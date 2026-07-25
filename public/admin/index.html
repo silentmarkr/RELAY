@@ -67,6 +67,19 @@
   }
   .badge-allowed { background: #14361f; color: #3fb950; }
   .badge-blocked { background: #3a1618; color: #f85149; }
+  .otp-code {
+    font-family: monospace;
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    color: #3fb950;
+    background: #0b0f14;
+    padding: 6px 10px;
+    border-radius: 8px;
+    border: 1px solid #1f2933;
+  }
+  .btn-copy { background: #30363d; color: #e6edf3; }
+  .countdown { font-size: 11px; color: #d29922; }
   .empty { color: #8b949e; font-size: 13px; padding: 8px 0; }
   .status-line {
     font-size: 13px;
@@ -96,6 +109,11 @@
   <div class="sub">OmniPOS Unlock Relay</div>
 
   <div id="restrictionStatus" class="status-line"></div>
+
+  <div class="card">
+    <h2>🔑 Pending OTP requests</h2>
+    <div id="otpList" class="empty">Loading...</div>
+  </div>
 
   <div class="card">
     <h2>Manual na magdagdag ng device</h2>
@@ -157,6 +175,9 @@ async function loadDevices() {
   document.getElementById('mainScreen').style.display = 'block';
 
   const data = await api('/relay/admin/api/devices');
+  const otpData = await api('/relay/admin/api/pending-otps');
+
+  renderOtps(otpData.pendingOtps);
 
   const statusEl = document.getElementById('restrictionStatus');
   if (data.restrictionActive) {
@@ -203,6 +224,65 @@ async function loadDevices() {
   }
 }
 
+function minsLeft(expiresAt) {
+  const secs = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return `${m}:${String(s).padStart(2, '0')} na lang`;
+}
+
+function renderOtps(list) {
+  const el = document.getElementById('otpList');
+  if (!list || list.length === 0) {
+    el.innerHTML = '<div class="empty">Walang kasalukuyang naghihintay na OTP request.</div>';
+    return;
+  }
+  el.innerHTML = list.map(o => {
+    const label = o.featureNames
+      ? (Array.isArray(o.featureNames) ? o.featureNames.join(', ') : o.featureNames)
+      : o.featureName;
+
+    let statusHtml;
+    if (o.approved) {
+      statusHtml = '<span class="badge badge-allowed">NAAPRUBAHAN — hinihintay i-retry ng kliyente</span>';
+    } else if (o.otpVerified) {
+      statusHtml = '<span class="badge badge-blocked">TAMA ang OTP — naghihintay ng Run/Allow mo</span>';
+    } else {
+      statusHtml = '<span class="badge" style="background:#30363d;color:#8b949e;">Naghihintay pang ilagay ang OTP</span>';
+    }
+
+    return `<div class="row" style="align-items:flex-start;">
+      ${o.photo ? `<img src="${o.photo}" style="width:64px;height:64px;object-fit:cover;border-radius:8px;border:1px solid #1f2933;flex-shrink:0;">` : ''}
+      <div class="row-info">
+        <div><strong>${label}</strong>${o.price ? ' · ₱' + o.price : ''}</div>
+        <div class="meta">${o.storeName || 'Walang pangalan ng tindahan'} · hiniling ni ${o.requestedBy}</div>
+        <div style="margin:6px 0;">${statusHtml}</div>
+        <div class="countdown">Mag-e-expire sa ${minsLeft(o.expiresAt)}</div>
+      </div>
+      <div style="text-align:right;">
+        <div class="otp-code">${o.code}</div>
+        <button class="btn-copy" style="margin-top:6px; display:block; width:100%;" onclick="copyCode('${o.code}', this)">Copy</button>
+        ${!o.approved
+          ? `<button class="btn-allow" style="margin-top:6px; width:100%;" onclick="approveOtp('${o.key}')">✓ Allow / Run</button>`
+          : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function approveOtp(key) {
+  await api('/relay/admin/api/pending-otps/approve', { method: 'POST', body: JSON.stringify({ key }) });
+  loadDevices();
+}
+
+function copyCode(code, btn) {
+  navigator.clipboard.writeText(code).then(() => {
+    const original = btn.innerText;
+    btn.innerText = 'Copied!';
+    setTimeout(() => { btn.innerText = original; }, 1500);
+  });
+}
+
 async function allow(id) {
   await api('/relay/admin/api/devices/allow', { method: 'POST', body: JSON.stringify({ installationId: id }) });
   loadDevices();
@@ -221,6 +301,7 @@ function manualAllow() {
 }
 
 if (adminKey) loadDevices();
+setInterval(() => { if (adminKey) loadDevices(); }, 8000);
 </script>
 
 </body>

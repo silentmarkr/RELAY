@@ -156,6 +156,42 @@ function requireAdminKey(req, res, next) {
 
 app.use('/relay/admin', express.static(path.join(__dirname, 'public', 'admin')));
 
+app.post('/relay/admin/api/pending-otps/approve', requireAdminKey, (req, res) => {
+    const { key } = req.body;
+    const pending = pendingOtps.get(key);
+    if (!pending) {
+        return res.status(404).json({ success: false, message: "Wala nang aktibong request na iyan (baka na-expire na o na-claim na)." });
+    }
+    pending.approved = true;
+    res.json({ success: true, message: 'Naaprubahan. Pwede na ulit i-click ng kliyente ang unlock button nila.' });
+});
+
+// --------------------------------------------------------------
+// AUTO-CLEANUP — kada 30 segundo, tinatanggal ang kahit anong pending
+// OTP na LUMAMPAS na sa 10-minutong expiry nito nang hindi na-Allow.
+// Ganito nakakamit ang hiling na "kung hindi ko na-Run/Allow bago
+// matapos ang oras, mababaliwala at mabubura ang OTP" — hindi na
+// kailangang balikan pa ng kliyente/kliyenteng humihiling.
+// --------------------------------------------------------------
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, pending] of pendingOtps.entries()) {
+        if (now > pending.expiresAt) {
+            pendingOtps.delete(key);
+        }
+    }
+}, 30 * 1000);
+
+app.get('/relay/admin/api/pending-otps', requireAdminKey, (req, res) => {
+    const now = Date.now();
+    const pending = [...pendingOtps.entries()]
+        .map(([key, data]) => ({ key, ...data }))
+        .filter(entry => entry.expiresAt > now) // huwag ipakita yung na-expire na
+        .sort((a, b) => b.expiresAt - a.expiresAt);
+
+    res.json({ success: true, pendingOtps: pending });
+});
+
 app.get('/relay/admin/api/devices', requireAdminKey, (req, res) => {
     const seen = [...seenDevices.entries()].map(([installationId, meta]) => ({
         installationId,
@@ -269,7 +305,7 @@ function rateLimit(bucketName, max, windowMs) {
 // tuwing may humihiling mag-unlock ng isang Pro theme.
 // --------------------------------------------------------------
 app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit('request-unlock', 5, 10 * 60 * 1000), async (req, res) => {
-    const { installationId, featureId, featureName, price, username, storeName } = req.body;
+    const { installationId, featureId, featureName, price, username, storeName, photo } = req.body;
 
     if (!installationId || !featureId) {
         return res.status(400).json({ success: false, message: 'Kulang ang installationId o featureId.' });
@@ -281,6 +317,12 @@ app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit
         code: otpCode,
         expiresAt: Date.now() + OTP_TTL_MS,
         requestedBy: username || 'Unknown',
+        storeName: storeName || null,
+        photo: photo || null,
+        approved: false,
+        otpVerified: false,
+        installationId,
+        featureId,
         featureName: featureName || featureId,
         price: price || null
     });
@@ -321,6 +363,23 @@ app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit
 // magiging "resibo" ng pagka-unlock, at maaaring i-verify kahit
 // offline (walang internet) gamit lang ang public key.
 // --------------------------------------------------------------
+// --------------------------------------------------------------
+// APPROVAL GATE — bago ito, kapag TAMA na ang OTP, agad na nabibigyan
+// ng signed token ang kliyente. Ngayon, dagdag pang kondisyon: kailangan
+// mo (ang may-ari, sa admin panel) na pindutin ang "Allow/Run" button
+// BAGO talaga maisyu ang token — kahit pa tama na ang OTP na inilagay
+// ng kliyente. Ito ay para masigurado mong nakabayad na talaga sila
+// bago mo bigyan ng access, hindi lang basta tamang OTP.
+// --------------------------------------------------------------
+function checkApprovalGate(pending) {
+    if (!pending.approved) {
+        pending.otpVerified = true;
+        pending.otpVerifiedAt = Date.now();
+        return false;
+    }
+    return true;
+}
+
 app.post('/relay/confirm-unlock', requireApiKey, requireAllowedDevice, rateLimit('confirm-unlock', 10, 10 * 60 * 1000), (req, res) => {
     const { installationId, featureId, otp } = req.body;
 
@@ -340,6 +399,14 @@ app.post('/relay/confirm-unlock', requireApiKey, requireAllowedDevice, rateLimit
     }
     if (String(otp).trim() !== pending.code) {
         return res.status(400).json({ success: false, message: 'Maling OTP code.' });
+    }
+
+    if (!checkApprovalGate(pending)) {
+        return res.json({
+            success: false,
+            pending: true,
+            message: `Tama ang code para sa ${pending.featureName}! Naghihintay na lang ng approval mula sa may-ari. Pakisubukan ulit paglipas ng ilang segundo.`
+        });
     }
 
     // Tama ang OTP — gumawa ng naka-sign na token. Ang payload ay
@@ -378,7 +445,7 @@ const DEMO_FEATURE_ID = '__demo__';
 const DEMO_DURATION_MS = (Number(process.env.RELAY_DEMO_DURATION_HOURS) || 24) * 60 * 60 * 1000;
 
 app.post('/relay/request-demo', requireApiKey, requireAllowedDevice, rateLimit('request-demo', 5, 10 * 60 * 1000), async (req, res) => {
-    const { installationId, username, storeName } = req.body;
+    const { installationId, username, storeName, photo } = req.body;
 
     if (!installationId) {
         return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
@@ -390,6 +457,12 @@ app.post('/relay/request-demo', requireApiKey, requireAllowedDevice, rateLimit('
         code: otpCode,
         expiresAt: Date.now() + OTP_TTL_MS,
         requestedBy: username || 'Unknown',
+        storeName: storeName || null,
+        photo: photo || null,
+        approved: false,
+        otpVerified: false,
+        installationId,
+        featureId: DEMO_FEATURE_ID,
         featureName: 'Full Demo Mode',
         price: null
     });
@@ -442,6 +515,14 @@ app.post('/relay/confirm-demo', requireApiKey, requireAllowedDevice, rateLimit('
         return res.status(400).json({ success: false, message: 'Maling OTP code.' });
     }
 
+    if (!checkApprovalGate(pending)) {
+        return res.json({
+            success: false,
+            pending: true,
+            message: 'Tama ang code para sa Demo Mode! Naghihintay na lang ng approval mula sa may-ari. Pakisubukan ulit paglipas ng ilang segundo.'
+        });
+    }
+
     const now = Date.now();
     // MAHALAGA: kasama na ang `expiresAt` sa payload (hindi tulad ng
     // regular na paid-feature tokens) — ito ang gumagawang "time-limited"
@@ -476,7 +557,7 @@ app.post('/relay/confirm-demo', requireApiKey, requireAllowedDevice, rateLimit('
 // itaas ng parehong mekanismo.
 // --------------------------------------------------------------
 app.post('/relay/request-unlock-bulk', requireApiKey, requireAllowedDevice, rateLimit('request-unlock-bulk', 5, 10 * 60 * 1000), async (req, res) => {
-    const { installationId, featureIds, featureNames, totalPrice, username, storeName } = req.body;
+    const { installationId, featureIds, featureNames, totalPrice, username, storeName, photo } = req.body;
 
     if (!installationId || !Array.isArray(featureIds) || featureIds.length === 0) {
         return res.status(400).json({ success: false, message: 'Kulang ang installationId o featureIds.' });
@@ -488,6 +569,11 @@ app.post('/relay/request-unlock-bulk', requireApiKey, requireAllowedDevice, rate
         code: otpCode,
         expiresAt: Date.now() + OTP_TTL_MS,
         requestedBy: username || 'Unknown',
+        storeName: storeName || null,
+        photo: photo || null,
+        approved: false,
+        otpVerified: false,
+        installationId,
         featureIds,
         featureNames: featureNames || featureIds,
         price: totalPrice || null
@@ -541,6 +627,14 @@ app.post('/relay/confirm-unlock-bulk', requireApiKey, requireAllowedDevice, rate
     }
     if (String(otp).trim() !== pending.code) {
         return res.status(400).json({ success: false, message: 'Maling OTP code.' });
+    }
+
+    if (!checkApprovalGate(pending)) {
+        return res.json({
+            success: false,
+            pending: true,
+            message: 'Tama ang code para sa bundle na ito! Naghihintay na lang ng approval mula sa may-ari. Pakisubukan ulit paglipas ng ilang segundo.'
+        });
     }
 
     const now = Date.now();
