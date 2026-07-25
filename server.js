@@ -56,6 +56,37 @@ const MAIL_PASS = process.env.RELAY_MAIL_PASS;
 const RECIPIENT_EMAIL = process.env.RELAY_RECIPIENT_EMAIL; // ang TOTOONG email mo — dito lang ito nakatira ngayon, hindi na sa client
 const OTP_TTL_MS = 10 * 60 * 1000; // 10 minuto
 
+// --------------------------------------------------------------
+// (OPTIONAL) DEVICE ALLOWLIST — kung gusto mong per-device lang
+// gumana ang OMNIPOS (hal. isang beses ka lang nagbenta ng lisensya
+// sa isang partikular na kliyente/device), ilista dito ang mga
+// pinapayagang installationId (comma-separated) sa RELAY_ALLOWED_DEVICES
+// env var sa Render.
+//
+// Halimbawa: RELAY_ALLOWED_DEVICES=a1b2c3d4-...,e5f6g7h8-...
+//
+// Kung IWAN itong blangko/hindi naka-set, WALANG restriction —
+// tatanggapin ang request mula sa kahit anong installationId (parang
+// dati, walang binago). Ito ang default para hindi masira ang
+// existing na setup.
+// --------------------------------------------------------------
+const ALLOWED_DEVICES = (process.env.RELAY_ALLOWED_DEVICES || '')
+    .split(',')
+    .map(id => id.trim())
+    .filter(Boolean);
+
+function requireAllowedDevice(req, res, next) {
+    if (ALLOWED_DEVICES.length === 0) return next(); // walang allowlist naka-configure = walang restriction
+    const { installationId } = req.body;
+    if (!installationId || !ALLOWED_DEVICES.includes(installationId)) {
+        return res.status(403).json({
+            success: false,
+            message: 'Hindi authorized ang device na ito para gumamit ng relay.'
+        });
+    }
+    next();
+}
+
 // Hiwalay na secret ito sa RELAY_API_KEY — ang RELAY_API_KEY ay hawak ng
 // bawat CLIENT SERVER (maraming kliyente, posibleng mas mahina ang
 // proteksyon sa kanilang deployment). Ang DEV_VIEWER_KEY ay hawak MO
@@ -134,7 +165,7 @@ function rateLimit(bucketName, max, windowMs) {
 // Tinatawag ito ng CLIENT server (hindi diretso ng browser ng cashier)
 // tuwing may humihiling mag-unlock ng isang Pro theme.
 // --------------------------------------------------------------
-app.post('/relay/request-unlock', requireApiKey, rateLimit('request-unlock', 5, 10 * 60 * 1000), async (req, res) => {
+app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit('request-unlock', 5, 10 * 60 * 1000), async (req, res) => {
     const { installationId, featureId, featureName, price, username, storeName } = req.body;
 
     if (!installationId || !featureId) {
@@ -187,7 +218,7 @@ app.post('/relay/request-unlock', requireApiKey, rateLimit('request-unlock', 5, 
 // magiging "resibo" ng pagka-unlock, at maaaring i-verify kahit
 // offline (walang internet) gamit lang ang public key.
 // --------------------------------------------------------------
-app.post('/relay/confirm-unlock', requireApiKey, rateLimit('confirm-unlock', 10, 10 * 60 * 1000), (req, res) => {
+app.post('/relay/confirm-unlock', requireApiKey, requireAllowedDevice, rateLimit('confirm-unlock', 10, 10 * 60 * 1000), (req, res) => {
     const { installationId, featureId, otp } = req.body;
 
     if (!installationId || !featureId || !otp) {
@@ -243,7 +274,7 @@ app.post('/relay/confirm-unlock', requireApiKey, rateLimit('confirm-unlock', 10,
 const DEMO_FEATURE_ID = '__demo__';
 const DEMO_DURATION_MS = (Number(process.env.RELAY_DEMO_DURATION_HOURS) || 24) * 60 * 60 * 1000;
 
-app.post('/relay/request-demo', requireApiKey, rateLimit('request-demo', 5, 10 * 60 * 1000), async (req, res) => {
+app.post('/relay/request-demo', requireApiKey, requireAllowedDevice, rateLimit('request-demo', 5, 10 * 60 * 1000), async (req, res) => {
     const { installationId, username, storeName } = req.body;
 
     if (!installationId) {
@@ -287,7 +318,7 @@ app.post('/relay/request-demo', requireApiKey, rateLimit('request-demo', 5, 10 *
     }
 });
 
-app.post('/relay/confirm-demo', requireApiKey, rateLimit('confirm-demo', 10, 10 * 60 * 1000), (req, res) => {
+app.post('/relay/confirm-demo', requireApiKey, requireAllowedDevice, rateLimit('confirm-demo', 10, 10 * 60 * 1000), (req, res) => {
     const { installationId, otp } = req.body;
 
     if (!installationId || !otp) {
@@ -341,7 +372,7 @@ app.post('/relay/confirm-demo', requireApiKey, rateLimit('confirm-demo', 10, 10 
 // verifyUnlockToken() sa panig ng client, pang-convenience lang ito sa
 // itaas ng parehong mekanismo.
 // --------------------------------------------------------------
-app.post('/relay/request-unlock-bulk', requireApiKey, rateLimit('request-unlock-bulk', 5, 10 * 60 * 1000), async (req, res) => {
+app.post('/relay/request-unlock-bulk', requireApiKey, requireAllowedDevice, rateLimit('request-unlock-bulk', 5, 10 * 60 * 1000), async (req, res) => {
     const { installationId, featureIds, featureNames, totalPrice, username, storeName } = req.body;
 
     if (!installationId || !Array.isArray(featureIds) || featureIds.length === 0) {
@@ -388,7 +419,7 @@ app.post('/relay/request-unlock-bulk', requireApiKey, rateLimit('request-unlock-
     }
 });
 
-app.post('/relay/confirm-unlock-bulk', requireApiKey, rateLimit('confirm-unlock-bulk', 10, 10 * 60 * 1000), (req, res) => {
+app.post('/relay/confirm-unlock-bulk', requireApiKey, requireAllowedDevice, rateLimit('confirm-unlock-bulk', 10, 10 * 60 * 1000), (req, res) => {
     const { installationId, featureIds, otp } = req.body;
 
     if (!installationId || !Array.isArray(featureIds) || featureIds.length === 0 || !otp) {
