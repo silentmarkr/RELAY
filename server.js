@@ -20,6 +20,7 @@ const nodemailer = require('nodemailer');
 const http = require('http');
 const { WebSocketServer } = require('ws');
 const path = require('path');
+const fs = require('fs');
 
 // I-load ang .env file papunta sa process.env — gamit ang BUILT-IN na
 // loader ng Node (available sa Node 20.12+/22+, kapareho ng bersyon na
@@ -57,28 +58,75 @@ const RECIPIENT_EMAIL = process.env.RELAY_RECIPIENT_EMAIL; // ang TOTOONG email 
 const OTP_TTL_MS = 10 * 60 * 1000; // 10 minuto
 
 // --------------------------------------------------------------
-// (OPTIONAL) DEVICE ALLOWLIST — kung gusto mong per-device lang
-// gumana ang OMNIPOS (hal. isang beses ka lang nagbenta ng lisensya
-// sa isang partikular na kliyente/device), ilista dito ang mga
-// pinapayagang installationId (comma-separated) sa RELAY_ALLOWED_DEVICES
-// env var sa Render.
+// DEVICE STORE — dalawang bagay ang tina-track dito:
 //
-// Halimbawa: RELAY_ALLOWED_DEVICES=a1b2c3d4-...,e5f6g7h8-...
+// 1. "Allowed devices" (allowlist) — mga installationId na PWEDENG
+//    gumamit ng relay. Naka-save sa isang JSON file (allowed-devices.json)
+//    para hindi mawala kahit mag-restart/matulog ang free instance ng
+//    Render. Nase-seed ito paunang beses mula sa RELAY_ALLOWED_DEVICES
+//    env var (kung meron), pero pagkatapos non, ang FILE na ang
+//    "source of truth" — dito nagagawa ang mga pagbabago mula sa admin
+//    panel (hindi na kailangang balikan ang Render dashboard).
 //
-// Kung IWAN itong blangko/hindi naka-set, WALANG restriction —
-// tatanggapin ang request mula sa kahit anong installationId (parang
-// dati, walang binago). Ito ang default para hindi masira ang
-// existing na setup.
+// 2. "Seen devices" — LAHAT ng installationId na kailanman gumawa ng
+//    request dito, kasama ang huling nakitang storeName/username at
+//    petsa. In-memory lang ito (nawawala kapag nag-restart ang
+//    service) — gamit lang ito para makita mo sa admin panel kung anong
+//    mga bagong device ang humihiling ng unlock, para madali mo silang
+//    ma-"Allow" nang isang click na lang.
+//
+// PAALALA: dahil walang persistent disk add-on ang Render free tier,
+// ang allowed-devices.json ay MAWAWALA sa susunod na REDEPLOY (git push)
+// — hindi ito mawawala sa ordinaryong pagtulog/paggising (spin down/up)
+// ng free instance, redeploy lang talaga. Kaya kung nag-set ka na ng
+// allowlist via admin panel, tandaan/i-note ang mga ID bago ka mag-push
+// ng panibagong code change, at i-restore mo ulit pagkatapos.
 // --------------------------------------------------------------
-const ALLOWED_DEVICES = (process.env.RELAY_ALLOWED_DEVICES || '')
-    .split(',')
-    .map(id => id.trim())
-    .filter(Boolean);
+const DEVICE_STORE_PATH = path.join(__dirname, 'allowed-devices.json');
+
+function loadAllowedDevices() {
+    try {
+        const raw = fs.readFileSync(DEVICE_STORE_PATH, 'utf8');
+        return new Set(JSON.parse(raw));
+    } catch (err) {
+        // Walang file pa (unang beses) — i-seed mula sa env var kung meron.
+        const seed = (process.env.RELAY_ALLOWED_DEVICES || '')
+            .split(',')
+            .map(id => id.trim())
+            .filter(Boolean);
+        return new Set(seed);
+    }
+}
+
+function saveAllowedDevices(set) {
+    try {
+        fs.writeFileSync(DEVICE_STORE_PATH, JSON.stringify([...set], null, 2));
+    } catch (err) {
+        console.error('Hindi ma-save ang allowed-devices.json:', err);
+    }
+}
+
+let allowedDevices = loadAllowedDevices();
+
+// In-memory lang, para lang sa "recently seen" view sa admin panel.
+const seenDevices = new Map(); // installationId -> { storeName, username, lastSeenAt, requestCount }
+
+function recordDeviceSeen(installationId, meta = {}) {
+    if (!installationId) return;
+    const existing = seenDevices.get(installationId) || { requestCount: 0 };
+    seenDevices.set(installationId, {
+        storeName: meta.storeName || existing.storeName || null,
+        username: meta.username || existing.username || null,
+        lastSeenAt: Date.now(),
+        requestCount: existing.requestCount + 1
+    });
+}
 
 function requireAllowedDevice(req, res, next) {
-    if (ALLOWED_DEVICES.length === 0) return next(); // walang allowlist naka-configure = walang restriction
-    const { installationId } = req.body;
-    if (!installationId || !ALLOWED_DEVICES.includes(installationId)) {
+    const { installationId, storeName, username } = req.body;
+    recordDeviceSeen(installationId, { storeName, username }); // laging i-log, kahit tanggihan pagkatapos
+    if (allowedDevices.size === 0) return next(); // walang allowlist naka-configure = walang restriction
+    if (!installationId || !allowedDevices.has(installationId)) {
         return res.status(403).json({
             success: false,
             message: 'Hindi authorized ang device na ito para gumamit ng relay.'
@@ -86,6 +134,62 @@ function requireAllowedDevice(req, res, next) {
     }
     next();
 }
+
+// --------------------------------------------------------------
+// ADMIN PANEL — /relay/admin (protektado ng sarili niyang password,
+// HIWALAY sa RELAY_API_KEY). Dito mo makikita ang listahan ng mga
+// device na kailanman humiling ng unlock, at pwede mo silang
+// paganahin/tanggalin sa allowlist nang isang click na lang.
+// --------------------------------------------------------------
+const ADMIN_KEY = process.env.RELAY_ADMIN_KEY || null;
+if (!ADMIN_KEY) {
+    console.warn('⚠️  Walang RELAY_ADMIN_KEY na naka-set — hindi magagamit ang /relay/admin panel hangga\'t hindi ito nalagyan.');
+}
+
+function requireAdminKey(req, res, next) {
+    const provided = req.headers['x-relay-admin-key'] || req.query.key;
+    if (!ADMIN_KEY || provided !== ADMIN_KEY) {
+        return res.status(403).json({ success: false, message: 'Invalid o walang admin key.' });
+    }
+    next();
+}
+
+app.use('/relay/admin', express.static(path.join(__dirname, 'public', 'admin')));
+
+app.get('/relay/admin/api/devices', requireAdminKey, (req, res) => {
+    const seen = [...seenDevices.entries()].map(([installationId, meta]) => ({
+        installationId,
+        ...meta,
+        allowed: allowedDevices.has(installationId)
+    })).sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+
+    res.json({
+        success: true,
+        seenDevices: seen,
+        allowedDevices: [...allowedDevices],
+        restrictionActive: allowedDevices.size > 0
+    });
+});
+
+app.post('/relay/admin/api/devices/allow', requireAdminKey, (req, res) => {
+    const { installationId } = req.body;
+    if (!installationId) {
+        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+    }
+    allowedDevices.add(installationId);
+    saveAllowedDevices(allowedDevices);
+    res.json({ success: true, allowedDevices: [...allowedDevices] });
+});
+
+app.post('/relay/admin/api/devices/revoke', requireAdminKey, (req, res) => {
+    const { installationId } = req.body;
+    if (!installationId) {
+        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+    }
+    allowedDevices.delete(installationId);
+    saveAllowedDevices(allowedDevices);
+    res.json({ success: true, allowedDevices: [...allowedDevices] });
+});
 
 // Hiwalay na secret ito sa RELAY_API_KEY — ang RELAY_API_KEY ay hawak ng
 // bawat CLIENT SERVER (maraming kliyente, posibleng mas mahina ang
@@ -108,7 +212,6 @@ if (!MAIL_USER || !MAIL_PASS || !RECIPIENT_EMAIL) {
 // sa Render (walang persistent disk sa free tier) — RELAY_PRIVATE_KEY_PEM.
 // Kung may sarili kang VPS na may disk, pwede ring basahin mula sa file.
 // --------------------------------------------------------------
-const fs = require('fs');
 let privateKeyPem = process.env.RELAY_PRIVATE_KEY_PEM;
 if (!privateKeyPem) {
     const keyPath = path.join(__dirname, 'relay-private-key.pem');

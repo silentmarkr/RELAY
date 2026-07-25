@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="tl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OmniPOS Relay — Device Admin</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, system-ui, Segoe UI, Roboto, sans-serif;
+    background: #0b0f14;
+    color: #e6edf3;
+    padding: 16px;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: #8b949e; font-size: 13px; margin-bottom: 20px; }
+  .card {
+    background: #111820;
+    border: 1px solid #1f2933;
+    border-radius: 10px;
+    padding: 14px;
+    margin-bottom: 16px;
+  }
+  .card h2 { font-size: 15px; margin: 0 0 10px; }
+  input[type=text], input[type=password] {
+    width: 100%;
+    padding: 10px;
+    border-radius: 8px;
+    border: 1px solid #2d3843;
+    background: #0b0f14;
+    color: #e6edf3;
+    font-size: 14px;
+    margin-bottom: 8px;
+  }
+  button {
+    padding: 9px 14px;
+    border-radius: 8px;
+    border: none;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .btn-allow { background: #238636; color: white; }
+  .btn-revoke { background: #da3633; color: white; }
+  .btn-primary { background: #1f6feb; color: white; width: 100%; }
+  .row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px;
+    border-radius: 8px;
+    background: #0b0f14;
+    margin-bottom: 8px;
+    border: 1px solid #1f2933;
+  }
+  .row-info { min-width: 0; flex: 1; }
+  .id { font-family: monospace; font-size: 12px; word-break: break-all; color: #58a6ff; }
+  .meta { font-size: 12px; color: #8b949e; margin-top: 2px; }
+  .badge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    margin-left: 6px;
+  }
+  .badge-allowed { background: #14361f; color: #3fb950; }
+  .badge-blocked { background: #3a1618; color: #f85149; }
+  .empty { color: #8b949e; font-size: 13px; padding: 8px 0; }
+  .status-line {
+    font-size: 13px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    margin-bottom: 12px;
+  }
+  .status-on { background: #14361f; color: #3fb950; }
+  .status-off { background: #3a2f14; color: #d29922; }
+  #loginScreen { max-width: 360px; margin: 60px auto; }
+</style>
+</head>
+<body>
+
+<div id="loginScreen">
+  <h1>OmniPOS Relay — Device Admin</h1>
+  <div class="sub">Ilagay ang admin key para makapasok</div>
+  <div class="card">
+    <input type="password" id="adminKeyInput" placeholder="Admin key" autocomplete="off">
+    <button class="btn-primary" onclick="login()">Pumasok</button>
+    <div id="loginError" style="color:#f85149; font-size:12px; margin-top:8px;"></div>
+  </div>
+</div>
+
+<div id="mainScreen" style="display:none;">
+  <h1>Device Admin</h1>
+  <div class="sub">OmniPOS Unlock Relay</div>
+
+  <div id="restrictionStatus" class="status-line"></div>
+
+  <div class="card">
+    <h2>Manual na magdagdag ng device</h2>
+    <input type="text" id="manualIdInput" placeholder="Paste installation ID dito">
+    <button class="btn-primary" onclick="manualAllow()">+ Allow</button>
+  </div>
+
+  <div class="card">
+    <h2>Allowed devices</h2>
+    <div id="allowedList" class="empty">Loading...</div>
+  </div>
+
+  <div class="card">
+    <h2>Recently seen (lahat ng humiling)</h2>
+    <div id="seenList" class="empty">Loading...</div>
+  </div>
+</div>
+
+<script>
+let adminKey = sessionStorage.getItem('relayAdminKey') || '';
+
+function login() {
+  adminKey = document.getElementById('adminKeyInput').value.trim();
+  if (!adminKey) return;
+  sessionStorage.setItem('relayAdminKey', adminKey);
+  loadDevices();
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: {
+      'Content-Type': 'application/json',
+      'x-relay-admin-key': adminKey,
+      ...(opts.headers || {})
+    }
+  });
+  if (res.status === 403) {
+    sessionStorage.removeItem('relayAdminKey');
+    adminKey = '';
+    document.getElementById('mainScreen').style.display = 'none';
+    document.getElementById('loginScreen').style.display = 'block';
+    document.getElementById('loginError').innerText = 'Maling admin key.';
+    throw new Error('forbidden');
+  }
+  return res.json();
+}
+
+function timeAgo(ts) {
+  const diff = Math.floor((Date.now() - ts) / 1000);
+  if (diff < 60) return diff + 's ago';
+  if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+  return Math.floor(diff / 86400) + 'd ago';
+}
+
+async function loadDevices() {
+  document.getElementById('loginScreen').style.display = 'none';
+  document.getElementById('mainScreen').style.display = 'block';
+
+  const data = await api('/relay/admin/api/devices');
+
+  const statusEl = document.getElementById('restrictionStatus');
+  if (data.restrictionActive) {
+    statusEl.className = 'status-line status-on';
+    statusEl.innerText = '🔒 Naka-ON ang restriction — ' + data.allowedDevices.length + ' device(s) lang ang pinapayagan.';
+  } else {
+    statusEl.className = 'status-line status-off';
+    statusEl.innerText = '🔓 Naka-OFF ang restriction — tinatanggap pa rin ang LAHAT ng device.';
+  }
+
+  const allowedEl = document.getElementById('allowedList');
+  if (data.allowedDevices.length === 0) {
+    allowedEl.innerHTML = '<div class="empty">Wala pang naka-allow. (Walang restriction habang wala pang laman ito.)</div>';
+  } else {
+    allowedEl.innerHTML = data.allowedDevices.map(id => {
+      const seen = data.seenDevices.find(d => d.installationId === id);
+      return `<div class="row">
+        <div class="row-info">
+          <div class="id">${id}</div>
+          <div class="meta">${seen ? (seen.storeName || 'Walang pangalan') + ' · ' + timeAgo(seen.lastSeenAt) : 'Hindi pa nakikitang gumagawa ng request'}</div>
+        </div>
+        <button class="btn-revoke" onclick="revoke('${id}')">Alisin</button>
+      </div>`;
+    }).join('');
+  }
+
+  const seenEl = document.getElementById('seenList');
+  if (data.seenDevices.length === 0) {
+    seenEl.innerHTML = '<div class="empty">Wala pang nakikitang device.</div>';
+  } else {
+    seenEl.innerHTML = data.seenDevices.map(d => `
+      <div class="row">
+        <div class="row-info">
+          <div class="id">${d.installationId}
+            <span class="badge ${d.allowed ? 'badge-allowed' : 'badge-blocked'}">${d.allowed ? 'ALLOWED' : 'BLOCKED'}</span>
+          </div>
+          <div class="meta">${d.storeName || 'Walang pangalan'} · ${d.username || '—'} · ${timeAgo(d.lastSeenAt)} · ${d.requestCount} request(s)</div>
+        </div>
+        ${d.allowed
+          ? `<button class="btn-revoke" onclick="revoke('${d.installationId}')">Alisin</button>`
+          : `<button class="btn-allow" onclick="allow('${d.installationId}')">Allow</button>`}
+      </div>
+    `).join('');
+  }
+}
+
+async function allow(id) {
+  await api('/relay/admin/api/devices/allow', { method: 'POST', body: JSON.stringify({ installationId: id }) });
+  loadDevices();
+}
+
+async function revoke(id) {
+  await api('/relay/admin/api/devices/revoke', { method: 'POST', body: JSON.stringify({ installationId: id }) });
+  loadDevices();
+}
+
+function manualAllow() {
+  const id = document.getElementById('manualIdInput').value.trim();
+  if (!id) return;
+  allow(id);
+  document.getElementById('manualIdInput').value = '';
+}
+
+if (adminKey) loadDevices();
+</script>
+
+</body>
+</html>
