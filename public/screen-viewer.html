@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>OmniPOS — Watch My Screen (Dev Viewer)</title>
+<meta name="robots" content="noindex, nofollow">
+<style>
+  body { font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0; margin: 0; padding: 24px; }
+  .wrap { max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 1.1rem; color: #f8fafc; }
+  .card { background: #1e293b; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  label { display: block; font-size: 0.8rem; color: #94a3b8; margin-bottom: 4px; }
+  input { width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0; font-size: 1rem; }
+  button { margin-top: 10px; padding: 8px 16px; border-radius: 6px; border: none; background: #2563eb; color: white; font-weight: 600; cursor: pointer; }
+  button:disabled { background: #475569; cursor: not-allowed; }
+  #status { font-size: 0.85rem; color: #94a3b8; margin-top: 8px; }
+  video { width: 100%; border-radius: 10px; background: #000; margin-top: 12px; display: none; }
+  .meta { font-size: 0.8rem; color: #94a3b8; margin-top: 6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🖥️ Watch My Screen — Dev Viewer</h1>
+  <p style="font-size:0.85rem;color:#94a3b8;">
+    View-only. Wala kang kontrol sa terminal — ang taong naka-login lang doon ang gumagalaw
+    at siya lang ang may kapangyarihang itigil ang session anumang oras.
+  </p>
+
+  <div class="card">
+    <label for="devKey">Developer key (RELAY_DEV_VIEWER_KEY)</label>
+    <input id="devKey" type="password" placeholder="Developer key">
+    <label for="sessionCode" style="margin-top:10px;">6-digit session code (mula sa terminal)</label>
+    <input id="sessionCode" type="text" maxlength="6" inputmode="numeric" placeholder="123456">
+    <button id="joinBtn">Connect</button>
+    <div id="status"></div>
+    <div id="meta" class="meta"></div>
+  </div>
+
+  <video id="remoteVideo" autoplay playsinline></video>
+</div>
+
+<script>
+const RELAY_WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/relay/screen-share/ws';
+
+const joinBtn = document.getElementById('joinBtn');
+const statusEl = document.getElementById('status');
+const metaEl = document.getElementById('meta');
+const videoEl = document.getElementById('remoteVideo');
+
+let ws = null;
+let pc = null;
+
+function setStatus(text) { statusEl.textContent = text; }
+
+joinBtn.addEventListener('click', () => {
+    const devKey = document.getElementById('devKey').value.trim();
+    const sessionCode = document.getElementById('sessionCode').value.trim();
+    if (!devKey || !sessionCode) return setStatus('Kailangan ang developer key at session code.');
+
+    joinBtn.disabled = true;
+    setStatus('Kumokonekta sa relay...');
+
+    ws = new WebSocket(RELAY_WS_URL);
+
+    ws.onopen = () => {
+        ws.send(JSON.stringify({ type: 'viewer-join', sessionCode, devKey }));
+    };
+
+    ws.onerror = () => setStatus('Hindi maka-konekta sa relay.');
+
+    ws.onclose = () => {
+        setStatus('Naputol ang koneksyon sa relay.');
+        joinBtn.disabled = false;
+    };
+
+    ws.onmessage = async (event) => {
+        const msg = JSON.parse(event.data);
+
+        if (msg.type === 'error') {
+            setStatus('Error: ' + msg.message);
+            joinBtn.disabled = false;
+            ws.close();
+            return;
+        }
+
+        if (msg.type === 'viewer-ready') {
+            setStatus('Naka-konekta. Hinihintay ang video mula sa terminal...');
+            const m = msg.meta || {};
+            metaEl.textContent = [m.storeName, m.username].filter(Boolean).join(' — ');
+            setupPeerConnection();
+            return;
+        }
+
+        if (msg.type === 'signal') {
+            const payload = msg.payload;
+            if (payload.kind === 'offer') {
+                await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                ws.send(JSON.stringify({ type: 'signal', payload: { kind: 'answer', sdp: pc.localDescription } }));
+            } else if (payload.kind === 'ice-candidate' && payload.candidate) {
+                try { await pc.addIceCandidate(payload.candidate); } catch (e) { /* ignore stray candidates */ }
+            }
+            return;
+        }
+
+        if (msg.type === 'session-ended') {
+            setStatus('Natapos ang session (' + msg.reason + ').');
+            videoEl.style.display = 'none';
+            joinBtn.disabled = false;
+            if (pc) pc.close();
+            return;
+        }
+    };
+});
+
+function setupPeerConnection() {
+    pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+
+    pc.onicecandidate = (event) => {
+        if (event.candidate) {
+            ws.send(JSON.stringify({ type: 'signal', payload: { kind: 'ice-candidate', candidate: event.candidate } }));
+        }
+    };
+
+    pc.ontrack = (event) => {
+        videoEl.srcObject = event.streams[0];
+        videoEl.style.display = 'block';
+        setStatus('Live.');
+    };
+}
+</script>
+</body>
+</html>

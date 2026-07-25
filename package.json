@@ -1,0 +1,15 @@
+{
+  "name": "omnipos-unlock-relay",
+  "version": "1.0.0",
+  "description": "Relay service para sa OmniPOS Pro Theme unlock approval. Hiwalay na project ito — hindi ito bahagi ng OmniPOS client package na binebenta/dinideploy sa mga kliyente. Ang kailangang mag-run nito ay ang developer/owner lang, sa sarili niyang hosting (VPS, Render, atbp.).",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "generate-keys": "node generate-keys.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "nodemailer": "^6.9.14",
+    "ws": "^8.18.0"
+  }
+}
