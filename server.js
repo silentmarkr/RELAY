@@ -964,10 +964,24 @@ function requireApiKey(req, res, next) {
 
 // Napaka-simpleng in-memory rate limiter (per key sa Map, hindi kailangan
 // ng Redis o external store dahil isang maliit na relay lang ito).
+// `keyFn` (optional): function(req) -> extra string na idadagdag sa IP
+// para bumuo ng mas specific na bucket. Ginagamit ito sa mga OTP
+// endpoints (installationId bilang extra key) — kung hindi, DALAWANG
+// magkaibang store/device na nagkataong parehong public IP (hal.
+// parehong ISP/NAT o corporate network) ay COLLECTIVELY na-rate-limit
+// sa isa't isa, kahit magkaibang installationId sila.
 const rateBuckets = new Map();
-function rateLimit(bucketName, max, windowMs) {
+function rateLimit(bucketName, max, windowMs, keyFn) {
     return (req, res, next) => {
-        const key = `${bucketName}:${req.ip}`;
+        let key = `${bucketName}:${req.ip}`;
+        if (typeof keyFn === 'function') {
+            try {
+                const extra = (keyFn(req) || '').toString().trim();
+                if (extra) key += `:${extra}`;
+            } catch (err) {
+                // Kung mabigo ang keyFn, bumalik na lang sa dating IP-only key.
+            }
+        }
         const now = Date.now();
         const bucket = rateBuckets.get(key) || [];
         const recent = bucket.filter(ts => now - ts < windowMs);
@@ -1001,7 +1015,7 @@ function rateLimit(bucketName, max, windowMs) {
 // (shared secret) at rate limit, kaya hindi basta kahit sinong random
 // tao (na walang API key) ang makaka-trigger nito.
 // --------------------------------------------------------------
-app.post('/relay/backup-checkin', requireApiKey, rateLimit('backup-checkin', 20, 60 * 60 * 1000), (req, res) => {
+app.post('/relay/backup-checkin', requireApiKey, rateLimit('backup-checkin', 20, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
     const { installationId, storeName, username, fileSizeBytes, backupAt } = req.body;
 
     if (!installationId) {
@@ -1047,7 +1061,7 @@ app.post('/relay/backup-checkin', requireApiKey, rateLimit('backup-checkin', 20,
 // Tinatawag ito ng CLIENT server (hindi diretso ng browser ng cashier)
 // tuwing may humihiling mag-unlock ng isang Pro theme.
 // --------------------------------------------------------------
-app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit('request-unlock', 5, 10 * 60 * 1000), async (req, res) => {
+app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit('request-unlock', 5, 10 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
     const { installationId, featureId, featureName, price, username, storeName, photo } = req.body;
 
     if (!installationId || !featureId) {
@@ -1117,7 +1131,7 @@ function checkApprovalGate(pending) {
     return true;
 }
 
-app.post('/relay/confirm-unlock', requireApiKey, requireAllowedDevice, rateLimit('confirm-unlock', 120, 10 * 60 * 1000), (req, res) => {
+app.post('/relay/confirm-unlock', requireApiKey, requireAllowedDevice, rateLimit('confirm-unlock', 120, 10 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
     const { installationId, featureId, otp } = req.body;
 
     if (!installationId || !featureId || !otp) {
@@ -1189,7 +1203,7 @@ app.post('/relay/confirm-unlock', requireApiKey, requireAllowedDevice, rateLimit
 const DEMO_FEATURE_ID = '__demo__';
 const DEMO_DURATION_MS = (Number(process.env.RELAY_DEMO_DURATION_HOURS) || 24) * 60 * 60 * 1000;
 
-app.post('/relay/request-demo', requireApiKey, requireAllowedDevice, rateLimit('request-demo', 5, 10 * 60 * 1000), async (req, res) => {
+app.post('/relay/request-demo', requireApiKey, requireAllowedDevice, rateLimit('request-demo', 5, 10 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
     const { installationId, username, storeName, photo } = req.body;
 
     if (!installationId) {
@@ -1233,7 +1247,7 @@ app.post('/relay/request-demo', requireApiKey, requireAllowedDevice, rateLimit('
     }
 });
 
-app.post('/relay/confirm-demo', requireApiKey, requireAllowedDevice, rateLimit('confirm-demo', 120, 10 * 60 * 1000), (req, res) => {
+app.post('/relay/confirm-demo', requireApiKey, requireAllowedDevice, rateLimit('confirm-demo', 120, 10 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
     const { installationId, otp } = req.body;
 
     if (!installationId || !otp) {
@@ -1303,7 +1317,7 @@ app.post('/relay/confirm-demo', requireApiKey, requireAllowedDevice, rateLimit('
 // verifyUnlockToken() sa panig ng client, pang-convenience lang ito sa
 // itaas ng parehong mekanismo.
 // --------------------------------------------------------------
-app.post('/relay/request-unlock-bulk', requireApiKey, requireAllowedDevice, rateLimit('request-unlock-bulk', 5, 10 * 60 * 1000), async (req, res) => {
+app.post('/relay/request-unlock-bulk', requireApiKey, requireAllowedDevice, rateLimit('request-unlock-bulk', 5, 10 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
     const { installationId, featureIds, featureNames, totalPrice, username, storeName, photo } = req.body;
 
     if (!installationId || !Array.isArray(featureIds) || featureIds.length === 0) {
@@ -1349,7 +1363,7 @@ app.post('/relay/request-unlock-bulk', requireApiKey, requireAllowedDevice, rate
     }
 });
 
-app.post('/relay/confirm-unlock-bulk', requireApiKey, requireAllowedDevice, rateLimit('confirm-unlock-bulk', 120, 10 * 60 * 1000), (req, res) => {
+app.post('/relay/confirm-unlock-bulk', requireApiKey, requireAllowedDevice, rateLimit('confirm-unlock-bulk', 120, 10 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
     const { installationId, featureIds, otp } = req.body;
 
     if (!installationId || !Array.isArray(featureIds) || featureIds.length === 0 || !otp) {
