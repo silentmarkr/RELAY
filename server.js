@@ -246,6 +246,129 @@ function requireAllowedDevice(req, res, next) {
 }
 
 // --------------------------------------------------------------
+// FEATURE CATALOG MIRROR — para lang sa ADMIN PANEL (display + direct
+// "Activate" button). Ito ay KOPYA ng FEATURE_CATALOG/UPGRADE_TIERS na
+// nasa OMNIPOS/server.js — dapat i-sync manually kapag nagbago ang
+// presyo/pangalan doon. Hindi umaasa ang OMNIPOS client dito; ginagamit
+// lang ito ng admin panel para malaman kung anong mga package ang
+// "locked pa" sa isang device (dahil hindi ito naka-imbak ng RELAY sa
+// sarili nito), at para bigyan ng tamang featureName/price ang mga
+// direct-activate na token na ginagawa mula sa admin panel.
+// --------------------------------------------------------------
+const FEATURE_CATALOG = {
+    ocean: { name: 'Ocean Pro', price: 149, category: 'theme' },
+    emerald: { name: 'Emerald Pro', price: 149, category: 'theme' },
+    sunset: { name: 'Sunset Pro', price: 149, category: 'theme' },
+    rosegold: { name: 'Rose Gold Pro', price: 149, category: 'theme' },
+    cyber: { name: 'Cyber Neon Pro', price: 149, category: 'theme' },
+    noir: { name: 'Coffee Noir Pro', price: 149, category: 'theme' },
+    mintfrost: { name: 'Mint Frost Pro', price: 149, category: 'theme' },
+    purchase_orders: { name: 'Purchase Orders Module', price: 999, category: 'module' },
+    customer_crm: { name: 'Customer Profiles & Loyalty', price: 799, category: 'module' },
+    promo_codes: { name: 'Promo Codes Module', price: 499, category: 'module' },
+    advanced_reports: { name: 'Sales Analytics & Advanced Reports', price: 799, category: 'module' },
+    shift_management: { name: 'Multi-Cashier Shift Oversight & Z-Reading Reports', price: 699, category: 'module' },
+    rbac_management: { name: 'Roles & Permissions (RBAC) Management', price: 999, category: 'module' }
+};
+
+const UPGRADE_TIERS = [
+    { id: 'basic', name: 'Basic Upgrade', featureIds: ['advanced_reports', 'promo_codes'], bundlePrice: 999 },
+    { id: 'standard', name: 'Standard Upgrade', featureIds: ['advanced_reports', 'promo_codes', 'customer_crm', 'shift_management'], bundlePrice: 1999 },
+    { id: 'pro', name: 'Pro Upgrade (Complete)', featureIds: Object.keys(FEATURE_CATALOG), bundlePrice: 4499 }
+];
+
+// --------------------------------------------------------------
+// ISSUED UNLOCKS — persistent na "memory" ng RELAY kung anong mga
+// token na talaga niyang na-isyu na sa bawat installationId. Dati,
+// walang ganito — nagagawa lang ang token, ibinibigay sa client, at
+// nakakalimutan agad ng RELAY. Kailangan ito para sa: (1) Device Detail
+// admin page (makita kung ano na ang naka-unlock/locked pa), at (2) ang
+// bagong /relay/restore-tokens endpoint (auto-restore pagkatapos ng
+// hard reset sa OMNIPOS client, hindi na kailangang mag-OTP ulit).
+//
+// Estruktura: { [installationId]: { [featureId]: { featureName, price,
+// issuedAt, expiresAt?, payload, signature, source, note? } } }
+//
+// PAALALA: kapareho ng allowed-devices.json, MAWAWALA ito sa susunod na
+// REDEPLOY kung walang persistent disk (Render free tier) — hindi ito
+// mawawala sa ordinaryong spin down/up.
+// --------------------------------------------------------------
+const ISSUED_UNLOCKS_PATH = path.join(__dirname, 'issued-unlocks.json');
+
+function loadIssuedUnlocks() {
+    try {
+        return JSON.parse(fs.readFileSync(ISSUED_UNLOCKS_PATH, 'utf8'));
+    } catch (err) {
+        return {};
+    }
+}
+
+function saveIssuedUnlocks(obj) {
+    try {
+        fs.writeFileSync(ISSUED_UNLOCKS_PATH, JSON.stringify(obj, null, 2));
+    } catch (err) {
+        console.error('Hindi ma-save ang issued-unlocks.json:', err);
+    }
+}
+
+let issuedUnlocks = loadIssuedUnlocks();
+
+function recordIssuedUnlock(installationId, featureId, token, meta = {}) {
+    if (!issuedUnlocks[installationId]) issuedUnlocks[installationId] = {};
+    issuedUnlocks[installationId][featureId] = {
+        featureName: meta.featureName || (FEATURE_CATALOG[featureId] && FEATURE_CATALOG[featureId].name) || featureId,
+        price: typeof meta.price === 'number' ? meta.price : (FEATURE_CATALOG[featureId] && FEATURE_CATALOG[featureId].price) || null,
+        issuedAt: token.payload.issuedAt,
+        expiresAt: typeof token.payload.expiresAt === 'number' ? token.payload.expiresAt : null,
+        payload: token.payload,
+        signature: token.signature,
+        source: meta.source || 'otp', // 'otp' | 'admin-direct'
+        note: meta.note || null
+    };
+    saveIssuedUnlocks(issuedUnlocks);
+}
+
+// --------------------------------------------------------------
+// ACTIVITY LOG — simpleng history (huling 500 entries) ng lahat ng
+// mahalagang pangyayari kada device: hiningi ng OTP, na-approve,
+// na-isyu ang token, in-allow/revoke, at "restore check-in" (ibig
+// sabihin, nag-check-in ulit ang isang device na posibleng
+// nag-hard-reset). Ipinapakita ito sa History timeline ng Device
+// Detail admin page.
+// --------------------------------------------------------------
+const ACTIVITY_LOG_PATH = path.join(__dirname, 'activity-log.json');
+const ACTIVITY_LOG_MAX = 500;
+
+function loadActivityLog() {
+    try {
+        return JSON.parse(fs.readFileSync(ACTIVITY_LOG_PATH, 'utf8'));
+    } catch (err) {
+        return [];
+    }
+}
+
+function saveActivityLog(arr) {
+    try {
+        fs.writeFileSync(ACTIVITY_LOG_PATH, JSON.stringify(arr, null, 2));
+    } catch (err) {
+        console.error('Hindi ma-save ang activity-log.json:', err);
+    }
+}
+
+let activityLog = loadActivityLog();
+
+function logActivity(installationId, type, details = {}) {
+    activityLog.unshift({
+        installationId: installationId || null,
+        type, // 'otp_requested' | 'admin_approved' | 'unlock_issued' | 'device_allowed' | 'device_revoked' | 'restore_checkin'
+        details,
+        at: Date.now()
+    });
+    if (activityLog.length > ACTIVITY_LOG_MAX) activityLog.length = ACTIVITY_LOG_MAX;
+    saveActivityLog(activityLog);
+}
+
+// --------------------------------------------------------------
 // ADMIN PANEL — /relay/admin (protektado ng sarili niyang password,
 // HIWALAY sa RELAY_API_KEY). Dito mo makikita ang listahan ng mga
 // device na kailanman humiling ng unlock, at pwede mo silang
@@ -323,6 +446,7 @@ app.post('/relay/admin/api/pending-otps/approve', requireAdminKey, (req, res) =>
         return res.status(404).json({ success: false, message: "Wala nang aktibong request na iyan (baka na-expire na o na-claim na)." });
     }
     pending.approved = true;
+    logActivity(pending.installationId, 'admin_approved', { featureId: pending.featureId, featureName: pending.featureName });
     res.json({ success: true, message: 'Naaprubahan. Pwede na ulit i-click ng kliyente ang unlock button nila.' });
 });
 
@@ -352,12 +476,32 @@ app.get('/relay/admin/api/pending-otps', requireAdminKey, (req, res) => {
     res.json({ success: true, pendingOtps: pending });
 });
 
+// Helper: ilista lang ang mga featureId na may VALID (hindi pa expired)
+// na naka-record na token para sa isang installationId.
+function getActiveUnlockedFeatureIds(installationId) {
+    const record = issuedUnlocks[installationId] || {};
+    const now = Date.now();
+    return Object.keys(record).filter(featureId => {
+        const entry = record[featureId];
+        return !(typeof entry.expiresAt === 'number' && now > entry.expiresAt);
+    });
+}
+
 app.get('/relay/admin/api/devices', requireAdminKey, (req, res) => {
-    const seen = [...seenDevices.entries()].map(([installationId, meta]) => ({
-        installationId,
-        ...meta,
-        allowed: allowedDevices.has(installationId)
-    })).sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+    const seen = [...seenDevices.entries()].map(([installationId, meta]) => {
+        const unlockedIds = getActiveUnlockedFeatureIds(installationId).filter(id => id !== DEMO_FEATURE_ID);
+        const activations = Object.values(issuedUnlocks[installationId] || {});
+        const lastActivationAt = activations.length ? Math.max(...activations.map(a => a.issuedAt)) : null;
+        return {
+            installationId,
+            ...meta,
+            allowed: allowedDevices.has(installationId),
+            unlockedCount: unlockedIds.length,
+            totalCatalogCount: Object.keys(FEATURE_CATALOG).length,
+            demoActive: getActiveUnlockedFeatureIds(installationId).includes(DEMO_FEATURE_ID),
+            lastActivationAt
+        };
+    }).sort((a, b) => b.lastSeenAt - a.lastSeenAt);
 
     res.json({
         success: true,
@@ -374,6 +518,7 @@ app.post('/relay/admin/api/devices/allow', requireAdminKey, (req, res) => {
     }
     allowedDevices.add(installationId);
     saveAllowedDevices(allowedDevices);
+    logActivity(installationId, 'device_allowed', {});
     res.json({ success: true, allowedDevices: [...allowedDevices] });
 });
 
@@ -384,7 +529,142 @@ app.post('/relay/admin/api/devices/revoke', requireAdminKey, (req, res) => {
     }
     allowedDevices.delete(installationId);
     saveAllowedDevices(allowedDevices);
+    logActivity(installationId, 'device_revoked', {});
     res.json({ success: true, allowedDevices: [...allowedDevices] });
+});
+
+// --------------------------------------------------------------
+// GET /relay/admin/api/catalog
+// Ibinabalik ang FEATURE_CATALOG + UPGRADE_TIERS mirror — ginagamit ng
+// admin panel JS para malaman ang lahat ng posibleng package/presyo
+// (kasama ang mga hindi pa na-request kailanman ng device), para sa
+// "Locked pa" list at sa mga tier bulk-activate button.
+// --------------------------------------------------------------
+app.get('/relay/admin/api/catalog', requireAdminKey, (req, res) => {
+    res.json({ success: true, catalog: FEATURE_CATALOG, tiers: UPGRADE_TIERS });
+});
+
+// --------------------------------------------------------------
+// GET /relay/admin/api/devices/:installationId/detail
+// Ang buong detalye ng isang device: naka-unlock na, locked pa, demo
+// status, at history ng lahat ng pangyayari — ito ang pina-pakita sa
+// bagong "Device Detail" page.
+// --------------------------------------------------------------
+app.get('/relay/admin/api/devices/:installationId/detail', requireAdminKey, (req, res) => {
+    const { installationId } = req.params;
+    const meta = seenDevices.get(installationId) || null;
+    const record = issuedUnlocks[installationId] || {};
+    const now = Date.now();
+
+    const unlocked = Object.entries(record)
+        .filter(([featureId]) => featureId !== DEMO_FEATURE_ID)
+        .filter(([, entry]) => !(typeof entry.expiresAt === 'number' && now > entry.expiresAt))
+        .map(([featureId, entry]) => ({ featureId, ...entry }))
+        .sort((a, b) => b.issuedAt - a.issuedAt);
+
+    const unlockedIds = new Set(unlocked.map(u => u.featureId));
+    const locked = Object.entries(FEATURE_CATALOG)
+        .filter(([featureId]) => !unlockedIds.has(featureId))
+        .map(([featureId, info]) => ({ featureId, ...info }));
+
+    const demoEntry = record[DEMO_FEATURE_ID];
+    const demoActive = !!demoEntry && !(typeof demoEntry.expiresAt === 'number' && now > demoEntry.expiresAt);
+
+    const history = activityLog
+        .filter(entry => entry.installationId === installationId)
+        .slice(0, 100);
+
+    res.json({
+        success: true,
+        installationId,
+        meta,
+        allowed: allowedDevices.has(installationId),
+        unlocked,
+        locked,
+        demo: { active: demoActive, expiresAt: demoEntry ? demoEntry.expiresAt : null },
+        tiers: UPGRADE_TIERS,
+        history
+    });
+});
+
+// --------------------------------------------------------------
+// POST /relay/admin/api/devices/:installationId/activate
+// Direktang gumagawa ng signed token(s) PARA SA installationId na ito
+// — WALANG OTP kailangan. Gamit ito kung MAY REFERENCE KA NA (dati nang
+// nabayaran/na-unlock na ang package na ito, gaya ng pagkatapos ng
+// emergency hard reset ng customer) at gusto mo lang i-restore/i-issue
+// ulit agad. Body: { featureId } o { featureIds: [...] } o { tierId }.
+// Opsyonal na `note` para sa audit trail (hal. "Restore matapos ang
+// hard reset, ref: <invoice #>").
+// --------------------------------------------------------------
+app.post('/relay/admin/api/devices/:installationId/activate', requireAdminKey, (req, res) => {
+    const { installationId } = req.params;
+    const { featureId, featureIds, tierId, note } = req.body;
+
+    let idsToActivate = [];
+    if (tierId) {
+        const tier = UPGRADE_TIERS.find(t => t.id === tierId);
+        if (!tier) return res.status(400).json({ success: false, message: 'Hindi kilalang tierId.' });
+        idsToActivate = tier.featureIds;
+    } else if (Array.isArray(featureIds) && featureIds.length) {
+        idsToActivate = featureIds;
+    } else if (featureId) {
+        idsToActivate = [featureId];
+    } else {
+        return res.status(400).json({ success: false, message: 'Kulang ang featureId, featureIds, o tierId.' });
+    }
+
+    const unknown = idsToActivate.filter(id => !FEATURE_CATALOG[id]);
+    if (unknown.length) {
+        return res.status(400).json({ success: false, message: `Hindi kilalang feature(s): ${unknown.join(', ')}` });
+    }
+
+    const now = Date.now();
+    const tokens = {};
+    for (const id of idsToActivate) {
+        const payload = { installationId, featureId: id, issuedAt: now };
+        const payloadString = JSON.stringify(payload);
+        const signature = crypto.sign(null, Buffer.from(payloadString), privateKey).toString('base64');
+        const token = { payload, signature };
+        tokens[id] = token;
+        recordIssuedUnlock(installationId, id, token, {
+            featureName: FEATURE_CATALOG[id].name,
+            price: FEATURE_CATALOG[id].price,
+            source: 'admin-direct',
+            note: note || null
+        });
+        logActivity(installationId, 'unlock_issued', { featureId: id, featureName: FEATURE_CATALOG[id].name, source: 'admin-direct', note: note || null });
+    }
+
+    res.json({ success: true, message: `Na-activate ang ${idsToActivate.length} feature(s).`, tokens });
+});
+
+// --------------------------------------------------------------
+// POST /relay/restore-tokens
+// Tinatawag ito ng OMNIPOS CLIENT (hindi ng browser diretso) kapag
+// nag-check-in ulit ang isang installationId na wala/kulang ang
+// featureUnlocks nito sa panig ng client (hal. matapos ang emergency
+// hard reset). Ibinabalik ang LAHAT ng dating na-isyu na (VALID pa
+// rin, hindi pa expired) na tokens para sa installationId na ito —
+// walang bagong OTP/bayad kailangan, dahil dati na itong nabayaran.
+// --------------------------------------------------------------
+app.post('/relay/restore-tokens', requireApiKey, requireAllowedDevice, rateLimit('restore-tokens', 30, 10 * 60 * 1000), (req, res) => {
+    const { installationId } = req.body;
+    if (!installationId) {
+        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+    }
+
+    const record = issuedUnlocks[installationId] || {};
+    const now = Date.now();
+    const tokens = {};
+    for (const [featureId, entry] of Object.entries(record)) {
+        if (typeof entry.expiresAt === 'number' && now > entry.expiresAt) continue; // expired na demo, huwag ibalik
+        tokens[featureId] = { payload: entry.payload, signature: entry.signature };
+    }
+
+    logActivity(installationId, 'restore_checkin', { restoredCount: Object.keys(tokens).length });
+
+    res.json({ success: true, tokens });
 });
 
 // Hiwalay na secret ito sa RELAY_API_KEY — ang RELAY_API_KEY ay hawak ng
@@ -501,6 +781,7 @@ app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit
                   `I-verify muna ang bayad bago ibigay ang OTP na ito sa kliyente.`
         });
 
+        logActivity(installationId, 'otp_requested', { featureId, featureName: featureName || featureId });
         res.json({ success: true, message: 'Naipadala ang OTP request.' });
     } catch (err) {
         console.error('Relay mail send failure:', err);
@@ -572,13 +853,21 @@ app.post('/relay/confirm-unlock', requireApiKey, requireAllowedDevice, rateLimit
     };
     const payloadString = JSON.stringify(payload);
     const signature = crypto.sign(null, Buffer.from(payloadString), privateKey).toString('base64');
+    const token = { payload, signature };
+
+    recordIssuedUnlock(installationId, featureId, token, {
+        featureName: pending.featureName,
+        price: pending.price,
+        source: 'otp'
+    });
+    logActivity(installationId, 'unlock_issued', { featureId, featureName: pending.featureName, source: 'otp' });
 
     pendingOtps.delete(key);
 
     res.json({
         success: true,
         message: `Na-unlock ang ${pending.featureName}!`,
-        token: { payload, signature }
+        token
     });
 });
 
@@ -632,6 +921,7 @@ app.post('/relay/request-demo', requireApiKey, requireAllowedDevice, rateLimit('
                   `Ibigay lang ito kung gusto mo talagang bigyan sila ng full trial.`
         });
 
+        logActivity(installationId, 'otp_requested', { featureId: DEMO_FEATURE_ID, featureName: 'Full Demo Mode' });
         res.json({ success: true, message: 'Naipadala ang demo OTP request.' });
     } catch (err) {
         console.error('Relay mail send failure (demo):', err);
@@ -682,13 +972,21 @@ app.post('/relay/confirm-demo', requireApiKey, requireAllowedDevice, rateLimit('
     };
     const payloadString = JSON.stringify(payload);
     const signature = crypto.sign(null, Buffer.from(payloadString), privateKey).toString('base64');
+    const token = { payload, signature };
+
+    recordIssuedUnlock(installationId, DEMO_FEATURE_ID, token, {
+        featureName: 'Full Demo Mode',
+        price: null,
+        source: 'otp'
+    });
+    logActivity(installationId, 'unlock_issued', { featureId: DEMO_FEATURE_ID, featureName: 'Full Demo Mode', source: 'otp' });
 
     pendingOtps.delete(key);
 
     res.json({
         success: true,
         message: `Buksan na ang Demo Mode sa loob ng ${Math.round(DEMO_DURATION_MS / 3600000)} oras!`,
-        token: { payload, signature }
+        token
     });
 });
 
@@ -739,6 +1037,7 @@ app.post('/relay/request-unlock-bulk', requireApiKey, requireAllowedDevice, rate
                   `I-verify muna ang bayad bago ibigay ang OTP na ito sa kliyente.`
         });
 
+        logActivity(installationId, 'otp_requested', { featureIds, featureNames: featureNames || featureIds });
         res.json({ success: true, message: 'Naipadala ang bundle OTP request.' });
     } catch (err) {
         console.error('Relay mail send failure (bulk):', err);
@@ -778,11 +1077,22 @@ app.post('/relay/confirm-unlock-bulk', requireApiKey, requireAllowedDevice, rate
 
     const now = Date.now();
     const tokens = {};
-    for (const featureId of featureIds) {
+    const namesList = pending.featureNames || featureIds;
+    for (let i = 0; i < featureIds.length; i++) {
+        const featureId = featureIds[i];
         const payload = { installationId, featureId, issuedAt: now };
         const payloadString = JSON.stringify(payload);
         const signature = crypto.sign(null, Buffer.from(payloadString), privateKey).toString('base64');
-        tokens[featureId] = { payload, signature };
+        const token = { payload, signature };
+        tokens[featureId] = token;
+
+        const featureName = namesList[i] || featureId;
+        recordIssuedUnlock(installationId, featureId, token, {
+            featureName,
+            price: FEATURE_CATALOG[featureId] ? FEATURE_CATALOG[featureId].price : null,
+            source: 'otp-bulk'
+        });
+        logActivity(installationId, 'unlock_issued', { featureId, featureName, source: 'otp-bulk' });
     }
 
     pendingOtps.delete(key);

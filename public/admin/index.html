@@ -286,6 +286,54 @@
   }
 
   .footer-note { text-align: center; font-size: 11px; color: #4d5a67; margin-top: 24px; }
+
+  /* ---------- FILTER BAR (main device list) ---------- */
+  .filter-bar { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+  .filter-bar input[type=text] { flex: 1; min-width: 140px; margin: 0; }
+  .filter-bar select {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border-soft);
+    border-radius: 8px; padding: 10px; font-size: 13px;
+  }
+  .btn-export { background: #21262d; color: var(--text); border: 1px solid var(--border-soft); white-space: nowrap; }
+
+  .btn-detail { background: var(--accent-soft); color: #8fb8ff; }
+
+  /* ---------- DEVICE DETAIL SCREEN ---------- */
+  .detail-topbar { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .back-btn { background: #161d26; border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 8px 12px; cursor: pointer; font-size: 13px; }
+  .detail-id-row { display: flex; align-items: center; gap: 8px; font-family: monospace; font-size: 13px; word-break: break-all; }
+  .btn-tiny-copy { background: #21262d; border: 1px solid var(--border-soft); color: var(--muted); border-radius: 6px; padding: 3px 8px; font-size: 11px; cursor: pointer; flex-shrink: 0; }
+
+  .feature-item {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 10px 0; border-bottom: 1px solid var(--border);
+  }
+  .feature-item:last-child { border-bottom: none; }
+  .feature-name { font-size: 13px; font-weight: 600; }
+  .feature-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .feature-price { font-size: 12px; color: var(--muted); }
+
+  .tier-row { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+  .btn-tier {
+    flex: 1; min-width: 100px; background: var(--accent-soft); color: #8fb8ff;
+    border: 1px solid #1f4d99; border-radius: 8px; padding: 10px 8px; font-size: 12px; cursor: pointer;
+  }
+
+  .timeline { position: relative; padding-left: 18px; }
+  .timeline-item { position: relative; padding-bottom: 14px; font-size: 12px; }
+  .timeline-item:last-child { padding-bottom: 0; }
+  .timeline-item::before {
+    content: ''; position: absolute; left: -18px; top: 3px; width: 8px; height: 8px;
+    border-radius: 50%; background: var(--accent);
+  }
+  .timeline-item::after {
+    content: ''; position: absolute; left: -14.5px; top: 12px; bottom: -2px; width: 1px; background: var(--border-soft);
+  }
+  .timeline-item:last-child::after { display: none; }
+  .timeline-time { color: var(--muted); font-size: 11px; }
+  .timeline-type-unlock_issued::before { background: var(--green); }
+  .timeline-type-device_revoked::before { background: var(--red); }
+  .timeline-type-restore_checkin::before { background: var(--amber); }
 </style>
 </head>
 <body>
@@ -357,11 +405,81 @@
     </div>
 
     <div class="card">
-      <h2>Recently seen (lahat ng humiling)</h2>
+      <h2>Recently seen (lahat ng humiling) <span class="count-pill" id="seenCountPill">0</span></h2>
+      <div class="filter-bar">
+        <input type="text" id="seenFilterInput" placeholder="Hanapin: store, username, o installation ID" oninput="renderSeenList()">
+        <select id="seenFilterStatus" onchange="renderSeenList()">
+          <option value="all">Lahat</option>
+          <option value="allowed">Allowed lang</option>
+          <option value="blocked">Blocked lang</option>
+        </select>
+        <select id="seenSortBy" onchange="renderSeenList()">
+          <option value="lastSeen">I-sort: Huling nakita</option>
+          <option value="mostUnlocked">I-sort: Pinaka-marami na-unlock</option>
+          <option value="storeName">I-sort: Pangalan ng tindahan</option>
+        </select>
+        <button class="btn-export" onclick="exportDevicesCSV()">⬇️ Export CSV</button>
+      </div>
       <div id="seenList" class="empty">Loading...</div>
     </div>
 
     <div class="footer-note">Awtomatikong mag-lo-logout pagkatapos ng 20 minutong walang aktibidad.</div>
+  </div>
+</div>
+
+<div id="deviceDetailScreen" style="display:none;">
+  <div class="topbar">
+    <div class="topbar-brand">
+      <img src="icons/icon-192.png" alt="OmniPOS">
+      <div>
+        <div class="topbar-title">Device Detail</div>
+        <div class="topbar-sub" id="detailStoreName">—</div>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <button class="icon-btn" onclick="closeDeviceDetail()">← Balik</button>
+    </div>
+  </div>
+  <div class="wrap">
+    <div class="card">
+      <div class="detail-id-row">
+        <span id="detailInstallationId">—</span>
+        <button class="btn-tiny-copy" onclick="copyText(document.getElementById('detailInstallationId').innerText, this)">Copy</button>
+      </div>
+      <div class="meta" style="margin-top:6px;" id="detailMeta">—</div>
+      <div style="margin-top:10px;" id="detailAllowedBadgeWrap"></div>
+    </div>
+
+    <div class="stat-strip">
+      <div class="stat-card">
+        <div class="stat-num" id="detailUnlockedCount">—</div>
+        <div class="stat-label">Naka-unlock</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num" id="detailLockedCount">—</div>
+        <div class="stat-label">Naka-lock pa</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num" id="detailDemoStatus">—</div>
+        <div class="stat-label">Demo mode</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>✅ Naka-unlock na</h2>
+      <div id="detailUnlockedList" class="empty">Loading...</div>
+    </div>
+
+    <div class="card">
+      <h2>🔒 Naka-lock pa <span style="font-size:11px; color:var(--muted); font-weight:normal;">(may reference ka na? i-activate agad)</span></h2>
+      <div id="detailTierRow" class="tier-row"></div>
+      <div id="detailLockedList" class="empty">Loading...</div>
+    </div>
+
+    <div class="card">
+      <h2>🕘 History ng device na ito</h2>
+      <div id="detailHistoryList" class="empty">Loading...</div>
+    </div>
   </div>
 </div>
 
@@ -384,6 +502,7 @@
 
 <script>
 let adminKey = sessionStorage.getItem('relayAdminKey') || '';
+let lastLoadedDevices = [];
 let pollTimer = null;
 let lastActivityAt = Date.now();
 const IDLE_LOGOUT_MS = 20 * 60 * 1000; // 20 minuto — auto-logout kapag tahimik masyado
@@ -535,24 +654,90 @@ async function loadDevices() {
     }).join('');
   }
 
+  lastLoadedDevices = data.seenDevices;
+  document.getElementById('seenCountPill').innerText = data.seenDevices.length;
+  renderSeenList();
+}
+
+function renderSeenList() {
   const seenEl = document.getElementById('seenList');
-  if (data.seenDevices.length === 0) {
-    seenEl.innerHTML = '<div class="empty">Wala pang nakikitang device.</div>';
+  const query = (document.getElementById('seenFilterInput').value || '').trim().toLowerCase();
+  const statusFilter = document.getElementById('seenFilterStatus').value;
+  const sortBy = document.getElementById('seenSortBy').value;
+
+  let list = [...lastLoadedDevices];
+
+  if (query) {
+    list = list.filter(d =>
+      (d.storeName || '').toLowerCase().includes(query) ||
+      (d.username || '').toLowerCase().includes(query) ||
+      d.installationId.toLowerCase().includes(query)
+    );
+  }
+  if (statusFilter === 'allowed') list = list.filter(d => d.allowed);
+  if (statusFilter === 'blocked') list = list.filter(d => !d.allowed);
+
+  if (sortBy === 'mostUnlocked') {
+    list.sort((a, b) => (b.unlockedCount || 0) - (a.unlockedCount || 0));
+  } else if (sortBy === 'storeName') {
+    list.sort((a, b) => (a.storeName || '').localeCompare(b.storeName || ''));
   } else {
-    seenEl.innerHTML = data.seenDevices.map(d => `
-      <div class="row">
-        <div class="row-info">
-          <div class="id">${d.installationId}
-            <span class="badge ${d.allowed ? 'badge-allowed' : 'badge-blocked'}">${d.allowed ? 'ALLOWED' : 'BLOCKED'}</span>
-          </div>
-          <div class="meta">${d.storeName || 'Walang pangalan'} · ${d.username || '—'} · ${timeAgo(d.lastSeenAt)} · ${d.requestCount} request(s)</div>
+    list.sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+  }
+
+  if (list.length === 0) {
+    seenEl.innerHTML = '<div class="empty">Walang tumugma sa filter.</div>';
+    return;
+  }
+
+  seenEl.innerHTML = list.map(d => `
+    <div class="row">
+      <div class="row-info">
+        <div class="id">${d.installationId}
+          <span class="badge ${d.allowed ? 'badge-allowed' : 'badge-blocked'}">${d.allowed ? 'ALLOWED' : 'BLOCKED'}</span>
+          ${d.demoActive ? '<span class="badge" style="background:var(--amber-bg); color:var(--amber);">DEMO</span>' : ''}
         </div>
+        <div class="meta">${d.storeName || 'Walang pangalan'} · ${d.username || '—'} · ${timeAgo(d.lastSeenAt)} · ${d.requestCount} request(s) · ${d.unlockedCount || 0}/${d.totalCatalogCount} naka-unlock</div>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:6px;">
+        <button class="btn-detail" onclick="openDeviceDetail('${d.installationId}')">Detalye</button>
         ${d.allowed
           ? `<button class="btn-revoke" onclick="revoke('${d.installationId}', '${(d.storeName || '').replace(/'/g, "\\'")}')">Alisin</button>`
           : `<button class="btn-allow" onclick="allow('${d.installationId}', '${(d.storeName || '').replace(/'/g, "\\'")}')">Allow</button>`}
       </div>
-    `).join('');
+    </div>
+  `).join('');
+}
+
+function exportDevicesCSV() {
+  if (!lastLoadedDevices || lastLoadedDevices.length === 0) {
+    toast('Walang data na i-export.', 'info');
+    return;
   }
+  const headers = ['installationId', 'storeName', 'username', 'allowed', 'unlockedCount', 'totalCatalogCount', 'demoActive', 'requestCount', 'lastSeenAt'];
+  const rows = lastLoadedDevices.map(d => headers.map(h => {
+    const v = d[h];
+    const s = v === null || v === undefined ? '' : String(v);
+    return '"' + s.replace(/"/g, '""') + '"';
+  }).join(','));
+  const csv = [headers.join(','), ...rows].join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `omnipos-relay-devices-${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function copyText(text, btn) {
+  navigator.clipboard.writeText(text).then(() => {
+    const original = btn.innerText;
+    btn.innerText = 'Copied!';
+    setTimeout(() => { btn.innerText = original; }, 1500);
+  });
 }
 
 function minsLeft(expiresAt) {
@@ -675,6 +860,192 @@ async function manualAllow() {
   } catch (err) { /* handled */ }
   document.getElementById('manualIdInput').value = '';
   loadDevices();
+}
+
+// ---------------- DEVICE DETAIL SCREEN ----------------
+const ACTIVITY_LABELS = {
+  otp_requested: '🔑 Humiling ng OTP',
+  admin_approved: '✓ Na-approve mo',
+  unlock_issued: '🔓 Na-isyu ang unlock token',
+  device_allowed: '✅ Na-allow ang device',
+  device_revoked: '⛔ Na-revoke ang device',
+  restore_checkin: '🔄 Nag-check-in ulit (posibleng na-hard-reset)'
+};
+
+function activityDescription(entry) {
+  const d = entry.details || {};
+  if (entry.type === 'unlock_issued') return `${d.featureName || d.featureId} (${d.source || 'otp'})${d.note ? ' — ' + d.note : ''}`;
+  if (entry.type === 'otp_requested') return d.featureNames ? (Array.isArray(d.featureNames) ? d.featureNames.join(', ') : d.featureNames) : (d.featureName || d.featureId || '');
+  if (entry.type === 'restore_checkin') return `${d.restoredCount || 0} feature(s) na-restore`;
+  return '';
+}
+
+let detailPollTimer = null;
+let currentDetailId = null;
+
+async function openDeviceDetail(installationId) {
+  currentDetailId = installationId;
+  document.getElementById('mainScreen').style.display = 'none';
+  document.getElementById('deviceDetailScreen').style.display = 'block';
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  await loadDeviceDetail();
+  if (detailPollTimer) clearInterval(detailPollTimer);
+  detailPollTimer = setInterval(loadDeviceDetail, 8000);
+}
+
+function closeDeviceDetail() {
+  if (detailPollTimer) { clearInterval(detailPollTimer); detailPollTimer = null; }
+  document.getElementById('deviceDetailScreen').style.display = 'none';
+  document.getElementById('mainScreen').style.display = 'block';
+  startPolling();
+}
+
+async function loadDeviceDetail() {
+  if (!currentDetailId) return;
+  let detail;
+  try {
+    detail = await api(`/relay/admin/api/devices/${encodeURIComponent(currentDetailId)}/detail`);
+  } catch (err) { return; }
+  if (!detail.success) { toast(detail.message || 'Hindi makuha ang detalye.', 'error'); return; }
+  renderDeviceDetail(detail);
+}
+
+function renderDeviceDetail(detail) {
+  document.getElementById('detailInstallationId').innerText = detail.installationId;
+  const meta = detail.meta;
+  document.getElementById('detailStoreName').innerText = (meta && meta.storeName) || 'Walang pangalan';
+  document.getElementById('detailMeta').innerText = meta
+    ? `${meta.username || '—'} · huling nakita ${timeAgo(meta.lastSeenAt)} · ${meta.requestCount} request(s)`
+    : 'Wala pang record ng aktibidad mula sa device na ito.';
+  document.getElementById('detailAllowedBadgeWrap').innerHTML = `<span class="badge ${detail.allowed ? 'badge-allowed' : 'badge-blocked'}">${detail.allowed ? 'ALLOWED' : 'BLOCKED'}</span>` +
+    `<button class="icon-btn" style="margin-left:8px;" onclick="toggleAllowFromDetail('${detail.installationId}', ${detail.allowed})">${detail.allowed ? 'Alisin' : 'Allow'}</button>`;
+
+  document.getElementById('detailUnlockedCount').innerText = detail.unlocked.length;
+  document.getElementById('detailLockedCount').innerText = detail.locked.length;
+  document.getElementById('detailDemoStatus').innerText = detail.demo.active ? 'Aktibo' : 'Wala';
+
+  const unlockedEl = document.getElementById('detailUnlockedList');
+  unlockedEl.innerHTML = detail.unlocked.length === 0
+    ? '<div class="empty">Walang naka-unlock pa.</div>'
+    : detail.unlocked.map(u => `
+      <div class="feature-item">
+        <div>
+          <div class="feature-name">${u.featureName}</div>
+          <div class="feature-meta">Na-isyu ${timeAgo(u.issuedAt)} · via ${u.source}${u.note ? ' · ' + u.note : ''}${u.expiresAt ? ' · mag-e-expire sa ' + new Date(u.expiresAt).toLocaleString('en-PH') : ''}</div>
+        </div>
+        <div class="feature-price">${u.price ? '₱' + u.price : ''}</div>
+      </div>
+    `).join('');
+
+  const tierRowEl = document.getElementById('detailTierRow');
+  tierRowEl.innerHTML = detail.tiers.map(t => `
+    <button class="btn-tier" onclick="activateTier('${detail.installationId}', '${t.id}', '${t.name.replace(/'/g, "\\'")}')">📦 ${t.name}</button>
+  `).join('');
+
+  const lockedEl = document.getElementById('detailLockedList');
+  lockedEl.innerHTML = detail.locked.length === 0
+    ? '<div class="empty">Walang naka-lock — pinapasado na lahat!</div>'
+    : detail.locked.map(f => `
+      <div class="feature-item">
+        <div>
+          <div class="feature-name">${f.name}</div>
+          <div class="feature-meta">${f.category === 'theme' ? 'Pro Theme' : 'Module'}</div>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <div class="feature-price">₱${f.price}</div>
+          <button class="btn-allow" onclick="activateFeature('${detail.installationId}', '${f.featureId}', '${f.name.replace(/'/g, "\\'")}')">Activate</button>
+        </div>
+      </div>
+    `).join('');
+
+  const historyEl = document.getElementById('detailHistoryList');
+  historyEl.innerHTML = detail.history.length === 0
+    ? '<div class="empty">Walang history pa.</div>'
+    : `<div class="timeline">` + detail.history.map(h => `
+        <div class="timeline-item timeline-type-${h.type}">
+          <div>${ACTIVITY_LABELS[h.type] || h.type}</div>
+          <div class="feature-meta">${activityDescription(h)}</div>
+          <div class="timeline-time">${timeAgo(h.at)}</div>
+        </div>
+      `).join('') + `</div>`;
+}
+
+async function toggleAllowFromDetail(installationId, currentlyAllowed) {
+  const ok = await confirmAction({
+    title: currentlyAllowed ? 'Alisin ang device na ito?' : 'Payagan ang device na ito?',
+    message: currentlyAllowed
+      ? 'Mawawalan ng access ang device na ito sa relay.'
+      : 'Papayagan mong gumamit ng relay ang device na ito.',
+    confirmLabel: currentlyAllowed ? 'Alisin' : 'Allow',
+    danger: currentlyAllowed
+  });
+  if (!ok) return;
+  try {
+    await api(`/relay/admin/api/devices/${currentlyAllowed ? 'revoke' : 'allow'}`, {
+      method: 'POST',
+      body: JSON.stringify({ installationId })
+    });
+    toast(currentlyAllowed ? 'Naalis ang device.' : 'Na-allow ang device.', 'success');
+  } catch (err) { /* handled */ }
+  loadDeviceDetail();
+}
+
+async function activateFeature(installationId, featureId, featureName) {
+  const note = await promptForNote(`I-activate ang "${featureName}" para dito ngayon din — walang OTP kailangan. Gamitin lang kung MAY REFERENCE KA NA (dati nang binayaran/na-unlock).`);
+  if (note === null) return; // kinansela
+  try {
+    const res = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/activate`, {
+      method: 'POST',
+      body: JSON.stringify({ featureId, note: note || null })
+    });
+    if (res.success) toast(`Na-activate ang ${featureName}.`, 'success');
+    else toast(res.message || 'Hindi na-activate.', 'error');
+  } catch (err) { /* handled */ }
+  loadDeviceDetail();
+}
+
+async function activateTier(installationId, tierId, tierName) {
+  const note = await promptForNote(`I-activate ang BUONG "${tierName}" tier (lahat ng kasamang feature) para dito ngayon din — walang OTP kailangan.`);
+  if (note === null) return;
+  try {
+    const res = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/activate`, {
+      method: 'POST',
+      body: JSON.stringify({ tierId, note: note || null })
+    });
+    if (res.success) toast(`Na-activate ang ${tierName}.`, 'success');
+    else toast(res.message || 'Hindi na-activate.', 'error');
+  } catch (err) { /* handled */ }
+  loadDeviceDetail();
+}
+
+// Gumagamit ng parehong confirm-modal pattern (hindi native prompt() para
+// consistent ang look), pero may text input dagdag para sa optional na
+// "note/reference" (hal. invoice #, dahilan ng restore).
+function promptForNote(message) {
+  return new Promise((resolve) => {
+    const backdrop = document.getElementById('confirmBackdrop');
+    const okBtn = document.getElementById('confirmActionBtn');
+    const cancelBtn = document.getElementById('confirmCancelBtn');
+
+    document.getElementById('confirmTitle').innerText = 'Kumpirmahin ang Activate';
+    document.getElementById('confirmMessage').innerHTML = `${message}<br><br><input type="text" id="activateNoteInput" placeholder="Opsyonal na reference/note (hal. invoice #)" style="margin-top:4px;">`;
+    okBtn.innerText = '✓ I-activate';
+    okBtn.className = 'btn-allow';
+
+    backdrop.style.display = 'flex';
+
+    function cleanup(result) {
+      backdrop.style.display = 'none';
+      okBtn.onclick = null;
+      cancelBtn.onclick = null;
+      resolve(result);
+    }
+    okBtn.onclick = () => {
+      const input = document.getElementById('activateNoteInput');
+      cleanup(input ? input.value.trim() : '');
+    };
+    cancelBtn.onclick = () => cleanup(null);
+  });
 }
 
 function startPolling() {
