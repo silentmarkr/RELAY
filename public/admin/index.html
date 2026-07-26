@@ -367,6 +367,8 @@
   .backup-row .btn-primary, .backup-row .btn-ghost { flex: 1; min-width: 160px; }
   .backup-note { font-size: 12px; color: var(--muted); margin-top: 8px; line-height: 1.5; }
   .backup-lastexport { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .auto-backup-toggle { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-top: 12px; cursor: pointer; user-select: none; }
+  .auto-backup-toggle input { width: 16px; height: 16px; cursor: pointer; }
 
   .tier-row { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
   .btn-tier {
@@ -439,6 +441,13 @@
       </div>
       <input type="file" id="restoreFileInput" accept="application/json" style="display:none;" onchange="restoreBackupFromFile(event)">
       <div class="backup-lastexport" id="backupLastExport"></div>
+      <label class="auto-backup-toggle">
+        <input type="checkbox" id="autoBackupOnAllowToggle" onchange="onAutoBackupToggleChange()">
+        Awtomatikong i-download ang backup (may petsa/oras stamp) kapag may bagong na-allow na device
+      </label>
+      <div class="backup-note" style="margin-top:6px;">
+        Ang filename ng auto-download ay may petsa/oras stamp (hal. <code>relaybackup07260130.json</code> = July 26, 1:30 AM — LOCAL na oras ng browser mo), kaya iba-ibang file ito kada allow (hindi nag-o-overwrite sa isa't isa). Ito ang mananatili sa Downloads folder mo bilang history ng mga backup.
+      </div>
     </div>
 
     <div class="stat-strip">
@@ -643,6 +652,7 @@ function login() {
   sessionStorage.setItem('relayAdminKey', adminKey);
   lastActivityAt = Date.now();
   renderLastExportNote();
+  renderAutoBackupToggle();
   startPolling();
 }
 
@@ -697,19 +707,39 @@ function renderLastExportNote() {
     : 'Wala ka pang na-download na backup.';
 }
 
-async function downloadBackup() {
+// `auto` = true kapag ito ay awtomatikong tinawag (hal. matapos mag-allow
+// ng device) sa halip na manual na pag-click sa "I-download ang Backup"
+// button. Pareho ang laman/endpoint, pero magkaiba ang filename:
+//   - MANUAL: relay-backup-2026-07-27.json (petsa lang, YYYY-MM-DD).
+//   - AUTO:   relaybackup + MMDDHHmm (2-digit month, araw, oras 24h,
+//     minuto — LOCAL na oras ng browser, hindi UTC), hal.
+//     relaybackup07260130.json = July 26, 1:30 AM. May stamp na ito
+//     kada auto-download (hindi na fixed/"latest" filename) para
+//     malinaw kung ANONG oras nagawa ang bawat isa at para hindi rin
+//     magkapatong-patong kung dalawang magkaibang minuto ang pagitan.
+function autoBackupFilename() {
+  const now = new Date();
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const stamp = `${pad2(now.getMonth() + 1)}${pad2(now.getDate())}${pad2(now.getHours())}${pad2(now.getMinutes())}`;
+  return `relaybackup${stamp}.json`;
+}
+
+async function downloadBackup(auto = false) {
   let data;
   try {
     data = await api('/relay/admin/api/backup');
   } catch (err) { return; }
-  if (!data.success) { toast(data.message || 'Hindi ma-generate ang backup.', 'error'); return; }
+  if (!data.success) {
+    if (!auto) toast(data.message || 'Hindi ma-generate ang backup.', 'error');
+    return;
+  }
 
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const dateStr = new Date().toISOString().slice(0, 10);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `relay-backup-${dateStr}.json`;
+  a.download = auto ? autoBackupFilename() : `relay-backup-${dateStr}.json`;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -717,7 +747,59 @@ async function downloadBackup() {
 
   localStorage.setItem('relayLastBackupAt', String(Date.now()));
   renderLastExportNote();
-  toast('Na-download ang backup. Itago ito sa ligtas na lugar.', 'success');
+  toast(
+    auto
+      ? `💾 Auto-backup: na-download ang ${a.download} sa Downloads.`
+      : 'Na-download ang backup. Itago ito sa ligtas na lugar.',
+    'success'
+  );
+}
+
+// --------------------------------------------------------------
+// AUTO-BACKUP KAPAG MAY BAGONG NA-ALLOW NA DEVICE
+// --------------------------------------------------------------
+// Ang toggle na ito ("Awtomatikong i-download ang backup kapag may
+// bagong na-allow na device") ay hiwalay sa 24-hour na RELAY_BACKUP
+// auto-sync ng OMNIPOS client (tingnan ang runRelayBackupSync sa
+// OMNIPOS server.js) — ito ay para sa ADMIN PANEL mismo: bawat successful
+// na "Allow" (bago man o mula sa pending OTP list, manual ID, o device
+// detail screen), awtomatiko ring mag-DOWNLOAD (may petsa/oras stamp,
+// tingnan ang autoBackupFilename() sa itaas) ng buong backup papunta sa parehong
+// browser/device kung saan naka-bukas ang admin panel — para hindi na
+// kailangang mag-manual click ng "I-download ang Backup" tuwing may
+// bagong device na papasok.
+// Naka-ON bilang DEFAULT (opt-out sa halip na opt-in) — pero naka-save
+// pa rin sa localStorage ang preference kung gusto mong i-off.
+function isAutoBackupOnAllowEnabled() {
+  const saved = localStorage.getItem('relayAutoBackupOnAllow');
+  return saved === null ? true : saved === 'true';
+}
+
+function renderAutoBackupToggle() {
+  const el = document.getElementById('autoBackupOnAllowToggle');
+  if (!el) return;
+  el.checked = isAutoBackupOnAllowEnabled();
+}
+
+function onAutoBackupToggleChange() {
+  const el = document.getElementById('autoBackupOnAllowToggle');
+  if (!el) return;
+  localStorage.setItem('relayAutoBackupOnAllow', String(el.checked));
+  toast(
+    el.checked
+      ? 'Naka-ON: mag-a-auto-download ng backup tuwing may na-allow na device.'
+      : 'Naka-OFF: manual na lang ang pag-download ng backup.',
+    'success'
+  );
+}
+
+// Tinatawag lang kapag SUCCESSFUL ang isang "allow" action (hindi sa
+// revoke) — sinasadya itong hindi mag-block/mag-await sa buong allow()
+// flow (fire-and-forget), para hindi bumagal ang toast/UI feedback ng
+// allow action mismo kung sakaling mabagal ang /backup endpoint.
+function autoBackupAfterAllow() {
+  if (!isAutoBackupOnAllowEnabled()) return;
+  downloadBackup(true);
 }
 
 async function restoreBackupFromFile(event) {
@@ -1029,7 +1111,7 @@ async function allow(id, storeName) {
   if (!ok) return;
   try {
     const res = await api('/relay/admin/api/devices/allow', { method: 'POST', body: JSON.stringify({ installationId: id }) });
-    if (res.success) toast('Na-allow ang device.', 'success');
+    if (res.success) { toast('Na-allow ang device.', 'success'); autoBackupAfterAllow(); }
   } catch (err) { /* handled */ }
   loadDevices();
 }
@@ -1074,7 +1156,7 @@ async function manualAllow() {
   if (!ok) return;
   try {
     const res = await api('/relay/admin/api/devices/allow', { method: 'POST', body: JSON.stringify({ installationId: id }) });
-    if (res.success) toast('Naidagdag sa allowlist.', 'success');
+    if (res.success) { toast('Naidagdag sa allowlist.', 'success'); autoBackupAfterAllow(); }
   } catch (err) { /* handled */ }
   document.getElementById('manualIdInput').value = '';
   loadDevices();
@@ -1219,6 +1301,7 @@ async function toggleAllowFromDetail(installationId, currentlyAllowed) {
       body: JSON.stringify({ installationId })
     });
     toast(currentlyAllowed ? 'Naalis ang device.' : 'Na-allow ang device.', 'success');
+    if (!currentlyAllowed) autoBackupAfterAllow();
   } catch (err) { /* handled */ }
   loadDeviceDetail();
 }
@@ -1369,7 +1452,7 @@ function startPolling() {
   pollTimer = setInterval(() => { if (adminKey) loadDevices(); }, 8000);
 }
 
-if (adminKey) { renderLastExportNote(); startPolling(); }
+if (adminKey) { renderLastExportNote(); renderAutoBackupToggle(); startPolling(); }
 
 // ---------------- PWA: INSTALL SUPPORT (Android + PC) ----------------
 // Sa Android, kadalasang awtomatikong lumalabas ang install banner kapag
