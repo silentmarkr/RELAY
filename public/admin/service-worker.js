@@ -9,7 +9,7 @@
 
 // BUMPED: v3 -> v4 (bagong Backup/Restore card sa itaas ng admin panel —
 // nabago ulit ang index.html).
-const CACHE_VERSION = 'relay-admin-shell-v4';
+const CACHE_VERSION = 'relay-admin-shell-v5';
 
 // Mga static shell file lang — walang laman na dynamic/sensitive data.
 const SHELL_FILES = [

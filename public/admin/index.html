@@ -758,13 +758,20 @@ async function loadDevices() {
   } else {
     allowedEl.innerHTML = data.allowedDevices.map(id => {
       const seen = data.seenDevices.find(d => d.installationId === id);
-      const label = seen ? (seen.storeName || 'Walang pangalan') : 'Hindi pa nakikitang gumagawa ng request';
+      const devLabel = seen ? seen.label : null;
+      const fallback = seen ? (seen.storeName || 'Walang pangalan') : 'Hindi pa nakikitang gumagawa ng request';
+      const displayName = devLabel ? `🏷️ ${devLabel}` : fallback;
+      const revokeName = devLabel || fallback;
       return `<div class="row">
         <div class="row-info">
           <div class="id">${id}</div>
-          <div class="meta">${seen ? label + ' · ' + timeAgo(seen.lastSeenAt) : label}</div>
+          <div class="meta">${displayName}${devLabel && seen ? ' · ' + (seen.storeName || 'walang self-reported na pangalan') : ''}${seen ? ' · ' + timeAgo(seen.lastSeenAt) : ''}</div>
         </div>
-        <button class="btn-revoke" onclick="revoke('${id}', '${(label || '').replace(/'/g, "\\'")}')">Alisin</button>
+        <div style="display:flex; flex-direction:column; gap:6px;">
+          <button class="btn-detail" onclick="openDeviceDetail('${id}')">Detalye</button>
+          <button class="btn-ghost" onclick="editLabel('${id}', '${(devLabel || '').replace(/'/g, "\\'")}')">🏷️ I-label</button>
+          <button class="btn-revoke" onclick="revoke('${id}', '${(revokeName || '').replace(/'/g, "\\'")}')">Alisin</button>
+        </div>
       </div>`;
     }).join('');
   }
@@ -812,13 +819,14 @@ function renderSeenList() {
           <span class="badge ${d.allowed ? 'badge-allowed' : 'badge-blocked'}">${d.allowed ? 'ALLOWED' : 'BLOCKED'}</span>
           ${d.demoActive ? '<span class="badge" style="background:var(--amber-bg); color:var(--amber);">DEMO</span>' : ''}
         </div>
-        <div class="meta">${d.storeName || 'Walang pangalan'} · ${d.username || '—'} · ${timeAgo(d.lastSeenAt)} · ${d.requestCount} request(s) · ${d.unlockedCount || 0}/${d.totalCatalogCount} naka-unlock</div>
+        <div class="meta">${d.label ? `🏷️ <strong>${d.label}</strong> · ` : ''}${d.storeName || 'Walang self-reported na pangalan'} · ${d.username || '—'} · ${timeAgo(d.lastSeenAt)} · ${d.requestCount} request(s) · ${d.unlockedCount || 0}/${d.totalCatalogCount} naka-unlock</div>
       </div>
       <div style="display:flex; flex-direction:column; gap:6px;">
         <button class="btn-detail" onclick="openDeviceDetail('${d.installationId}')">Detalye</button>
+        <button class="btn-ghost" onclick="editLabel('${d.installationId}', '${(d.label || '').replace(/'/g, "\\'")}')">🏷️ I-label</button>
         ${d.allowed
-          ? `<button class="btn-revoke" onclick="revoke('${d.installationId}', '${(d.storeName || '').replace(/'/g, "\\'")}')">Alisin</button>`
-          : `<button class="btn-allow" onclick="allow('${d.installationId}', '${(d.storeName || '').replace(/'/g, "\\'")}')">Allow</button>`}
+          ? `<button class="btn-revoke" onclick="revoke('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">Alisin</button>`
+          : `<button class="btn-allow" onclick="allow('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">Allow</button>`}
       </div>
     </div>
   `).join('');
@@ -829,7 +837,7 @@ function exportDevicesCSV() {
     toast('Walang data na i-export.', 'info');
     return;
   }
-  const headers = ['installationId', 'storeName', 'username', 'allowed', 'unlockedCount', 'totalCatalogCount', 'demoActive', 'requestCount', 'lastSeenAt'];
+  const headers = ['installationId', 'label', 'storeName', 'username', 'allowed', 'unlockedCount', 'totalCatalogCount', 'demoActive', 'requestCount', 'lastSeenAt'];
   const rows = lastLoadedDevices.map(d => headers.map(h => {
     const v = d[h];
     const s = v === null || v === undefined ? '' : String(v);
@@ -960,6 +968,20 @@ async function revoke(id, storeName) {
   loadDevices();
 }
 
+async function editLabel(id, currentLabel) {
+  const label = await promptForLabel(currentLabel);
+  if (label === null) return; // kinansela
+  try {
+    const res = await api(`/relay/admin/api/devices/${encodeURIComponent(id)}/label`, {
+      method: 'POST',
+      body: JSON.stringify({ label })
+    });
+    if (res.success) toast(label ? 'Na-save ang label.' : 'Naalis ang label.', 'success');
+  } catch (err) { /* handled */ }
+  loadDevices();
+  if (currentDetailId === id) loadDeviceDetail();
+}
+
 async function manualAllow() {
   const id = document.getElementById('manualIdInput').value.trim();
   if (!id) return;
@@ -986,6 +1008,7 @@ const ACTIVITY_LABELS = {
   device_reset: '🗑️ Na-reset ang device (lahat ng feature)',
   device_allowed: '✅ Na-allow ang device',
   device_revoked: '⛔ Na-revoke ang device',
+  device_labeled: '🏷️ Na-update ang label',
   restore_checkin: '🔄 Nag-check-in ulit (posibleng na-hard-reset)'
 };
 
@@ -996,6 +1019,7 @@ function activityDescription(entry) {
   if (entry.type === 'device_reset') return `${d.deactivatedCount || 0} feature(s) na-tanggal`;
   if (entry.type === 'otp_requested') return d.featureNames ? (Array.isArray(d.featureNames) ? d.featureNames.join(', ') : d.featureNames) : (d.featureName || d.featureId || '');
   if (entry.type === 'restore_checkin') return `${d.restoredCount || 0} feature(s) na-restore`;
+  if (entry.type === 'device_labeled') return d.label ? `→ "${d.label}"` : '(inalis ang label)';
   return '';
 }
 
@@ -1032,12 +1056,13 @@ async function loadDeviceDetail() {
 function renderDeviceDetail(detail) {
   document.getElementById('detailInstallationId').innerText = detail.installationId;
   const meta = detail.meta;
-  document.getElementById('detailStoreName').innerText = (meta && meta.storeName) || 'Walang pangalan';
+  document.getElementById('detailStoreName').innerText = detail.label ? `🏷️ ${detail.label}` : ((meta && meta.storeName) || 'Walang pangalan');
   document.getElementById('detailMeta').innerText = meta
     ? `${meta.username || '—'} · huling nakita ${timeAgo(meta.lastSeenAt)} · ${meta.requestCount} request(s)`
     : 'Wala pang record ng aktibidad mula sa device na ito.';
   document.getElementById('detailAllowedBadgeWrap').innerHTML = `<span class="badge ${detail.allowed ? 'badge-allowed' : 'badge-blocked'}">${detail.allowed ? 'ALLOWED' : 'BLOCKED'}</span>` +
-    `<button class="icon-btn" style="margin-left:8px;" onclick="toggleAllowFromDetail('${detail.installationId}', ${detail.allowed})">${detail.allowed ? 'Alisin' : 'Allow'}</button>`;
+    `<button class="icon-btn" style="margin-left:8px;" onclick="toggleAllowFromDetail('${detail.installationId}', ${detail.allowed})">${detail.allowed ? 'Alisin' : 'Allow'}</button>` +
+    `<button class="icon-btn" style="margin-left:8px;" onclick="editLabel('${detail.installationId}', '${(detail.label || '').replace(/'/g, "\\'")}')">🏷️ I-label</button>`;
 
   document.getElementById('detailUnlockedCount').innerText = detail.unlocked.length;
   document.getElementById('detailLockedCount').innerText = detail.locked.length;
@@ -1213,6 +1238,41 @@ function promptForNote(message) {
     }
     okBtn.onclick = () => {
       const input = document.getElementById('activateNoteInput');
+      cleanup(input ? input.value.trim() : '');
+    };
+    cancelBtn.onclick = () => cleanup(null);
+  });
+}
+
+// Gumagamit ng parehong confirm-modal pattern — pinapayagan ang admin na
+// magtakda ng SARILING palayaw/label para sa isang device (hal. "Aling
+// Nena — Sari-sari Store, Cubao"), IBA sa self-reported storeName ng
+// device mismo. Gamit ito para MADALING MAKILALA/MATANDAAN ang customer,
+// kahit pa "Recently Seen" pa lang ito (bago pa ma-Allow).
+function promptForLabel(currentLabel) {
+  return new Promise((resolve) => {
+    const backdrop = document.getElementById('confirmBackdrop');
+    const okBtn = document.getElementById('confirmActionBtn');
+    const cancelBtn = document.getElementById('confirmCancelBtn');
+
+    document.getElementById('confirmTitle').innerText = 'I-label ang Device';
+    document.getElementById('confirmMessage').innerHTML =
+      'Palayaw/pangalan na PARA SA IYO lang (hindi makikita ng customer) para madali mong makilala ang device na ito — hal. pangalan ng tindahan o customer.' +
+      `<br><br><input type="text" id="deviceLabelInput" placeholder="hal. Aling Nena — Sari-sari Store, Cubao" maxlength="120" value="${(currentLabel || '').replace(/"/g, '&quot;')}" style="margin-top:4px;">`;
+    okBtn.innerText = '💾 I-save';
+    okBtn.className = 'btn-allow';
+
+    backdrop.style.display = 'flex';
+    setTimeout(() => document.getElementById('deviceLabelInput')?.focus(), 50);
+
+    function cleanup(result) {
+      backdrop.style.display = 'none';
+      okBtn.onclick = null;
+      cancelBtn.onclick = null;
+      resolve(result);
+    }
+    okBtn.onclick = () => {
+      const input = document.getElementById('deviceLabelInput');
       cleanup(input ? input.value.trim() : '');
     };
     cancelBtn.onclick = () => cleanup(null);

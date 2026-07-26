@@ -218,6 +218,39 @@ function saveAllowedDevices(set) {
 
 let allowedDevices = loadAllowedDevices();
 
+// --------------------------------------------------------------
+// DEVICE LABELS — pangalan/tatak na MANU-MANONG inilalagay ng admin
+// (hal. "Aling Nena — Sari-sari Store, Cubao") para sa isang
+// installationId, HIWALAY sa self-reported storeName/username na galing
+// mismo sa device (madaling ma-blangko o hindi kilala kung bagong
+// request pa lang). Layunin: mas madaling makilala/matandaan kung SINO
+// ang customer na "gumagawa ng request", kahit pa hindi pa ito
+// naka-Allow. Naka-imbak sa hiwalay na JSON file (persistent, gaya ng
+// allowed-devices.json) — pero tandaan din: mawawala din ito sa
+// susunod na REDEPLOY dahil walang persistent disk sa Render free
+// tier (parehong paalala gaya ng nasa itaas).
+// --------------------------------------------------------------
+const DEVICE_LABELS_PATH = path.join(__dirname, 'device-labels.json');
+
+function loadDeviceLabels() {
+    try {
+        const raw = fs.readFileSync(DEVICE_LABELS_PATH, 'utf8');
+        return new Map(Object.entries(JSON.parse(raw)));
+    } catch (err) {
+        return new Map();
+    }
+}
+
+function saveDeviceLabels(map) {
+    try {
+        fs.writeFileSync(DEVICE_LABELS_PATH, JSON.stringify(Object.fromEntries(map), null, 2));
+    } catch (err) {
+        console.error('Hindi ma-save ang device-labels.json:', err);
+    }
+}
+
+let deviceLabels = loadDeviceLabels();
+
 // In-memory lang, para lang sa "recently seen" view sa admin panel.
 const seenDevices = new Map(); // installationId -> { storeName, username, lastSeenAt, requestCount }
 
@@ -239,7 +272,14 @@ function requireAllowedDevice(req, res, next) {
     if (!installationId || !allowedDevices.has(installationId)) {
         return res.status(403).json({
             success: false,
-            message: 'Hindi authorized ang device na ito para gumamit ng relay.'
+            // Hiwalay na flag (hindi lang basta message string) para ma-detect
+            // ito nang maaasahan ng OMNIPOS server/app — ginagamit ito para
+            // ipakita ang isang "naghihintay pa ng authorization" na estado sa
+            // requestor sa halip na basta-basta error, dahil normal at
+            // inaasahang pangyayari ito sa UNANG request ng isang bagong
+            // device (bago pa ito ma-Allow ng admin sa Relay admin panel).
+            deviceNotAllowed: true,
+            message: 'Hindi pa authorized ang device na ito para gumamit ng relay. Naka-log na ang device — maghintay ng authorization mula sa developer/store owner.'
         });
     }
     next();
@@ -495,6 +535,7 @@ app.get('/relay/admin/api/devices', requireAdminKey, (req, res) => {
         return {
             installationId,
             ...meta,
+            label: deviceLabels.get(installationId) || null,
             allowed: allowedDevices.has(installationId),
             unlockedCount: unlockedIds.length,
             totalCatalogCount: Object.keys(FEATURE_CATALOG).length,
@@ -520,6 +561,28 @@ app.post('/relay/admin/api/devices/allow', requireAdminKey, (req, res) => {
     saveAllowedDevices(allowedDevices);
     logActivity(installationId, 'device_allowed', {});
     res.json({ success: true, allowedDevices: [...allowedDevices] });
+});
+
+// --------------------------------------------------------------
+// POST /relay/admin/api/devices/:installationId/label
+// Nagtatakda (o nagbabawas, kung blangko ang label) ng developer-given
+// na palayaw para sa isang device — gawa ito PARA MA-GAMIT KAHIT HINDI
+// PA NA-ALLOW ang device (i.e. sa "Recently Seen" list pa lang), para
+// madaling makilala/matandaan kung sinong customer ito bago mo pa
+// pindutin ang "Allow". Body: { label }.
+// --------------------------------------------------------------
+app.post('/relay/admin/api/devices/:installationId/label', requireAdminKey, (req, res) => {
+    const { installationId } = req.params;
+    const label = typeof req.body.label === 'string' ? req.body.label.trim().slice(0, 120) : '';
+
+    if (label) {
+        deviceLabels.set(installationId, label);
+    } else {
+        deviceLabels.delete(installationId);
+    }
+    saveDeviceLabels(deviceLabels);
+    logActivity(installationId, 'device_labeled', { label: label || null });
+    res.json({ success: true, label: label || null });
 });
 
 app.post('/relay/admin/api/devices/revoke', requireAdminKey, (req, res) => {
@@ -578,6 +641,7 @@ app.get('/relay/admin/api/devices/:installationId/detail', requireAdminKey, (req
         success: true,
         installationId,
         meta,
+        label: deviceLabels.get(installationId) || null,
         allowed: allowedDevices.has(installationId),
         unlocked,
         locked,
@@ -707,9 +771,10 @@ app.post('/relay/admin/api/devices/:installationId/deactivate-all', requireAdmin
 app.get('/relay/admin/api/backup', requireAdminKey, (req, res) => {
     res.json({
         success: true,
-        backupVersion: 1,
+        backupVersion: 2, // v2: dinagdagan ng deviceLabels (dati v1, walang labels)
         exportedAt: Date.now(),
         allowedDevices: [...allowedDevices],
+        deviceLabels: Object.fromEntries(deviceLabels),
         issuedUnlocks,
         activityLog
     });
@@ -726,14 +791,24 @@ app.get('/relay/admin/api/backup', requireAdminKey, (req, res) => {
 // na-download na backup file).
 // --------------------------------------------------------------
 app.post('/relay/admin/api/restore', requireAdminKey, (req, res) => {
-    const { allowedDevices: backupAllowed, issuedUnlocks: backupUnlocks, activityLog: backupLog } = req.body;
+    const { allowedDevices: backupAllowed, deviceLabels: backupLabels, issuedUnlocks: backupUnlocks, activityLog: backupLog } = req.body;
 
     if (!Array.isArray(backupAllowed) || typeof backupUnlocks !== 'object' || backupUnlocks === null || !Array.isArray(backupLog)) {
         return res.status(400).json({ success: false, message: 'Hindi kilalang format ng backup file — siguraduhing yung na-download galing sa /backup ang ini-restore.' });
     }
+    // `deviceLabels` ay OPTIONAL — mga LUMANG (v1) backup na ginawa bago
+    // idinagdag ang label feature ay walang field na ito. Sa ganung
+    // kaso, iiwan na lang natin ang mga kasalukuyang label (huwag
+    // burahin), sa halip na basta i-treat bilang "walang labels".
+    const hasLabels = backupLabels && typeof backupLabels === 'object' && !Array.isArray(backupLabels);
 
     allowedDevices = new Set(backupAllowed);
     saveAllowedDevices(allowedDevices);
+
+    if (hasLabels) {
+        deviceLabels = new Map(Object.entries(backupLabels));
+        saveDeviceLabels(deviceLabels);
+    }
 
     issuedUnlocks = backupUnlocks;
     saveIssuedUnlocks(issuedUnlocks);
@@ -743,7 +818,7 @@ app.post('/relay/admin/api/restore', requireAdminKey, (req, res) => {
 
     res.json({
         success: true,
-        message: `Na-restore: ${allowedDevices.size} allowed device(s), ${Object.keys(issuedUnlocks).length} device(s) may naka-unlock, ${activityLog.length} history entry(ies).`
+        message: `Na-restore: ${allowedDevices.size} allowed device(s), ${deviceLabels.size} label(s)${hasLabels ? '' : ' (hindi binago — lumang backup na walang labels)'}, ${Object.keys(issuedUnlocks).length} device(s) may naka-unlock, ${activityLog.length} history entry(ies).`
     });
 });
 
