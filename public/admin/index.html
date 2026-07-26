@@ -4,34 +4,126 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OmniPOS Relay — Device Admin</title>
+
+<!-- PWA: para maging "installable" sa Android/iOS/PC gaya ng OMNIPOS client app -->
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0b0f14">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Relay Admin">
+<meta name="mobile-web-app-capable" content="yes">
 <style>
+  :root {
+    --bg: #0b0f14;
+    --card: #111820;
+    --border: #1f2933;
+    --border-soft: #2d3843;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #1f6feb;
+    --accent-soft: #163156;
+    --green: #3fb950;
+    --green-bg: #14361f;
+    --red: #f85149;
+    --red-bg: #3a1618;
+    --amber: #d29922;
+    --amber-bg: #3a2f14;
+  }
   * { box-sizing: border-box; }
   body {
     margin: 0;
     font-family: -apple-system, system-ui, Segoe UI, Roboto, sans-serif;
-    background: #0b0f14;
-    color: #e6edf3;
-    padding: 16px;
+    background: var(--bg);
+    color: var(--text);
+    padding-bottom: 40px;
   }
+  a { color: var(--accent); }
+
+  /* ---------- TOPBAR ---------- */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 14px 16px;
+    background: linear-gradient(180deg, #0e141b, #0b0f14);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 50;
+  }
+  .topbar-brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .topbar-brand img { width: 30px; height: 30px; border-radius: 7px; flex-shrink: 0; }
+  .topbar-title { font-size: 15px; font-weight: 700; line-height: 1.15; }
+  .topbar-sub { font-size: 11px; color: var(--muted); }
+  .topbar-actions { display: flex; align-items: center; gap: 8px; }
+  .icon-btn {
+    background: #161d26;
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .icon-btn:hover { border-color: var(--border-soft); }
+
+  .wrap { max-width: 640px; margin: 0 auto; padding: 16px; }
+
   h1 { font-size: 18px; margin: 0 0 4px; }
-  .sub { color: #8b949e; font-size: 13px; margin-bottom: 20px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+
+  /* ---------- STAT STRIP ---------- */
+  .stat-strip {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  .stat-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+  }
+  .stat-num { font-size: 20px; font-weight: 700; }
+  .stat-label { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
   .card {
-    background: #111820;
-    border: 1px solid #1f2933;
+    background: var(--card);
+    border: 1px solid var(--border);
     border-radius: 10px;
     padding: 14px;
     margin-bottom: 16px;
   }
-  .card h2 { font-size: 15px; margin: 0 0 10px; }
+  .card h2 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+  .card h2 .count-pill {
+    font-size: 11px;
+    font-weight: 600;
+    background: #1c2733;
+    color: var(--muted);
+    padding: 1px 8px;
+    border-radius: 999px;
+  }
+
   input[type=text], input[type=password] {
     width: 100%;
     padding: 10px;
     border-radius: 8px;
-    border: 1px solid #2d3843;
-    background: #0b0f14;
-    color: #e6edf3;
+    border: 1px solid var(--border-soft);
+    background: var(--bg);
+    color: var(--text);
     font-size: 14px;
     margin-bottom: 8px;
+  }
+  input[type=text]:focus, input[type=password]:focus {
+    outline: none;
+    border-color: var(--accent);
   }
   button {
     padding: 9px 14px;
@@ -40,10 +132,16 @@
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
+    transition: filter .12s ease, transform .04s ease;
   }
-  .btn-allow { background: #238636; color: white; }
-  .btn-revoke { background: #da3633; color: white; }
-  .btn-primary { background: #1f6feb; color: white; width: 100%; }
+  button:hover { filter: brightness(1.08); }
+  button:active { transform: scale(0.98); }
+  button:disabled { opacity: .55; cursor: not-allowed; filter: none; }
+  .btn-allow { background: var(--green); color: #08240f; }
+  .btn-revoke { background: var(--red); color: #2b0605; }
+  .btn-primary { background: var(--accent); color: white; width: 100%; }
+  .btn-ghost { background: #1c2733; color: var(--text); }
+
   .row {
     display: flex;
     align-items: center;
@@ -51,13 +149,13 @@
     gap: 10px;
     padding: 10px;
     border-radius: 8px;
-    background: #0b0f14;
+    background: var(--bg);
     margin-bottom: 8px;
-    border: 1px solid #1f2933;
+    border: 1px solid var(--border);
   }
   .row-info { min-width: 0; flex: 1; }
   .id { font-family: monospace; font-size: 12px; word-break: break-all; color: #58a6ff; }
-  .meta { font-size: 12px; color: #8b949e; margin-top: 2px; }
+  .meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
   .badge {
     display: inline-block;
     font-size: 11px;
@@ -65,81 +163,302 @@
     border-radius: 999px;
     margin-left: 6px;
   }
-  .badge-allowed { background: #14361f; color: #3fb950; }
-  .badge-blocked { background: #3a1618; color: #f85149; }
+  .badge-allowed { background: var(--green-bg); color: var(--green); }
+  .badge-blocked { background: var(--red-bg); color: var(--red); }
   .otp-code {
     font-family: monospace;
     font-size: 22px;
     font-weight: 700;
     letter-spacing: 2px;
-    color: #3fb950;
-    background: #0b0f14;
+    color: var(--green);
+    background: var(--bg);
     padding: 6px 10px;
     border-radius: 8px;
-    border: 1px solid #1f2933;
+    border: 1px solid var(--border);
   }
-  .btn-copy { background: #30363d; color: #e6edf3; }
-  .countdown { font-size: 11px; color: #d29922; }
-  .empty { color: #8b949e; font-size: 13px; padding: 8px 0; }
+  .btn-copy { background: #30363d; color: var(--text); }
+  .countdown { font-size: 11px; color: var(--amber); }
+  .empty { color: var(--muted); font-size: 13px; padding: 8px 0; }
   .status-line {
     font-size: 13px;
     padding: 8px 10px;
     border-radius: 8px;
     margin-bottom: 12px;
   }
-  .status-on { background: #14361f; color: #3fb950; }
-  .status-off { background: #3a2f14; color: #d29922; }
-  #loginScreen { max-width: 360px; margin: 60px auto; }
+  .status-on { background: var(--green-bg); color: var(--green); }
+  .status-off { background: var(--amber-bg); color: var(--amber); }
+  .requestor-photo {
+    width: 72px;
+    height: 72px;
+    object-fit: cover;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    flex-shrink: 0;
+    cursor: zoom-in;
+  }
+  .requestor-photo-placeholder {
+    width: 72px;
+    height: 72px;
+    border-radius: 8px;
+    border: 1px dashed var(--border-soft);
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+    color: #4d5a67;
+    background: var(--bg);
+  }
+  #photoLightbox {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.85);
+    z-index: 999;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  #photoLightbox img {
+    max-width: 100%;
+    max-height: 100%;
+    border-radius: 10px;
+    border: 1px solid var(--border-soft);
+  }
+  #loginScreen { max-width: 360px; margin: 60px auto; padding: 0 16px; }
+  #loginScreen .brand-badge {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 18px;
+  }
+  #loginScreen .brand-badge img { width: 40px; height: 40px; border-radius: 9px; }
+
+  /* ---------- CONFIRMATION MODAL (safety prompt) ---------- */
+  .modal-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 998;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .modal-box {
+    background: var(--card);
+    border: 1px solid var(--border-soft);
+    border-radius: 12px;
+    padding: 18px;
+    max-width: 380px;
+    width: 100%;
+  }
+  .modal-box h3 { margin: 0 0 8px; font-size: 16px; }
+  .modal-box p { margin: 0 0 16px; font-size: 13px; color: var(--muted); line-height: 1.5; }
+  .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+  .modal-actions button { min-width: 88px; }
+
+  /* ---------- TOASTS ---------- */
+  #toastHost {
+    position: fixed;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 92%;
+    max-width: 420px;
+    pointer-events: none;
+  }
+  .toast {
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+    animation: toast-in .18s ease-out;
+  }
+  .toast-success { background: var(--green-bg); color: var(--green); border: 1px solid #1e5a2c; }
+  .toast-error { background: var(--red-bg); color: var(--red); border: 1px solid #6e2422; }
+  .toast-info { background: var(--accent-soft); color: #8fb8ff; border: 1px solid #1f4d99; }
+  @keyframes toast-in {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .footer-note { text-align: center; font-size: 11px; color: #4d5a67; margin-top: 24px; }
 </style>
 </head>
 <body>
 
+<div id="toastHost"></div>
+
 <div id="loginScreen">
-  <h1>OmniPOS Relay — Device Admin</h1>
-  <div class="sub">Ilagay ang admin key para makapasok</div>
+  <div class="brand-badge">
+    <img src="icons/icon-192.png" alt="OmniPOS">
+    <div>
+      <h1 style="margin:0;">Relay — Device Admin</h1>
+      <div class="sub" style="margin:0;">Ilagay ang admin key para makapasok</div>
+    </div>
+  </div>
   <div class="card">
     <input type="password" id="adminKeyInput" placeholder="Admin key" autocomplete="off">
     <button class="btn-primary" onclick="login()">Pumasok</button>
-    <div id="loginError" style="color:#f85149; font-size:12px; margin-top:8px;"></div>
+    <div id="loginError" style="color:var(--red); font-size:12px; margin-top:8px;"></div>
   </div>
 </div>
 
 <div id="mainScreen" style="display:none;">
-  <h1>Device Admin</h1>
-  <div class="sub">OmniPOS Unlock Relay</div>
-
-  <div id="restrictionStatus" class="status-line"></div>
-
-  <div class="card">
-    <h2>🔑 Pending OTP requests</h2>
-    <div id="otpList" class="empty">Loading...</div>
+  <div class="topbar">
+    <div class="topbar-brand">
+      <img src="icons/icon-192.png" alt="OmniPOS">
+      <div>
+        <div class="topbar-title">Device Admin</div>
+        <div class="topbar-sub">OmniPOS Unlock Relay</div>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <button id="installBtn" class="icon-btn" style="display:none;" onclick="installApp()">⬇️ I-install</button>
+      <button class="icon-btn" onclick="logout()">🚪 Log out</button>
+    </div>
   </div>
 
-  <div class="card">
-    <h2>Manual na magdagdag ng device</h2>
-    <input type="text" id="manualIdInput" placeholder="Paste installation ID dito">
-    <button class="btn-primary" onclick="manualAllow()">+ Allow</button>
-  </div>
+  <div class="wrap">
+    <div class="stat-strip">
+      <div class="stat-card">
+        <div class="stat-num" id="statAllowed">—</div>
+        <div class="stat-label">Allowed devices</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num" id="statPending">—</div>
+        <div class="stat-label">Pending OTPs</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num" id="statSeen">—</div>
+        <div class="stat-label">Seen devices</div>
+      </div>
+    </div>
 
-  <div class="card">
-    <h2>Allowed devices</h2>
-    <div id="allowedList" class="empty">Loading...</div>
-  </div>
+    <div id="restrictionStatus" class="status-line"></div>
 
-  <div class="card">
-    <h2>Recently seen (lahat ng humiling)</h2>
-    <div id="seenList" class="empty">Loading...</div>
+    <div class="card">
+      <h2>🔑 Pending OTP requests <span class="count-pill" id="otpCountPill">0</span></h2>
+      <div id="otpList" class="empty">Loading...</div>
+    </div>
+
+    <div class="card">
+      <h2>Manual na magdagdag ng device</h2>
+      <input type="text" id="manualIdInput" placeholder="Paste installation ID dito">
+      <button class="btn-primary" onclick="manualAllow()">+ Allow</button>
+    </div>
+
+    <div class="card">
+      <h2>Allowed devices <span class="count-pill" id="allowedCountPill">0</span></h2>
+      <div id="allowedList" class="empty">Loading...</div>
+    </div>
+
+    <div class="card">
+      <h2>Recently seen (lahat ng humiling)</h2>
+      <div id="seenList" class="empty">Loading...</div>
+    </div>
+
+    <div class="footer-note">Awtomatikong mag-lo-logout pagkatapos ng 20 minutong walang aktibidad.</div>
+  </div>
+</div>
+
+<div id="photoLightbox" onclick="this.style.display='none'">
+  <img id="photoLightboxImg" src="" alt="Requestor photo">
+</div>
+
+<!-- SAFETY PROMPT: lumalabas ito bago ma-execute ang kahit anong "malaking" aksyon
+     (Allow, Revoke, Approve/Run) para hindi masira ng aksidenteng click. -->
+<div id="confirmBackdrop" class="modal-backdrop">
+  <div class="modal-box">
+    <h3 id="confirmTitle">Sigurado ka ba?</h3>
+    <p id="confirmMessage"></p>
+    <div class="modal-actions">
+      <button class="btn-ghost" id="confirmCancelBtn">Kanselahin</button>
+      <button class="btn-allow" id="confirmActionBtn">Oo, tuloy</button>
+    </div>
   </div>
 </div>
 
 <script>
 let adminKey = sessionStorage.getItem('relayAdminKey') || '';
+let pollTimer = null;
+let lastActivityAt = Date.now();
+const IDLE_LOGOUT_MS = 20 * 60 * 1000; // 20 minuto — auto-logout kapag tahimik masyado
+
+// ---------------- TOASTS ----------------
+function toast(message, type = 'info') {
+  const host = document.getElementById('toastHost');
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.innerText = message;
+  host.appendChild(el);
+  setTimeout(() => {
+    el.style.transition = 'opacity .25s ease';
+    el.style.opacity = '0';
+    setTimeout(() => el.remove(), 250);
+  }, 3200);
+}
+
+// ---------------- SAFETY-PROMPT CONFIRM MODAL ----------------
+function confirmAction({ title, message, confirmLabel = 'Oo, tuloy', danger = false }) {
+  return new Promise((resolve) => {
+    const backdrop = document.getElementById('confirmBackdrop');
+    const okBtn = document.getElementById('confirmActionBtn');
+    const cancelBtn = document.getElementById('confirmCancelBtn');
+
+    document.getElementById('confirmTitle').innerText = title;
+    document.getElementById('confirmMessage').innerText = message;
+    okBtn.innerText = confirmLabel;
+    okBtn.className = danger ? 'btn-revoke' : 'btn-allow';
+
+    backdrop.style.display = 'flex';
+
+    function cleanup(result) {
+      backdrop.style.display = 'none';
+      okBtn.onclick = null;
+      cancelBtn.onclick = null;
+      resolve(result);
+    }
+    okBtn.onclick = () => cleanup(true);
+    cancelBtn.onclick = () => cleanup(false);
+  });
+}
+document.getElementById('confirmBackdrop').addEventListener('click', (e) => {
+  if (e.target.id === 'confirmBackdrop') {
+    e.currentTarget.style.display = 'none';
+  }
+});
+
+// ---------------- SESSION / IDLE HANDLING ----------------
+['click', 'keydown', 'touchstart'].forEach(evt =>
+  document.addEventListener(evt, () => { lastActivityAt = Date.now(); })
+);
+setInterval(() => {
+  if (adminKey && Date.now() - lastActivityAt > IDLE_LOGOUT_MS) {
+    logout('Na-logout ka dahil sa 20 minutong walang aktibidad.');
+  }
+}, 30 * 1000);
 
 function login() {
   adminKey = document.getElementById('adminKeyInput').value.trim();
   if (!adminKey) return;
   sessionStorage.setItem('relayAdminKey', adminKey);
-  loadDevices();
+  lastActivityAt = Date.now();
+  startPolling();
+}
+
+function logout(message) {
+  sessionStorage.removeItem('relayAdminKey');
+  adminKey = '';
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  document.getElementById('mainScreen').style.display = 'none';
+  document.getElementById('loginScreen').style.display = 'block';
+  document.getElementById('loginError').innerText = '';
+  document.getElementById('adminKeyInput').value = '';
+  if (message) toast(message, 'info');
 }
 
 async function api(path, opts = {}) {
@@ -152,12 +471,13 @@ async function api(path, opts = {}) {
     }
   });
   if (res.status === 403) {
-    sessionStorage.removeItem('relayAdminKey');
-    adminKey = '';
-    document.getElementById('mainScreen').style.display = 'none';
-    document.getElementById('loginScreen').style.display = 'block';
     document.getElementById('loginError').innerText = 'Maling admin key.';
+    logout();
     throw new Error('forbidden');
+  }
+  if (res.status === 429) {
+    toast('Sobra sa pinapayagang bilang ng requests. Sandali lang.', 'error');
+    throw new Error('rate-limited');
   }
   return res.json();
 }
@@ -174,10 +494,20 @@ async function loadDevices() {
   document.getElementById('loginScreen').style.display = 'none';
   document.getElementById('mainScreen').style.display = 'block';
 
-  const data = await api('/relay/admin/api/devices');
-  const otpData = await api('/relay/admin/api/pending-otps');
+  let data, otpData;
+  try {
+    data = await api('/relay/admin/api/devices');
+    otpData = await api('/relay/admin/api/pending-otps');
+  } catch (err) {
+    return; // logout() o toast na ang humawak nito sa loob ng api()
+  }
 
   renderOtps(otpData.pendingOtps);
+  document.getElementById('otpCountPill').innerText = otpData.pendingOtps.length;
+  document.getElementById('statPending').innerText = otpData.pendingOtps.length;
+  document.getElementById('statAllowed').innerText = data.allowedDevices.length;
+  document.getElementById('statSeen').innerText = data.seenDevices.length;
+  document.getElementById('allowedCountPill').innerText = data.allowedDevices.length;
 
   const statusEl = document.getElementById('restrictionStatus');
   if (data.restrictionActive) {
@@ -194,12 +524,13 @@ async function loadDevices() {
   } else {
     allowedEl.innerHTML = data.allowedDevices.map(id => {
       const seen = data.seenDevices.find(d => d.installationId === id);
+      const label = seen ? (seen.storeName || 'Walang pangalan') : 'Hindi pa nakikitang gumagawa ng request';
       return `<div class="row">
         <div class="row-info">
           <div class="id">${id}</div>
-          <div class="meta">${seen ? (seen.storeName || 'Walang pangalan') + ' · ' + timeAgo(seen.lastSeenAt) : 'Hindi pa nakikitang gumagawa ng request'}</div>
+          <div class="meta">${seen ? label + ' · ' + timeAgo(seen.lastSeenAt) : label}</div>
         </div>
-        <button class="btn-revoke" onclick="revoke('${id}')">Alisin</button>
+        <button class="btn-revoke" onclick="revoke('${id}', '${(label || '').replace(/'/g, "\\'")}')">Alisin</button>
       </div>`;
     }).join('');
   }
@@ -217,8 +548,8 @@ async function loadDevices() {
           <div class="meta">${d.storeName || 'Walang pangalan'} · ${d.username || '—'} · ${timeAgo(d.lastSeenAt)} · ${d.requestCount} request(s)</div>
         </div>
         ${d.allowed
-          ? `<button class="btn-revoke" onclick="revoke('${d.installationId}')">Alisin</button>`
-          : `<button class="btn-allow" onclick="allow('${d.installationId}')">Allow</button>`}
+          ? `<button class="btn-revoke" onclick="revoke('${d.installationId}', '${(d.storeName || '').replace(/'/g, "\\'")}')">Alisin</button>`
+          : `<button class="btn-allow" onclick="allow('${d.installationId}', '${(d.storeName || '').replace(/'/g, "\\'")}')">Allow</button>`}
       </div>
     `).join('');
   }
@@ -252,7 +583,9 @@ function renderOtps(list) {
     }
 
     return `<div class="row" style="align-items:flex-start;">
-      ${o.photo ? `<img src="${o.photo}" style="width:64px;height:64px;object-fit:cover;border-radius:8px;border:1px solid #1f2933;flex-shrink:0;">` : ''}
+      ${o.photo
+        ? `<img src="${o.photo}" class="requestor-photo" onclick="viewPhotoFullSize('${o.photo}')" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'requestor-photo-placeholder',innerText:'⚠️'}))">`
+        : `<div class="requestor-photo-placeholder" title="Walang photo (baka tinanggihan ang camera permission, o walang camera ang device)">🚫</div>`}
       <div class="row-info">
         <div><strong>${label}</strong>${o.price ? ' · ₱' + o.price : ''}</div>
         <div class="meta">${o.storeName || 'Walang pangalan ng tindahan'} · hiniling ni ${o.requestedBy}</div>
@@ -263,15 +596,25 @@ function renderOtps(list) {
         <div class="otp-code">${o.code}</div>
         <button class="btn-copy" style="margin-top:6px; display:block; width:100%;" onclick="copyCode('${o.code}', this)">Copy</button>
         ${!o.approved
-          ? `<button class="btn-allow" style="margin-top:6px; width:100%;" onclick="approveOtp('${o.key}')">✓ Allow / Run</button>`
+          ? `<button class="btn-allow" style="margin-top:6px; width:100%;" onclick="approveOtp('${o.key}', '${(label || '').replace(/'/g, "\\'")}', '${(o.storeName || '').replace(/'/g, "\\'")}')">✓ Allow / Run</button>`
           : ''}
       </div>
     </div>`;
   }).join('');
 }
 
-async function approveOtp(key) {
-  await api('/relay/admin/api/pending-otps/approve', { method: 'POST', body: JSON.stringify({ key }) });
+async function approveOtp(key, featureLabel, storeName) {
+  const ok = await confirmAction({
+    title: 'Aprubahan ang unlock?',
+    message: `Bibigyan mo ng access sa "${featureLabel}" ang tindahang "${storeName || 'walang pangalan'}". Gawin lang ito kung na-verify mo na ang bayad.`,
+    confirmLabel: '✓ Allow / Run'
+  });
+  if (!ok) return;
+  try {
+    const res = await api('/relay/admin/api/pending-otps/approve', { method: 'POST', body: JSON.stringify({ key }) });
+    if (res.success) toast('Naaprubahan. Hinihintay ang retry ng kliyente.', 'success');
+    else toast(res.message || 'Hindi na-approve.', 'error');
+  } catch (err) { /* toast na na-handle sa api() */ }
   loadDevices();
 }
 
@@ -283,25 +626,97 @@ function copyCode(code, btn) {
   });
 }
 
-async function allow(id) {
-  await api('/relay/admin/api/devices/allow', { method: 'POST', body: JSON.stringify({ installationId: id }) });
+function viewPhotoFullSize(dataUrl) {
+  document.getElementById('photoLightboxImg').src = dataUrl;
+  document.getElementById('photoLightbox').style.display = 'flex';
+}
+
+async function allow(id, storeName) {
+  const ok = await confirmAction({
+    title: 'Payagan ang device na ito?',
+    message: `Papayagan mong gumamit ng relay ang device na ito${storeName ? ' (' + storeName + ')' : ''}. Puwede mo pa rin itong alisin anumang oras.`,
+    confirmLabel: 'Allow'
+  });
+  if (!ok) return;
+  try {
+    const res = await api('/relay/admin/api/devices/allow', { method: 'POST', body: JSON.stringify({ installationId: id }) });
+    if (res.success) toast('Na-allow ang device.', 'success');
+  } catch (err) { /* handled */ }
   loadDevices();
 }
 
-async function revoke(id) {
-  await api('/relay/admin/api/devices/revoke', { method: 'POST', body: JSON.stringify({ installationId: id }) });
+async function revoke(id, storeName) {
+  const ok = await confirmAction({
+    title: 'Alisin ang device na ito?',
+    message: `Mawawalan ng access ang device na ito${storeName ? ' (' + storeName + ')' : ''} sa relay. Kakailanganin nilang humingi ulit ng OTP kung gusto mong payagan sila muli.`,
+    confirmLabel: 'Alisin',
+    danger: true
+  });
+  if (!ok) return;
+  try {
+    const res = await api('/relay/admin/api/devices/revoke', { method: 'POST', body: JSON.stringify({ installationId: id }) });
+    if (res.success) toast('Naalis ang device.', 'success');
+  } catch (err) { /* handled */ }
   loadDevices();
 }
 
-function manualAllow() {
+async function manualAllow() {
   const id = document.getElementById('manualIdInput').value.trim();
   if (!id) return;
-  allow(id);
+  const ok = await confirmAction({
+    title: 'Manual na payagan?',
+    message: `Idadagdag mo sa allowlist ang installation ID na ito:\n${id}`,
+    confirmLabel: 'Allow'
+  });
+  if (!ok) return;
+  try {
+    const res = await api('/relay/admin/api/devices/allow', { method: 'POST', body: JSON.stringify({ installationId: id }) });
+    if (res.success) toast('Naidagdag sa allowlist.', 'success');
+  } catch (err) { /* handled */ }
   document.getElementById('manualIdInput').value = '';
+  loadDevices();
 }
 
-if (adminKey) loadDevices();
-setInterval(() => { if (adminKey) loadDevices(); }, 8000);
+function startPolling() {
+  loadDevices();
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(() => { if (adminKey) loadDevices(); }, 8000);
+}
+
+if (adminKey) startPolling();
+
+// ---------------- PWA: INSTALL SUPPORT (Android + PC) ----------------
+// Sa Android, kadalasang awtomatikong lumalabas ang install banner kapag
+// tugma na sa criteria ang manifest/service-worker. Sa DESKTOP (Chrome/
+// Edge), kailangan ng explicit button na tumatawag sa prompt() —- kaya
+// dito, hinuhuli natin ang "beforeinstallprompt" event at ipinapakita
+// lang ang button kapag TALAGANG installable na (hindi palagi/basta
+// nakalagay lang).
+let deferredInstallPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  document.getElementById('installBtn').style.display = 'inline-flex';
+});
+window.addEventListener('appinstalled', () => {
+  deferredInstallPrompt = null;
+  document.getElementById('installBtn').style.display = 'none';
+  toast('Na-install ang Relay Admin!', 'success');
+});
+async function installApp() {
+  if (!deferredInstallPrompt) return;
+  deferredInstallPrompt.prompt();
+  await deferredInstallPrompt.userChoice;
+  deferredInstallPrompt = null;
+  document.getElementById('installBtn').style.display = 'none';
+}
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('service-worker.js')
+      .catch((err) => console.warn('[Admin] SW registration failed:', err));
+  });
+}
 </script>
 
 </body>

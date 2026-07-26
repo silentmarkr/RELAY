@@ -37,7 +37,33 @@ try {
 }
 
 const app = express();
-app.use(express.json());
+
+// --------------------------------------------------------------
+// SECURITY HEADERS — mabilis na dagdag na proteksyon nang hindi na
+// kailangan pang mag-install ng bagong dependency (helmet, atbp.).
+// - X-Frame-Options / frame-ancestors: pumipigil sa "clickjacking"
+//   (hindi puwedeng i-embed ang admin panel sa loob ng <iframe> ng
+//   ibang site para linlangin kang mag-click ng Allow/Revoke).
+// - X-Content-Type-Options: pumipigil sa MIME-sniffing.
+// - Referrer-Policy: hindi na-leleak ang buong URL (posibleng may key
+//   sa query string) papunta sa ibang site sa pamamagitan ng Referer header.
+// --------------------------------------------------------------
+app.use((req, res, next) => {
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    next();
+});
+
+// FIX: default na 100kb lang ang limit ng express.json() — madalas sobra dito
+// ang mga request na may kasamang requestor photo (base64 JPEG mula sa
+// captureQuickPhoto() sa OMNIPOS client), kaya minsan na-REJECT ng RELAY ang
+// buong request (413) bago pa man ito maka-abot sa /relay/request-unlock
+// route — ibig sabihin, minsan hindi lang yung photo ang nawawala, buong
+// unlock/demo/bundle request mismo ang nabibigo dahil dito. 2mb na ngayon,
+// katumbas ng limit na ginagamit na rin ng OMNIPOS client server mismo.
+app.use(express.json({ limit: '2mb' }));
 
 // Static dev-only page (WebRTC viewer) — hindi ito naka-link kahit saan
 // sa publiko, at protektado pa rin ng DEV_VIEWER_KEY sa loob ng WS
@@ -230,9 +256,59 @@ if (!ADMIN_KEY) {
     console.warn('⚠️  Walang RELAY_ADMIN_KEY na naka-set — hindi magagamit ang /relay/admin panel hangga\'t hindi ito nalagyan.');
 }
 
+// Timing-safe string comparison — pumipigil sa "timing attack" kung saan
+// puwedeng hulaan ng attacker ang key nang paunti-unti (character by
+// character) batay sa kung gaano kabilis tumugon ang server sa bawat
+// maling guess. Gumagamit ng crypto.timingSafeEqual, pero pareho munang
+// pinapantayan ang haba ng dalawang string (kailangan ito ng function na
+// iyon) nang hindi nagpapakita kung alin ang mas maikli/mahaba.
+function safeCompare(a, b) {
+    if (typeof a !== 'string' || typeof b !== 'string') return false;
+    const bufA = Buffer.from(a);
+    const bufB = Buffer.from(b);
+    if (bufA.length !== bufB.length) {
+        // Ipadaan pa rin sa timingSafeEqual gamit ang parehong haba (bufA
+        // laban sa sarili nito) para hindi bumagsak agad sa maikling-circuit
+        // na maaaring gamiting "oracle" ng attacker.
+        crypto.timingSafeEqual(bufA, bufA);
+        return false;
+    }
+    return crypto.timingSafeEqual(bufA, bufB);
+}
+
+// Bantay laban sa brute-force: limitado ang bilang ng MALING admin-key
+// attempts bawat IP bago pansamantalang harangan (kahit tama na ang key
+// pagkatapos) — hindi ito nakakaapekto sa normal na 8-second auto-refresh
+// ng admin panel dahil MALING attempts lang ang binibilang, hindi lahat
+// ng request.
+const ADMIN_LOGIN_MAX_FAILURES = 10;
+const ADMIN_LOGIN_WINDOW_MS = 10 * 60 * 1000;
+const adminLoginFailures = new Map(); // ip -> [timestamps]
+
+function isAdminLoginLocked(ip) {
+    const attempts = (adminLoginFailures.get(ip) || []).filter(
+        ts => Date.now() - ts < ADMIN_LOGIN_WINDOW_MS
+    );
+    adminLoginFailures.set(ip, attempts);
+    return attempts.length >= ADMIN_LOGIN_MAX_FAILURES;
+}
+
+function recordAdminLoginFailure(ip) {
+    const attempts = adminLoginFailures.get(ip) || [];
+    attempts.push(Date.now());
+    adminLoginFailures.set(ip, attempts);
+}
+
 function requireAdminKey(req, res, next) {
+    if (isAdminLoginLocked(req.ip)) {
+        return res.status(429).json({
+            success: false,
+            message: 'Sobra na sa maling pagtatangka. Subukan ulit mamaya.'
+        });
+    }
     const provided = req.headers['x-relay-admin-key'] || req.query.key;
-    if (!ADMIN_KEY || provided !== ADMIN_KEY) {
+    if (!ADMIN_KEY || !safeCompare(String(provided || ''), ADMIN_KEY)) {
+        recordAdminLoginFailure(req.ip);
         return res.status(403).json({ success: false, message: 'Invalid o walang admin key.' });
     }
     next();
@@ -359,7 +435,7 @@ const pendingOtps = new Map(); // key: `${installationId}:${featureId}` -> { cod
 function requireApiKey(req, res, next) {
     if (!RELAY_API_KEY) return next(); // walang na-configure na key = walang gate (hindi rekomendado, pero valid config)
     const provided = req.headers['x-relay-key'];
-    if (provided !== RELAY_API_KEY) {
+    if (!safeCompare(String(provided || ''), RELAY_API_KEY)) {
         return res.status(403).json({ success: false, message: 'Invalid o walang API key.' });
     }
     next();
@@ -841,7 +917,7 @@ wss.on('connection', (ws) => {
         }
 
         if (msg.type === 'viewer-join') {
-            if (!DEV_VIEWER_KEY || msg.devKey !== DEV_VIEWER_KEY) {
+            if (!DEV_VIEWER_KEY || !safeCompare(String(msg.devKey || ''), DEV_VIEWER_KEY)) {
                 return safeSend(ws, { type: 'error', message: 'Invalid developer key.' });
             }
             const session = screenShareSessions.get(msg.sessionCode);
