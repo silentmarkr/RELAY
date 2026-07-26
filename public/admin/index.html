@@ -312,6 +312,21 @@
   .feature-name { font-size: 13px; font-weight: 600; }
   .feature-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
   .feature-price { font-size: 12px; color: var(--muted); }
+  /* Deactivate button sa loob ng bawat naka-unlock na feature — ginamit
+     para "i-reset" ang isang device pabalik sa walang naka-unlock (hal.
+     bago ibenta/ilipat ang unit sa ibang customer). Maliit at pula
+     (parang btn-revoke) para malinaw na destructive/pang-alis ang aksyon,
+     pero hindi masyadong kalaki para hindi ma-miss ang buong row. */
+  .btn-deactivate {
+    background: var(--red-bg); color: var(--red);
+    border: 1px solid #5c1f22; border-radius: 6px;
+    padding: 6px 10px; font-size: 11px; font-weight: 600; cursor: pointer;
+  }
+  .btn-deactivate-all {
+    background: var(--red); color: #2b0605;
+    border-radius: 8px; padding: 8px 12px; font-size: 12px; font-weight: 700;
+    cursor: pointer; width: 100%; margin-top: 10px;
+  }
 
   .tier-row { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
   .btn-tier {
@@ -867,6 +882,8 @@ const ACTIVITY_LABELS = {
   otp_requested: '🔑 Humiling ng OTP',
   admin_approved: '✓ Na-approve mo',
   unlock_issued: '🔓 Na-isyu ang unlock token',
+  feature_deactivated: '🔒 Na-deactivate ang feature',
+  device_reset: '🗑️ Na-reset ang device (lahat ng feature)',
   device_allowed: '✅ Na-allow ang device',
   device_revoked: '⛔ Na-revoke ang device',
   restore_checkin: '🔄 Nag-check-in ulit (posibleng na-hard-reset)'
@@ -875,6 +892,8 @@ const ACTIVITY_LABELS = {
 function activityDescription(entry) {
   const d = entry.details || {};
   if (entry.type === 'unlock_issued') return `${d.featureName || d.featureId} (${d.source || 'otp'})${d.note ? ' — ' + d.note : ''}`;
+  if (entry.type === 'feature_deactivated') return `${d.featureName || d.featureId}`;
+  if (entry.type === 'device_reset') return `${d.deactivatedCount || 0} feature(s) na-tanggal`;
   if (entry.type === 'otp_requested') return d.featureNames ? (Array.isArray(d.featureNames) ? d.featureNames.join(', ') : d.featureNames) : (d.featureName || d.featureId || '');
   if (entry.type === 'restore_checkin') return `${d.restoredCount || 0} feature(s) na-restore`;
   return '';
@@ -933,9 +952,14 @@ function renderDeviceDetail(detail) {
           <div class="feature-name">${u.featureName}</div>
           <div class="feature-meta">Na-isyu ${timeAgo(u.issuedAt)} · via ${u.source}${u.note ? ' · ' + u.note : ''}${u.expiresAt ? ' · mag-e-expire sa ' + new Date(u.expiresAt).toLocaleString('en-PH') : ''}</div>
         </div>
-        <div class="feature-price">${u.price ? '₱' + u.price : ''}</div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <div class="feature-price">${u.price ? '₱' + u.price : ''}</div>
+          <button class="btn-deactivate" onclick="deactivateFeature('${detail.installationId}', '${u.featureId}', '${u.featureName.replace(/'/g, "\\'")}')">Deactivate</button>
+        </div>
       </div>
-    `).join('');
+    `).join('') + (detail.unlocked.length > 0
+      ? `<button class="btn-deactivate-all" onclick="deactivateAllFeatures('${detail.installationId}')">🗑️ I-reset ang Device (Deactivate LAHAT ng Feature)</button>`
+      : '');
 
   const tierRowEl = document.getElementById('detailTierRow');
   tierRowEl.innerHTML = detail.tiers.map(t => `
@@ -1000,6 +1024,53 @@ async function activateFeature(installationId, featureId, featureName) {
     });
     if (res.success) toast(`Na-activate ang ${featureName}.`, 'success');
     else toast(res.message || 'Hindi na-activate.', 'error');
+  } catch (err) { /* handled */ }
+  loadDeviceDetail();
+}
+
+// Tinatanggal ang isang naka-unlock na feature sa device na ito — hindi
+// nire-refund, hindi rin binabago ang billing, "lokal" lang na alis ito
+// sa panig ng RELAY kaya babalik itong naka-lock ang feature sa device.
+// Gamitin ito kapag: (1) mali ang pagka-activate, o (2) i-a-unbundle mo
+// ang isang feature bago ibenta/ilipat ang device sa ibang customer.
+async function deactivateFeature(installationId, featureId, featureName) {
+  const ok = await confirmAction({
+    title: `I-deactivate ang "${featureName}"?`,
+    message: `Mawawalan ng access ang device na ito sa "${featureName}". Kung dati na itong binayaran ng customer, tandaan mo munang mag-note bago mo i-deactivate.`,
+    confirmLabel: 'I-deactivate',
+    danger: true
+  });
+  if (!ok) return;
+  try {
+    const res = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/deactivate`, {
+      method: 'POST',
+      body: JSON.stringify({ featureId })
+    });
+    if (res.success) toast(`Na-deactivate ang ${featureName}.`, 'success');
+    else toast(res.message || 'Hindi na-deactivate.', 'error');
+  } catch (err) { /* handled */ }
+  loadDeviceDetail();
+}
+
+// Buong "factory reset" ng feature unlocks ng device na ito — tinatanggal
+// LAHAT ng naka-unlock (pati demo, kung meron) para bumalik ito sa
+// default na walang naka-unlock. Para ito sa sitwasyon na ibebenta o
+// ililipat mo na ang device/unit sa ibang tao/tindahan at ayaw mong
+// kasamang ma-carry-over ang mga dating binayarang feature.
+async function deactivateAllFeatures(installationId) {
+  const ok = await confirmAction({
+    title: 'I-reset ang device na ito?',
+    message: 'Tatanggalin ang LAHAT ng naka-unlock na feature sa device na ito (pati demo, kung meron). Babalik ito sa default state — walang naka-unlock. Gamitin ito bago ibenta o ilipat ang device sa ibang customer. Hindi ito maaaring bawiin.',
+    confirmLabel: 'Oo, i-reset',
+    danger: true
+  });
+  if (!ok) return;
+  try {
+    const res = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/deactivate-all`, {
+      method: 'POST'
+    });
+    if (res.success) toast(res.message || 'Na-reset ang device.', 'success');
+    else toast(res.message || 'Hindi na-reset.', 'error');
   } catch (err) { /* handled */ }
   loadDeviceDetail();
 }

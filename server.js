@@ -640,6 +640,61 @@ app.post('/relay/admin/api/devices/:installationId/activate', requireAdminKey, (
 });
 
 // --------------------------------------------------------------
+// POST /relay/admin/api/devices/:installationId/deactivate
+// Tinatanggal ang IISANG naka-unlock na feature sa installationId na
+// ito — hindi ito nag-i-issue ng bagong invalidation token, "lokal" lang
+// itong pag-alis sa panig ng RELAY: sa susunod na mag-check-in/mag-sync
+// ang OMNIPOS client, wala na itong makikitang unlock record para sa
+// feature na ito kaya babalik itong naka-lock. Hindi ito nire-refund at
+// hindi rin binabago ang billing — audit trail lang ang ginagawa nito
+// dito, ang aktwal na bayad ay hiwalay na usapin. Body: { featureId }.
+// --------------------------------------------------------------
+app.post('/relay/admin/api/devices/:installationId/deactivate', requireAdminKey, (req, res) => {
+    const { installationId } = req.params;
+    const { featureId } = req.body;
+
+    if (!featureId) {
+        return res.status(400).json({ success: false, message: 'Kulang ang featureId.' });
+    }
+
+    const record = issuedUnlocks[installationId];
+    if (!record || !record[featureId]) {
+        return res.status(404).json({ success: false, message: 'Walang ganitong naka-unlock na feature para sa device na ito.' });
+    }
+
+    const featureName = record[featureId].featureName || (FEATURE_CATALOG[featureId] && FEATURE_CATALOG[featureId].name) || featureId;
+    delete record[featureId];
+    saveIssuedUnlocks(issuedUnlocks);
+    logActivity(installationId, 'feature_deactivated', { featureId, featureName });
+
+    res.json({ success: true, message: `Na-deactivate ang ${featureName}.` });
+});
+
+// --------------------------------------------------------------
+// POST /relay/admin/api/devices/:installationId/deactivate-all
+// "Factory reset" ng feature unlocks ng device na ito — tinatanggal
+// LAHAT (pati ang demo entry, kung meron) para bumalik ito sa default
+// state na walang naka-unlock. Gamitin ito bago ibenta o ilipat ang
+// physical na unit/device sa ibang customer, para hindi ma-carry-over
+// ang mga dating binayarang feature ng dating may-ari.
+// --------------------------------------------------------------
+app.post('/relay/admin/api/devices/:installationId/deactivate-all', requireAdminKey, (req, res) => {
+    const { installationId } = req.params;
+
+    const record = issuedUnlocks[installationId];
+    const deactivatedCount = record ? Object.keys(record).length : 0;
+    if (deactivatedCount === 0) {
+        return res.json({ success: true, message: 'Wala nang naka-unlock na feature dito.' });
+    }
+
+    delete issuedUnlocks[installationId];
+    saveIssuedUnlocks(issuedUnlocks);
+    logActivity(installationId, 'device_reset', { deactivatedCount });
+
+    res.json({ success: true, message: `Na-reset ang device — ${deactivatedCount} feature(s) na tinanggal.` });
+});
+
+// --------------------------------------------------------------
 // POST /relay/restore-tokens
 // Tinatawag ito ng OMNIPOS CLIENT (hindi ng browser diretso) kapag
 // nag-check-in ulit ang isang installationId na wala/kulang ang
