@@ -409,6 +409,56 @@ function logActivity(installationId, type, details = {}) {
 }
 
 // --------------------------------------------------------------
+// BACKUP CHECK-INS — "auto backup" na tinatawag ng OMNIPOS client
+// (server.js doon, hindi ang browser) tuwing matagumpay itong
+// nag-mirror ng sarili niyang database papunta sa Download/RELAY_BACKUP
+// nito (iisang overwritten file, tingnan ang db.js/server.js ng
+// OMNIPOS). Ginagamit ito para sa DALAWANG bagay:
+//   1. Pinapakita sa admin panel kung KAILAN huling successful na-sync
+//      ang bawat device (at ang pinaka-huli sa LAHAT, para sa
+//      notification/dot sa itaas ng "Allowed devices").
+//   2. (Opsyonal, naka-toggle) AWTOMATIKONG idinaragdag ang device sa
+//      allowlist sa tuwing may matagumpay na check-in — "trust on
+//      first successful backup" na modelo, para hindi na kailangang
+//      i-Allow nang manual ang bawat bagong verified na device.
+//      I-set ang RELAY_AUTOALLOW_ON_BACKUP=false sa .env kung ayaw mo
+//      nito (manual Allow pa rin sa admin panel ang gagamitin).
+//
+// PAALALA: kapareho ng iba pang JSON stores dito, MAWAWALA ito sa
+// susunod na REDEPLOY kung walang persistent disk (Render free tier).
+// --------------------------------------------------------------
+const BACKUP_CHECKINS_PATH = path.join(__dirname, 'backup-checkins.json');
+
+function loadBackupCheckins() {
+    try {
+        return JSON.parse(fs.readFileSync(BACKUP_CHECKINS_PATH, 'utf8'));
+    } catch (err) {
+        return {};
+    }
+}
+
+function saveBackupCheckins(obj) {
+    try {
+        fs.writeFileSync(BACKUP_CHECKINS_PATH, JSON.stringify(obj, null, 2));
+    } catch (err) {
+        console.error('Hindi ma-save ang backup-checkins.json:', err);
+    }
+}
+
+let backupCheckins = loadBackupCheckins(); // installationId -> { lastBackupAt, storeName, fileSizeBytes, checkinCount }
+
+// Default na NAKA-ON ang auto-allow-on-backup (mas kaunting manual na
+// hakbang para sa developer) — i-set ang env var na ito sa 'false' kung
+// gusto mo pa ring manual na i-Allow bawat device sa admin panel kahit
+// successful na ang backup check-in nito.
+const AUTOALLOW_ON_BACKUP = String(process.env.RELAY_AUTOALLOW_ON_BACKUP || 'true').trim().toLowerCase() !== 'false';
+
+function mostRecentBackupCheckinAt() {
+    const values = Object.values(backupCheckins).map((c) => c.lastBackupAt).filter(Boolean);
+    return values.length ? Math.max(...values) : null;
+}
+
+// --------------------------------------------------------------
 // ADMIN PANEL — /relay/admin (protektado ng sarili niyang password,
 // HIWALAY sa RELAY_API_KEY). Dito mo makikita ang listahan ng mga
 // device na kailanman humiling ng unlock, at pwede mo silang
@@ -532,6 +582,7 @@ app.get('/relay/admin/api/devices', requireAdminKey, (req, res) => {
         const unlockedIds = getActiveUnlockedFeatureIds(installationId).filter(id => id !== DEMO_FEATURE_ID);
         const activations = Object.values(issuedUnlocks[installationId] || {});
         const lastActivationAt = activations.length ? Math.max(...activations.map(a => a.issuedAt)) : null;
+        const backupCheckin = backupCheckins[installationId] || null;
         return {
             installationId,
             ...meta,
@@ -540,7 +591,9 @@ app.get('/relay/admin/api/devices', requireAdminKey, (req, res) => {
             unlockedCount: unlockedIds.length,
             totalCatalogCount: Object.keys(FEATURE_CATALOG).length,
             demoActive: getActiveUnlockedFeatureIds(installationId).includes(DEMO_FEATURE_ID),
-            lastActivationAt
+            lastActivationAt,
+            lastBackupAt: backupCheckin ? backupCheckin.lastBackupAt : null,
+            backupCheckinCount: backupCheckin ? backupCheckin.checkinCount : 0
         };
     }).sort((a, b) => b.lastSeenAt - a.lastSeenAt);
 
@@ -548,7 +601,12 @@ app.get('/relay/admin/api/devices', requireAdminKey, (req, res) => {
         success: true,
         seenDevices: seen,
         allowedDevices: [...allowedDevices],
-        restrictionActive: allowedDevices.size > 0
+        restrictionActive: allowedDevices.size > 0,
+        // Para sa notification/dot blinker sa itaas ng "Allowed devices":
+        // huling successful backup check-in mula SA KAHIT ANONG device,
+        // at kung naka-ON ang auto-allow-on-backup na behavior.
+        lastBackupSyncAt: mostRecentBackupCheckinAt(),
+        backupAutoAllowEnabled: AUTOALLOW_ON_BACKUP
     });
 });
 
@@ -921,6 +979,68 @@ function rateLimit(bucketName, max, windowMs) {
         next();
     };
 }
+
+// --------------------------------------------------------------
+// POST /relay/backup-checkin
+// Tinatawag ito ng OMNIPOS CLIENT SERVER (hindi ng browser) sa TUWING
+// matagumpay itong nakapag-mirror ng sarili niyang database papunta sa
+// Download/RELAY_BACKUP nito (iisang overwritten file). Layunin:
+//
+//   1. I-record ang "huling successful backup" ng device na ito, para
+//      makita sa admin panel (Device Detail, at ang notification/dot
+//      sa itaas ng "Allowed devices").
+//   2. Kung naka-ON ang AUTOALLOW_ON_BACKUP (default), AWTOMATIKONG
+//      idadagdag ang device na ito sa allowlist — hindi na kailangang
+//      balikan pa ang admin panel para mag-Allow nang manual sa bawat
+//      bagong device na regular nang gumagawa ng backup.
+//
+// SADYANG WALANG requireAllowedDevice dito (hindi tulad ng ibang
+// /relay/* endpoints) — kailangan itong tawagin KAHIT HINDI PA
+// naka-Allow ang device, dahil ito mismo ang paraan para maging
+// naka-Allow ito. Nananatili pa ring protektado ito ng requireApiKey
+// (shared secret) at rate limit, kaya hindi basta kahit sinong random
+// tao (na walang API key) ang makaka-trigger nito.
+// --------------------------------------------------------------
+app.post('/relay/backup-checkin', requireApiKey, rateLimit('backup-checkin', 20, 60 * 60 * 1000), (req, res) => {
+    const { installationId, storeName, username, fileSizeBytes, backupAt } = req.body;
+
+    if (!installationId) {
+        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+    }
+
+    recordDeviceSeen(installationId, { storeName, username });
+
+    const existing = backupCheckins[installationId] || { checkinCount: 0 };
+    backupCheckins[installationId] = {
+        lastBackupAt: typeof backupAt === 'number' ? backupAt : Date.now(),
+        storeName: storeName || existing.storeName || null,
+        fileSizeBytes: typeof fileSizeBytes === 'number' ? fileSizeBytes : (existing.fileSizeBytes || null),
+        checkinCount: existing.checkinCount + 1
+    };
+    saveBackupCheckins(backupCheckins);
+
+    let newlyAllowed = false;
+    if (AUTOALLOW_ON_BACKUP && !allowedDevices.has(installationId)) {
+        allowedDevices.add(installationId);
+        saveAllowedDevices(allowedDevices);
+        newlyAllowed = true;
+        logActivity(installationId, 'device_allowed', { source: 'auto_backup_checkin' });
+    }
+
+    logActivity(installationId, 'backup_checkin', {
+        fileSizeBytes: backupCheckins[installationId].fileSizeBytes,
+        newlyAllowed
+    });
+
+    res.json({
+        success: true,
+        allowed: allowedDevices.has(installationId),
+        newlyAllowed,
+        message: newlyAllowed
+            ? 'Successful ang backup check-in — awtomatikong na-allow ang device na ito.'
+            : 'Successful ang backup check-in.'
+    });
+});
 
 // --------------------------------------------------------------
 // POST /relay/request-unlock

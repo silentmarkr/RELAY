@@ -187,6 +187,41 @@
   }
   .status-on { background: var(--green-bg); color: var(--green); }
   .status-off { background: var(--amber-bg); color: var(--amber); }
+
+  /* ---------- BACKUP SYNC BANNER (dot blinker sa itaas ng "Allowed devices") ---------- */
+  .sync-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    margin-bottom: 12px;
+    font-size: 12.5px;
+    border: 1px solid var(--border);
+  }
+  .sync-banner.sync-green { background: var(--green-bg); color: var(--green); border-color: #1e5a2c; }
+  .sync-banner.sync-orange { background: var(--amber-bg); color: var(--amber); border-color: #4a3a16; }
+  .sync-banner-text { flex: 1; min-width: 0; }
+  .sync-banner-sub { font-size: 11px; opacity: .8; margin-top: 1px; }
+  .sync-dot-blink {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    animation: sync-dot-pulse 1.4s ease-in-out infinite;
+  }
+  .sync-dot-blink.sync-green { background: var(--green); animation-name: sync-dot-pulse-green; }
+  .sync-dot-blink.sync-orange { background: var(--amber); animation-name: sync-dot-pulse-orange; }
+  @keyframes sync-dot-pulse-green {
+    0%   { box-shadow: 0 0 0 0 rgba(63,185,80,.6); opacity: 1; }
+    70%  { box-shadow: 0 0 0 6px rgba(63,185,80,0); opacity: .55; }
+    100% { box-shadow: 0 0 0 0 rgba(63,185,80,0); opacity: 1; }
+  }
+  @keyframes sync-dot-pulse-orange {
+    0%   { box-shadow: 0 0 0 0 rgba(210,153,34,.6); opacity: 1; }
+    70%  { box-shadow: 0 0 0 6px rgba(210,153,34,0); opacity: .55; }
+    100% { box-shadow: 0 0 0 0 rgba(210,153,34,0); opacity: 1; }
+  }
   .requestor-photo {
     width: 72px;
     height: 72px;
@@ -430,6 +465,14 @@
       <h2>Manual na magdagdag ng device</h2>
       <input type="text" id="manualIdInput" placeholder="Paste installation ID dito">
       <button class="btn-primary" onclick="manualAllow()">+ Allow</button>
+    </div>
+
+    <div id="backupSyncBanner" class="sync-banner sync-orange">
+      <div class="sync-dot-blink sync-orange" id="backupSyncDot"></div>
+      <div class="sync-banner-text">
+        <div id="backupSyncMain">Naghihintay pa ng unang successful auto-backup check-in...</div>
+        <div class="sync-banner-sub" id="backupSyncSub">Database → Download/RELAY_BACKUP</div>
+      </div>
     </div>
 
     <div class="card">
@@ -724,6 +767,42 @@ function timeAgo(ts) {
   return Math.floor(diff / 86400) + 'd ago';
 }
 
+// Blinking dot + notification sa itaas ng "Allowed devices":
+// GREEN  = may successful auto-backup check-in (Download/RELAY_BACKUP)
+//          mula sa kahit anong device sa loob ng nakaraang ~26 oras
+//          (kasabay ng 24-hour na auto-backup schedule ng OMNIPOS client
+//          + konting buffer).
+// ORANGE = wala pang nag-check-in kailanman, o luma na (>26h) ang huling
+//          successful sync — parehong pattern gaya ng "connection-dot"
+//          sa OMNIPOS login screen (orange = waiting/pending, green =
+//          na-sync/updated na).
+const BACKUP_SYNC_STALE_MS = 26 * 60 * 60 * 1000;
+
+function renderBackupSyncBanner(data) {
+  const banner = document.getElementById('backupSyncBanner');
+  const dot = document.getElementById('backupSyncDot');
+  const main = document.getElementById('backupSyncMain');
+  const sub = document.getElementById('backupSyncSub');
+
+  const lastSync = data.lastBackupSyncAt || null;
+  const isFresh = lastSync && (Date.now() - lastSync) < BACKUP_SYNC_STALE_MS;
+  const state = isFresh ? 'green' : 'orange';
+
+  banner.classList.remove('sync-green', 'sync-orange');
+  banner.classList.add(state === 'green' ? 'sync-green' : 'sync-orange');
+  dot.classList.remove('sync-green', 'sync-orange');
+  dot.classList.add(state === 'green' ? 'sync-green' : 'sync-orange');
+
+  if (state === 'green') {
+    main.innerText = `Naka-sync — huling successful backup: ${timeAgo(lastSync)}`;
+  } else if (lastSync) {
+    main.innerText = `Luma na ang huling backup check-in (${timeAgo(lastSync)}) — naghihintay ng bagong sync`;
+  } else {
+    main.innerText = 'Naghihintay pa ng unang successful auto-backup check-in...';
+  }
+  sub.innerText = `Database → Download/RELAY_BACKUP${data.backupAutoAllowEnabled ? ' · auto-allow naka-ON' : ''}`;
+}
+
 async function loadDevices() {
   document.getElementById('loginScreen').style.display = 'none';
   document.getElementById('mainScreen').style.display = 'block';
@@ -742,6 +821,8 @@ async function loadDevices() {
   document.getElementById('statAllowed').innerText = data.allowedDevices.length;
   document.getElementById('statSeen').innerText = data.seenDevices.length;
   document.getElementById('allowedCountPill').innerText = data.allowedDevices.length;
+
+  renderBackupSyncBanner(data);
 
   const statusEl = document.getElementById('restrictionStatus');
   if (data.restrictionActive) {
@@ -1009,7 +1090,8 @@ const ACTIVITY_LABELS = {
   device_allowed: '✅ Na-allow ang device',
   device_revoked: '⛔ Na-revoke ang device',
   device_labeled: '🏷️ Na-update ang label',
-  restore_checkin: '🔄 Nag-check-in ulit (posibleng na-hard-reset)'
+  restore_checkin: '🔄 Nag-check-in ulit (posibleng na-hard-reset)',
+  backup_checkin: '💾 Auto-backup sync (Download/RELAY_BACKUP)'
 };
 
 function activityDescription(entry) {
@@ -1020,6 +1102,8 @@ function activityDescription(entry) {
   if (entry.type === 'otp_requested') return d.featureNames ? (Array.isArray(d.featureNames) ? d.featureNames.join(', ') : d.featureNames) : (d.featureName || d.featureId || '');
   if (entry.type === 'restore_checkin') return `${d.restoredCount || 0} feature(s) na-restore`;
   if (entry.type === 'device_labeled') return d.label ? `→ "${d.label}"` : '(inalis ang label)';
+  if (entry.type === 'backup_checkin') return `${d.fileSizeBytes ? (d.fileSizeBytes / 1024).toFixed(0) + ' KB' : ''}${d.newlyAllowed ? ' — awtomatikong na-allow' : ''}`;
+  if (entry.type === 'device_allowed' && d.source === 'auto_backup_checkin') return '(awtomatiko, matapos ang successful backup)';
   return '';
 }
 
