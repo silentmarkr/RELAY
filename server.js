@@ -57,6 +57,90 @@ const MAIL_PASS = process.env.RELAY_MAIL_PASS;
 const RECIPIENT_EMAIL = process.env.RELAY_RECIPIENT_EMAIL; // ang TOTOONG email mo — dito lang ito nakatira ngayon, hindi na sa client
 const OTP_TTL_MS = 10 * 60 * 1000; // 10 minuto
 
+// Opsyonal na PAGPAPABILIS: kung naka-set ang RESEND_API_KEY (env var),
+// gagamitin ang Resend (https://resend.com) HTTPS API sa halip na Gmail
+// SMTP. Bakit mas mabilis/maaasahan ito sa Render: (1) isang simpleng
+// HTTPS POST call lang ito (walang TCP/TLS SMTP handshake+greeting na
+// paulit-ulit), (2) hindi ito naka-block/na-throttle gaya minsan ng
+// outbound SMTP ports sa ilang PaaS/free-tier networks, (3) may sarili
+// itong timeout na madaling i-abort. Kung WALA namang RESEND_API_KEY na
+// naka-set, awtomatikong babalik ito sa dating Gmail/nodemailer path sa
+// ibaba — hindi kailangang palitan agad, opsyonal na upgrade lang ito.
+const RESEND_API_KEY = process.env.RESEND_API_KEY || null;
+const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'OmniPOS Unlock Relay <onboarding@resend.dev>';
+
+// ====================================================================
+// SHARED, POOLED NODEMAILER TRANSPORTER (fallback path, fix para sa
+// dating OTP timeout kapag Gmail SMTP pa rin ang gamit)
+// ====================================================================
+// Dati, GUMAGAWA ng BAGONG koneksyon sa Gmail (bagong TCP/TLS handshake)
+// sa BAWAT OTP request (request-unlock, demo-request, bundle-unlock).
+// Sa Render, kapag na-spin-down/natulog ang serbisyo dahil sa free
+// tier (walang traffic sa loob ng ~15 min), ang UNANG request pagkatapos
+// ay kailangan munang gisingin ang container BAGO pa man ito magsimula
+// gumawa ng bagong SMTP handshake papunta sa Gmail — kaya madaling
+// lumagpas sa timeout ng platform/client. Dito, IISANG pooled
+// transporter na lang ang ginagawa (buhay habang tumatakbo ang
+// process), gamit muli sa lahat ng OTP endpoints, at may EXPLICIT na
+// connection/greeting/socket timeouts para bumagsak na lang agad
+// nang malinaw (at ma-retry) kaysa sa manatiling nakabitin.
+const mailTransporter = (MAIL_USER && MAIL_PASS) ? nodemailer.createTransport({
+    service: 'gmail',
+    pool: true,
+    maxConnections: 3,
+    auth: { user: MAIL_USER, pass: MAIL_PASS },
+    connectionTimeout: 8000,
+    greetingTimeout: 8000,
+    socketTimeout: 15000
+}) : null;
+
+// ====================================================================
+// UNIFIED "sendOtpMail" HELPER
+// ====================================================================
+// Ginagamit ito ng LAHAT ng 3 OTP endpoint (request-unlock, demo-request,
+// bundle-unlock) sa halip na direktang tumawag sa nodemailer/Resend.
+// Susubukan munang gamitin ang Resend HTTPS API kung naka-configure ito
+// (mas mabilis); kung hindi, babalik sa pooled Gmail transporter sa itaas.
+async function sendOtpMail({ subject, text }) {
+    if (RESEND_API_KEY) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 8000);
+        try {
+            const resp = await fetch('https://api.resend.com/emails', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${RESEND_API_KEY}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    from: RESEND_FROM_EMAIL,
+                    to: [RECIPIENT_EMAIL],
+                    subject,
+                    text
+                }),
+                signal: controller.signal
+            });
+            if (!resp.ok) {
+                const errBody = await resp.text().catch(() => '');
+                throw new Error(`Resend API error (${resp.status}): ${errBody}`);
+            }
+            return;
+        } finally {
+            clearTimeout(timeout);
+        }
+    }
+
+    if (!mailTransporter) {
+        throw new Error('Walang RESEND_API_KEY o RELAY_MAIL_USER/RELAY_MAIL_PASS na naka-configure.');
+    }
+    await mailTransporter.sendMail({
+        from: `"OmniPOS Unlock Relay" <${MAIL_USER}>`,
+        to: RECIPIENT_EMAIL,
+        subject,
+        text
+    });
+}
+
 // --------------------------------------------------------------
 // DEVICE STORE — dalawang bagay ang tina-track dito:
 //
@@ -328,14 +412,7 @@ app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit
     });
 
     try {
-        const transporter = nodemailer.createTransport({
-            service: 'gmail',
-            auth: { user: MAIL_USER, pass: MAIL_PASS }
-        });
-
-        await transporter.sendMail({
-            from: `"OmniPOS Unlock Relay" <${MAIL_USER}>`,
-            to: RECIPIENT_EMAIL,
+        await sendOtpMail({
             subject: `🎨 Unlock Request — ${featureName || featureId}${price ? ` (₱${price})` : ''}`,
             text: `May humiling na i-unlock ang isang Pro theme.\n\n` +
                   `Store: ${storeName || 'Hindi tiyak'}\n` +
@@ -380,7 +457,7 @@ function checkApprovalGate(pending) {
     return true;
 }
 
-app.post('/relay/confirm-unlock', requireApiKey, requireAllowedDevice, rateLimit('confirm-unlock', 10, 10 * 60 * 1000), (req, res) => {
+app.post('/relay/confirm-unlock', requireApiKey, requireAllowedDevice, rateLimit('confirm-unlock', 120, 10 * 60 * 1000), (req, res) => {
     const { installationId, featureId, otp } = req.body;
 
     if (!installationId || !featureId || !otp) {
@@ -468,14 +545,7 @@ app.post('/relay/request-demo', requireApiKey, requireAllowedDevice, rateLimit('
     });
 
     try {
-        const transporter = nodemailer.createTransport({
-            service: 'gmail',
-            auth: { user: MAIL_USER, pass: MAIL_PASS }
-        });
-
-        await transporter.sendMail({
-            from: `"OmniPOS Unlock Relay" <${MAIL_USER}>`,
-            to: RECIPIENT_EMAIL,
+        await sendOtpMail({
             subject: `🕒 Demo Mode Request — ${storeName || 'Hindi tiyak'}`,
             text: `May humiling ng FULL DEMO MODE (lahat ng features, ${Math.round(DEMO_DURATION_MS / 3600000)} oras lang bago mag-expire).\n\n` +
                   `Store: ${storeName || 'Hindi tiyak'}\n` +
@@ -494,7 +564,7 @@ app.post('/relay/request-demo', requireApiKey, requireAllowedDevice, rateLimit('
     }
 });
 
-app.post('/relay/confirm-demo', requireApiKey, requireAllowedDevice, rateLimit('confirm-demo', 10, 10 * 60 * 1000), (req, res) => {
+app.post('/relay/confirm-demo', requireApiKey, requireAllowedDevice, rateLimit('confirm-demo', 120, 10 * 60 * 1000), (req, res) => {
     const { installationId, otp } = req.body;
 
     if (!installationId || !otp) {
@@ -580,14 +650,7 @@ app.post('/relay/request-unlock-bulk', requireApiKey, requireAllowedDevice, rate
     });
 
     try {
-        const transporter = nodemailer.createTransport({
-            service: 'gmail',
-            auth: { user: MAIL_USER, pass: MAIL_PASS }
-        });
-
-        await transporter.sendMail({
-            from: `"OmniPOS Unlock Relay" <${MAIL_USER}>`,
-            to: RECIPIENT_EMAIL,
+        await sendOtpMail({
             subject: `📦 Bundle Unlock Request (${featureIds.length} items)${totalPrice ? ` — ₱${totalPrice}` : ''}`,
             text: `May humiling na i-unlock ang isang BUNDLE ng ${featureIds.length} feature(s).\n\n` +
                   `Store: ${storeName || 'Hindi tiyak'}\n` +
@@ -608,7 +671,7 @@ app.post('/relay/request-unlock-bulk', requireApiKey, requireAllowedDevice, rate
     }
 });
 
-app.post('/relay/confirm-unlock-bulk', requireApiKey, requireAllowedDevice, rateLimit('confirm-unlock-bulk', 10, 10 * 60 * 1000), (req, res) => {
+app.post('/relay/confirm-unlock-bulk', requireApiKey, requireAllowedDevice, rateLimit('confirm-unlock-bulk', 120, 10 * 60 * 1000), (req, res) => {
     const { installationId, featureIds, otp } = req.body;
 
     if (!installationId || !Array.isArray(featureIds) || featureIds.length === 0 || !otp) {
