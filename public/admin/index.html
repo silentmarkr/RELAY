@@ -327,6 +327,11 @@
     border-radius: 8px; padding: 8px 12px; font-size: 12px; font-weight: 700;
     cursor: pointer; width: 100%; margin-top: 10px;
   }
+  /* Backup / Restore card */
+  .backup-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .backup-row .btn-primary, .backup-row .btn-ghost { flex: 1; min-width: 160px; }
+  .backup-note { font-size: 12px; color: var(--muted); margin-top: 8px; line-height: 1.5; }
+  .backup-lastexport { font-size: 12px; color: var(--muted); margin-top: 6px; }
 
   .tier-row { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
   .btn-tier {
@@ -386,6 +391,21 @@
   </div>
 
   <div class="wrap">
+    <div id="restrictionStatus" class="status-line"></div>
+
+    <div class="card">
+      <h2>💾 Backup / Restore</h2>
+      <div class="backup-note">
+        Walang persistent disk ang Render free tier — nawawala ang allowed devices, naka-unlock na features, at history sa bawat <code>git push</code>/redeploy, at mawawala LAHAT kung ide-delete mo ang service/domain. I-download ang backup paminsan-minsan (lalo na pagkatapos ng bagong unlock/customer) at itago sa ligtas na lugar.
+      </div>
+      <div class="backup-row">
+        <button class="btn-primary" onclick="downloadBackup()">⬇️ I-download ang Backup</button>
+        <button class="btn-ghost" onclick="document.getElementById('restoreFileInput').click()">⬆️ I-restore mula sa Backup</button>
+      </div>
+      <input type="file" id="restoreFileInput" accept="application/json" style="display:none;" onchange="restoreBackupFromFile(event)">
+      <div class="backup-lastexport" id="backupLastExport"></div>
+    </div>
+
     <div class="stat-strip">
       <div class="stat-card">
         <div class="stat-num" id="statAllowed">—</div>
@@ -400,8 +420,6 @@
         <div class="stat-label">Seen devices</div>
       </div>
     </div>
-
-    <div id="restrictionStatus" class="status-line"></div>
 
     <div class="card">
       <h2>🔑 Pending OTP requests <span class="count-pill" id="otpCountPill">0</span></h2>
@@ -581,6 +599,7 @@ function login() {
   if (!adminKey) return;
   sessionStorage.setItem('relayAdminKey', adminKey);
   lastActivityAt = Date.now();
+  renderLastExportNote();
   startPolling();
 }
 
@@ -614,6 +633,87 @@ async function api(path, opts = {}) {
     throw new Error('rate-limited');
   }
   return res.json();
+}
+
+// --------------------------------------------------------------
+// BACKUP / RESTORE — mano-manong pag-download ng buong data
+// (allowed devices, naka-unlock na features, history) bilang isang
+// .json file, at pag-restore mula rito. Kailangan ito dahil walang
+// persistent disk ang Render free tier — nawawala ang data sa bawat
+// redeploy, at mawawala LAHAT kung ma-delete ang service/domain.
+// `relayLastBackupAt` sa localStorage (hindi sessionStorage — dapat
+// hindi ito nawawala pag-close ng tab/browser) ay para lang paalala
+// kung kailan huling nag-download, walang sensitive data ito.
+// --------------------------------------------------------------
+function renderLastExportNote() {
+  const el = document.getElementById('backupLastExport');
+  if (!el) return;
+  const last = localStorage.getItem('relayLastBackupAt');
+  el.innerText = last
+    ? `Huling na-download: ${timeAgo(parseInt(last, 10))}`
+    : 'Wala ka pang na-download na backup.';
+}
+
+async function downloadBackup() {
+  let data;
+  try {
+    data = await api('/relay/admin/api/backup');
+  } catch (err) { return; }
+  if (!data.success) { toast(data.message || 'Hindi ma-generate ang backup.', 'error'); return; }
+
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const dateStr = new Date().toISOString().slice(0, 10);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `relay-backup-${dateStr}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+
+  localStorage.setItem('relayLastBackupAt', String(Date.now()));
+  renderLastExportNote();
+  toast('Na-download ang backup. Itago ito sa ligtas na lugar.', 'success');
+}
+
+async function restoreBackupFromFile(event) {
+  const file = event.target.files && event.target.files[0];
+  event.target.value = ''; // para makapili ulit ng parehong file sa susunod
+  if (!file) return;
+
+  let parsed;
+  try {
+    const text = await file.text();
+    parsed = JSON.parse(text);
+  } catch (err) {
+    toast('Hindi ma-basa ang file — siguraduhing wastong backup .json ito.', 'error');
+    return;
+  }
+
+  if (!Array.isArray(parsed.allowedDevices) || typeof parsed.issuedUnlocks !== 'object' || !Array.isArray(parsed.activityLog)) {
+    toast('Mukhang hindi ito wastong backup file mula sa Relay.', 'error');
+    return;
+  }
+
+  const exportedNote = parsed.exportedAt ? ` (ginawa noong ${new Date(parsed.exportedAt).toLocaleString('en-PH')})` : '';
+  const ok = await confirmAction({
+    title: 'I-restore ang backup na ito?',
+    message: `PAPALITAN nito ang KASALUKUYANG allowed devices, naka-unlock na features, at history ng laman ng backup file${exportedNote}. Hindi ito maaaring bawiin maliban kung mayroon kang bagong backup pagkatapos nito.`,
+    confirmLabel: 'Oo, i-restore',
+    danger: true
+  });
+  if (!ok) return;
+
+  try {
+    const res = await api('/relay/admin/api/restore', {
+      method: 'POST',
+      body: JSON.stringify(parsed)
+    });
+    if (res.success) toast(res.message || 'Na-restore ang backup.', 'success');
+    else toast(res.message || 'Hindi na-restore ang backup.', 'error');
+  } catch (err) { /* handled */ }
+  loadDevices();
 }
 
 function timeAgo(ts) {
@@ -1125,7 +1225,7 @@ function startPolling() {
   pollTimer = setInterval(() => { if (adminKey) loadDevices(); }, 8000);
 }
 
-if (adminKey) startPolling();
+if (adminKey) { renderLastExportNote(); startPolling(); }
 
 // ---------------- PWA: INSTALL SUPPORT (Android + PC) ----------------
 // Sa Android, kadalasang awtomatikong lumalabas ang install banner kapag

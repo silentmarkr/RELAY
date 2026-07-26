@@ -695,6 +695,59 @@ app.post('/relay/admin/api/devices/:installationId/deactivate-all', requireAdmin
 });
 
 // --------------------------------------------------------------
+// GET /relay/admin/api/backup
+// Buong "export" ng lahat ng data na naka-store lang sa disk ng
+// container na ito (allowed devices, issued unlocks, activity log) —
+// WALANG persistent disk ang Render free tier kaya ito ang tanging
+// paraan para hindi mawala ang lahat kapag na-redeploy (git push) o
+// na-delete ang service/domain. I-download ito paminsan-minsan (lalo
+// na pagkatapos ng bagong unlock/customer) at itago sa ligtas na lugar
+// (Google Drive, laptop, atbp.) — gamitin ang /restore para ibalik.
+// --------------------------------------------------------------
+app.get('/relay/admin/api/backup', requireAdminKey, (req, res) => {
+    res.json({
+        success: true,
+        backupVersion: 1,
+        exportedAt: Date.now(),
+        allowedDevices: [...allowedDevices],
+        issuedUnlocks,
+        activityLog
+    });
+});
+
+// --------------------------------------------------------------
+// POST /relay/admin/api/restore
+// Ibinabalik ang datos mula sa isang backup file na ginawa ng
+// /relay/admin/api/backup sa itaas. PINAPALITAN (hindi dinadagdag/
+// merge) ang kasalukuyang allowed devices, issued unlocks, at activity
+// log ng laman ng backup — sinusulat din agad sa disk (JSON files) at
+// sa in-memory state, para agad itong lumabas sa admin panel. Body:
+// yung buong JSON object na nakuha mula sa /backup (o mula sa
+// na-download na backup file).
+// --------------------------------------------------------------
+app.post('/relay/admin/api/restore', requireAdminKey, (req, res) => {
+    const { allowedDevices: backupAllowed, issuedUnlocks: backupUnlocks, activityLog: backupLog } = req.body;
+
+    if (!Array.isArray(backupAllowed) || typeof backupUnlocks !== 'object' || backupUnlocks === null || !Array.isArray(backupLog)) {
+        return res.status(400).json({ success: false, message: 'Hindi kilalang format ng backup file — siguraduhing yung na-download galing sa /backup ang ini-restore.' });
+    }
+
+    allowedDevices = new Set(backupAllowed);
+    saveAllowedDevices(allowedDevices);
+
+    issuedUnlocks = backupUnlocks;
+    saveIssuedUnlocks(issuedUnlocks);
+
+    activityLog = backupLog;
+    saveActivityLog(activityLog);
+
+    res.json({
+        success: true,
+        message: `Na-restore: ${allowedDevices.size} allowed device(s), ${Object.keys(issuedUnlocks).length} device(s) may naka-unlock, ${activityLog.length} history entry(ies).`
+    });
+});
+
+// --------------------------------------------------------------
 // POST /relay/restore-tokens
 // Tinatawag ito ng OMNIPOS CLIENT (hindi ng browser diretso) kapag
 // nag-check-in ulit ang isang installationId na wala/kulang ang

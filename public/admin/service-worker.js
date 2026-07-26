@@ -7,11 +7,9 @@
 // mapanganib mag-serve ng lumang OTP code o lumang device list mula sa
 // cache, kaya hindi natin ito ginagalaw dito.
 
-// BUMPED: v2 -> v3 (bagong Deactivate button per-feature + "I-reset ang
-// Device" sa Device Detail page — nabago ulit ang index.html, kailangang
-// mag-fetch ulit ng bagong bersyon ang mga existing na naka-install na
-// PWA sa halip na patuloy na servehan ng lumang cached shell).
-const CACHE_VERSION = 'relay-admin-shell-v3';
+// BUMPED: v3 -> v4 (bagong Backup/Restore card sa itaas ng admin panel —
+// nabago ulit ang index.html).
+const CACHE_VERSION = 'relay-admin-shell-v4';
 
 // Mga static shell file lang — walang laman na dynamic/sensitive data.
 const SHELL_FILES = [
