@@ -1632,6 +1632,54 @@ app.post('/relay/confirm-demo', requireApiKey, requireAllowedDevice, rateLimit('
 });
 
 // --------------------------------------------------------------
+// POST /relay/admin/api/devices/:installationId/activate-demo
+// Direktang nagbibigay ng FULL DEMO MODE (lahat ng features, pansamantala
+// lang) sa isang device — WALANG OTP kailangan, at HINDI na kailangang
+// maghintay na ang customer/kliyente mismo ang humingi muna
+// (/relay/request-demo) bago ito ma-Allow/Approve. Gamitin ito kung
+// PROAKTIBO mong gustong bigyan ng trial ang isang device (hal. bagong
+// prospect, demo booth, o follow-up sa naka-Locked pang tindahan) —
+// katulad ng "May reference ka na? i-activate agad" na admin-direct na
+// flow ng ibang FEATURE_CATALOG entries sa /activate sa itaas, pero para
+// dito sa DEMO_FEATURE_ID (na sinasadyang HINDI kasama sa FEATURE_CATALOG
+// kaya hindi dumadaan sa parehong route). Parehong duration convention
+// ang ginamit dito gaya ng promptForDemoDuration() sa admin panel
+// (fractional na bilang ng araw — 0.25 = 6 oras, 0 = tahasang permanente,
+// wala/undefined = babalik sa DEMO_DURATION_MS default).
+// Body: { durationDays }
+// --------------------------------------------------------------
+app.post('/relay/admin/api/devices/:installationId/activate-demo', requireAdminKey, (req, res) => {
+    const { installationId } = req.params;
+    const { durationDays } = req.body;
+
+    const durationMs = typeof durationDays === 'number' && durationDays > 0
+        ? Math.round(durationDays * 24 * 60 * 60 * 1000)
+        : (durationDays === 0 ? null : DEMO_DURATION_MS);
+
+    const token = issueSignedToken(installationId, DEMO_FEATURE_ID, durationMs);
+
+    recordIssuedUnlock(installationId, DEMO_FEATURE_ID, token, {
+        featureName: 'Full Demo Mode',
+        price: null,
+        source: 'admin-direct'
+    });
+    logActivity(installationId, 'unlock_issued', {
+        featureId: DEMO_FEATURE_ID,
+        featureName: 'Full Demo Mode',
+        source: 'admin-direct',
+        durationDays: typeof durationDays === 'number' ? durationDays : null
+    });
+
+    res.json({
+        success: true,
+        message: durationMs
+            ? `Na-activate ang Demo Mode sa loob ng ${formatDemoDurationLabel(durationMs)}.`
+            : 'Na-activate ang Demo Mode — walang expiry (tahasang pinili ng admin).',
+        token
+    });
+});
+
+// --------------------------------------------------------------
 // BULK/BUNDLE UNLOCK — parang /relay/request-unlock + /relay/confirm-
 // unlock sa itaas, pero ISANG OTP na lang ang ginagawa para sa
 // MARAMING featureIds nang sabay (isang tier o custom na à la carte

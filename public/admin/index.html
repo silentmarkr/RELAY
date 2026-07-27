@@ -416,6 +416,15 @@
     flex: 1; min-width: 100px; background: var(--accent-soft); color: #8fb8ff;
     border: 1px solid #1f4d99; border-radius: 8px; padding: 10px 8px; font-size: 12px; cursor: pointer;
   }
+  /* Demo Mode card sa Device Detail — amber-themed (kapareho ng "DEMO"
+     badge) para agad makilala na PANSAMANTALA/TRIAL ito, iba sa mga
+     regular na paid feature (blue) o destructive na aksyon (red). */
+  .btn-demo {
+    flex: 1; min-width: 160px; background: var(--amber-bg); color: var(--amber);
+    border: 1px solid #5c4318; border-radius: 8px; padding: 10px 12px;
+    font-size: 12px; font-weight: 700; cursor: pointer;
+  }
+  .demo-status-line { font-size: 13px; margin-bottom: 12px; }
 
   .timeline { position: relative; padding-left: 18px; }
   .timeline-item { position: relative; padding-bottom: 14px; font-size: 12px; }
@@ -589,6 +598,15 @@
       <div class="stat-card">
         <div class="stat-num" id="detailDemoStatus">—</div>
         <div class="stat-label">Demo mode</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>🕘 Demo Mode <span style="font-size:11px; color:var(--muted); font-weight:normal;">(direktang i-activate — walang OTP, walang paghihintay sa request)</span></h2>
+      <div class="demo-status-line" id="demoModeStatusLine">Loading...</div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="btn-demo" id="demoActivateBtn" onclick="activateDemoMode(currentDetailId)">▶ I-activate ang Demo Mode</button>
+        <button class="btn-deactivate" id="demoStopBtn" style="display:none; font-size:12px; padding:10px 12px;" onclick="stopDemoMode(currentDetailId)">⏹ Itigil Ngayon</button>
       </div>
     </div>
 
@@ -1288,7 +1306,8 @@ const ACTIVITY_LABELS = {
   device_revoked: '⛔ Na-revoke ang device',
   device_labeled: '🏷️ Na-update ang label',
   restore_checkin: '🔄 Nag-check-in ulit (posibleng na-hard-reset)',
-  backup_checkin: '💾 Auto-backup sync (Download/RELAY_BACKUP)'
+  backup_checkin: '💾 Auto-backup sync (Download/RELAY_BACKUP)',
+  feature_status_checked: '📡 Ni-check ang status (Sync sa Relay ng client)'
 };
 
 function activityDescription(entry) {
@@ -1302,6 +1321,7 @@ function activityDescription(entry) {
   if (entry.type === 'device_reset') return `${d.deactivatedCount || 0} feature(s) na-tanggal`;
   if (entry.type === 'otp_requested') return d.featureNames ? (Array.isArray(d.featureNames) ? d.featureNames.join(', ') : d.featureNames) : (d.featureName || d.featureId || '');
   if (entry.type === 'restore_checkin') return `${d.restoredCount || 0} feature(s) na-restore`;
+  if (entry.type === 'feature_status_checked') return `${(d.featureIds || []).length} feature(s) na-check`;
   if (entry.type === 'device_labeled') return d.label ? `→ "${d.label}"` : '(inalis ang label)';
   if (entry.type === 'backup_checkin') return `${d.fileSizeBytes ? (d.fileSizeBytes / 1024).toFixed(0) + ' KB' : ''}${d.newlyAllowed ? ' — awtomatikong na-allow' : ''}`;
   if (entry.type === 'device_allowed' && d.source === 'auto_backup_checkin') return '(awtomatiko, matapos ang successful backup)';
@@ -1425,6 +1445,19 @@ function renderDeviceDetail(detail) {
   document.getElementById('detailUnlockedCount').innerText = detail.unlocked.length;
   document.getElementById('detailLockedCount').innerText = detail.locked.length;
   document.getElementById('detailDemoStatus').innerText = detail.demo.active ? 'Aktibo' : 'Wala';
+
+  const demoStatusLineEl = document.getElementById('demoModeStatusLine');
+  const demoActivateBtnEl = document.getElementById('demoActivateBtn');
+  const demoStopBtnEl = document.getElementById('demoStopBtn');
+  if (detail.demo.active) {
+    demoStatusLineEl.innerHTML = `🟢 <strong>Aktibo ngayon</strong>${detail.demo.expiresAt ? ' — mag-e-expire sa ' + new Date(detail.demo.expiresAt).toLocaleString('en-PH') : ' — walang expiry (permanente)'}`;
+    demoActivateBtnEl.innerText = '🔄 I-renew / Palitan ang Tagal';
+    demoStopBtnEl.style.display = 'inline-flex';
+  } else {
+    demoStatusLineEl.innerHTML = '⚪ Walang aktibong demo para sa device na ito ngayon.';
+    demoActivateBtnEl.innerText = '▶ I-activate ang Demo Mode';
+    demoStopBtnEl.style.display = 'none';
+  }
 
   const unlockedEl = document.getElementById('detailUnlockedList');
   unlockedEl.innerHTML = detail.unlocked.length === 0
@@ -1557,6 +1590,53 @@ async function deactivateAllFeatures(installationId) {
     });
     if (res.success) toast(res.message || 'Na-reset ang device.', 'success');
     else toast(res.message || 'Hindi na-reset.', 'error');
+  } catch (err) { /* handled */ }
+  loadDeviceDetail();
+}
+
+// Direktang nagbibigay ng FULL DEMO MODE (lahat ng features, pansamantala
+// lang) sa device na ito — WALANG OTP kailangan, at HINDI na kailangang
+// hintayin munang ang customer/device mismo ang humingi (request-demo)
+// bago ito ma-Allow/Approve. Gamitin ito kung PROAKTIBO mong gustong
+// bigyan ng trial ang isang device (hal. bagong prospect, demo booth,
+// follow-up sa naka-Locked pang tindahan). Gumagamit ng parehong
+// oras-based na duration picker (promptForDemoDuration) na ginagamit
+// na rin sa Approve-with-duration flow, para consistent ang UX.
+async function activateDemoMode(installationId) {
+  if (!installationId) return;
+  const durationDays = await promptForDemoDuration('Piliin ang tagal ng Full Demo Mode na ibibigay mo ngayon din sa device na ito — walang OTP kailangan, direkta itong ma-a-activate.');
+  if (durationDays === null) return; // kinansela
+  try {
+    const res = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/activate-demo`, {
+      method: 'POST',
+      body: JSON.stringify({ durationDays })
+    });
+    if (res.success) toast(res.message || 'Na-activate ang Demo Mode.', 'success');
+    else toast(res.message || 'Hindi na-activate ang Demo Mode.', 'error');
+  } catch (err) { /* handled */ }
+  loadDeviceDetail();
+}
+
+// Itinitigil ang Demo Mode BAGO pa ito mag-expire nang mag-isa — parang
+// deactivateFeature() sa itaas, pero laging '__demo__' ang featureId.
+// Gamitin ito kung sobrang aga pa (hal. na-trigger nang hindi sinasadya,
+// o gusto mo nang matapos agad bago ang orihinal na inilaang tagal).
+async function stopDemoMode(installationId) {
+  if (!installationId) return;
+  const ok = await confirmAction({
+    title: 'Itigil ang Demo Mode ngayon?',
+    message: 'Agad na mawawalan ng access ang device na ito sa lahat ng feature na ibinigay ng Demo Mode.',
+    confirmLabel: 'Itigil Ngayon',
+    danger: true
+  });
+  if (!ok) return;
+  try {
+    const res = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/deactivate`, {
+      method: 'POST',
+      body: JSON.stringify({ featureId: '__demo__' })
+    });
+    if (res.success) toast(res.message || 'Natigil ang Demo Mode.', 'success');
+    else toast(res.message || 'Hindi na-stop ang Demo Mode.', 'error');
   } catch (err) { /* handled */ }
   loadDeviceDetail();
 }
