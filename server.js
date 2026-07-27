@@ -1115,6 +1115,65 @@ app.post('/relay/restore-tokens', requireApiKey, requireAllowedDevice, rateLimit
     res.json({ success: true, tokens });
 });
 
+// --------------------------------------------------------------
+// POST /relay/check-feature-status
+// Tinatawag ito ng OMNIPOS CLIENT tuwing pinipindot ng user ang manual
+// na "Sync sa Relay Ngayon" (Settings) — layunin: TUKUYIN kung alin sa
+// mga feature/theme na NASA LOCAL na ng client (may token na siya doon,
+// ibig sabihin dati itong na-unlock) ang HINDI NA kinikilala ng RELAY
+// ngayon, dahil:
+//   (a) na-deactivate mismo ng developer/store owner sa admin panel
+//       (tinanggal ang record sa issuedUnlocks — tingnan ang
+//       /relay/admin/api/devices/:installationId/deactivate sa itaas), o
+//   (b) nag-expire na ang time-based na lisensya nito.
+// Hindi ito nagbabalik ng bagong VALID token (/relay/restore-tokens ang
+// gagawa niyan) — ito lang ang sagot sa tanong na "totoo pa ba ito?"
+// bawat featureId na ipinasa, para agad ma-lock ng client ang mga ito
+// nang hindi na kailangang maghintay ng susunod na server restart.
+// Body: { installationId, featureIds: string[] }
+// --------------------------------------------------------------
+app.post('/relay/check-feature-status', requireApiKey, requireAllowedDevice, rateLimit('check-feature-status', 30, 10 * 60 * 1000), (req, res) => {
+    const { installationId, featureIds } = req.body;
+    if (!installationId || !Array.isArray(featureIds)) {
+        return res.status(400).json({ success: false, message: 'Kulang ang installationId o featureIds.' });
+    }
+
+    const record = issuedUnlocks[installationId] || {};
+    const now = Date.now();
+    const statuses = {};
+
+    for (const featureId of featureIds) {
+        const entry = record[featureId];
+        const catalogEntry = FEATURE_CATALOG[featureId];
+        const featureName = (entry && entry.featureName) || (catalogEntry && catalogEntry.name) || featureId;
+        const category = (catalogEntry && catalogEntry.category) || 'module';
+
+        if (!entry) {
+            // Walang record dito para dito — dahil ang client lang ang
+            // tumatawag para sa mga featureId na MAY LOCAL TOKEN na ito
+            // (dati na itong na-unlock), ang kawalang ito ay nangangahulugan
+            // na na-deactivate ito mismo ng developer/store owner.
+            statuses[featureId] = { status: 'deactivated', reason: 'deactivated', featureName, category };
+            continue;
+        }
+        if (typeof entry.expiresAt === 'number' && now > entry.expiresAt) {
+            statuses[featureId] = { status: 'expired', reason: 'expired', featureName, category, expiresAt: entry.expiresAt };
+            continue;
+        }
+        statuses[featureId] = {
+            status: 'active',
+            reason: 'active',
+            featureName,
+            category,
+            expiresAt: typeof entry.expiresAt === 'number' ? entry.expiresAt : null
+        };
+    }
+
+    logActivity(installationId, 'feature_status_checked', { featureIds });
+
+    res.json({ success: true, statuses });
+});
+
 // Hiwalay na secret ito sa RELAY_API_KEY — ang RELAY_API_KEY ay hawak ng
 // bawat CLIENT SERVER (maraming kliyente, posibleng mas mahina ang
 // proteksyon sa kanilang deployment). Ang DEV_VIEWER_KEY ay hawak MO
