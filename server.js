@@ -1318,13 +1318,24 @@ app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit
     });
 
     try {
+        // Ground-truth mula sa SARILING FEATURE_CATALOG ng relay — hindi
+        // basta client-supplied na featureName/price ang isasalig, dahil
+        // ang mga iyon ay galing lang sa request body (pwedeng palitan).
+        // Kung hindi tugma, tahasang i-flag sa email para alertuhan ang
+        // admin bago pa mag-Approve.
+        const catalogEntry = FEATURE_CATALOG[featureId] || null;
+        const priceMismatch = catalogEntry && typeof price === 'number' && price !== catalogEntry.price;
+        const nameMismatch = catalogEntry && featureName && featureName !== catalogEntry.name;
+
         await notifyUnlockRequest({
             subject: `🎨 Unlock Request — ${featureName || featureId}${price ? ` (₱${price})` : ''}`,
             text: `May humiling na i-unlock ang isang Pro theme.\n\n` +
                   `Store: ${storeName || 'Hindi tiyak'}\n` +
                   `Installation ID: ${installationId}\n` +
                   `Feature: ${featureName || featureId}\n` +
-                  (price ? `Presyo: ₱${price}\n` : '') +
+                  (price ? `Presyo (sinabi ng client): ₱${price}\n` : '') +
+                  (catalogEntry ? `Presyo ayon sa price list namin: ₱${catalogEntry.price} (${catalogEntry.name})\n` : `⚠️ Hindi nakita sa price list namin ang featureId na "${featureId}" — mag-ingat.\n`) +
+                  ((priceMismatch || nameMismatch) ? `⚠️⚠️ MAY DISKREPANSIYA sa presyo/pangalan — hindi tugma sa opisyal na price list. HUWAG mag-Approve hangga't hindi ito na-verify.\n` : '') +
                   `Hiniling ni: ${username || 'Unknown'}\n` +
                   `OTP Code: ${otpCode}\n` +
                   `Mag-e-expire ito sa loob ng 10 minuto.\n\n` +
@@ -1381,7 +1392,7 @@ app.post('/relay/confirm-unlock', requireApiKey, requireAllowedDevice, rateLimit
         pendingOtps.delete(key);
         return res.status(400).json({ success: false, message: 'Expired na ang OTP code. Humingi ng bago.' });
     }
-    if (String(otp).trim() !== pending.code) {
+    if (!safeCompare(String(otp).trim(), pending.code)) {
         return res.status(400).json({ success: false, message: 'Maling OTP code.' });
     }
 
@@ -1495,7 +1506,7 @@ app.post('/relay/confirm-demo', requireApiKey, requireAllowedDevice, rateLimit('
         pendingOtps.delete(key);
         return res.status(400).json({ success: false, message: 'Expired na ang OTP code. Humingi ng bago.' });
     }
-    if (String(otp).trim() !== pending.code) {
+    if (!safeCompare(String(otp).trim(), pending.code)) {
         return res.status(400).json({ success: false, message: 'Maling OTP code.' });
     }
 
@@ -1563,13 +1574,24 @@ app.post('/relay/request-unlock-bulk', requireApiKey, requireAllowedDevice, rate
     });
 
     try {
+        // Ground-truth mula sa SARILING FEATURE_CATALOG ng relay — hindi
+        // basta client-supplied na totalPrice ang isasalig. Hindi natin
+        // dine-duplicate dito ang proportional bundle-discount math (nasa
+        // OMNIPOS client server lang iyon), pero ipinapakita ang à la
+        // carte sum bilang reference kasama ng anumang unknown featureId,
+        // para may masangguni ang admin bago mag-Approve.
+        const unknownIds = featureIds.filter(id => !FEATURE_CATALOG[id]);
+        const alaCarteTotal = featureIds.reduce((sum, id) => sum + (FEATURE_CATALOG[id] ? FEATURE_CATALOG[id].price : 0), 0);
+
         await notifyUnlockRequest({
             subject: `📦 Bundle Unlock Request (${featureIds.length} items)${totalPrice ? ` — ₱${totalPrice}` : ''}`,
             text: `May humiling na i-unlock ang isang BUNDLE ng ${featureIds.length} feature(s).\n\n` +
                   `Store: ${storeName || 'Hindi tiyak'}\n` +
                   `Installation ID: ${installationId}\n` +
                   `Features: ${(featureNames || featureIds).join(', ')}\n` +
-                  (totalPrice ? `Total Presyo: ₱${totalPrice}\n` : '') +
+                  (totalPrice ? `Total Presyo (sinabi ng client, posibleng may bundle discount): ₱${totalPrice}\n` : '') +
+                  `À la carte na kabuuan ayon sa price list namin (walang discount): ₱${alaCarteTotal}\n` +
+                  (unknownIds.length ? `⚠️⚠️ Hindi nakita sa price list namin ang: ${unknownIds.join(', ')} — mag-ingat, HUWAG mag-Approve hangga't hindi na-verify.\n` : '') +
                   `Hiniling ni: ${username || 'Unknown'}\n` +
                   `OTP Code: ${otpCode}\n` +
                   `Mag-e-expire ito sa loob ng 10 minuto.\n\n` +
@@ -1602,7 +1624,7 @@ app.post('/relay/confirm-unlock-bulk', requireApiKey, requireAllowedDevice, rate
         pendingOtps.delete(key);
         return res.status(400).json({ success: false, message: 'Expired na ang OTP code. Humingi ng bago.' });
     }
-    if (String(otp).trim() !== pending.code) {
+    if (!safeCompare(String(otp).trim(), pending.code)) {
         return res.status(400).json({ success: false, message: 'Maling OTP code.' });
     }
 
