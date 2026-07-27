@@ -398,6 +398,17 @@
     border: 1px solid #5c1f22; border-radius: 6px;
     padding: 6px 10px; font-size: 11px; font-weight: 600; cursor: pointer;
   }
+  /* Renew button — kaparehong laki/hugis ng Deactivate para magkatabi
+     silang maayos sa isang column (Renew sa ITAAS, Deactivate sa
+     ILALIM), pero blue/accent ang kulay (parang btn-tier) para malinaw
+     na hindi ito destructive — mag-a-activate lang ulit ng parehong
+     feature gamit ang bagong duration (bagong expiresAt), kagaya ng
+     ginagawa na ng "I-renew / Palitan ang Tagal" sa Demo Mode. */
+  .btn-renew {
+    background: var(--accent-soft); color: #8fb8ff;
+    border: 1px solid #1f4d99; border-radius: 6px;
+    padding: 6px 10px; font-size: 11px; font-weight: 600; cursor: pointer;
+  }
   .btn-deactivate-all {
     background: var(--red); color: #2b0605;
     border-radius: 8px; padding: 8px 12px; font-size: 12px; font-weight: 700;
@@ -1470,7 +1481,10 @@ function renderDeviceDetail(detail) {
         </div>
         <div style="display:flex; align-items:center; gap:8px;">
           <div class="feature-price">${u.price ? '₱' + u.price : ''}</div>
-          <button class="btn-deactivate" onclick="deactivateFeature('${detail.installationId}', '${u.featureId}', '${u.featureName.replace(/'/g, "\\'")}')">Deactivate</button>
+          <div style="display:flex; flex-direction:column; gap:6px;">
+            <button class="btn-renew" onclick="activateFeature('${detail.installationId}', '${u.featureId}', '${u.featureName.replace(/'/g, "\\'")}')">🔄 Renew</button>
+            <button class="btn-deactivate" onclick="deactivateFeature('${detail.installationId}', '${u.featureId}', '${u.featureName.replace(/'/g, "\\'")}')">Deactivate</button>
+          </div>
         </div>
       </div>
     `).join('') + (detail.unlocked.length > 0
