@@ -83,6 +83,27 @@ const MAIL_PASS = process.env.RELAY_MAIL_PASS;
 const RECIPIENT_EMAIL = process.env.RELAY_RECIPIENT_EMAIL; // ang TOTOONG email mo — dito lang ito nakatira ngayon, hindi na sa client
 const OTP_TTL_MS = 10 * 60 * 1000; // 10 minuto
 
+// Opsyonal: default na bilang ng araw bago mag-expire ang isang BAGONG
+// paid unlock/license (hindi demo), kung walang tahasang durationDays na
+// pinasa ang admin sa Approve/Activate. NULL/wala = permanente (dating
+// behavior, walang expiry) — kaya ligtas itong iwanang blangko kung ayaw
+// mo pang gawing time-based ang lahat ng lisensya.
+const RELAY_DEFAULT_LICENSE_DAYS = process.env.RELAY_DEFAULT_LICENSE_DAYS
+    ? Number(process.env.RELAY_DEFAULT_LICENSE_DAYS)
+    : null;
+
+// --------------------------------------------------------------
+// EXTRA NOTIFICATION CHANNELS (opsyonal) — Slack at/o Telegram, dagdag
+// sa email na required pa rin. Kapag naka-set ang alinman dito, ipapadala
+// din agad ang parehong mensahe (unlock/demo/bundle request) sa channel
+// na iyon — best-effort lang ito, hindi ito dapat makasira ng buong
+// request kung ito lang ang bumagsak (email pa rin ang "source of truth"
+// kung na-notify ka; tingnan ang notifyUnlockRequest() sa ibaba).
+// --------------------------------------------------------------
+const SLACK_WEBHOOK_URL = process.env.RELAY_SLACK_WEBHOOK_URL || null;
+const TELEGRAM_BOT_TOKEN = process.env.RELAY_TELEGRAM_BOT_TOKEN || null;
+const TELEGRAM_CHAT_ID = process.env.RELAY_TELEGRAM_CHAT_ID || null;
+
 // Opsyonal na PAGPAPABILIS: kung naka-set ang RESEND_API_KEY (env var),
 // gagamitin ang Resend (https://resend.com) HTTPS API sa halip na Gmail
 // SMTP. Bakit mas mabilis/maaasahan ito sa Render: (1) isang simpleng
@@ -164,6 +185,77 @@ async function sendOtpMail({ subject, text }) {
         to: RECIPIENT_EMAIL,
         subject,
         text
+    });
+}
+
+// ====================================================================
+// SLACK / TELEGRAM (opsyonal, best-effort) — hindi nire-required, at
+// hindi dapat mag-throw papunta sa caller (sinasalo dito mismo ang
+// error, sine-console.error na lang para may bakas sa Render logs).
+// ====================================================================
+async function sendSlackNotification(text) {
+    if (!SLACK_WEBHOOK_URL) return;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+        const resp = await fetch(SLACK_WEBHOOK_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text }),
+            signal: controller.signal
+        });
+        if (!resp.ok) {
+            const errBody = await resp.text().catch(() => '');
+            throw new Error(`Slack webhook error (${resp.status}): ${errBody}`);
+        }
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+async function sendTelegramNotification(text) {
+    if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+        const resp = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text }),
+            signal: controller.signal
+        });
+        if (!resp.ok) {
+            const errBody = await resp.text().catch(() => '');
+            throw new Error(`Telegram API error (${resp.status}): ${errBody}`);
+        }
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+// --------------------------------------------------------------
+// UNIFIED NOTIFICATION HELPER — ginagamit ito ng LAHAT ng OTP request
+// endpoints (request-unlock, request-demo, request-unlock-bulk) sa
+// halip na direktang tumawag sa sendOtpMail(). Email pa rin ang
+// REQUIRED na channel (kapareho ng dati — kung mabigo ito, mabibigo pa
+// rin ang buong request, kasi doon pa rin dinideliver ang OTP code).
+// Ang Slack/Telegram ay dagdag lang na "heads up" (mas mabilis makita
+// sa phone kaysa email) — best-effort, hindi ito hahadlang o
+// magpapabagsak sa request kahit mabigo.
+// --------------------------------------------------------------
+async function notifyUnlockRequest({ subject, text }) {
+    await sendOtpMail({ subject, text });
+
+    const extraText = `*${subject}*\n${text}`;
+    Promise.allSettled([
+        sendSlackNotification(extraText),
+        sendTelegramNotification(extraText)
+    ]).then((results) => {
+        results.forEach((r) => {
+            if (r.status === 'rejected') {
+                console.error('Extra notification channel failed:', r.reason);
+            }
+        });
     });
 }
 
@@ -529,14 +621,31 @@ function requireAdminKey(req, res, next) {
 
 app.use('/relay/admin', express.static(path.join(__dirname, 'public', 'admin')));
 
+// Body: { key, durationDays? }. `durationDays`:
+//   - positibong numero -> ganoong dami ng araw bago mag-expire ang
+//     lisensyang ito (AUTO-EXPIRING, hindi lang device-based).
+//   - 0 (tahasang pinasa) -> PERMANENTE, kahit may RELAY_DEFAULT_LICENSE_DAYS.
+//   - wala/undefined -> babalik sa RELAY_DEFAULT_LICENSE_DAYS (kung meron),
+//     o permanente kung wala ring env default (backward-compatible).
 app.post('/relay/admin/api/pending-otps/approve', requireAdminKey, (req, res) => {
-    const { key } = req.body;
+    const { key, durationDays } = req.body;
     const pending = pendingOtps.get(key);
     if (!pending) {
         return res.status(404).json({ success: false, message: "Wala nang aktibong request na iyan (baka na-expire na o na-claim na)." });
     }
     pending.approved = true;
-    logActivity(pending.installationId, 'admin_approved', { featureId: pending.featureId, featureName: pending.featureName });
+    if (typeof durationDays === 'number' && durationDays > 0) {
+        pending.durationDays = durationDays;
+    } else if (durationDays === 0) {
+        pending.durationDays = null; // tahasang "Permanente" na pinili ng admin
+    } else {
+        pending.durationDays = RELAY_DEFAULT_LICENSE_DAYS;
+    }
+    logActivity(pending.installationId, 'admin_approved', {
+        featureId: pending.featureId,
+        featureName: pending.featureName,
+        durationDays: pending.durationDays || null
+    });
     res.json({ success: true, message: 'Naaprubahan. Pwede na ulit i-click ng kliyente ang unlock button nila.' });
 });
 
@@ -666,6 +775,95 @@ app.get('/relay/admin/api/catalog', requireAdminKey, (req, res) => {
 });
 
 // --------------------------------------------------------------
+// GET /relay/admin/api/analytics
+// USAGE ANALYTICS DASHBOARD — buod ng "kalusugan" ng buong relay: ilang
+// device ang aktibo/naka-allow, ilang pending approval, ilang lisensyang
+// naka-issue (active vs all-time), tinatayang kita, pinaka-paborito na
+// features, at kung ANO-ANONG lisensya ang MALAPIT NG MAG-EXPIRE (para
+// hindi ka mahuhuli sa pag-follow-up sa customer bago pa mag-expire).
+// Kinukuwenta lahat mula sa data na NASA MEMORY/DISK NA (walang bagong
+// storage na kailangan) — mabilis, walang bagong dependency.
+// --------------------------------------------------------------
+app.get('/relay/admin/api/analytics', requireAdminKey, (req, res) => {
+    const now = Date.now();
+    const SOON_MS = 7 * 24 * 60 * 60 * 1000; // "malapit ng mag-expire" = sa loob ng 7 araw
+
+    let activeUnlocksCount = 0;
+    let allTimeUnlocksCount = 0;
+    let activeRevenue = 0;
+    let allTimeRevenue = 0;
+    let demoActiveCount = 0;
+    const featureCounts = {};
+    const expiringSoon = [];
+
+    for (const [installationId, record] of Object.entries(issuedUnlocks)) {
+        for (const [featureId, entry] of Object.entries(record)) {
+            const isExpired = typeof entry.expiresAt === 'number' && now > entry.expiresAt;
+
+            if (featureId === DEMO_FEATURE_ID) {
+                if (!isExpired) demoActiveCount++;
+                continue;
+            }
+
+            allTimeUnlocksCount++;
+            allTimeRevenue += entry.price || 0;
+
+            if (!isExpired) {
+                activeUnlocksCount++;
+                activeRevenue += entry.price || 0;
+                featureCounts[featureId] = (featureCounts[featureId] || 0) + 1;
+
+                if (typeof entry.expiresAt === 'number' && entry.expiresAt - now <= SOON_MS) {
+                    const meta = seenDevices.get(installationId);
+                    expiringSoon.push({
+                        installationId,
+                        label: deviceLabels.get(installationId) || (meta && meta.storeName) || null,
+                        featureId,
+                        featureName: entry.featureName || featureId,
+                        expiresAt: entry.expiresAt
+                    });
+                }
+            }
+        }
+    }
+    expiringSoon.sort((a, b) => a.expiresAt - b.expiresAt);
+
+    const topFeatures = Object.entries(featureCounts)
+        .map(([featureId, count]) => ({
+            featureId,
+            featureName: (FEATURE_CATALOG[featureId] && FEATURE_CATALOG[featureId].name) || featureId,
+            count
+        }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 8);
+
+    const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
+    const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
+    const unlocksLast7d = activityLog.filter(e => e.type === 'unlock_issued' && e.at >= sevenDaysAgo).length;
+    const unlocksLast30d = activityLog.filter(e => e.type === 'unlock_issued' && e.at >= thirtyDaysAgo).length;
+
+    const pendingCount = [...pendingOtps.values()].filter(p => p.expiresAt > now).length;
+
+    res.json({
+        success: true,
+        analytics: {
+            allowedCount: allowedDevices.size,
+            seenCount: seenDevices.size,
+            pendingCount,
+            activeUnlocksCount,
+            allTimeUnlocksCount,
+            activeRevenue,
+            allTimeRevenue,
+            demoActiveCount,
+            unlocksLast7d,
+            unlocksLast30d,
+            topFeatures,
+            expiringSoon: expiringSoon.slice(0, 20)
+        }
+    });
+});
+
+// --------------------------------------------------------------
 // GET /relay/admin/api/devices/:installationId/detail
 // Ang buong detalye ng isang device: naka-unlock na, locked pa, demo
 // status, at history ng lahat ng pangyayari — ito ang pina-pakita sa
@@ -717,11 +915,17 @@ app.get('/relay/admin/api/devices/:installationId/detail', requireAdminKey, (req
 // emergency hard reset ng customer) at gusto mo lang i-restore/i-issue
 // ulit agad. Body: { featureId } o { featureIds: [...] } o { tierId }.
 // Opsyonal na `note` para sa audit trail (hal. "Restore matapos ang
-// hard reset, ref: <invoice #>").
+// hard reset, ref: <invoice #>"). Opsyonal ding `durationDays` — kung
+// pinasa (positibong numero), MAY EXPIRY ang mga token na ito (parehong
+// petsa ng expiry para sa lahat ng na-activate dito); kung wala, gagamit
+// ito ng RELAY_DEFAULT_LICENSE_DAYS (kung meron), o permanente kung wala
+// ring env default. Ginagamit din ito para sa "Renew/Extend" ng isang
+// device — i-activate lang ulit ang parehong featureId na may bagong
+// durationDays, ma-o-overwrite nito ang dating entry (bagong expiresAt).
 // --------------------------------------------------------------
 app.post('/relay/admin/api/devices/:installationId/activate', requireAdminKey, (req, res) => {
     const { installationId } = req.params;
-    const { featureId, featureIds, tierId, note } = req.body;
+    const { featureId, featureIds, tierId, note, durationDays } = req.body;
 
     let idsToActivate = [];
     if (tierId) {
@@ -741,13 +945,16 @@ app.post('/relay/admin/api/devices/:installationId/activate', requireAdminKey, (
         return res.status(400).json({ success: false, message: `Hindi kilalang feature(s): ${unknown.join(', ')}` });
     }
 
-    const now = Date.now();
+    const resolvedDurationDays = (typeof durationDays === 'number' && durationDays > 0)
+        ? durationDays
+        : (durationDays === 0 ? null : RELAY_DEFAULT_LICENSE_DAYS);
+    const durationMs = (typeof resolvedDurationDays === 'number' && resolvedDurationDays > 0)
+        ? resolvedDurationDays * 24 * 60 * 60 * 1000
+        : null;
+
     const tokens = {};
     for (const id of idsToActivate) {
-        const payload = { installationId, featureId: id, issuedAt: now };
-        const payloadString = JSON.stringify(payload);
-        const signature = crypto.sign(null, Buffer.from(payloadString), privateKey).toString('base64');
-        const token = { payload, signature };
+        const token = issueSignedToken(installationId, id, durationMs);
         tokens[id] = token;
         recordIssuedUnlock(installationId, id, token, {
             featureName: FEATURE_CATALOG[id].name,
@@ -755,7 +962,7 @@ app.post('/relay/admin/api/devices/:installationId/activate', requireAdminKey, (
             source: 'admin-direct',
             note: note || null
         });
-        logActivity(installationId, 'unlock_issued', { featureId: id, featureName: FEATURE_CATALOG[id].name, source: 'admin-direct', note: note || null });
+        logActivity(installationId, 'unlock_issued', { featureId: id, featureName: FEATURE_CATALOG[id].name, source: 'admin-direct', note: note || null, durationDays: resolvedDurationDays || null });
     }
 
     res.json({ success: true, message: `Na-activate ang ${idsToActivate.length} feature(s).`, tokens });
@@ -943,6 +1150,32 @@ if (!privateKeyPem) {
 const privateKey = crypto.createPrivateKey(privateKeyPem);
 
 // --------------------------------------------------------------
+// issueSignedToken — IISANG lugar na lang para gumawa ng naka-sign na
+// unlock token, ginagamit ng LAHAT ng token-issuing routes (admin
+// activate, confirm-unlock, confirm-demo, confirm-unlock-bulk).
+//
+// Kung binigyan ng `durationMs` (positibong numero), MAY EXPIRY ang
+// token — kasama ang `expiresAt` sa payload (AUTO-EXPIRING LICENSE,
+// hindi lang basta naka-tali sa device). Kung wala/null, permanente
+// ang token (dating behavior — walang binabagong wire format).
+//
+// MAHALAGA: ang eksaktong key order ng payload object ({ installationId,
+// featureId, issuedAt[, expiresAt] }) ay dapat ITUGMA nang eksakto sa
+// verifyUnlockToken() sa panig ng OMNIPOS client server, dahil
+// JSON.stringify() mismo (hindi ang parsed na object) ang sini-sign at
+// ve-verify.
+// --------------------------------------------------------------
+function issueSignedToken(installationId, featureId, durationMs) {
+    const now = Date.now();
+    const payload = (typeof durationMs === 'number' && durationMs > 0)
+        ? { installationId, featureId, issuedAt: now, expiresAt: now + durationMs }
+        : { installationId, featureId, issuedAt: now };
+    const payloadString = JSON.stringify(payload);
+    const signature = crypto.sign(null, Buffer.from(payloadString), privateKey).toString('base64');
+    return { payload, signature };
+}
+
+// --------------------------------------------------------------
 // STORAGE — simpleng in-memory Map lang para sa mga PENDING OTP.
 // Hindi kailangan ng persistent database dito dahil ang mga OTP ay
 // panandalian lang (10-minute TTL) — kung mag-restart ang relay
@@ -1085,7 +1318,7 @@ app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit
     });
 
     try {
-        await sendOtpMail({
+        await notifyUnlockRequest({
             subject: `🎨 Unlock Request — ${featureName || featureId}${price ? ` (₱${price})` : ''}`,
             text: `May humiling na i-unlock ang isang Pro theme.\n\n` +
                   `Store: ${storeName || 'Hindi tiyak'}\n` +
@@ -1162,15 +1395,13 @@ app.post('/relay/confirm-unlock', requireApiKey, requireAllowedDevice, rateLimit
 
     // Tama ang OTP — gumawa ng naka-sign na token. Ang payload ay
     // nagta-tali ng token na ito SA SPESIPIKONG installationId+featureId,
-    // kaya hindi ito magagamit sa ibang installation o ibang theme.
-    const payload = {
-        installationId,
-        featureId,
-        issuedAt: Date.now()
-    };
-    const payloadString = JSON.stringify(payload);
-    const signature = crypto.sign(null, Buffer.from(payloadString), privateKey).toString('base64');
-    const token = { payload, signature };
+    // kaya hindi ito magagamit sa ibang installation o ibang theme. Kung
+    // may durationDays na naitakda ng admin sa Approve, MAY EXPIRY ito
+    // (auto-expiring license) — kung wala, permanente (dating behavior).
+    const durationMs = typeof pending.durationDays === 'number' && pending.durationDays > 0
+        ? pending.durationDays * 24 * 60 * 60 * 1000
+        : null;
+    const token = issueSignedToken(installationId, featureId, durationMs);
 
     recordIssuedUnlock(installationId, featureId, token, {
         featureName: pending.featureName,
@@ -1227,7 +1458,7 @@ app.post('/relay/request-demo', requireApiKey, requireAllowedDevice, rateLimit('
     });
 
     try {
-        await sendOtpMail({
+        await notifyUnlockRequest({
             subject: `🕒 Demo Mode Request — ${storeName || 'Hindi tiyak'}`,
             text: `May humiling ng FULL DEMO MODE (lahat ng features, ${Math.round(DEMO_DURATION_MS / 3600000)} oras lang bago mag-expire).\n\n` +
                   `Store: ${storeName || 'Hindi tiyak'}\n` +
@@ -1276,20 +1507,11 @@ app.post('/relay/confirm-demo', requireApiKey, requireAllowedDevice, rateLimit('
         });
     }
 
-    const now = Date.now();
-    // MAHALAGA: kasama na ang `expiresAt` sa payload (hindi tulad ng
-    // regular na paid-feature tokens) — ito ang gumagawang "time-limited"
-    // sa demo. Ang parehong key order na ito ay dapat itugma nang eksakto
-    // sa verifyUnlockToken() sa panig ng OMNIPOS client server.
-    const payload = {
-        installationId,
-        featureId: DEMO_FEATURE_ID,
-        issuedAt: now,
-        expiresAt: now + DEMO_DURATION_MS
-    };
-    const payloadString = JSON.stringify(payload);
-    const signature = crypto.sign(null, Buffer.from(payloadString), privateKey).toString('base64');
-    const token = { payload, signature };
+    // Palaging may `expiresAt` ang demo token (DEMO_DURATION_MS) — ito
+    // ang gumagawang "time-limited" sa demo, gamit ang parehong
+    // issueSignedToken() helper na ginagamit na rin ngayon ng mga
+    // (opsyonal na) auto-expiring na paid licenses.
+    const token = issueSignedToken(installationId, DEMO_FEATURE_ID, DEMO_DURATION_MS);
 
     recordIssuedUnlock(installationId, DEMO_FEATURE_ID, token, {
         featureName: 'Full Demo Mode',
@@ -1341,7 +1563,7 @@ app.post('/relay/request-unlock-bulk', requireApiKey, requireAllowedDevice, rate
     });
 
     try {
-        await sendOtpMail({
+        await notifyUnlockRequest({
             subject: `📦 Bundle Unlock Request (${featureIds.length} items)${totalPrice ? ` — ₱${totalPrice}` : ''}`,
             text: `May humiling na i-unlock ang isang BUNDLE ng ${featureIds.length} feature(s).\n\n` +
                   `Store: ${storeName || 'Hindi tiyak'}\n` +
@@ -1392,15 +1614,17 @@ app.post('/relay/confirm-unlock-bulk', requireApiKey, requireAllowedDevice, rate
         });
     }
 
-    const now = Date.now();
     const tokens = {};
     const namesList = pending.featureNames || featureIds;
+    // Isang durationDays lang para sa buong bundle na ito (itinakda ng
+    // admin sa Approve) — parehong expiresAt (o wala) ang makukuha ng
+    // lahat ng featureId sa bundle.
+    const durationMs = typeof pending.durationDays === 'number' && pending.durationDays > 0
+        ? pending.durationDays * 24 * 60 * 60 * 1000
+        : null;
     for (let i = 0; i < featureIds.length; i++) {
         const featureId = featureIds[i];
-        const payload = { installationId, featureId, issuedAt: now };
-        const payloadString = JSON.stringify(payload);
-        const signature = crypto.sign(null, Buffer.from(payloadString), privateKey).toString('base64');
-        const token = { payload, signature };
+        const token = issueSignedToken(installationId, featureId, durationMs);
         tokens[featureId] = token;
 
         const featureName = namesList[i] || featureId;

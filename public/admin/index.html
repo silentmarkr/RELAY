@@ -94,6 +94,47 @@
   .stat-num { font-size: 20px; font-weight: 700; }
   .stat-label { font-size: 11px; color: var(--muted); margin-top: 2px; }
 
+  /* ---------- ANALYTICS ---------- */
+  .abar-row { margin-bottom: 10px; }
+  .abar-row:last-child { margin-bottom: 0; }
+  .abar-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    margin-bottom: 4px;
+  }
+  .abar-label .name { color: var(--text); }
+  .abar-label .count { color: var(--muted); font-weight: 600; }
+  .abar-track {
+    background: #1c2733;
+    border-radius: 999px;
+    height: 8px;
+    overflow: hidden;
+  }
+  .abar-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 999px;
+  }
+  .expiring-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .expiring-item:last-child { border-bottom: none; }
+  .expiring-days {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .expiring-days.urgent { background: var(--red-bg); color: var(--red); }
+  .expiring-days.soon { background: var(--amber-bg); color: var(--amber); }
+
   .card {
     background: var(--card);
     border: 1px solid var(--border);
@@ -422,6 +463,7 @@
       </div>
     </div>
     <div class="topbar-actions">
+      <button class="icon-btn" onclick="openAnalytics()">📊 Analytics</button>
       <button id="installBtn" class="icon-btn" style="display:none;" onclick="installApp()">⬇️ I-install</button>
       <button class="icon-btn" onclick="logout()">🚪 Log out</button>
     </div>
@@ -564,6 +606,72 @@
     <div class="card">
       <h2>🕘 History ng device na ito</h2>
       <div id="detailHistoryList" class="empty">Loading...</div>
+    </div>
+  </div>
+</div>
+
+<div id="analyticsScreen" style="display:none;">
+  <div class="topbar">
+    <div class="topbar-brand">
+      <img src="icons/icon-192.png" alt="OmniPOS">
+      <div>
+        <div class="topbar-title">📊 Analytics</div>
+        <div class="topbar-sub">OmniPOS Unlock Relay</div>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <button class="icon-btn" onclick="closeAnalytics()">← Balik</button>
+    </div>
+  </div>
+  <div class="wrap">
+    <div class="stat-strip">
+      <div class="stat-card">
+        <div class="stat-num" id="anaAllowed">—</div>
+        <div class="stat-label">Allowed devices</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num" id="anaPending">—</div>
+        <div class="stat-label">Pending approvals</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num" id="anaSeen">—</div>
+        <div class="stat-label">Seen devices</div>
+      </div>
+    </div>
+    <div class="stat-strip">
+      <div class="stat-card">
+        <div class="stat-num" id="anaActiveUnlocks">—</div>
+        <div class="stat-label">Aktibong lisensya</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num" id="anaDemoActive">—</div>
+        <div class="stat-label">Aktibong demo</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num" id="anaRevenue">—</div>
+        <div class="stat-label">Kita (aktibo)</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>📈 Aktibidad</h2>
+      <div class="meta" id="anaActivitySummary">Loading...</div>
+    </div>
+
+    <div class="card">
+      <h2>⏳ Malapit nang mag-expire <span class="count-pill" id="anaExpiringPill">0</span></h2>
+      <div class="backup-note">Mga lisensyang mag-e-expire sa loob ng 7 araw — magandang paalala para mag-follow-up sa customer bago sila ma-lock out.</div>
+      <div id="anaExpiringList" class="empty" style="margin-top:10px;">Loading...</div>
+    </div>
+
+    <div class="card">
+      <h2>🏆 Pinaka-paborito na features <span style="font-size:11px; color:var(--muted); font-weight:normal;">(aktibong lisensya lang)</span></h2>
+      <div id="anaTopFeatures" class="empty">Loading...</div>
+    </div>
+
+    <div class="card">
+      <h2>💰 All-time</h2>
+      <div class="meta" id="anaAllTimeSummary">Loading...</div>
     </div>
   </div>
 </div>
@@ -1081,8 +1189,10 @@ async function approveOtp(key, featureLabel, storeName) {
     confirmLabel: '✓ Allow / Run'
   });
   if (!ok) return;
+  const durationDays = await promptForDuration(`Gaano katagal dapat mag-expire ang "${featureLabel}" bago kailanganin ulit ng renewal?`);
+  if (durationDays === null) return; // kinansela
   try {
-    const res = await api('/relay/admin/api/pending-otps/approve', { method: 'POST', body: JSON.stringify({ key }) });
+    const res = await api('/relay/admin/api/pending-otps/approve', { method: 'POST', body: JSON.stringify({ key, durationDays }) });
     if (res.success) toast('Naaprubahan. Hinihintay ang retry ng kliyente.', 'success');
     else toast(res.message || 'Hindi na-approve.', 'error');
   } catch (err) { /* toast na na-handle sa api() */ }
@@ -1178,7 +1288,11 @@ const ACTIVITY_LABELS = {
 
 function activityDescription(entry) {
   const d = entry.details || {};
-  if (entry.type === 'unlock_issued') return `${d.featureName || d.featureId} (${d.source || 'otp'})${d.note ? ' — ' + d.note : ''}`;
+  const durationSuffix = (typeof d.durationDays === 'number' && d.durationDays > 0)
+    ? ` · ${d.durationDays} araw na lisensya`
+    : '';
+  if (entry.type === 'unlock_issued') return `${d.featureName || d.featureId} (${d.source || 'otp'})${d.note ? ' — ' + d.note : ''}${durationSuffix}`;
+  if (entry.type === 'admin_approved') return `${d.featureName || d.featureId}${durationSuffix || ' · permanente'}`;
   if (entry.type === 'feature_deactivated') return `${d.featureName || d.featureId}`;
   if (entry.type === 'device_reset') return `${d.deactivatedCount || 0} feature(s) na-tanggal`;
   if (entry.type === 'otp_requested') return d.featureNames ? (Array.isArray(d.featureNames) ? d.featureNames.join(', ') : d.featureNames) : (d.featureName || d.featureId || '');
@@ -1208,6 +1322,79 @@ function closeDeviceDetail() {
   document.getElementById('mainScreen').style.display = 'block';
   startPolling();
 }
+
+// ---------------- ANALYTICS SCREEN ----------------
+let analyticsPollTimer = null;
+
+async function openAnalytics() {
+  document.getElementById('mainScreen').style.display = 'none';
+  document.getElementById('analyticsScreen').style.display = 'block';
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  await loadAnalytics();
+  if (analyticsPollTimer) clearInterval(analyticsPollTimer);
+  analyticsPollTimer = setInterval(loadAnalytics, 15000);
+}
+
+function closeAnalytics() {
+  if (analyticsPollTimer) { clearInterval(analyticsPollTimer); analyticsPollTimer = null; }
+  document.getElementById('analyticsScreen').style.display = 'none';
+  document.getElementById('mainScreen').style.display = 'block';
+  startPolling();
+}
+
+async function loadAnalytics() {
+  let data;
+  try {
+    data = await api('/relay/admin/api/analytics');
+  } catch (err) { return; }
+  if (!data.success) { toast(data.message || 'Hindi makuha ang analytics.', 'error'); return; }
+  renderAnalytics(data.analytics);
+}
+
+function renderAnalytics(a) {
+  document.getElementById('anaAllowed').innerText = a.allowedCount;
+  document.getElementById('anaPending').innerText = a.pendingCount;
+  document.getElementById('anaSeen').innerText = a.seenCount;
+  document.getElementById('anaActiveUnlocks').innerText = a.activeUnlocksCount;
+  document.getElementById('anaDemoActive').innerText = a.demoActiveCount;
+  document.getElementById('anaRevenue').innerText = '₱' + a.activeRevenue.toLocaleString('en-PH');
+
+  document.getElementById('anaActivitySummary').innerText =
+    `${a.unlocksLast7d} bagong unlock sa nakaraang 7 araw · ${a.unlocksLast30d} sa nakaraang 30 araw.`;
+
+  document.getElementById('anaAllTimeSummary').innerText =
+    `${a.allTimeUnlocksCount} feature unlock(s) na na-isyu simula pa noon (kasama na ang mga na-expire/na-deactivate) · ₱${a.allTimeRevenue.toLocaleString('en-PH')} kabuuang kita.`;
+
+  const expiringEl = document.getElementById('anaExpiringList');
+  document.getElementById('anaExpiringPill').innerText = a.expiringSoon.length;
+  expiringEl.innerHTML = a.expiringSoon.length === 0
+    ? '<div class="empty">Walang lisensyang malapit nang mag-expire sa loob ng 7 araw.</div>'
+    : a.expiringSoon.map(e => {
+        const daysLeft = Math.max(0, Math.ceil((e.expiresAt - Date.now()) / (24 * 60 * 60 * 1000)));
+        const urgency = daysLeft <= 2 ? 'urgent' : 'soon';
+        return `<div class="expiring-item">
+          <div>
+            <div class="feature-name">${e.featureName}</div>
+            <div class="feature-meta">${e.label || 'Walang label'} · <a href="#" onclick="closeAnalytics(); openDeviceDetail('${e.installationId}'); return false;">buksan ang device</a></div>
+          </div>
+          <div class="expiring-days ${urgency}">${daysLeft <= 0 ? 'ngayon na' : daysLeft + ' araw na lang'}</div>
+        </div>`;
+      }).join('');
+
+  const topEl = document.getElementById('anaTopFeatures');
+  if (a.topFeatures.length === 0) {
+    topEl.innerHTML = '<div class="empty">Wala pang aktibong lisensya.</div>';
+  } else {
+    const maxCount = Math.max(...a.topFeatures.map(f => f.count));
+    topEl.innerHTML = a.topFeatures.map(f => `
+      <div class="abar-row">
+        <div class="abar-label"><span class="name">${f.featureName}</span><span class="count">${f.count}</span></div>
+        <div class="abar-track"><div class="abar-fill" style="width:${Math.max(6, Math.round((f.count / maxCount) * 100))}%;"></div></div>
+      </div>
+    `).join('');
+  }
+}
+
 
 async function loadDeviceDetail() {
   if (!currentDetailId) return;
@@ -1309,10 +1496,12 @@ async function toggleAllowFromDetail(installationId, currentlyAllowed) {
 async function activateFeature(installationId, featureId, featureName) {
   const note = await promptForNote(`I-activate ang "${featureName}" para dito ngayon din — walang OTP kailangan. Gamitin lang kung MAY REFERENCE KA NA (dati nang binayaran/na-unlock).`);
   if (note === null) return; // kinansela
+  const durationDays = await promptForDuration(`Gaano katagal dapat mag-expire ang "${featureName}"? (Gamitin din ito para mag-RENEW — i-activate lang ulit ang parehong feature na may bagong duration.)`);
+  if (durationDays === null) return; // kinansela
   try {
     const res = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/activate`, {
       method: 'POST',
-      body: JSON.stringify({ featureId, note: note || null })
+      body: JSON.stringify({ featureId, note: note || null, durationDays })
     });
     if (res.success) toast(`Na-activate ang ${featureName}.`, 'success');
     else toast(res.message || 'Hindi na-activate.', 'error');
@@ -1370,10 +1559,12 @@ async function deactivateAllFeatures(installationId) {
 async function activateTier(installationId, tierId, tierName) {
   const note = await promptForNote(`I-activate ang BUONG "${tierName}" tier (lahat ng kasamang feature) para dito ngayon din — walang OTP kailangan.`);
   if (note === null) return;
+  const durationDays = await promptForDuration(`Gaano katagal dapat mag-expire ang lahat ng feature sa "${tierName}"?`);
+  if (durationDays === null) return;
   try {
     const res = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/activate`, {
       method: 'POST',
-      body: JSON.stringify({ tierId, note: note || null })
+      body: JSON.stringify({ tierId, note: note || null, durationDays })
     });
     if (res.success) toast(`Na-activate ang ${tierName}.`, 'success');
     else toast(res.message || 'Hindi na-activate.', 'error');
@@ -1408,6 +1599,63 @@ function promptForNote(message) {
       cleanup(input ? input.value.trim() : '');
     };
     cancelBtn.onclick = () => cleanup(null);
+  });
+}
+
+// Gumagamit ng parehong confirm-modal pattern — pinapayagan ang admin na
+// pumili ng ILANG ARAW bago mag-expire ang isang lisensya (o "Permanente"
+// para sa dating behavior na walang expiry). Ginagamit ito bago mag-Allow
+// ng OTP (approveOtp) at bago mag-direct Activate (activateFeature /
+// activateTier). Resolve sa isang integer (araw) o `0` (permanente).
+function promptForDuration(message, defaultLabel) {
+  return new Promise((resolve) => {
+    const backdrop = document.getElementById('confirmBackdrop');
+    const okBtn = document.getElementById('confirmActionBtn');
+    const cancelBtn = document.getElementById('confirmCancelBtn');
+
+    document.getElementById('confirmTitle').innerText = 'Gaano katagal ang lisensya?';
+    document.getElementById('confirmMessage').innerHTML = `${message}<br><br>` +
+      `<select id="durationSelect" style="width:100%; padding:10px; border-radius:8px; border:1px solid var(--border-soft); background:var(--bg); color:var(--text); margin-top:4px;">` +
+      `<option value="0">Permanente (walang expiry)</option>` +
+      `<option value="7">7 araw</option>` +
+      `<option value="30" selected>30 araw (1 buwan)</option>` +
+      `<option value="90">90 araw (3 buwan)</option>` +
+      `<option value="180">180 araw (6 na buwan)</option>` +
+      `<option value="365">365 araw (1 taon)</option>` +
+      `<option value="custom">Custom...</option>` +
+      `</select>` +
+      `<input type="text" id="durationCustomInput" placeholder="Bilang ng araw" style="margin-top:8px; display:none;" inputmode="numeric">`;
+    okBtn.innerText = '✓ Tuloy';
+    okBtn.className = 'btn-allow';
+
+    backdrop.style.display = 'flex';
+
+    const select = document.getElementById('durationSelect');
+    const customInput = document.getElementById('durationCustomInput');
+    if (defaultLabel) select.value = defaultLabel;
+    select.onchange = () => {
+      customInput.style.display = select.value === 'custom' ? 'block' : 'none';
+      if (select.value === 'custom') customInput.focus();
+    };
+
+    function cleanup(result) {
+      backdrop.style.display = 'none';
+      okBtn.onclick = null;
+      cancelBtn.onclick = null;
+      select.onchange = null;
+      resolve(result);
+    }
+    okBtn.onclick = () => {
+      let days = 0;
+      if (select.value === 'custom') {
+        days = parseInt(customInput.value, 10);
+        if (!Number.isFinite(days) || days <= 0) { customInput.focus(); return; }
+      } else {
+        days = parseInt(select.value, 10);
+      }
+      cleanup(days); // 0 = permanente
+    };
+    cancelBtn.onclick = () => cleanup(null); // null = kinansela
   });
 }
 

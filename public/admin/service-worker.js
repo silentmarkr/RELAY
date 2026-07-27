@@ -7,10 +7,9 @@
 // mapanganib mag-serve ng lumang OTP code o lumang device list mula sa
 // cache, kaya hindi natin ito ginagalaw dito.
 
-// BUMPED: v7 -> v8 (auto-download ng backup ay gumagamit na ng
-// petsa/oras stamp sa filename — relaybackupMMDDHHmm.json — sa halip
-// na fixed "latest" filename; nabago ulit ang index.html).
-const CACHE_VERSION = 'relay-admin-shell-v8';
+// BUMPED: v8 -> v9 (bagong Analytics dashboard screen + duration-picker
+// modal para sa auto-expiring licenses — nabago ulit ang index.html).
+const CACHE_VERSION = 'relay-admin-shell-v9';
 
 // Mga static shell file lang — walang laman na dynamic/sensitive data.
 const SHELL_FILES = [
