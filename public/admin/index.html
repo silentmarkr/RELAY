@@ -1175,21 +1175,26 @@ function renderOtps(list) {
         <div class="otp-code">${o.code}</div>
         <button class="btn-copy" style="margin-top:6px; display:block; width:100%;" onclick="copyCode('${o.code}', this)">Copy</button>
         ${!o.approved
-          ? `<button class="btn-allow" style="margin-top:6px; width:100%;" onclick="approveOtp('${o.key}', '${(label || '').replace(/'/g, "\\'")}', '${(o.storeName || '').replace(/'/g, "\\'")}')">✓ Allow / Run</button>`
+          ? `<button class="btn-allow" style="margin-top:6px; width:100%;" onclick="approveOtp('${o.key}', '${(label || '').replace(/'/g, "\\'")}', '${(o.storeName || '').replace(/'/g, "\\'")}', '${(o.featureId || '').replace(/'/g, "\\'")}')">✓ Allow / Run</button>`
           : ''}
       </div>
     </div>`;
   }).join('');
 }
 
-async function approveOtp(key, featureLabel, storeName) {
+async function approveOtp(key, featureLabel, storeName, featureId) {
+  const isDemo = featureId === '__demo__';
   const ok = await confirmAction({
     title: 'Aprubahan ang unlock?',
-    message: `Bibigyan mo ng access sa "${featureLabel}" ang tindahang "${storeName || 'walang pangalan'}". Gawin lang ito kung na-verify mo na ang bayad.`,
+    message: isDemo
+      ? `Bibigyan mo ng FULL DEMO MODE (lahat ng features, pansamantala lang) ang tindahang "${storeName || 'walang pangalan'}".`
+      : `Bibigyan mo ng access sa "${featureLabel}" ang tindahang "${storeName || 'walang pangalan'}". Gawin lang ito kung na-verify mo na ang bayad.`,
     confirmLabel: '✓ Allow / Run'
   });
   if (!ok) return;
-  const durationDays = await promptForDuration(`Gaano katagal dapat mag-expire ang "${featureLabel}" bago kailanganin ulit ng renewal?`);
+  const durationDays = isDemo
+    ? await promptForDemoDuration(`Gaano katagal dapat tumakbo ang Demo Mode bago mag-expire?`)
+    : await promptForDuration(`Gaano katagal dapat mag-expire ang "${featureLabel}" bago kailanganin ulit ng renewal?`);
   if (durationDays === null) return; // kinansela
   try {
     const res = await api('/relay/admin/api/pending-otps/approve', { method: 'POST', body: JSON.stringify({ key, durationDays }) });
@@ -1652,6 +1657,65 @@ function promptForDuration(message, defaultLabel) {
         if (!Number.isFinite(days) || days <= 0) { customInput.focus(); return; }
       } else {
         days = parseInt(select.value, 10);
+      }
+      cleanup(days); // 0 = permanente
+    };
+    cancelBtn.onclick = () => cleanup(null); // null = kinansela
+  });
+}
+
+// Katulad ng promptForDuration() sa itaas, pero ORAS ang unit sa halip
+// na buwan/taon — mas angkop ito sa isang PANSAMANTALANG trial (Demo
+// Mode) kaysa sa mga presets na 7/30/90/365 araw na para sa matagalang
+// lisensya. Resolve din sa isang FRACTIONAL na bilang ng araw (hal. 0.25
+// = 6 oras) dahil ganito rin ang unit na inaasahan ng
+// /relay/admin/api/pending-otps/approve (durationDays), o `0` para sa
+// "Permanente" (kung sadyang gusto ng admin na hindi mag-expire).
+function promptForDemoDuration(message) {
+  return new Promise((resolve) => {
+    const backdrop = document.getElementById('confirmBackdrop');
+    const okBtn = document.getElementById('confirmActionBtn');
+    const cancelBtn = document.getElementById('confirmCancelBtn');
+
+    document.getElementById('confirmTitle').innerText = 'Gaano katagal ang Demo Mode?';
+    document.getElementById('confirmMessage').innerHTML = `${message}<br><br>` +
+      `<select id="demoDurationSelect" style="width:100%; padding:10px; border-radius:8px; border:1px solid var(--border-soft); background:var(--bg); color:var(--text); margin-top:4px;">` +
+      `<option value="0.25">6 oras</option>` +
+      `<option value="0.5">12 oras</option>` +
+      `<option value="1" selected>24 oras (1 araw)</option>` +
+      `<option value="3">3 araw</option>` +
+      `<option value="7">7 araw</option>` +
+      `<option value="0">Permanente (walang expiry)</option>` +
+      `<option value="custom">Custom (oras)...</option>` +
+      `</select>` +
+      `<input type="text" id="demoDurationCustomInput" placeholder="Bilang ng oras" style="margin-top:8px; display:none;" inputmode="numeric">`;
+    okBtn.innerText = '✓ Tuloy';
+    okBtn.className = 'btn-allow';
+
+    backdrop.style.display = 'flex';
+
+    const select = document.getElementById('demoDurationSelect');
+    const customInput = document.getElementById('demoDurationCustomInput');
+    select.onchange = () => {
+      customInput.style.display = select.value === 'custom' ? 'block' : 'none';
+      if (select.value === 'custom') customInput.focus();
+    };
+
+    function cleanup(result) {
+      backdrop.style.display = 'none';
+      okBtn.onclick = null;
+      cancelBtn.onclick = null;
+      select.onchange = null;
+      resolve(result);
+    }
+    okBtn.onclick = () => {
+      let days;
+      if (select.value === 'custom') {
+        const hours = parseFloat(customInput.value);
+        if (!Number.isFinite(hours) || hours <= 0) { customInput.focus(); return; }
+        days = hours / 24;
+      } else {
+        days = parseFloat(select.value);
       }
       cleanup(days); // 0 = permanente
     };

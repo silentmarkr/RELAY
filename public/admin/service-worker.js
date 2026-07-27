@@ -7,9 +7,10 @@
 // mapanganib mag-serve ng lumang OTP code o lumang device list mula sa
 // cache, kaya hindi natin ito ginagalaw dito.
 
-// BUMPED: v8 -> v9 (bagong Analytics dashboard screen + duration-picker
-// modal para sa auto-expiring licenses — nabago ulit ang index.html).
-const CACHE_VERSION = 'relay-admin-shell-v9';
+// BUMPED: v9 -> v10 (dagdag na promptForDemoDuration + featureId sa
+// approveOtp — admin-configurable na ang Demo Mode duration, nabago
+// ulit ang index.html).
+const CACHE_VERSION = 'relay-admin-shell-v10';
 
 // Mga static shell file lang — walang laman na dynamic/sensitive data.
 const SHELL_FILES = [

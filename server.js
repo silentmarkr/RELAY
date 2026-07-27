@@ -1443,7 +1443,22 @@ app.post('/relay/confirm-unlock', requireApiKey, requireAllowedDevice, rateLimit
 //      ulit dito sa relay.
 // --------------------------------------------------------------
 const DEMO_FEATURE_ID = '__demo__';
+// Fallback/default lang ito ngayon — ang aktwal na tagal ng bawat demo ay
+// PINIPILI NA NG ADMIN kada request (per-request, admin-configurable) sa
+// Approve step sa admin panel, katulad ng ibang time-limited na
+// features/subscriptions. Ginagamit lang ito kapag walang tahasang
+// durationDays na naitakda (tingnan ang /relay/confirm-demo).
 const DEMO_DURATION_MS = (Number(process.env.RELAY_DEMO_DURATION_HOURS) || 24) * 60 * 60 * 1000;
+
+function formatDemoDurationLabel(durationMs) {
+    const hours = durationMs / 3600000;
+    if (hours < 48) {
+        const rounded = Math.round(hours * 10) / 10;
+        return `${rounded} oras`;
+    }
+    const days = Math.round((hours / 24) * 10) / 10;
+    return `${days} araw`;
+}
 
 app.post('/relay/request-demo', requireApiKey, requireAllowedDevice, rateLimit('request-demo', 5, 10 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
     const { installationId, username, storeName, photo } = req.body;
@@ -1471,12 +1486,13 @@ app.post('/relay/request-demo', requireApiKey, requireAllowedDevice, rateLimit('
     try {
         await notifyUnlockRequest({
             subject: `🕒 Demo Mode Request — ${storeName || 'Hindi tiyak'}`,
-            text: `May humiling ng FULL DEMO MODE (lahat ng features, ${Math.round(DEMO_DURATION_MS / 3600000)} oras lang bago mag-expire).\n\n` +
+            text: `May humiling ng FULL DEMO MODE (lahat ng features, pansamantala lang).\n\n` +
                   `Store: ${storeName || 'Hindi tiyak'}\n` +
                   `Installation ID: ${installationId}\n` +
                   `Hiniling ni: ${username || 'Unknown'}\n` +
                   `OTP Code: ${otpCode}\n` +
                   `Mag-e-expire ang OTP code na ito sa loob ng 10 minuto.\n\n` +
+                  `Pipiliin mo ang tagal ng demo (hal. ${formatDemoDurationLabel(DEMO_DURATION_MS)} bilang default) sa Admin Panel kapag Ina-Allow/Approve mo ito.\n` +
                   `Ibigay lang ito kung gusto mo talagang bigyan sila ng full trial.`
         });
 
@@ -1518,24 +1534,40 @@ app.post('/relay/confirm-demo', requireApiKey, requireAllowedDevice, rateLimit('
         });
     }
 
-    // Palaging may `expiresAt` ang demo token (DEMO_DURATION_MS) — ito
-    // ang gumagawang "time-limited" sa demo, gamit ang parehong
-    // issueSignedToken() helper na ginagamit na rin ngayon ng mga
-    // (opsyonal na) auto-expiring na paid licenses.
-    const token = issueSignedToken(installationId, DEMO_FEATURE_ID, DEMO_DURATION_MS);
+    // Ang TAGAL ng Demo Mode ay PINIPILI NA NGAYON NG ADMIN sa mismong
+    // Approve step (parang ibang time-limited na feature/subscription),
+    // gamit ang parehong pending.durationDays na ginagamit na ng
+    // /relay/confirm-unlock — ang admin panel (approveOtp) ay may
+    // hiwalay na oras-based na duration picker para dito (tingnan ang
+    // promptForDemoDuration() sa public/admin/index.html). Kung sa
+    // kadahilanan man ay walang natukoy na durationDays (hal. direktang
+    // API call na nag-skip sa admin panel), babalik sa dating
+    // DEMO_DURATION_MS default (RELAY_DEMO_DURATION_HOURS) — hindi
+    // kailanman "walang expiry" nang hindi tahasang pinili ng admin.
+    const durationMs = typeof pending.durationDays === 'number' && pending.durationDays > 0
+        ? Math.round(pending.durationDays * 24 * 60 * 60 * 1000)
+        : (pending.durationDays === null ? null : DEMO_DURATION_MS);
+    const token = issueSignedToken(installationId, DEMO_FEATURE_ID, durationMs);
 
     recordIssuedUnlock(installationId, DEMO_FEATURE_ID, token, {
         featureName: 'Full Demo Mode',
         price: null,
         source: 'otp'
     });
-    logActivity(installationId, 'unlock_issued', { featureId: DEMO_FEATURE_ID, featureName: 'Full Demo Mode', source: 'otp' });
+    logActivity(installationId, 'unlock_issued', {
+        featureId: DEMO_FEATURE_ID,
+        featureName: 'Full Demo Mode',
+        source: 'otp',
+        durationDays: pending.durationDays ?? null
+    });
 
     pendingOtps.delete(key);
 
     res.json({
         success: true,
-        message: `Buksan na ang Demo Mode sa loob ng ${Math.round(DEMO_DURATION_MS / 3600000)} oras!`,
+        message: durationMs
+            ? `Buksan na ang Demo Mode sa loob ng ${formatDemoDurationLabel(durationMs)}!`
+            : 'Buksan na ang Demo Mode — walang expiry (tahasang pinili ng admin).',
         token
     });
 });
