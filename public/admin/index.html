@@ -525,6 +525,10 @@
         <div class="stat-num" id="statSeen">—</div>
         <div class="stat-label">Seen devices</div>
       </div>
+      <div class="stat-card" style="cursor:pointer;" onclick="document.getElementById('seenFilterStatus').value='flagged'; renderSeenList(); document.getElementById('seenList').scrollIntoView({behavior:'smooth'});">
+        <div class="stat-num" id="statCloneFlagged" style="color:var(--red);">—</div>
+        <div class="stat-label">🚩 Clone flagged</div>
+      </div>
     </div>
 
     <div class="card">
@@ -559,6 +563,7 @@
           <option value="all">Lahat</option>
           <option value="allowed">Allowed lang</option>
           <option value="blocked">Blocked lang</option>
+          <option value="flagged">🚩 Naka-flag na clone lang</option>
         </select>
         <select id="seenSortBy" onchange="renderSeenList()">
           <option value="lastSeen">I-sort: Huling nakita</option>
@@ -1039,6 +1044,7 @@ async function loadDevices() {
   document.getElementById('statPending').innerText = otpData.pendingOtps.length;
   document.getElementById('statAllowed').innerText = data.allowedDevices.length;
   document.getElementById('statSeen').innerText = data.seenDevices.length;
+  document.getElementById('statCloneFlagged').innerText = data.cloneFlaggedCount || 0;
   document.getElementById('allowedCountPill').innerText = data.allowedDevices.length;
 
   renderBackupSyncBanner(data);
@@ -1098,6 +1104,7 @@ function renderSeenList() {
   }
   if (statusFilter === 'allowed') list = list.filter(d => d.allowed);
   if (statusFilter === 'blocked') list = list.filter(d => !d.allowed);
+  if (statusFilter === 'flagged') list = list.filter(d => d.cloneFlagged);
 
   if (sortBy === 'mostUnlocked') {
     list.sort((a, b) => (b.unlockedCount || 0) - (a.unlockedCount || 0));
@@ -1113,17 +1120,20 @@ function renderSeenList() {
   }
 
   seenEl.innerHTML = list.map(d => `
-    <div class="row">
+    <div class="row" ${d.cloneFlagged ? 'style="border:1px solid var(--red);"' : ''}>
       <div class="row-info">
         <div class="id">${d.installationId}
           <span class="badge ${d.allowed ? 'badge-allowed' : 'badge-blocked'}">${d.allowed ? 'ALLOWED' : 'BLOCKED'}</span>
           ${d.demoActive ? '<span class="badge" style="background:var(--amber-bg); color:var(--amber);">DEMO</span>' : ''}
+          ${d.cloneFlagged ? '<span class="badge badge-blocked">🚩 POSIBLENG CLONE</span>' : ''}
         </div>
         <div class="meta">${d.label ? `🏷️ <strong>${d.label}</strong> · ` : ''}${d.storeName || 'Walang self-reported na pangalan'} · ${d.username || '—'} · ${timeAgo(d.lastSeenAt)} · ${d.requestCount} request(s) · ${d.unlockedCount || 0}/${d.totalCatalogCount} naka-unlock</div>
+        ${d.cloneFlagged ? '<div class="meta" style="color:var(--red);">⚠️ May dalawang magkaibang device na gumamit ng parehong installationId — malamang kinopya/inilipat ang app folder papunta sa ibang unit.</div>' : ''}
       </div>
       <div style="display:flex; flex-direction:column; gap:6px;">
         <button class="btn-detail" onclick="openDeviceDetail('${d.installationId}')">Detalye</button>
         <button class="btn-ghost" onclick="editLabel('${d.installationId}', '${(d.label || '').replace(/'/g, "\\'")}')">🏷️ I-label</button>
+        ${d.cloneFlagged ? `<button class="btn-revoke" onclick="resetCloneFlag('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🚩 I-reset ang clone flag</button>` : ''}
         ${d.allowed
           ? `<button class="btn-revoke" onclick="revoke('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">Alisin</button>`
           : `<button class="btn-allow" onclick="allow('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">Allow</button>`}
@@ -1271,6 +1281,21 @@ async function revoke(id, storeName) {
   try {
     const res = await api('/relay/admin/api/devices/revoke', { method: 'POST', body: JSON.stringify({ installationId: id }) });
     if (res.success) toast('Naalis ang device.', 'success');
+  } catch (err) { /* handled */ }
+  loadDevices();
+}
+
+async function resetCloneFlag(id, storeName) {
+  const ok = await confirmAction({
+    title: 'I-reset ang clone flag?',
+    message: `Gawin lang ito kung na-verify mo na na LEGIT na paglipat ito sa bagong device${storeName ? ' (' + storeName + ')' : ''} (hal. pinalitan mo ang unit ng customer) — HINDI totoong cloning. Sa susunod na online verify, mabibind ulit ang installationId na ito sa BAGONG fingerprint.`,
+    confirmLabel: 'I-reset',
+    danger: true
+  });
+  if (!ok) return;
+  try {
+    const res = await api('/relay/admin/api/devices/clone-reset', { method: 'POST', body: JSON.stringify({ installationId: id }) });
+    if (res.success) toast('Na-clear na ang clone flag.', 'success');
   } catch (err) { /* handled */ }
   loadDevices();
 }

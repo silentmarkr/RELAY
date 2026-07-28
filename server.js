@@ -725,6 +725,7 @@ app.get('/relay/admin/api/devices', requireAdminKey, (req, res) => {
         const activations = Object.values(issuedUnlocks[installationId] || {});
         const lastActivationAt = activations.length ? Math.max(...activations.map(a => a.issuedAt)) : null;
         const backupCheckin = backupCheckins[installationId] || null;
+        const fingerprintRecord = deviceFingerprints.get(installationId) || null;
         return {
             installationId,
             ...meta,
@@ -735,7 +736,12 @@ app.get('/relay/admin/api/devices', requireAdminKey, (req, res) => {
             demoActive: getActiveUnlockedFeatureIds(installationId).includes(DEMO_FEATURE_ID),
             lastActivationAt,
             lastBackupAt: backupCheckin ? backupCheckin.lastBackupAt : null,
-            backupCheckinCount: backupCheckin ? backupCheckin.checkinCount : 0
+            backupCheckinCount: backupCheckin ? backupCheckin.checkinCount : 0,
+            // ANTI-CLONE: para makita agad sa listahan kung may device na
+            // naka-flag bilang posibleng clone (dalawang magkaibang
+            // pisikal na makina na nag-claim ng iisang installationId).
+            cloneFlagged: !!(fingerprintRecord && fingerprintRecord.flagged),
+            fingerprintVerifyCount: fingerprintRecord ? fingerprintRecord.verifyCount : 0
         };
     }).sort((a, b) => b.lastSeenAt - a.lastSeenAt);
 
@@ -748,7 +754,11 @@ app.get('/relay/admin/api/devices', requireAdminKey, (req, res) => {
         // huling successful backup check-in mula SA KAHIT ANONG device,
         // at kung naka-ON ang auto-allow-on-backup na behavior.
         lastBackupSyncAt: mostRecentBackupCheckinAt(),
-        backupAutoAllowEnabled: AUTOALLOW_ON_BACKUP
+        backupAutoAllowEnabled: AUTOALLOW_ON_BACKUP,
+        // Bilang ng mga device na kasalukuyang naka-flag bilang clone —
+        // para sa isang mabilis na "may reklamo ka bang tignan" na counter
+        // sa itaas ng admin panel.
+        cloneFlaggedCount: [...deviceFingerprints.values()].filter(r => r.flagged).length
     });
 });
 
@@ -794,6 +804,26 @@ app.post('/relay/admin/api/devices/revoke', requireAdminKey, (req, res) => {
     saveAllowedDevices(allowedDevices);
     logActivity(installationId, 'device_revoked', {});
     res.json({ success: true, allowedDevices: [...allowedDevices] });
+});
+
+// --------------------------------------------------------------
+// POST /relay/admin/api/devices/clone-reset  (ANTI-CLONE)
+// Body-based na bersyon (tugma sa parehong pattern ng /allow at /revoke
+// sa itaas, para madaling tawagin ng admin panel JS). I-clear ang
+// naka-bind na fingerprint (kasama ang flagged state) para sa isang
+// installationId — gamitin kapag na-verify na ng developer/store owner
+// na LEGIT na paglipat ito sa bagong device (hal. pinalitan ang
+// unit/telepono ng customer), o kung false-positive ang clone flag.
+// --------------------------------------------------------------
+app.post('/relay/admin/api/devices/clone-reset', requireAdminKey, (req, res) => {
+    const { installationId } = req.body;
+    if (!installationId) {
+        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+    }
+    deviceFingerprints.delete(installationId);
+    saveDeviceFingerprints(deviceFingerprints);
+    logActivity(installationId, 'device_fingerprint_reset', {});
+    res.json({ success: true, message: 'Na-clear ang fingerprint binding — kailangan na namang mag-verify online sa susunod na login.' });
 });
 
 // --------------------------------------------------------------
