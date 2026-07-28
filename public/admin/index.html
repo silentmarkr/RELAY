@@ -1134,6 +1134,7 @@ function renderSeenList() {
         <button class="btn-detail" onclick="openDeviceDetail('${d.installationId}')">Detalye</button>
         <button class="btn-ghost" onclick="editLabel('${d.installationId}', '${(d.label || '').replace(/'/g, "\\'")}')">🏷️ I-label</button>
         ${d.cloneFlagged ? `<button class="btn-revoke" onclick="resetCloneFlag('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🚩 I-reset ang clone flag</button>` : ''}
+        ${d.cloneFlagged ? `<button class="btn-ghost" onclick="splitClone('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🔀 Ibukod bilang bagong device</button>` : ''}
         ${d.allowed
           ? `<button class="btn-revoke" onclick="revoke('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">Alisin</button>`
           : `<button class="btn-allow" onclick="allow('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">Allow</button>`}
@@ -1296,6 +1297,24 @@ async function resetCloneFlag(id, storeName) {
   try {
     const res = await api('/relay/admin/api/devices/clone-reset', { method: 'POST', body: JSON.stringify({ installationId: id }) });
     if (res.success) toast('Na-clear na ang clone flag.', 'success');
+  } catch (err) { /* handled */ }
+  loadDevices();
+}
+
+async function splitClone(id, storeName) {
+  const ok = await confirmAction({
+    title: 'Ibukod bilang bagong device?',
+    message: `Gawin lang ito kung gusto mong PATULOY na gumana ang DALAWA — ang lumang device${storeName ? ' (' + storeName + ')' : ''} AT ang na-flag na clone — bilang dalawang HIWALAY na device mula ngayon (sarili nilang installationId). Ang luma ay mananatiling gaya ng dati. Ang bago ay walang kasamang naka-unlock na feature — kailangan mo pang i-activate manually sa bagong Detalye page nito kung ano ang totoong binayaran.`,
+    confirmLabel: 'Ibukod',
+    danger: false
+  });
+  if (!ok) return;
+  try {
+    const res = await api(`/relay/admin/api/devices/${encodeURIComponent(id)}/split-clone`, { method: 'POST' });
+    if (res.success) {
+      toast(`Nagawa na ang hiwalay na device.`, 'success');
+      alert(`Bagong installationId:\n\n${res.newInstallationId}\n\nLalabas ito sa listahan sa susunod na mag-verify online ang clone device. Huwag kalimutang i-activate manually ang mga totoong binayaran nitong features sa Detalye page nito.`);
+    }
   } catch (err) { /* handled */ }
   loadDevices();
 }

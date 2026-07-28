@@ -7,10 +7,10 @@
 // mapanganib mag-serve ng lumang OTP code o lumang device list mula sa
 // cache, kaya hindi natin ito ginagalaw dito.
 
-// BUMPED: v9 -> v10 (dagdag na promptForDemoDuration + featureId sa
-// approveOtp — admin-configurable na ang Demo Mode duration, nabago
-// ulit ang index.html).
-const CACHE_VERSION = 'relay-admin-shell-v10';
+// BUMPED: v10 -> v11 (dagdag na "Ibukod bilang bagong device" (splitClone)
+// button + JS handler para sa clone-split feature — nabago ulit ang
+// index.html).
+const CACHE_VERSION = 'relay-admin-shell-v11';
 
 // Mga static shell file lang — walang laman na dynamic/sensitive data.
 const SHELL_FILES = [
