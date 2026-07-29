@@ -21,6 +21,59 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 const path = require('path');
 const fs = require('fs');
+const Redis = require('ioredis');
+
+// --------------------------------------------------------------
+// PERSISTENT STORAGE (Render Key Value / Redis) — dating JSON files lang
+// sa loob ng service folder ang ginagamit dito (allowed-devices.json,
+// issued-unlocks.json, atbp.), pero MAWAWALA ang mga iyon sa bawat
+// restart/redeploy/spin-down kung ephemeral ang filesystem (hal. Render
+// free/free-tier web service, walang naka-attach na persistent Disk).
+//
+// Kung naka-set ang REDIS_URL (hal. mula sa isang Render Key Value
+// instance), gagamitin ito bilang TUNAY na persistent na imbakan — hindi
+// na aasa sa lokal na disk. Kung WALA namang REDIS_URL (hal. sarili
+// mong VPS na may sariling disk), babalik ito sa dating file-based na
+// pamamaraan — walang kailangang baguhin doon.
+// --------------------------------------------------------------
+const REDIS_URL = process.env.REDIS_URL || null;
+const redisClient = REDIS_URL
+    ? new Redis(REDIS_URL, { maxRetriesPerRequest: 3, lazyConnect: false })
+    : null;
+
+if (redisClient) {
+    redisClient.on('error', (err) => {
+        console.error('⚠️  Redis connection error (persistent storage):', err.message);
+    });
+    redisClient.on('connect', () => {
+        console.log('✅ Nakakonekta sa Redis/Render Key Value — gagamitin ito bilang persistent storage.');
+    });
+} else {
+    console.warn('⚠️  Walang REDIS_URL na naka-set — babalik sa file-based na storage (mawawala ito sa ephemeral filesystem, hal. Render free web service, kada restart/redeploy).');
+}
+
+const REDIS_KEY_PREFIX = 'omnipos-relay:';
+
+async function redisGetJSON(key, fallback) {
+    if (!redisClient) return fallback;
+    try {
+        const raw = await redisClient.get(REDIS_KEY_PREFIX + key);
+        if (raw === null) return fallback;
+        return JSON.parse(raw);
+    } catch (err) {
+        console.error(`⚠️  Hindi mabasa sa Redis ang key "${key}":`, err.message);
+        return fallback;
+    }
+}
+
+function redisSetJSON(key, value) {
+    if (!redisClient) return;
+    // Fire-and-forget: hindi na kailangang i-await sa mga call site (na
+    // sync ang existing na code), pero naka-catch pa rin ang errors.
+    redisClient.set(REDIS_KEY_PREFIX + key, JSON.stringify(value)).catch((err) => {
+        console.error(`⚠️  Hindi ma-save sa Redis ang key "${key}":`, err.message);
+    });
+}
 
 // I-load ang .env file papunta sa process.env — gamit ang BUILT-IN na
 // loader ng Node (available sa Node 20.12+/22+, kapareho ng bersyon na
@@ -286,7 +339,9 @@ async function notifyUnlockRequest({ subject, text }) {
 // --------------------------------------------------------------
 const DEVICE_STORE_PATH = path.join(__dirname, 'allowed-devices.json');
 
-function loadAllowedDevices() {
+async function loadAllowedDevices() {
+    const fromRedis = await redisGetJSON('allowed-devices', null);
+    if (fromRedis !== null) return new Set(fromRedis);
     try {
         const raw = fs.readFileSync(DEVICE_STORE_PATH, 'utf8');
         return new Set(JSON.parse(raw));
@@ -301,6 +356,10 @@ function loadAllowedDevices() {
 }
 
 function saveAllowedDevices(set) {
+    if (redisClient) {
+        redisSetJSON('allowed-devices', [...set]);
+        return;
+    }
     try {
         fs.writeFileSync(DEVICE_STORE_PATH, JSON.stringify([...set], null, 2));
     } catch (err) {
@@ -308,7 +367,7 @@ function saveAllowedDevices(set) {
     }
 }
 
-let allowedDevices = loadAllowedDevices();
+let allowedDevices = new Set(); // pupunuin sa bootstrapStores() bago tumakbo ang httpServer.listen()
 
 // --------------------------------------------------------------
 // DEVICE LABELS — pangalan/tatak na MANU-MANONG inilalagay ng admin
@@ -324,7 +383,9 @@ let allowedDevices = loadAllowedDevices();
 // --------------------------------------------------------------
 const DEVICE_LABELS_PATH = path.join(__dirname, 'device-labels.json');
 
-function loadDeviceLabels() {
+async function loadDeviceLabels() {
+    const fromRedis = await redisGetJSON('device-labels', null);
+    if (fromRedis !== null) return new Map(Object.entries(fromRedis));
     try {
         const raw = fs.readFileSync(DEVICE_LABELS_PATH, 'utf8');
         return new Map(Object.entries(JSON.parse(raw)));
@@ -334,6 +395,10 @@ function loadDeviceLabels() {
 }
 
 function saveDeviceLabels(map) {
+    if (redisClient) {
+        redisSetJSON('device-labels', Object.fromEntries(map));
+        return;
+    }
     try {
         fs.writeFileSync(DEVICE_LABELS_PATH, JSON.stringify(Object.fromEntries(map), null, 2));
     } catch (err) {
@@ -341,7 +406,7 @@ function saveDeviceLabels(map) {
     }
 }
 
-let deviceLabels = loadDeviceLabels();
+let deviceLabels = new Map(); // pupunuin sa bootstrapStores()
 
 // --------------------------------------------------------------
 // DEVICE FINGERPRINT BINDING — ito ang PANGUNAHING proteksyon laban sa
@@ -357,7 +422,9 @@ let deviceLabels = loadDeviceLabels();
 // --------------------------------------------------------------
 const DEVICE_FINGERPRINTS_PATH = path.join(__dirname, 'device-fingerprints.json');
 
-function loadDeviceFingerprints() {
+async function loadDeviceFingerprints() {
+    const fromRedis = await redisGetJSON('device-fingerprints', null);
+    if (fromRedis !== null) return new Map(Object.entries(fromRedis));
     try {
         const raw = fs.readFileSync(DEVICE_FINGERPRINTS_PATH, 'utf8');
         return new Map(Object.entries(JSON.parse(raw)));
@@ -367,6 +434,10 @@ function loadDeviceFingerprints() {
 }
 
 function saveDeviceFingerprints(map) {
+    if (redisClient) {
+        redisSetJSON('device-fingerprints', Object.fromEntries(map));
+        return;
+    }
     try {
         fs.writeFileSync(DEVICE_FINGERPRINTS_PATH, JSON.stringify(Object.fromEntries(map), null, 2));
     } catch (err) {
@@ -374,7 +445,7 @@ function saveDeviceFingerprints(map) {
     }
 }
 
-let deviceFingerprints = loadDeviceFingerprints(); // installationId -> { fingerprint, firstVerifiedAt, lastVerifiedAt, verifyCount, flagged, flaggedFingerprint, flaggedAt }
+let deviceFingerprints = new Map(); // installationId -> { fingerprint, firstVerifiedAt, lastVerifiedAt, verifyCount, flagged, flaggedFingerprint, flaggedAt } — pupunuin sa bootstrapStores()
 
 // --------------------------------------------------------------
 // CLONE SPLIT MAP — para sa mga na-flag na clone na GUSTONG PATULOY na
@@ -397,7 +468,9 @@ let deviceFingerprints = loadDeviceFingerprints(); // installationId -> { finger
 // --------------------------------------------------------------
 const CLONE_SPLITS_PATH = path.join(__dirname, 'clone-splits.json');
 
-function loadCloneSplits() {
+async function loadCloneSplits() {
+    const fromRedis = await redisGetJSON('clone-splits', null);
+    if (fromRedis !== null) return new Map(Object.entries(fromRedis));
     try {
         const raw = fs.readFileSync(CLONE_SPLITS_PATH, 'utf8');
         return new Map(Object.entries(JSON.parse(raw)));
@@ -407,6 +480,10 @@ function loadCloneSplits() {
 }
 
 function saveCloneSplits(map) {
+    if (redisClient) {
+        redisSetJSON('clone-splits', Object.fromEntries(map));
+        return;
+    }
     try {
         fs.writeFileSync(CLONE_SPLITS_PATH, JSON.stringify(Object.fromEntries(map), null, 2));
     } catch (err) {
@@ -414,7 +491,7 @@ function saveCloneSplits(map) {
     }
 }
 
-let cloneSplits = loadCloneSplits();
+let cloneSplits = new Map(); // pupunuin sa bootstrapStores()
 function cloneSplitKey(installationId, fingerprint) {
     return `${installationId}::${fingerprint}`;
 }
@@ -503,7 +580,9 @@ const UPGRADE_TIERS = [
 // --------------------------------------------------------------
 const ISSUED_UNLOCKS_PATH = path.join(__dirname, 'issued-unlocks.json');
 
-function loadIssuedUnlocks() {
+async function loadIssuedUnlocks() {
+    const fromRedis = await redisGetJSON('issued-unlocks', null);
+    if (fromRedis !== null) return fromRedis;
     try {
         return JSON.parse(fs.readFileSync(ISSUED_UNLOCKS_PATH, 'utf8'));
     } catch (err) {
@@ -512,6 +591,10 @@ function loadIssuedUnlocks() {
 }
 
 function saveIssuedUnlocks(obj) {
+    if (redisClient) {
+        redisSetJSON('issued-unlocks', obj);
+        return;
+    }
     try {
         fs.writeFileSync(ISSUED_UNLOCKS_PATH, JSON.stringify(obj, null, 2));
     } catch (err) {
@@ -519,7 +602,7 @@ function saveIssuedUnlocks(obj) {
     }
 }
 
-let issuedUnlocks = loadIssuedUnlocks();
+let issuedUnlocks = {}; // pupunuin sa bootstrapStores()
 
 function recordIssuedUnlock(installationId, featureId, token, meta = {}) {
     if (!issuedUnlocks[installationId]) issuedUnlocks[installationId] = {};
@@ -547,7 +630,9 @@ function recordIssuedUnlock(installationId, featureId, token, meta = {}) {
 const ACTIVITY_LOG_PATH = path.join(__dirname, 'activity-log.json');
 const ACTIVITY_LOG_MAX = 500;
 
-function loadActivityLog() {
+async function loadActivityLog() {
+    const fromRedis = await redisGetJSON('activity-log', null);
+    if (fromRedis !== null) return fromRedis;
     try {
         return JSON.parse(fs.readFileSync(ACTIVITY_LOG_PATH, 'utf8'));
     } catch (err) {
@@ -556,6 +641,10 @@ function loadActivityLog() {
 }
 
 function saveActivityLog(arr) {
+    if (redisClient) {
+        redisSetJSON('activity-log', arr);
+        return;
+    }
     try {
         fs.writeFileSync(ACTIVITY_LOG_PATH, JSON.stringify(arr, null, 2));
     } catch (err) {
@@ -563,7 +652,7 @@ function saveActivityLog(arr) {
     }
 }
 
-let activityLog = loadActivityLog();
+let activityLog = []; // pupunuin sa bootstrapStores()
 
 function logActivity(installationId, type, details = {}) {
     activityLog.unshift({
@@ -597,7 +686,9 @@ function logActivity(installationId, type, details = {}) {
 // --------------------------------------------------------------
 const BACKUP_CHECKINS_PATH = path.join(__dirname, 'backup-checkins.json');
 
-function loadBackupCheckins() {
+async function loadBackupCheckins() {
+    const fromRedis = await redisGetJSON('backup-checkins', null);
+    if (fromRedis !== null) return fromRedis;
     try {
         return JSON.parse(fs.readFileSync(BACKUP_CHECKINS_PATH, 'utf8'));
     } catch (err) {
@@ -606,6 +697,10 @@ function loadBackupCheckins() {
 }
 
 function saveBackupCheckins(obj) {
+    if (redisClient) {
+        redisSetJSON('backup-checkins', obj);
+        return;
+    }
     try {
         fs.writeFileSync(BACKUP_CHECKINS_PATH, JSON.stringify(obj, null, 2));
     } catch (err) {
@@ -613,7 +708,7 @@ function saveBackupCheckins(obj) {
     }
 }
 
-let backupCheckins = loadBackupCheckins(); // installationId -> { lastBackupAt, storeName, fileSizeBytes, checkinCount }
+let backupCheckins = {}; // installationId -> { lastBackupAt, storeName, fileSizeBytes, checkinCount } — pupunuin sa bootstrapStores()
 
 // Default na NAKA-ON ang auto-allow-on-backup (mas kaunting manual na
 // hakbang para sa developer) — i-set ang env var na ito sa 'false' kung
@@ -2229,6 +2324,39 @@ app.post('/relay/screen-share/create', requireApiKey, rateLimit('screen-share-cr
 // panig ang lahat ng iba pang mensahe — hindi binabasa o binabago ang
 // laman ng payload (opaque na WebRTC offer/answer/ICE data lang ito).
 // --------------------------------------------------------------
+// --------------------------------------------------------------
+// BOOTSTRAP — kailangan munang ma-load ang lahat ng persisted na
+// estado (mula sa Redis kung naka-configure ang REDIS_URL, o mula sa
+// lokal na JSON files kung wala) BAGO tumanggap ng kahit anong request
+// ang server. Kaya hindi na basta tinatawag ang httpServer.listen() sa
+// ibaba — hinihintay muna nito ang function na ito.
+// --------------------------------------------------------------
+async function bootstrapStores() {
+    [
+        allowedDevices,
+        deviceLabels,
+        deviceFingerprints,
+        cloneSplits,
+        issuedUnlocks,
+        activityLog,
+        backupCheckins
+    ] = await Promise.all([
+        loadAllowedDevices(),
+        loadDeviceLabels(),
+        loadDeviceFingerprints(),
+        loadCloneSplits(),
+        loadIssuedUnlocks(),
+        loadActivityLog(),
+        loadBackupCheckins()
+    ]);
+
+    console.log(
+        redisClient
+            ? `✅ Na-load mula sa Redis: ${allowedDevices.size} allowed device(s), ${Object.keys(issuedUnlocks).length} device(s) may naka-unlock.`
+            : `ℹ️  Na-load mula sa lokal na JSON files: ${allowedDevices.size} allowed device(s), ${Object.keys(issuedUnlocks).length} device(s) may naka-unlock.`
+    );
+}
+
 const httpServer = http.createServer(app);
 const wss = new WebSocketServer({ server: httpServer, path: '/relay/screen-share/ws' });
 
@@ -2323,6 +2451,13 @@ wss.on('connection', (ws) => {
     });
 });
 
-httpServer.listen(PORT, () => {
-    console.log(`OmniPOS Unlock Relay running sa port ${PORT}`);
-});
+bootstrapStores()
+    .then(() => {
+        httpServer.listen(PORT, () => {
+            console.log(`OmniPOS Unlock Relay running sa port ${PORT}`);
+        });
+    })
+    .catch((err) => {
+        console.error('❌ Hindi ma-bootstrap ang persistent storage — hindi tumakbo ang server:', err);
+        process.exit(1);
+    });

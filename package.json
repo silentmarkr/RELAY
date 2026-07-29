@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "express": "^4.19.2",
+    "ioredis": "^5.4.1",
     "nodemailer": "^6.9.14",
     "ws": "^8.18.0"
   }
