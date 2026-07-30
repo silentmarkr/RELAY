@@ -8,6 +8,7 @@
     "generate-keys": "node generate-keys.js"
   },
   "dependencies": {
+    "archiver": "^7.0.1",
     "express": "^4.19.2",
     "ioredis": "^5.4.1",
     "nodemailer": "^6.9.14",

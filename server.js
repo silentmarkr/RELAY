@@ -19,6 +19,9 @@ const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
+const { execSync } = require('child_process');
+const archiver = require('archiver');
 const Redis = require('ioredis');
 
 // --------------------------------------------------------------
@@ -815,6 +818,50 @@ function saveSystemVersionInfo(obj) {
 let systemVersionInfo = { ...DEFAULT_SYSTEM_VERSION_INFO }; // pupunuin sa bootstrapStores()
 
 // --------------------------------------------------------------
+// DOWNLOAD CODES — para sa "one-time online setup, offline pagkatapos"
+// na hiling: ito ang paraan para makapag-download ang isang BAGONG
+// client ng OMNIPOS package (zip) nang HINDI pinapublic ang link —
+// developer/admin lang ang gumagawa ng code (may bilang ng uses at
+// expiry), ipapadala sa kliyente (SMS/email/chat), tapos gagamitin
+// nila ito ISANG BESES (o kung ilang beses ipinapayagan) para
+// makuha ang release zip mula sa RELAY.
+//
+// Structure: code -> { label, usesRemaining, maxUses, createdAt,
+//                        expiresAt, lastUsedAt, downloadCount }
+// --------------------------------------------------------------
+const DOWNLOAD_CODES_PATH = path.join(__dirname, 'download-codes.json');
+
+async function loadDownloadCodes() {
+    const fromRedis = await redisGetJSON('download-codes', null);
+    if (fromRedis !== null) return new Map(Object.entries(fromRedis));
+    try {
+        const raw = fs.readFileSync(DOWNLOAD_CODES_PATH, 'utf8');
+        return new Map(Object.entries(JSON.parse(raw)));
+    } catch (err) {
+        return new Map();
+    }
+}
+
+function saveDownloadCodes(map) {
+    if (redisClient) {
+        redisSetJSON('download-codes', Object.fromEntries(map));
+        return;
+    }
+    try {
+        fs.writeFileSync(DOWNLOAD_CODES_PATH, JSON.stringify(Object.fromEntries(map), null, 2));
+    } catch (err) {
+        console.error('Hindi ma-save ang download-codes.json:', err);
+    }
+}
+
+let downloadCodes = new Map(); // pupunuin sa bootstrapStores()
+
+// Kung saan naka-store ang aktwal na zip na ipapadala — i-place ito ng
+// developer bawat may bagong release (tingnan ang build-release.js sa
+// OMNIPOS repo). HINDI kasama sa git ang zip mismo.
+const RELEASE_PACKAGE_PATH = path.join(__dirname, 'release', 'omnipos-client.zip');
+
+// --------------------------------------------------------------
 // ADMIN PANEL — /relay/admin (protektado ng sarili niyang password,
 // HIWALAY sa RELAY_API_KEY). Dito mo makikita ang listahan ng mga
 // device na kailanman humiling ng unlock, at pwede mo silang
@@ -1519,6 +1566,30 @@ function issueSignedToken(installationId, featureId, durationMs) {
 }
 
 // --------------------------------------------------------------
+// issueDevicePermit — ANTI-CLONE, PERMIT SYSTEM
+// Kapareho ng ideya ng issueSignedToken (parehong PRIVATE KEY na
+// RELAY lang ang may hawak), pero para dito: pinapatunayan nito na
+// "TALAGANG si RELAY (ang developer) ang nag-approve na dumapo ang
+// installationId na ito sa fingerprint na ito" — hindi lang basta
+// isang lokal na boolean flag (deviceVerified=true) na naka-imbak sa
+// DB ng OMNIPOS client, na kung sakaling direktang i-edit ng isang
+// user ang database row (o i-restore mula sa kinopyang backup), MADALI
+// lang i-fake ang isang boolean pero HINDI kailanman mapeke ang
+// signature na ito dahil wala silang private key ng RELAY.
+//
+// Ito ang "permit" na sinusuri ng OMNIPOS client sa BAWAT startup/login
+// gamit lang ang RELAY_PUBLIC_KEY nito (kaya gumagana ito OFFLINE) —
+// online lang kailangan kapag kailangan ng BAGONG permit (unang beses,
+// o nagbago ang fingerprint/hardware).
+// --------------------------------------------------------------
+function issueDevicePermit(installationId, fingerprint) {
+    const payload = { installationId, fingerprint, issuedAt: Date.now() };
+    const payloadString = JSON.stringify(payload);
+    const signature = crypto.sign(null, Buffer.from(payloadString), privateKey).toString('base64');
+    return { payload, signature };
+}
+
+// --------------------------------------------------------------
 // STORAGE — simpleng in-memory Map lang para sa mga PENDING OTP.
 // Hindi kailangan ng persistent database dito dahil ang mga OTP ay
 // panandalian lang (10-minute TTL) — kung mag-restart ang relay
@@ -1832,6 +1903,7 @@ app.post('/relay/verify-login', requireApiKey, rateLimit('verify-login', 30, 10 
             success: true,
             allowed: allowedDevices.has(installationId),
             firstTime: true,
+            permit: issueDevicePermit(installationId, hardwareFingerprint),
             message: 'Unang beses na na-verify online ang device na ito.'
         });
     }
@@ -1859,6 +1931,7 @@ app.post('/relay/verify-login', requireApiKey, rateLimit('verify-login', 30, 10 
             allowed: allowedDevices.has(newId),
             firstTime: false,
             reassignedInstallationId: newId,
+            permit: issueDevicePermit(newId, hardwareFingerprint),
             message: 'Na-verify — ang device na ito ay hiwalay na (na-split mula sa isang naunang na-flag na clone). Ida-adopt ng client ang bagong installationId mula ngayon.'
         });
     }
@@ -1902,6 +1975,7 @@ app.post('/relay/verify-login', requireApiKey, rateLimit('verify-login', 30, 10 
         success: true,
         allowed: allowedDevices.has(installationId),
         firstTime: false,
+        permit: issueDevicePermit(installationId, hardwareFingerprint),
         message: 'Verified.'
     });
 });
@@ -2520,6 +2594,167 @@ app.get('/relay/admin/api/system/version', requireAdminKey, (req, res) => {
     res.json({ success: true, systemVersionInfo });
 });
 
+// --------------------------------------------------------------
+// POST /relay/admin/api/build-release
+// AWTOMATIKONG gumagawa ng bagong omnipos-client.zip DIREKTA SA RELAY
+// (Render) mismo — WALANG kailangang Termux o kahit anong lokal na
+// machine. Ito ang sagot sa "hindi ba pwede sa RELAY nalang gawin
+// online yun para ipapasa nalang ang zip sa client":
+//
+//   1. Git-clone ang OMNIPOS repo mo (kailangang naka-push na muna ang
+//      pinaka-bagong bersyon dito — gamit mo lang ang normal na
+//      "git push" na dati mong gawi).
+//   2. Tanggalin ang mga bagay na HINDI dapat isama (.git, .env,
+//      database/, node_modules, logs, patches).
+//   3. I-zip gamit ang "archiver" (purong Node.js — walang external
+//      zip CLI/Termux na kailangan).
+//   4. I-save bilang release/omnipos-client.zip — ito na ang
+//      awtomatikong maiipasa sa /relay/download/:code mula ngayon.
+//
+// Body: { repoUrl?, ref? } — kung wala, gagamit ng OMNIPOS_REPO_URL env
+// var (dapat naka-set sa Render dashboard). Kung PRIVATE ang repo,
+// isama ang access token DIREKTA sa URL, hal.:
+//   https://<TOKEN>@github.com/iyong-username/OMNIPOS.git
+// --------------------------------------------------------------
+const BUILD_EXCLUDE_NAMES = new Set(['.git', 'node_modules', 'database', 'release']);
+const BUILD_EXCLUDE_EXTENSIONS = new Set(['.log', '.patch']);
+
+function removeExcludedRecursive(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.name === '.env' || BUILD_EXCLUDE_NAMES.has(entry.name)) {
+            fs.rmSync(fullPath, { recursive: true, force: true });
+            continue;
+        }
+        if (entry.isFile() && BUILD_EXCLUDE_EXTENSIONS.has(path.extname(entry.name))) {
+            fs.rmSync(fullPath, { force: true });
+            continue;
+        }
+        if (entry.isDirectory()) removeExcludedRecursive(fullPath);
+    }
+}
+
+app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => {
+    const repoUrl = (req.body && req.body.repoUrl) || process.env.OMNIPOS_REPO_URL;
+    const ref = (req.body && req.body.ref) || 'main';
+
+    if (!repoUrl) {
+        return res.status(400).json({ success: false, message: 'Walang repoUrl na ibinigay at walang OMNIPOS_REPO_URL env var na naka-set.' });
+    }
+
+    const tmpDir = path.join(os.tmpdir(), `omnipos-build-${Date.now()}`);
+
+    try {
+        execSync(`git clone --depth 1 --branch ${ref} "${repoUrl}" "${tmpDir}"`, { stdio: 'pipe' });
+
+        removeExcludedRecursive(tmpDir);
+
+        const releaseDir = path.dirname(RELEASE_PACKAGE_PATH);
+        if (!fs.existsSync(releaseDir)) fs.mkdirSync(releaseDir, { recursive: true });
+
+        await new Promise((resolve, reject) => {
+            const output = fs.createWriteStream(RELEASE_PACKAGE_PATH);
+            const archive = archiver('zip', { zlib: { level: 9 } });
+            output.on('close', resolve);
+            archive.on('error', reject);
+            archive.pipe(output);
+            archive.directory(tmpDir, false);
+            archive.finalize();
+        });
+
+        const stats = fs.statSync(RELEASE_PACKAGE_PATH);
+        logActivity(null, 'release_package_built', { ref, sizeBytes: stats.size });
+
+        res.json({
+            success: true,
+            message: 'Nagawa ang bagong release package.',
+            sizeBytes: stats.size,
+            builtAt: Date.now()
+        });
+    } catch (err) {
+        console.error('❌ Build-release error:', err.message);
+        res.status(500).json({ success: false, message: `Hindi na-build ang release: ${err.message}` });
+    } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+});
+
+// --------------------------------------------------------------
+// POST /relay/admin/api/download-codes/generate
+// Gumagawa ang developer/admin nito ng isang BAGONG code para sa isang
+// bagong kliyente — walang publicly-listed link, kaya kontrolado kung
+// sino-sino talaga ang nagkakaroon ng access sa release package.
+// Body: { label?, maxUses?, expiresInHours? }
+// --------------------------------------------------------------
+app.post('/relay/admin/api/download-codes/generate', requireAdminKey, (req, res) => {
+    const { label, maxUses, expiresInHours } = req.body || {};
+    const code = crypto.randomBytes(9).toString('base64url'); // ~12 chars, URL-safe
+    const now = Date.now();
+    downloadCodes.set(code, {
+        label: label || null,
+        maxUses: typeof maxUses === 'number' && maxUses > 0 ? maxUses : 1,
+        usesRemaining: typeof maxUses === 'number' && maxUses > 0 ? maxUses : 1,
+        createdAt: now,
+        expiresAt: typeof expiresInHours === 'number' && expiresInHours > 0 ? now + expiresInHours * 60 * 60 * 1000 : null,
+        lastUsedAt: null,
+        downloadCount: 0
+    });
+    saveDownloadCodes(downloadCodes);
+    logActivity(null, 'download_code_generated', { code, label: label || null });
+    res.json({
+        success: true,
+        code,
+        downloadUrl: `${req.protocol}://${req.get('host')}/relay/download/${code}`
+    });
+});
+
+app.get('/relay/admin/api/download-codes', requireAdminKey, (req, res) => {
+    const list = [...downloadCodes.entries()].map(([code, meta]) => ({ code, ...meta }));
+    res.json({ success: true, codes: list });
+});
+
+app.post('/relay/admin/api/download-codes/:code/revoke', requireAdminKey, (req, res) => {
+    downloadCodes.delete(req.params.code);
+    saveDownloadCodes(downloadCodes);
+    res.json({ success: true });
+});
+
+// --------------------------------------------------------------
+// GET /relay/download/:code
+// TINATAWAG NG BROWSER/CURL NG KLIYENTE MISMO (hindi ng OMNIPOS server)
+// — ito ang aktwal na "i-download ang mga files para sa offline usage".
+// Walang requireApiKey dito dahil hindi pa nga naka-install ang
+// OMNIPOS client sa yugtong ito — ang code mismo (random, one-time,
+// may bilang ng uses/expiry) ang proteksyon.
+// --------------------------------------------------------------
+app.get('/relay/download/:code', (req, res) => {
+    const { code } = req.params;
+    const meta = downloadCodes.get(code);
+
+    if (!meta) {
+        return res.status(404).send('Invalid o expired na download code. Kontakin ang developer para sa bagong link.');
+    }
+    if (meta.expiresAt && Date.now() > meta.expiresAt) {
+        downloadCodes.delete(code);
+        saveDownloadCodes(downloadCodes);
+        return res.status(410).send('Expired na ang download code na ito. Kontakin ang developer para sa bagong link.');
+    }
+    if (meta.usesRemaining <= 0) {
+        return res.status(410).send('Naubos na ang bilang ng pwedeng gamitin sa code na ito. Kontakin ang developer para sa bagong link.');
+    }
+    if (!fs.existsSync(RELEASE_PACKAGE_PATH)) {
+        return res.status(503).send('Walang naka-publish na release package sa server pa. Kontakin ang developer.');
+    }
+
+    meta.usesRemaining -= 1;
+    meta.lastUsedAt = Date.now();
+    meta.downloadCount = (meta.downloadCount || 0) + 1;
+    saveDownloadCodes(downloadCodes);
+    logActivity(null, 'client_package_downloaded', { code, label: meta.label || null, ip: req.ip });
+
+    res.download(RELEASE_PACKAGE_PATH, 'omnipos-client.zip');
+});
+
 app.get('/relay/health', (req, res) => res.json({ success: true, status: 'ok' }));
 
 // --------------------------------------------------------------
@@ -2537,7 +2772,8 @@ async function bootstrapStores() {
         issuedUnlocks,
         activityLog,
         backupCheckins,
-        systemVersionInfo
+        systemVersionInfo,
+        downloadCodes
     ] = await Promise.all([
         loadAllowedDevices(),
         loadDeviceLabels(),
@@ -2546,7 +2782,8 @@ async function bootstrapStores() {
         loadIssuedUnlocks(),
         loadActivityLog(),
         loadBackupCheckins(),
-        loadSystemVersionInfo()
+        loadSystemVersionInfo(),
+        loadDownloadCodes()
     ]);
 
     console.log(
