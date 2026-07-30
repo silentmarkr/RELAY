@@ -627,6 +627,16 @@
     </div>
 
     <div class="card">
+      <h2>☁️ Cloud Backup <span style="font-size:11px; color:var(--muted); font-weight:normal;">(buong database ng device na ito, maliban sa user accounts)</span></h2>
+      <div id="cloudBackupStatusLine" class="meta">Loading...</div>
+      <div id="cloudBackupModuleList" style="margin-top:8px;"></div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
+        <button class="icon-btn" onclick="loadCloudBackupDetail(currentDetailId)">🔄 I-refresh</button>
+        <button class="icon-btn" id="cloudBackupDownloadBtn" style="display:none;" onclick="downloadCloudBackup(currentDetailId)">⬇️ I-download ang JSON</button>
+      </div>
+    </div>
+
+    <div class="card">
       <h2>✅ Naka-unlock na</h2>
       <div id="detailUnlockedList" class="empty">Loading...</div>
     </div>
@@ -1392,6 +1402,7 @@ async function openDeviceDetail(installationId) {
   document.getElementById('deviceDetailScreen').style.display = 'block';
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   await loadDeviceDetail();
+  await loadCloudBackupDetail(installationId);
   if (detailPollTimer) clearInterval(detailPollTimer);
   detailPollTimer = setInterval(loadDeviceDetail, 8000);
 }
@@ -1484,6 +1495,67 @@ async function loadDeviceDetail() {
   } catch (err) { return; }
   if (!detail.success) { toast(detail.message || 'Hindi makuha ang detalye.', 'error'); return; }
   renderDeviceDetail(detail);
+}
+
+let lastCloudBackupDetail = null;
+
+async function loadCloudBackupDetail(installationId) {
+  const lineEl = document.getElementById('cloudBackupStatusLine');
+  const listEl = document.getElementById('cloudBackupModuleList');
+  const downloadBtn = document.getElementById('cloudBackupDownloadBtn');
+  if (!lineEl || !listEl) return;
+
+  lineEl.innerText = 'Loading...';
+  listEl.innerHTML = '';
+  downloadBtn.style.display = 'none';
+  lastCloudBackupDetail = null;
+
+  let data;
+  try {
+    data = await api(`/relay/admin/api/cloud-backup/${encodeURIComponent(installationId)}`);
+  } catch (err) { return; }
+
+  if (!data.success) {
+    lineEl.innerHTML = data.message === 'Walang cloud backup na nakita para sa installationId na ito.'
+      ? '⚪ Wala pang cloud backup na na-sync ng device na ito.'
+      : `⚠️ ${data.message || 'Hindi makuha ang cloud backup.'}`;
+    return;
+  }
+
+  lastCloudBackupDetail = data;
+  const meta = data.meta;
+  lineEl.innerHTML = `🟢 <strong>${meta.total_records ?? '—'} records</strong> sa ${meta.module_count ?? (data.modules || []).length} module(s) · huling sync ${timeAgo(new Date(meta.last_sync_at).getTime())} · ${meta.sync_count} beses na na-sync`;
+
+  listEl.innerHTML = (data.modules || []).map(m => `
+    <div class="feature-item">
+      <div>
+        <div class="feature-name">${m.module}</div>
+        <div class="feature-meta">${m.record_count} record(s) · na-update ${timeAgo(new Date(m.updated_at).getTime())}</div>
+      </div>
+    </div>
+  `).join('') || '<div class="empty">Walang laman.</div>';
+
+  downloadBtn.style.display = 'inline-flex';
+}
+
+function downloadCloudBackup(installationId) {
+  if (!lastCloudBackupDetail || !lastCloudBackupDetail.success) {
+    toast('Wala pang cloud backup na na-load. I-refresh muna.', 'error');
+    return;
+  }
+  const payload = {};
+  (lastCloudBackupDetail.modules || []).forEach(m => { payload[m.module] = m.data; });
+
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `cloud-backup-${installationId}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  toast('Na-download ang cloud backup na JSON.', 'success');
 }
 
 function renderDeviceDetail(detail) {

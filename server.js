@@ -52,6 +52,66 @@ if (redisClient) {
 
 const REDIS_KEY_PREFIX = 'omnipos-relay:';
 
+// --------------------------------------------------------------
+// CLOUD BACKUP STORAGE (Postgres) — ito ang "malayong disk" na
+// pinag-iimbakan ng BUONG na-sync na database (maliban sa user
+// accounts) ng BAWAT OMNIPOS installation na naka-unlock ang
+// 'cloud_backup' feature nito. IISANG Postgres instance lang ang
+// ginagamit dito (env DATABASE_URL — pwedeng Render Postgres, Neon,
+// Supabase, sariling VPS, atbp., kahit saan available), pero
+// ISOLATED PER installationId ang bawat row (walang installationId
+// ang makakabasa/makakapag-overwrite ng datos ng IBANG installationId
+// — tingnan ang mga endpoints sa ibaba).
+//
+// Ang "bagong account" na ibinibigay ng developer sa isang customer
+// (per instructions) ay ang PAG-UNLOCK mismo ng 'cloud_backup' feature
+// sa kanilang installationId (parehong OTP/admin-activate na flow gaya
+// ng ibang FEATURE_CATALOG entries) — hindi kailangan ng hiwalay na
+// Postgres user/role bawat kliyente, dahil ang RELAY (na HAWAK LANG ng
+// developer) ang tanging bagay na dumidiretso sa Postgres na ito.
+// --------------------------------------------------------------
+const { Pool } = require('pg');
+const DATABASE_URL = process.env.DATABASE_URL || null;
+const pgPool = DATABASE_URL
+    ? new Pool({ connectionString: DATABASE_URL, ssl: process.env.PGSSL === 'false' ? false : { rejectUnauthorized: false } })
+    : null;
+
+if (pgPool) {
+    pgPool.on('error', (err) => {
+        console.error('⚠️  Postgres pool error (cloud backup storage):', err.message);
+    });
+} else {
+    console.warn('⚠️  Walang DATABASE_URL na naka-set — hindi gagana ang Cloud Backup (Postgres) feature hangga\'t hindi ito nalagyan.');
+}
+
+async function ensureCloudBackupSchema() {
+    if (!pgPool) return;
+    await pgPool.query(`
+        CREATE TABLE IF NOT EXISTS cloud_backup_modules (
+            installation_id TEXT NOT NULL,
+            module          TEXT NOT NULL,
+            data            JSONB NOT NULL,
+            record_count    INTEGER NOT NULL DEFAULT 0,
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (installation_id, module)
+        );
+    `);
+    await pgPool.query(`
+        CREATE TABLE IF NOT EXISTS cloud_backup_meta (
+            installation_id   TEXT PRIMARY KEY,
+            store_name        TEXT,
+            total_records     INTEGER,
+            module_count      INTEGER,
+            last_sync_at      TIMESTAMPTZ,
+            sync_count        INTEGER NOT NULL DEFAULT 0
+        );
+    `);
+    console.log('✅ Cloud backup Postgres schema ready (cloud_backup_modules, cloud_backup_meta).');
+}
+ensureCloudBackupSchema().catch((err) => {
+    console.error('⚠️  Hindi na-prepare ang Postgres schema para sa cloud backup:', err.message);
+});
+
 async function redisGetJSON(key, fallback) {
     if (!redisClient) return fallback;
     try {
@@ -545,7 +605,8 @@ const FEATURE_CATALOG = {
     promo_codes: { name: 'Promo Codes Module', price: 499, category: 'module' },
     advanced_reports: { name: 'Sales Analytics & Advanced Reports', price: 799, category: 'module' },
     shift_management: { name: 'Multi-Cashier Shift Oversight & Z-Reading Reports', price: 699, category: 'module' },
-    rbac_management: { name: 'Roles & Permissions (RBAC) Management', price: 999, category: 'module' }
+    rbac_management: { name: 'Roles & Permissions (RBAC) Management', price: 999, category: 'module' },
+    cloud_backup: { name: 'Cloud Backup (Postgres)', price: 1499, category: 'module' }
 };
 
 const UPGRADE_TIERS = [
@@ -1569,6 +1630,157 @@ app.post('/relay/backup-checkin', requireApiKey, rateLimit('backup-checkin', 20,
             ? 'Successful ang backup check-in — awtomatikong na-allow ang device na ito.'
             : 'Successful ang backup check-in.'
     });
+});
+
+// --------------------------------------------------------------
+// isFeatureCurrentlyUnlocked(installationId, featureId) — GROUND-TRUTH
+// na pagsusuri (kaparehong lohika ng /relay/check-feature-status sa
+// itaas) kung talagang naka-unlock ang isang feature PARA sa
+// installationId na ito NGAYON (na isinasaalang-alang ang expiry).
+// Ginagamit ito ng cloud-backup upload endpoint sa ibaba bilang
+// SERVER-SIDE gate — hindi ito basta umaasa sa sinasabi ng client.
+// --------------------------------------------------------------
+function isFeatureCurrentlyUnlocked(installationId, featureId) {
+    const entry = (issuedUnlocks[installationId] || {})[featureId];
+    if (!entry) return false;
+    if (typeof entry.expiresAt === 'number' && Date.now() > entry.expiresAt) return false;
+    return true;
+}
+
+// --------------------------------------------------------------
+// POST /relay/cloud-backup/upload
+// Tinatawag ito ng OMNIPOS CLIENT SERVER (manual — pinindot ng customer
+// ang "Cloud Backup" button) para i-sync ang BUONG database nito
+// (maliban sa user accounts — hinihigpitan din ito DITO, hindi lang
+// umaasa sa client) papunta sa Postgres. TINATANGGIHAN ito (402) kung
+// HINDI pa naka-unlock ang 'cloud_backup' feature para sa
+// installationId na ito — kahit anong ipadala ng client, walang
+// maisusulat sa Postgres hangga't hindi ito na-verify dito.
+// --------------------------------------------------------------
+const CLOUD_BACKUP_BLOCKED_MODULES = new Set(['users', 'featureUnlocks']);
+
+app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-upload', 12, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    const { installationId, storeName, modules, moduleNames, totalRecords } = req.body;
+
+    if (!installationId || !modules || typeof modules !== 'object') {
+        return res.status(400).json({ success: false, message: 'Kulang o mali ang installationId/modules.' });
+    }
+
+    if (!isFeatureCurrentlyUnlocked(installationId, 'cloud_backup')) {
+        logActivity(installationId, 'cloud_backup_blocked', { reason: 'feature_not_unlocked' });
+        return res.status(402).json({
+            success: false,
+            featureLocked: true,
+            featureId: 'cloud_backup',
+            featureName: FEATURE_CATALOG.cloud_backup.name,
+            price: FEATURE_CATALOG.cloud_backup.price,
+            message: 'Naka-lock pa ang Cloud Backup feature para sa installation na ito. Kailangan muna itong i-unlock bago magamit ang Cloud Backup.'
+        });
+    }
+
+    if (!pgPool) {
+        return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL) sa RELAY. Sabihin sa developer na i-set ito.' });
+    }
+
+    try {
+        const client = await pgPool.connect();
+        try {
+            await client.query('BEGIN');
+            let moduleCount = 0;
+            for (const [moduleName, data] of Object.entries(modules)) {
+                // Defense-in-depth: kahit anong ipadala ng client, hindi
+                // kailanman isusulat ang 'users'/'featureUnlocks' dito.
+                if (CLOUD_BACKUP_BLOCKED_MODULES.has(moduleName)) continue;
+                const recordCount = Array.isArray(data) ? data.length : 0;
+                await client.query(
+                    `INSERT INTO cloud_backup_modules (installation_id, module, data, record_count, updated_at)
+                     VALUES ($1, $2, $3, $4, now())
+                     ON CONFLICT (installation_id, module) DO UPDATE SET
+                        data = excluded.data, record_count = excluded.record_count, updated_at = excluded.updated_at`,
+                    [installationId, moduleName, JSON.stringify(data), recordCount]
+                );
+                moduleCount++;
+            }
+
+            await client.query(
+                `INSERT INTO cloud_backup_meta (installation_id, store_name, total_records, module_count, last_sync_at, sync_count)
+                 VALUES ($1, $2, $3, $4, now(), 1)
+                 ON CONFLICT (installation_id) DO UPDATE SET
+                    store_name = excluded.store_name,
+                    total_records = excluded.total_records,
+                    module_count = excluded.module_count,
+                    last_sync_at = now(),
+                    sync_count = cloud_backup_meta.sync_count + 1`,
+                [installationId, storeName || null, typeof totalRecords === 'number' ? totalRecords : null, moduleCount]
+            );
+
+            await client.query('COMMIT');
+        } catch (err) {
+            await client.query('ROLLBACK');
+            throw err;
+        } finally {
+            client.release();
+        }
+
+        logActivity(installationId, 'cloud_backup_sync', { moduleCount: Object.keys(modules).length, totalRecords: totalRecords || null, storeName: storeName || null });
+
+        res.json({ success: true, message: 'Na-save sa Postgres ang cloud backup.', moduleNames: moduleNames || Object.keys(modules) });
+    } catch (err) {
+        console.error('⚠️ CLOUD_BACKUP: hindi na-save sa Postgres:', err.message);
+        res.status(500).json({ success: false, message: 'May error habang sine-save sa Postgres: ' + err.message });
+    }
+});
+
+// --------------------------------------------------------------
+// GET /relay/admin/api/cloud-backup — listahan ng LAHAT ng
+// installations na may cloud backup data (para sa admin panel table).
+// GET /relay/admin/api/cloud-backup/:installationId — buong laman
+// (lahat ng modules) ng cloud backup ng isang partikular na
+// installationId — ito ang "sa storage nila ito babasahin" na binanggit
+// sa instructions (developer/admin lang ang may access dito, protektado
+// ng requireAdminKey).
+// --------------------------------------------------------------
+app.get('/relay/admin/api/cloud-backup', requireAdminKey, async (req, res) => {
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
+    try {
+        const result = await pgPool.query('SELECT installation_id, store_name, total_records, module_count, last_sync_at, sync_count FROM cloud_backup_meta ORDER BY last_sync_at DESC NULLS LAST');
+        res.json({ success: true, backups: result.rows });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+app.get('/relay/admin/api/cloud-backup/:installationId', requireAdminKey, async (req, res) => {
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
+    try {
+        const { installationId } = req.params;
+        const metaResult = await pgPool.query('SELECT * FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
+        const modulesResult = await pgPool.query('SELECT module, data, record_count, updated_at FROM cloud_backup_modules WHERE installation_id = $1 ORDER BY module', [installationId]);
+        if (!metaResult.rows[0]) {
+            return res.status(404).json({ success: false, message: 'Walang cloud backup na nakita para sa installationId na ito.' });
+        }
+        res.json({ success: true, meta: metaResult.rows[0], modules: modulesResult.rows });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+app.get('/relay/admin/api/cloud-backup/:installationId/download', requireAdminKey, async (req, res) => {
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
+    try {
+        const { installationId } = req.params;
+        const modulesResult = await pgPool.query('SELECT module, data FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
+        if (modulesResult.rows.length === 0) {
+            return res.status(404).json({ success: false, message: 'Walang cloud backup na nakita para sa installationId na ito.' });
+        }
+        const payload = {};
+        modulesResult.rows.forEach((r) => { payload[r.module] = r.data; });
+        res.setHeader('Content-Disposition', `attachment; filename="cloud-backup-${installationId}.json"`);
+        res.setHeader('Content-Type', 'application/json');
+        res.send(JSON.stringify(payload, null, 2));
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
 });
 
 // --------------------------------------------------------------
