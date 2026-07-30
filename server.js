@@ -714,6 +714,46 @@ function mostRecentBackupCheckinAt() {
 }
 
 // --------------------------------------------------------------
+// SYSTEM VERSION — pinapatunayan ng developer/owner dito ang
+// "pinakabagong" version ng OMNIPOS client app (hal. pagkatapos
+// mag-merge ng bagong upgrade papunta sa upstream/main). Ang bawat
+// OMNIPOS client instance (kahit saan naka-deploy — Render, Termux,
+// atbp.) ay tumatawag dito (GET /relay/latest-version) para malaman
+// kung may bagong version na available, at ipapakita ito bilang
+// "Check for Updates" sa Settings nila.
+//
+// PAALALA: gaya ng ibang stores dito, mawawala ito sa susunod na
+// REDEPLOY kung walang persistent disk/REDIS_URL — i-publish lang
+// ulit ito sa admin panel pagkatapos.
+// --------------------------------------------------------------
+const SYSTEM_VERSION_PATH = path.join(__dirname, 'system-version.json');
+const DEFAULT_SYSTEM_VERSION_INFO = { version: '0.0.0', changelog: '', publishedAt: null };
+
+async function loadSystemVersionInfo() {
+    const fromRedis = await redisGetJSON('system-version', null);
+    if (fromRedis !== null) return fromRedis;
+    try {
+        return JSON.parse(fs.readFileSync(SYSTEM_VERSION_PATH, 'utf8'));
+    } catch (err) {
+        return { ...DEFAULT_SYSTEM_VERSION_INFO };
+    }
+}
+
+function saveSystemVersionInfo(obj) {
+    if (redisClient) {
+        redisSetJSON('system-version', obj);
+        return;
+    }
+    try {
+        fs.writeFileSync(SYSTEM_VERSION_PATH, JSON.stringify(obj, null, 2));
+    } catch (err) {
+        console.error('Hindi ma-save ang system-version.json:', err);
+    }
+}
+
+let systemVersionInfo = { ...DEFAULT_SYSTEM_VERSION_INFO }; // pupunuin sa bootstrapStores()
+
+// --------------------------------------------------------------
 // ADMIN PANEL — /relay/admin (protektado ng sarili niyang password,
 // HIWALAY sa RELAY_API_KEY). Dito mo makikita ang listahan ng mga
 // device na kailanman humiling ng unlock, at pwede mo silang
@@ -2223,6 +2263,51 @@ app.post('/relay/confirm-unlock-bulk', requireApiKey, requireAllowedDevice, rate
     res.json({ success: true, message: `Na-unlock ang ${featureIds.length} feature(s)!`, tokens });
 });
 
+// --------------------------------------------------------------
+// GET /relay/latest-version
+// Tinatawag ito ng OMNIPOS CLIENT SERVER (hindi ng browser mismo) sa
+// "Check for Updates" ng Settings nito. Basic API key lang ang
+// kailangan dito (walang requireAllowedDevice) — publicly-readable
+// info lang naman ito (bersyon + changelog), hindi kailangang naka-
+// Allow muna ang device para lang malaman kung may bagong update.
+// --------------------------------------------------------------
+app.get('/relay/latest-version', requireApiKey, rateLimit('latest-version', 60, 10 * 60 * 1000), (req, res) => {
+    res.json({
+        success: true,
+        latestVersion: systemVersionInfo.version || '0.0.0',
+        changelog: systemVersionInfo.changelog || '',
+        publishedAt: systemVersionInfo.publishedAt || null
+    });
+});
+
+// --------------------------------------------------------------
+// POST /relay/admin/api/system/publish-version
+// Ito ang tinatawag ng developer/owner (manual, hal. gamit ang curl o
+// isang admin panel form) tuwing may na-merge/na-deploy na bagong
+// upgrade papunta sa mga client repo. Dito lang dapat isulat ang
+// bagong version — HINDI ito awtomatikong nade-derive mula sa git,
+// dahil sadyang hiwalay ang RELAY (developer-hosted lang) sa git repo
+// ng bawat kliyente.
+// --------------------------------------------------------------
+app.post('/relay/admin/api/system/publish-version', requireAdminKey, (req, res) => {
+    const { version, changelog } = req.body || {};
+    const trimmedVersion = String(version || '').trim();
+    if (!trimmedVersion) {
+        return res.status(400).json({ success: false, message: 'Kailangan ang "version" (hal. "1.3.0").' });
+    }
+    systemVersionInfo = {
+        version: trimmedVersion,
+        changelog: String(changelog || '').trim(),
+        publishedAt: Date.now()
+    };
+    saveSystemVersionInfo(systemVersionInfo);
+    res.json({ success: true, systemVersionInfo });
+});
+
+app.get('/relay/admin/api/system/version', requireAdminKey, (req, res) => {
+    res.json({ success: true, systemVersionInfo });
+});
+
 app.get('/relay/health', (req, res) => res.json({ success: true, status: 'ok' }));
 
 // --------------------------------------------------------------
@@ -2239,7 +2324,8 @@ async function bootstrapStores() {
         cloneSplits,
         issuedUnlocks,
         activityLog,
-        backupCheckins
+        backupCheckins,
+        systemVersionInfo
     ] = await Promise.all([
         loadAllowedDevices(),
         loadDeviceLabels(),
@@ -2247,7 +2333,8 @@ async function bootstrapStores() {
         loadCloneSplits(),
         loadIssuedUnlocks(),
         loadActivityLog(),
-        loadBackupCheckins()
+        loadBackupCheckins(),
+        loadSystemVersionInfo()
     ]);
 
     console.log(
