@@ -17,8 +17,6 @@
 const express = require('express');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
-const http = require('http');
-const { WebSocketServer } = require('ws');
 const path = require('path');
 const fs = require('fs');
 const Redis = require('ioredis');
@@ -117,12 +115,6 @@ app.use((req, res, next) => {
 // unlock/demo/bundle request mismo ang nabibigo dahil dito. 2mb na ngayon,
 // katumbas ng limit na ginagamit na rin ng OMNIPOS client server mismo.
 app.use(express.json({ limit: '2mb' }));
-
-// Static dev-only page (WebRTC viewer) — hindi ito naka-link kahit saan
-// sa publiko, at protektado pa rin ng DEV_VIEWER_KEY sa loob ng WS
-// connection mismo (ang static HTML/JS na ito ay walang access sa
-// kahit anong session hangga't hindi tama ang key).
-app.use('/relay/dev', express.static(path.join(__dirname, 'public')));
 
 // --------------------------------------------------------------
 // CONFIG — lahat ito ay dapat manggaling sa environment variables ng
@@ -1375,16 +1367,6 @@ app.post('/relay/check-feature-status', requireApiKey, requireAllowedDevice, rat
     res.json({ success: true, statuses });
 });
 
-// Hiwalay na secret ito sa RELAY_API_KEY — ang RELAY_API_KEY ay hawak ng
-// bawat CLIENT SERVER (maraming kliyente, posibleng mas mahina ang
-// proteksyon sa kanilang deployment). Ang DEV_VIEWER_KEY ay hawak MO
-// LANG, sa dev-viewer page na ikaw lang gagamit — kailangan ito bago
-// makapasok bilang "viewer" sa kahit anong live screen-share session.
-const DEV_VIEWER_KEY = process.env.RELAY_DEV_VIEWER_KEY || null;
-if (!DEV_VIEWER_KEY) {
-    console.warn('⚠️  Walang RELAY_DEV_VIEWER_KEY na naka-set — hindi magagamit ang Watch-My-Screen dev viewer hangga\'t hindi ito nalagyan.');
-}
-
 if (!MAIL_USER || !MAIL_PASS || !RECIPIENT_EMAIL) {
     console.error('❌ Kulang ang env vars: RELAY_MAIL_USER, RELAY_MAIL_PASS, RELAY_RECIPIENT_EMAIL. Tingnan ang .env.example.');
     process.exit(1);
@@ -2243,93 +2225,11 @@ app.post('/relay/confirm-unlock-bulk', requireApiKey, requireAllowedDevice, rate
 
 app.get('/relay/health', (req, res) => res.json({ success: true, status: 'ok' }));
 
-// ====================================================================
-// "WATCH MY SCREEN" — live support screen-share (view-only, consent
-// gated sa panig ng POS terminal, hindi awtomatiko).
-//
-// MAHALAGA sa disenyo: HINDI dumadaan dito ang aktwal na video. Ang
-// RELAY na ito ay isang SIGNALING channel lang — tinutulungan lang
-// nitong "magkakilala" ang dalawang panig (POS terminal = "host", dev
-// viewer = "viewer") sa pamamagitan ng palitan ng maliliit na WebRTC
-// control messages (offer/answer/ICE candidates). Kapag nagkonekt na
-// sila, DIREKTANG dumadaan (peer-to-peer, naka-encrypt na sa DTLS-SRTP,
-// built-in sa WebRTC) ang video — hindi na ito bumabalik dito sa relay.
-//
-// Ang "host" lang (ang POS terminal, matapos ang consent prompt) ang
-// nagsisimula ng session — ang relay mismo ay hindi kailanman
-// nagsisimula o humihiling ng screen share sa sinuman.
-// ====================================================================
-
-// key: sessionCode -> { hostToken, hostWs, viewerWs, createdAt, meta }
-const screenShareSessions = new Map();
-
-// Kinakalimutan lang ang mga session na hindi pa nagkaka-WS-connect ang
-// host sa loob ng ilang minuto (hal. tinatawag ang /create pero
-// hinahard-refresh o naisara ang tab bago pa makonekta).
-const SCREEN_SHARE_PENDING_TTL_MS = 5 * 60 * 1000;
-setInterval(() => {
-    const now = Date.now();
-    for (const [code, session] of screenShareSessions.entries()) {
-        if (!session.hostWs && now - session.createdAt > SCREEN_SHARE_PENDING_TTL_MS) {
-            screenShareSessions.delete(code);
-        }
-    }
-}, 60 * 1000);
-
-function generateSessionCode() {
-    let code;
-    do {
-        code = String(Math.floor(100000 + Math.random() * 900000));
-    } while (screenShareSessions.has(code));
-    return code;
-}
-
-// --------------------------------------------------------------
-// POST /relay/screen-share/create
-// Tinatawag ito ng CLIENT SERVER (hindi diretso ng browser) — ibig
-// sabihin, ang aktwal na "Simulan ang Watch My Screen" click sa POS ay
-// dumaan MUNA sa sariling backend ng kliyente (na may hawak ng
-// RELAY_API_KEY), bago mabuksan ang WebSocket diretso sa browser.
-// Ito ang naglilihim ng RELAY_API_KEY mula sa browser habang pinapayagan
-// pa ring diretso (peer-to-peer signaling, walang extra hop) ang WS.
-// --------------------------------------------------------------
-app.post('/relay/screen-share/create', requireApiKey, rateLimit('screen-share-create', 10, 10 * 60 * 1000), (req, res) => {
-    const { installationId, storeName, username } = req.body;
-
-    const sessionCode = generateSessionCode();
-    const hostToken = crypto.randomBytes(24).toString('hex');
-
-    screenShareSessions.set(sessionCode, {
-        hostToken,
-        hostWs: null,
-        viewerWs: null,
-        createdAt: Date.now(),
-        meta: {
-            installationId: installationId || null,
-            storeName: storeName || null,
-            username: username || 'Unknown'
-        }
-    });
-
-    res.json({ success: true, sessionCode, hostToken });
-});
-
-// --------------------------------------------------------------
-// WEBSOCKET SIGNALING — /relay/screen-share/ws
-// Dalawang uri ng koneksyon ang pumapasok dito:
-//   - HOST  (POS terminal browser): { type:'host-join', sessionCode, hostToken }
-//   - VIEWER (dev viewer page):     { type:'viewer-join', sessionCode, devKey }
-// Pagkatapos maging "paired" ang host+viewer sa isang sessionCode,
-// basta ipinapasa lang ({type:'signal', payload}) papunta sa KABILANG
-// panig ang lahat ng iba pang mensahe — hindi binabasa o binabago ang
-// laman ng payload (opaque na WebRTC offer/answer/ICE data lang ito).
-// --------------------------------------------------------------
 // --------------------------------------------------------------
 // BOOTSTRAP — kailangan munang ma-load ang lahat ng persisted na
 // estado (mula sa Redis kung naka-configure ang REDIS_URL, o mula sa
 // lokal na JSON files kung wala) BAGO tumanggap ng kahit anong request
-// ang server. Kaya hindi na basta tinatawag ang httpServer.listen() sa
-// ibaba — hinihintay muna nito ang function na ito.
+// ang server.
 // --------------------------------------------------------------
 async function bootstrapStores() {
     [
@@ -2357,103 +2257,9 @@ async function bootstrapStores() {
     );
 }
 
-const httpServer = http.createServer(app);
-const wss = new WebSocketServer({ server: httpServer, path: '/relay/screen-share/ws' });
-
-function safeSend(ws, data) {
-    if (ws && ws.readyState === ws.OPEN) {
-        ws.send(JSON.stringify(data));
-    }
-}
-
-function endScreenShareSession(sessionCode, reason) {
-    const session = screenShareSessions.get(sessionCode);
-    if (!session) return;
-    safeSend(session.hostWs, { type: 'session-ended', reason });
-    safeSend(session.viewerWs, { type: 'session-ended', reason });
-    if (session.hostWs) session.hostWs.close();
-    if (session.viewerWs) session.viewerWs.close();
-    screenShareSessions.delete(sessionCode);
-}
-
-wss.on('connection', (ws) => {
-    ws.role = null;
-    ws.sessionCode = null;
-
-    ws.on('message', (raw) => {
-        let msg;
-        try {
-            msg = JSON.parse(raw);
-        } catch {
-            return;
-        }
-
-        if (msg.type === 'host-join') {
-            const session = screenShareSessions.get(msg.sessionCode);
-            if (!session || session.hostToken !== msg.hostToken) {
-                return safeSend(ws, { type: 'error', message: 'Invalid session or host token.' });
-            }
-            session.hostWs = ws;
-            ws.role = 'host';
-            ws.sessionCode = msg.sessionCode;
-            safeSend(ws, { type: 'host-ready', sessionCode: msg.sessionCode });
-            return;
-        }
-
-        if (msg.type === 'viewer-join') {
-            if (!DEV_VIEWER_KEY || !safeCompare(String(msg.devKey || ''), DEV_VIEWER_KEY)) {
-                return safeSend(ws, { type: 'error', message: 'Invalid developer key.' });
-            }
-            const session = screenShareSessions.get(msg.sessionCode);
-            if (!session) {
-                return safeSend(ws, { type: 'error', message: 'No active session with that code.' });
-            }
-            session.viewerWs = ws;
-            ws.role = 'viewer';
-            ws.sessionCode = msg.sessionCode;
-            safeSend(ws, { type: 'viewer-ready', meta: session.meta });
-            // Sabihan ang host na puwede na siyang gumawa ng WebRTC offer.
-            safeSend(session.hostWs, { type: 'viewer-connected' });
-            return;
-        }
-
-        // Palitan lang ng offer/answer/ICE sa pagitan ng dalawang panig —
-        // hindi binabasa ang laman, ipinapasa lang papunta sa kabila.
-        if (msg.type === 'signal' && ws.sessionCode) {
-            const session = screenShareSessions.get(ws.sessionCode);
-            if (!session) return;
-            const target = ws.role === 'host' ? session.viewerWs : session.hostWs;
-            safeSend(target, { type: 'signal', payload: msg.payload });
-            return;
-        }
-
-        // Ang taong naka-login sa POS ang nag-click ng Stop — tapusin
-        // ang session agad para sa dalawang panig.
-        if (msg.type === 'end-session' && ws.sessionCode) {
-            endScreenShareSession(ws.sessionCode, 'ended_by_host');
-            return;
-        }
-    });
-
-    ws.on('close', () => {
-        if (!ws.sessionCode) return;
-        const session = screenShareSessions.get(ws.sessionCode);
-        if (!session) return;
-        if (ws.role === 'host') {
-            // Nawala ang host (nasarado ang tab, network drop, atbp.) —
-            // tapusin agad ang session, hindi natin gagawin ang
-            // pag-viewing kung wala nang kontrol ang taong nasa terminal.
-            endScreenShareSession(ws.sessionCode, 'host_disconnected');
-        } else if (ws.role === 'viewer') {
-            session.viewerWs = null;
-            safeSend(session.hostWs, { type: 'viewer-disconnected' });
-        }
-    });
-});
-
 bootstrapStores()
     .then(() => {
-        httpServer.listen(PORT, () => {
+        app.listen(PORT, () => {
             console.log(`OmniPOS Unlock Relay running sa port ${PORT}`);
         });
     })
