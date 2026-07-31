@@ -512,6 +512,24 @@
       </div>
     </div>
 
+    <div class="card">
+      <h2>📦 I-download ang Client Package <span style="font-size:11px; color:var(--muted); font-weight:normal;">(offline setup ng bagong kliyente)</span></h2>
+      <div class="backup-note">
+        Gumawa ng one-time (o limited-use) na link para makapag-download ang bagong kliyente ng <code>omnipos-client.zip</code> — mga files na kailangan niya para i-install at patakbuhin nang offline ang OMNIPOS sa sariling device. I-"Build Release" muna kung may bagong update sa OMNIPOS code bago gumawa ng link.
+      </div>
+      <div class="backup-row">
+        <button class="btn-ghost" onclick="buildRelease()" id="buildReleaseBtn">🛠️ I-build ang Release (git → zip)</button>
+        <button class="btn-ghost" onclick="downloadCodesJSON()">⬇️ I-download ang Listahan (JSON)</button>
+      </div>
+      <div class="backup-row" style="margin-top:10px;">
+        <input type="text" id="newCodeLabel" placeholder="Label (hal. Store ni Juan)" style="flex:2; min-width:160px;">
+        <input type="number" id="newCodeMaxUses" placeholder="Max uses (default 1)" min="1" style="flex:1; min-width:120px;">
+        <input type="number" id="newCodeExpiresHours" placeholder="Mag-e-expire sa (oras)" min="1" style="flex:1; min-width:120px;">
+        <button class="btn-primary" onclick="generateDownloadCode()">➕ Gumawa ng Download Link</button>
+      </div>
+      <div id="downloadCodesList" class="empty" style="margin-top:12px;">Loading...</div>
+    </div>
+
     <div class="stat-strip">
       <div class="stat-card">
         <div class="stat-num" id="statAllowed">—</div>
@@ -905,6 +923,135 @@ async function downloadBackup(auto = false) {
       : 'Na-download ang backup. Itago ito sa ligtas na lugar.',
     'success'
   );
+}
+
+// --------------------------------------------------------------
+// DOWNLOAD CODES — offline client package distribution.
+// "Build Release" = git-clone ng OMNIPOS repo sa RELAY server mismo
+// (Render), linisin, i-zip → release/omnipos-client.zip. Ginagawa lang
+// ito kapag may bagong update sa code (hindi kada bagong customer).
+// "Gumawa ng Download Link" = one-time/limited-use na code na
+// ipapadala mo sa BAGONG kliyente — visit lang nila ang link para
+// ma-download ang zip.
+// --------------------------------------------------------------
+let lastLoadedDownloadCodes = [];
+
+async function buildRelease() {
+  const btn = document.getElementById('buildReleaseBtn');
+  btn.disabled = true;
+  btn.innerText = '⏳ Ginagawa...';
+  try {
+    const data = await api('/relay/admin/api/build-release', { method: 'POST' });
+    if (data.success) {
+      toast(`✅ Nagawa ang release (${(data.sizeBytes / 1024 / 1024).toFixed(2)} MB).`, 'success');
+    } else {
+      toast(data.message || 'Hindi na-build ang release.', 'error');
+    }
+  } catch (err) {
+    // ipinapakita na ng api() ang toast kung 403/429; iba pang error dito
+  } finally {
+    btn.disabled = false;
+    btn.innerText = '🛠️ I-build ang Release (git → zip)';
+  }
+}
+
+async function generateDownloadCode() {
+  const label = document.getElementById('newCodeLabel').value.trim();
+  const maxUsesRaw = document.getElementById('newCodeMaxUses').value.trim();
+  const expiresRaw = document.getElementById('newCodeExpiresHours').value.trim();
+
+  const body = {};
+  if (label) body.label = label;
+  if (maxUsesRaw) body.maxUses = parseInt(maxUsesRaw, 10);
+  if (expiresRaw) body.expiresInHours = parseInt(expiresRaw, 10);
+
+  let data;
+  try {
+    data = await api('/relay/admin/api/download-codes/generate', {
+      method: 'POST',
+      body: JSON.stringify(body)
+    });
+  } catch (err) { return; }
+
+  if (!data.success) {
+    toast(data.message || 'Hindi nagawa ang download code.', 'error');
+    return;
+  }
+
+  document.getElementById('newCodeLabel').value = '';
+  document.getElementById('newCodeMaxUses').value = '';
+  document.getElementById('newCodeExpiresHours').value = '';
+
+  await navigator.clipboard.writeText(data.downloadUrl).catch(() => {});
+  toast('✅ Nagawa ang link at na-copy sa clipboard: ' + data.downloadUrl, 'success');
+  loadDownloadCodes();
+}
+
+async function loadDownloadCodes() {
+  let data;
+  try {
+    data = await api('/relay/admin/api/download-codes');
+  } catch (err) { return; }
+  if (!data.success) return;
+  lastLoadedDownloadCodes = data.codes || [];
+  renderDownloadCodesList();
+}
+
+function renderDownloadCodesList() {
+  const el = document.getElementById('downloadCodesList');
+  if (lastLoadedDownloadCodes.length === 0) {
+    el.innerHTML = '<div class="empty">Wala pang nagawang download code.</div>';
+    return;
+  }
+  const origin = window.location.origin;
+  el.innerHTML = lastLoadedDownloadCodes.map(c => {
+    const used = (c.maxUses || 1) - (c.usesRemaining || 0);
+    const expired = c.expiresAt && Date.now() > c.expiresAt;
+    const exhausted = c.usesRemaining <= 0;
+    const url = `${origin}/relay/download/${c.code}`;
+    return `
+    <div class="row" ${(expired || exhausted) ? 'style="opacity:0.55;"' : ''}>
+      <div class="row-info">
+        <div class="id">${c.label || '(walang label)'}
+          ${expired ? '<span class="badge badge-blocked">EXPIRED</span>' : ''}
+          ${!expired && exhausted ? '<span class="badge badge-blocked">NAUBOS ANG USES</span>' : ''}
+          ${!expired && !exhausted ? '<span class="badge badge-allowed">AKTIBO</span>' : ''}
+        </div>
+        <div class="meta">${used}/${c.maxUses} nagamit · ${c.expiresAt ? 'mag-e-expire ' + timeAgo(c.expiresAt) : 'walang expiry'} · ${c.lastUsedAt ? 'huling ginamit ' + timeAgo(c.lastUsedAt) : 'hindi pa ginagamit'}</div>
+        <div class="meta" style="word-break:break-all;">${url}</div>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:6px;">
+        <button class="btn-ghost" onclick="navigator.clipboard.writeText('${url}'); toast('Na-copy ang link.', 'success');">📋 Kopyahin</button>
+        <button class="btn-revoke" onclick="revokeDownloadCode('${c.code}', '${(c.label || '').replace(/'/g, "\\'")}')">🗑️ I-revoke</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function revokeDownloadCode(code, label) {
+  const ok = await confirmAction({
+    title: 'I-revoke ang download link na ito?',
+    message: `Hindi na magagamit ang link para sa "${label || code}" pagkatapos nito.`,
+    danger: true
+  });
+  if (!ok) return;
+  try {
+    await api(`/relay/admin/api/download-codes/${code}/revoke`, { method: 'POST' });
+  } catch (err) { return; }
+  toast('Na-revoke ang download link.', 'success');
+  loadDownloadCodes();
+}
+
+function downloadCodesJSON() {
+  const blob = new Blob([JSON.stringify(lastLoadedDownloadCodes, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `omnipos-download-codes-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 // --------------------------------------------------------------
@@ -1971,6 +2118,7 @@ function promptForLabel(currentLabel) {
 
 function startPolling() {
   loadDevices();
+  loadDownloadCodes();
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(() => { if (adminKey) loadDevices(); }, 8000);
 }
