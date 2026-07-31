@@ -633,7 +633,15 @@ function recordDeviceSeen(installationId, meta = {}) {
 function requireAllowedDevice(req, res, next) {
     const { installationId, storeName, username } = req.body;
     recordDeviceSeen(installationId, { storeName, username }); // laging i-log, kahit tanggihan pagkatapos
-    if (allowedDevices.size === 0) return next(); // walang allowlist naka-configure = walang restriction
+    // STRICT BY DEFAULT: dati, kapag WALA pang laman ang allowedDevices
+    // (bagong deploy, o pagkatapos mag-clone-reset), basta-basta
+    // pinapayagan ang LAHAT ng device na dumaan dito nang walang
+    // restriction — ibig sabihin, kayang mag-request-unlock/demo/backup
+    // ang KAHIT SINONG bagong kliyente hangga't wala pang unang device na
+    // manual na na-Allow ng developer. Tinanggal na ito — ngayon,
+    // KAILANGAN palaging EXPLICIT na "Allow" mula sa developer/store
+    // owner bago payagan ang KAHIT ANONG installationId, kahit pa unang
+    // device pa lang ito o kahit walang laman ang listahan.
     if (!installationId || !allowedDevices.has(installationId)) {
         return res.status(403).json({
             success: false,
@@ -1101,7 +1109,7 @@ app.get('/relay/admin/api/devices', requireAdminKey, async (req, res) => {
         success: true,
         seenDevices: seen,
         allowedDevices: [...allowedDevices],
-        restrictionActive: allowedDevices.size > 0,
+        restrictionActive: true, // laging ON simula ngayon — tinanggal na ang dating "walang laman = walang restriction" na bypass
         // Para sa notification/dot blinker sa itaas ng "Allowed devices":
         // huling successful backup check-in mula SA KAHIT ANONG device,
         // at kung naka-ON ang auto-allow-on-backup na behavior.

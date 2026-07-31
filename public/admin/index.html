@@ -1207,17 +1207,12 @@ async function loadDevices() {
   renderBackupSyncBanner(data);
 
   const statusEl = document.getElementById('restrictionStatus');
-  if (data.restrictionActive) {
-    statusEl.className = 'status-line status-on';
-    statusEl.innerText = '🔒 Naka-ON ang restriction — ' + data.allowedDevices.length + ' device(s) lang ang pinapayagan.';
-  } else {
-    statusEl.className = 'status-line status-off';
-    statusEl.innerText = '🔓 Naka-OFF ang restriction — tinatanggap pa rin ang LAHAT ng device.';
-  }
+  statusEl.className = 'status-line status-on';
+  statusEl.innerText = '🔒 Naka-ON palagi ang restriction — ' + data.allowedDevices.length + ' device(s) lang ang pinapayagan. Kailangan mo munang i-Allow ang bagong device dito bago ito makapag-login.';
 
   const allowedEl = document.getElementById('allowedList');
   if (data.allowedDevices.length === 0) {
-    allowedEl.innerHTML = '<div class="empty">Wala pang naka-allow. (Walang restriction habang wala pang laman ito.)</div>';
+    allowedEl.innerHTML = '<div class="empty">Wala pang naka-allow. (Kaya WALA pang makakapag-login hangga\'t wala kang ina-Allow dito.)</div>';
   } else {
     allowedEl.innerHTML = data.allowedDevices.map(id => {
       const seen = data.seenDevices.find(d => d.installationId === id);
