@@ -2732,15 +2732,29 @@ app.get('/relay/admin/api/system/version', requireAdminKey, (req, res) => {
 //      "git push" na dati mong gawi).
 //   2. Tanggalin ang mga bagay na HINDI dapat isama (.git, .env,
 //      database/, node_modules, logs, patches).
-//   3. I-zip gamit ang "archiver" (purong Node.js — walang external
+//   3. Gumawa ng BAGONG client .env (RELAY_URL, RELAY_API_KEY, PORT)
+//      at ilagay ITO sa loob ng tmpDir bago mag-zip — kaya kapag
+//      dina-download na ng bagong kliyente ang zip (sa pamamagitan
+//      ng /relay/download/:code), READY NA AGAD ITO — hindi na
+//      kailangang gumawa/mag-upload pa ng sariling .env ang kliyente.
+//   4. I-zip gamit ang "archiver" (purong Node.js — walang external
 //      zip CLI/Termux na kailangan).
-//   4. I-save bilang release/omnipos-client.zip — ito na ang
+//   5. I-save bilang release/omnipos-client.zip — ito na ang
 //      awtomatikong maiipasa sa /relay/download/:code mula ngayon.
 //
-// Body: { repoUrl?, ref? } — kung wala, gagamit ng OMNIPOS_REPO_URL env
-// var (dapat naka-set sa Render dashboard). Kung PRIVATE ang repo,
-// isama ang access token DIREKTA sa URL, hal.:
-//   https://<TOKEN>@github.com/iyong-username/OMNIPOS.git
+// Body: { repoUrl?, ref?, relayUrl?, relayApiKey?, port? }
+//   - repoUrl/ref: kung wala, gagamit ng OMNIPOS_REPO_URL env var
+//     (dapat naka-set sa Render dashboard). Kung PRIVATE ang repo,
+//     isama ang access token DIREKTA sa URL, hal.:
+//       https://<TOKEN>@github.com/iyong-username/OMNIPOS.git
+//   - relayUrl: URL na ilalagay sa RELAY_URL ng client .env. Kung
+//     wala, gagamit ng RELAY_PUBLIC_URL env var kung naka-set, kung
+//     wala rin ay awtomatikong kukunin mula sa kasalukuyang request
+//     (req.protocol + req.get('host')).
+//   - relayApiKey: kung wala, gagamit ng RELAY_API_KEY na naka-set na
+//     dito mismo sa RELAY .env (ito rin ang parehong key na
+//     ginagamit ng lahat ng kliyente).
+//   - port: default 3000 kung wala.
 // --------------------------------------------------------------
 const BUILD_EXCLUDE_NAMES = new Set(['.git', 'node_modules', 'database', 'release']);
 const BUILD_EXCLUDE_EXTENSIONS = new Set(['.log', '.patch']);
@@ -2774,6 +2788,27 @@ app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => 
         execSync(`git clone --depth 1 --branch ${ref} "${repoUrl}" "${tmpDir}"`, { stdio: 'pipe' });
 
         removeExcludedRecursive(tmpDir);
+
+        // Gumawa ng client .env DIREKTA sa loob ng tmpDir bago mag-zip,
+        // para READY NA AGAD ang zip pagka-download ng bagong kliyente
+        // (walang kailangan pang gawin/i-upload na .env sa panig nila).
+        const relayUrl = (req.body && req.body.relayUrl)
+            || process.env.RELAY_PUBLIC_URL
+            || `${req.protocol}://${req.get('host')}`;
+        const relayApiKey = (req.body && req.body.relayApiKey) || process.env.RELAY_API_KEY;
+        const clientPort = (req.body && req.body.port) || 3000;
+
+        if (!relayApiKey) {
+            throw new Error('Walang RELAY_API_KEY na naka-set (ni sa request body ni sa RELAY .env) — hindi makakagawa ng client .env.');
+        }
+
+        const clientEnvContent = [
+            `RELAY_URL=${relayUrl}`,
+            `RELAY_API_KEY=${relayApiKey}`,
+            `PORT=${clientPort}`,
+            ''
+        ].join('\n');
+        fs.writeFileSync(path.join(tmpDir, '.env'), clientEnvContent);
 
         const releaseDir = path.dirname(RELEASE_PACKAGE_PATH);
         if (!fs.existsSync(releaseDir)) fs.mkdirSync(releaseDir, { recursive: true });
