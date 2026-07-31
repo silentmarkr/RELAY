@@ -2678,6 +2678,29 @@ app.get('/relay/latest-version', requireApiKey, rateLimit('latest-version', 60, 
 // dahil sadyang hiwalay ang RELAY (developer-hosted lang) sa git repo
 // ng bawat kliyente.
 // --------------------------------------------------------------
+// --------------------------------------------------------------
+// GET /relay/release-package
+// BAGO: para sa self-update ng isang KLIYENTENG NAKA-INSTALL NA
+// (may sarili nang RELAY_API_KEY) — kaiba ito sa /relay/download/:code
+// (na para sa UNANG pag-download bago pa man ma-install ang client).
+// Ito ang tinatawag ng OMNIPOS instance mismo (POST /api/system/deploy
+// -update sa panig nito, sa "self-update mode" kapag walang Render
+// deploy hook na naka-configure, hal. Termux) para kunin ang
+// pinaka-bagong omnipos-client.zip at i-apply ito nang lokal.
+// Gate lang ito ng x-relay-key (parehong pattern ng /relay/latest
+// -version) — hindi kailangan ng requireAllowedDevice dahil parehong
+// developer-issued secret naman ang RELAY_API_KEY sa lahat ng
+// kliyente, at ang release package mismo ay hindi naman
+// client-specific na datos.
+// --------------------------------------------------------------
+app.get('/relay/release-package', requireApiKey, rateLimit('release-package', 10, 60 * 60 * 1000), (req, res) => {
+    if (!fs.existsSync(RELEASE_PACKAGE_PATH)) {
+        return res.status(503).json({ success: false, message: 'Walang naka-publish na release package sa RELAY pa.' });
+    }
+    logActivity(null, 'release_package_self_update_fetch', { ip: req.ip });
+    res.download(RELEASE_PACKAGE_PATH, 'omnipos-client.zip');
+});
+
 app.post('/relay/admin/api/system/publish-version', requireAdminKey, (req, res) => {
     const { version, changelog } = req.body || {};
     const trimmedVersion = String(version || '').trim();
