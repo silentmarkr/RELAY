@@ -1134,6 +1134,7 @@ function renderSeenList() {
       <div class="row-info">
         <div class="id">${d.installationId}
           <span class="badge ${d.allowed ? 'badge-allowed' : 'badge-blocked'}">${d.allowed ? 'ALLOWED' : 'BLOCKED'}</span>
+          <span class="badge" style="${d.online ? 'background:var(--green-bg,#0f2e1c); color:var(--green,#4ade80);' : 'background:var(--gray-bg,#2a2a2a); color:var(--gray,#888);'}">${d.online ? '🟢 ONLINE' : '⚪ OFFLINE'}</span>
           ${d.demoActive ? '<span class="badge" style="background:var(--amber-bg); color:var(--amber);">DEMO</span>' : ''}
           ${d.cloneFlagged ? '<span class="badge badge-blocked">🚩 POSIBLENG CLONE</span>' : ''}
         </div>

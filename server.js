@@ -554,6 +554,70 @@ function cloneSplitKey(installationId, fingerprint) {
 // In-memory lang, para lang sa "recently seen" view sa admin panel.
 const seenDevices = new Map(); // installationId -> { storeName, username, lastSeenAt, requestCount }
 
+// --------------------------------------------------------------
+// ONLINE STATUS (TTL-based, via Redis) — dati, "online" ang isang
+// device kung meron lang siyang lastSeenAt (kahit ilang ORAS na ang
+// nakalipas), dahil walang expiry ang seenDevices Map sa itaas. Bunga:
+// isang clone device na tumigil na (na-block, na-stop ang process,
+// o na-logout) ay LAGING lalabas na "online" hangga't hindi
+// nire-restart ang RELAY server (nawawala lang ang in-memory Map).
+//
+// Dito, gumagawa tayo ng HIWALAY na "heartbeat" key per device na
+// may TTL sa Redis (ire-refresh ito kada request, tulad ng ginagawa
+// ng OMNIPOS client kada 30s sa /relay/check-feature-status). Kapag
+// umere-expire ang key (ibig sabihin, hindi na nag-request ang
+// device sa loob ng ONLINE_WINDOW_MS), awtomatiko itong nawawala sa
+// Redis — walang kailangang i-cron/i-clean pa manually.
+//
+// ONLINE_WINDOW_MS = 90s: bahagyang mas mahaba sa default na 30s na
+// sync interval ng OMNIPOS client (RELAY_FEATURE_SYNC_INTERVAL_MS),
+// para may tolerance sa isang naka-miss na beat (hal. dahil sa slow
+// network) nang hindi agad nagpapakita ng false "offline".
+//
+// Kung WALANG naka-configure na REDIS_URL, babalik ito sa dating
+// in-memory na pagtantiya gamit ang lastSeenAt (approximate lang,
+// mawawala rin ito sa restart tulad ng dati) — ligtas pa ring
+// tumatakbo ang RELAY kahit walang Redis.
+// --------------------------------------------------------------
+const ONLINE_WINDOW_MS = 90 * 1000;
+const ONLINE_KEY_PREFIX = REDIS_KEY_PREFIX + 'online:';
+
+function markDeviceOnline(installationId) {
+    if (!installationId || !redisClient) return;
+    redisClient.set(ONLINE_KEY_PREFIX + installationId, '1', 'PX', ONLINE_WINDOW_MS).catch((err) => {
+        console.error(`⚠️  Hindi ma-set ang online heartbeat key para sa "${installationId}":`, err.message);
+    });
+}
+
+// Batch check — mas efficient kaysa isa-isahang GET kada device sa
+// listahan (gamit ang Redis pipeline, iisang round-trip lang).
+async function getOnlineStatusMap(installationIds) {
+    const now = Date.now();
+    if (!redisClient) {
+        // Fallback na walang Redis: itinuturing na "online" kung
+        // may request sa loob ng ONLINE_WINDOW_MS ayon sa in-memory
+        // na seenDevices (approximate lang, walang cross-restart
+        // survival, pero mas tama pa rin kaysa "laging online").
+        const map = {};
+        for (const id of installationIds) {
+            const meta = seenDevices.get(id);
+            map[id] = !!(meta && (now - meta.lastSeenAt) < ONLINE_WINDOW_MS);
+        }
+        return map;
+    }
+
+    if (installationIds.length === 0) return {};
+    const pipeline = redisClient.pipeline();
+    installationIds.forEach((id) => pipeline.exists(ONLINE_KEY_PREFIX + id));
+    const results = await pipeline.exec();
+    const map = {};
+    installationIds.forEach((id, i) => {
+        const [err, exists] = results[i] || [null, 0];
+        map[id] = !err && exists === 1;
+    });
+    return map;
+}
+
 function recordDeviceSeen(installationId, meta = {}) {
     if (!installationId) return;
     const existing = seenDevices.get(installationId) || { requestCount: 0 };
@@ -563,6 +627,7 @@ function recordDeviceSeen(installationId, meta = {}) {
         lastSeenAt: Date.now(),
         requestCount: existing.requestCount + 1
     });
+    markDeviceOnline(installationId);
 }
 
 function requireAllowedDevice(req, res, next) {
@@ -997,8 +1062,12 @@ function getActiveUnlockedFeatureIds(installationId) {
     });
 }
 
-app.get('/relay/admin/api/devices', requireAdminKey, (req, res) => {
-    const seen = [...seenDevices.entries()].map(([installationId, meta]) => {
+app.get('/relay/admin/api/devices', requireAdminKey, async (req, res) => {
+    const ids = [...seenDevices.keys()];
+    const onlineMap = await getOnlineStatusMap(ids);
+
+    const seen = ids.map((installationId) => {
+        const meta = seenDevices.get(installationId);
         const unlockedIds = getActiveUnlockedFeatureIds(installationId).filter(id => id !== DEMO_FEATURE_ID);
         const activations = Object.values(issuedUnlocks[installationId] || {});
         const lastActivationAt = activations.length ? Math.max(...activations.map(a => a.issuedAt)) : null;
@@ -1007,6 +1076,11 @@ app.get('/relay/admin/api/devices', requireAdminKey, (req, res) => {
         return {
             installationId,
             ...meta,
+            // Totoong "online ngayon" (heartbeat sa loob ng ONLINE_WINDOW_MS),
+            // hiwalay sa lastSeenAt na text lang (na "huling nakita X ago"
+            // kahit matagal na — lastSeenAt ay HINDI na dapat ituring na
+            // "online" nang basta-basta sa admin UI).
+            online: !!onlineMap[installationId],
             label: deviceLabels.get(installationId) || null,
             allowed: allowedDevices.has(installationId),
             unlockedCount: unlockedIds.length,
@@ -1727,8 +1801,29 @@ function isFeatureCurrentlyUnlocked(installationId, featureId) {
 // HINDI pa naka-unlock ang 'cloud_backup' feature para sa
 // installationId na ito — kahit anong ipadala ng client, walang
 // maisusulat sa Postgres hangga't hindi ito na-verify dito.
+//
+// UPDATE: dating buong-module ang laging tinatanggihan dito ("users",
+// "featureUnlocks") — ngayon, sadyang GUSTO NA ring i-backup ang mga
+// ito (user accounts, unlocked features/themes). Ang "users" module
+// mismo ay dapat nang dumating dito na WALANG "password" field —
+// ginagawa ito ng OMNIPOS client bago pa ito ipadala (tingnan ang
+// stripRedactedFields()/REDACTED_FIELDS_BY_MODULE sa db.js doon). Dito,
+// defense-in-depth pa rin: kahit sumingit ang isang password field sa
+// bawat record ng "users" (hal. luma/binagong client), tinatanggal pa
+// rin ito dito bago isulat sa Postgres.
 // --------------------------------------------------------------
-const CLOUD_BACKUP_BLOCKED_MODULES = new Set(['users', 'featureUnlocks']);
+const CLOUD_BACKUP_REDACTED_FIELDS_BY_MODULE = { users: ['password'] };
+
+function stripCloudBackupRedactedFields(moduleName, data) {
+    const redactedFields = CLOUD_BACKUP_REDACTED_FIELDS_BY_MODULE[moduleName];
+    if (!redactedFields || !Array.isArray(data)) return data;
+    return data.map((record) => {
+        if (!record || typeof record !== 'object') return record;
+        const clone = { ...record };
+        redactedFields.forEach((field) => { delete clone[field]; });
+        return clone;
+    });
+}
 
 app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-upload', 12, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
     const { installationId, storeName, modules, moduleNames, totalRecords } = req.body;
@@ -1758,10 +1853,10 @@ app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rate
         try {
             await client.query('BEGIN');
             let moduleCount = 0;
-            for (const [moduleName, data] of Object.entries(modules)) {
-                // Defense-in-depth: kahit anong ipadala ng client, hindi
-                // kailanman isusulat ang 'users'/'featureUnlocks' dito.
-                if (CLOUD_BACKUP_BLOCKED_MODULES.has(moduleName)) continue;
+            for (const [moduleName, rawData] of Object.entries(modules)) {
+                // Defense-in-depth: kahit ano ang ipadala ng client, hindi
+                // kailanman isusulat ang "password" field ng "users" dito.
+                const data = stripCloudBackupRedactedFields(moduleName, rawData);
                 const recordCount = Array.isArray(data) ? data.length : 0;
                 await client.query(
                     `INSERT INTO cloud_backup_modules (installation_id, module, data, record_count, updated_at)
