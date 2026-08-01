@@ -124,6 +124,30 @@ code {
 }
 .icon-btn:hover { border-color: var(--accent-dim); background: var(--card-hover); color: var(--accent-bright); }
 .icon-btn:active { transform: scale(.97); }
+.icon-btn-logout { padding: 8px 9px; color: var(--muted); }
+.icon-btn-logout svg { width: 16px; height: 16px; display: block; }
+.icon-btn-logout:hover { border-color: var(--red-line); background: var(--red-bg); color: var(--red); }
+
+.idle-countdown {
+  display: none;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--amber);
+  background: var(--amber-bg);
+  border: 1px solid var(--amber-line);
+  padding: 5px 9px;
+  border-radius: 999px;
+  letter-spacing: .02em;
+  white-space: nowrap;
+}
+.idle-countdown.idle-countdown-danger {
+  color: var(--red);
+  background: var(--red-bg);
+  border-color: var(--red-line);
+}
 
 .wrap { max-width: 640px; margin: 0 auto; padding: 16px; }
 
@@ -690,7 +714,14 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
       </div>
     </div>
     <div class="topbar-actions">
+      <span id="idleCountdownPill" class="idle-countdown"></span>
       <button id="installBtn" class="icon-btn" style="display:none;" onclick="installApp()">⬇️ I-install</button>
+      <button id="logoutBtn" class="icon-btn icon-btn-logout" onclick="logout()" title="Mag-logout" aria-label="Mag-logout">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2v10"/>
+          <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/>
+        </svg>
+      </button>
     </div>
   </div>
 
@@ -824,8 +855,7 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
     </div>
 
     <div class="footer-note">
-      Awtomatikong mag-lo-logout pagkatapos ng 20 minutong walang aktibidad. &middot;
-      <a href="#" onclick="logout(); return false;">Log out</a>
+      Awtomatikong mag-lo-logout pagkatapos ng 20 minutong walang aktibidad. May countdown na lalabas sa itaas bago mag-logout.
     </div>
   </div>
 </div>
@@ -1070,15 +1100,86 @@ function updateTabBadges() {
   document.getElementById('tabDotDownloads').style.display = needsBackupAttention ? 'block' : 'none';
 }
 
+// ---------------- MOBILE SWIPE (left/right) PARA MAGPALIT NG TAB ----------------
+// Home ↔ Devices ↔ Downloads lang ang kasama (hindi Analytics dahil hiwalay
+// na full screen 'yun, hindi bahagi ng tab-nav cycle). Gumagana lang ito
+// habang bukas ang mainScreen (hindi sa loob ng Device Detail / Analytics).
+(function () {
+  const SWIPE_TAB_ORDER = ['home', 'devices', 'downloads'];
+  const SWIPE_MIN_DIST = 55;      // pinakamaliit na distansya (px) para tawaging swipe
+  const SWIPE_MAX_OFF_AXIS = 70;  // kung gaano lang ka-vertical bago ituring na scroll, hindi swipe
+  const SWIPE_MAX_TIME = 600;     // ms — kung mas matagal pa dito, hindi na ituturing na swipe
+
+  let touchStartX = 0, touchStartY = 0, touchStartTime = 0;
+
+  document.addEventListener('touchstart', (e) => {
+    if (document.getElementById('mainScreen').style.display === 'none') return;
+    if (e.touches.length !== 1) return;
+    touchStartX = e.touches[0].clientX;
+    touchStartY = e.touches[0].clientY;
+    touchStartTime = Date.now();
+  }, { passive: true });
+
+  document.addEventListener('touchend', (e) => {
+    if (!touchStartTime) return;
+    if (document.getElementById('mainScreen').style.display === 'none') { touchStartTime = 0; return; }
+
+    const touch = e.changedTouches[0];
+    const dx = touch.clientX - touchStartX;
+    const dy = touch.clientY - touchStartY;
+    const dt = Date.now() - touchStartTime;
+    touchStartTime = 0;
+
+    if (dt > SWIPE_MAX_TIME) return;
+    if (Math.abs(dx) < SWIPE_MIN_DIST) return;
+    if (Math.abs(dy) > SWIPE_MAX_OFF_AXIS) return;
+
+    const activeBtn = document.querySelector('.tab-btn.active[data-tab]');
+    const current = activeBtn ? activeBtn.getAttribute('data-tab') : 'home';
+    const idx = SWIPE_TAB_ORDER.indexOf(current);
+    if (idx === -1) return;
+
+    if (dx < 0 && idx < SWIPE_TAB_ORDER.length - 1) {
+      switchTab(SWIPE_TAB_ORDER[idx + 1]); // swipe left → susunod na tab
+    } else if (dx > 0 && idx > 0) {
+      switchTab(SWIPE_TAB_ORDER[idx - 1]); // swipe right → nakaraang tab
+    }
+  }, { passive: true });
+})();
+
 // ---------------- SESSION / IDLE HANDLING ----------------
+const IDLE_WARNING_MS = 2 * 60 * 1000; // ipakita ang countdown 2 minuto bago mag-logout
+const IDLE_DANGER_MS = 30 * 1000; // pulahin ang countdown sa huling 30 segundo
+
 ['click', 'keydown', 'touchstart'].forEach(evt =>
   document.addEventListener(evt, () => { lastActivityAt = Date.now(); })
 );
+
+function updateIdleCountdown() {
+  const pill = document.getElementById('idleCountdownPill');
+  if (!adminKey) { pill.style.display = 'none'; return; }
+
+  const remaining = IDLE_LOGOUT_MS - (Date.now() - lastActivityAt);
+  if (remaining > IDLE_WARNING_MS) {
+    pill.style.display = 'none';
+    return;
+  }
+
+  const clamped = Math.max(0, remaining);
+  const mins = Math.floor(clamped / 60000);
+  const secs = Math.floor((clamped % 60000) / 1000);
+  pill.innerText = `⏳ Auto-logout sa ${mins}:${String(secs).padStart(2, '0')}`;
+  pill.classList.toggle('idle-countdown-danger', clamped <= IDLE_DANGER_MS);
+  pill.style.display = 'inline-flex';
+}
+
 setInterval(() => {
   if (adminKey && Date.now() - lastActivityAt > IDLE_LOGOUT_MS) {
     logout('Na-logout ka dahil sa 20 minutong walang aktibidad.');
+    return;
   }
-}, 30 * 1000);
+  updateIdleCountdown();
+}, 1000);
 
 function login() {
   adminKey = document.getElementById('adminKeyInput').value.trim();
@@ -1098,6 +1199,7 @@ function logout(message) {
   document.getElementById('loginScreen').style.display = 'block';
   document.getElementById('loginError').innerText = '';
   document.getElementById('adminKeyInput').value = '';
+  document.getElementById('idleCountdownPill').style.display = 'none';
   if (message) toast(message, 'info');
 }
 
@@ -1484,9 +1586,12 @@ async function loadDevices() {
       const fallback = seen ? (seen.storeName || 'Walang pangalan') : 'Hindi pa nakikitang gumagawa ng request';
       const displayName = devLabel ? `🏷️ ${devLabel}` : fallback;
       const revokeName = devLabel || fallback;
+      const online = !!(seen && seen.online);
       return `<div class="row">
         <div class="row-info">
-          <div class="id">${id}</div>
+          <div class="id">${id}
+            <span class="badge" style="${online ? 'background:var(--green-bg,#0f2e1c); color:var(--green,#4ade80);' : 'background:var(--gray-bg,#2a2a2a); color:var(--gray,#888);'}">${online ? '🟢 ONLINE' : '⚪ OFFLINE'}</span>
+          </div>
           <div class="meta">${displayName}${devLabel && seen ? ' · ' + (seen.storeName || 'walang self-reported na pangalan') : ''}${seen ? ' · ' + timeAgo(seen.lastSeenAt) : ''}</div>
         </div>
         <div style="display:flex; flex-direction:column; gap:6px;">
