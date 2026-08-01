@@ -3019,8 +3019,22 @@ function obfuscateReleaseTree(tmpDir) {
                 obfuscatedCount += 1;
             } else if (RELEASE_HTML_TARGETS.has(rel)) {
                 let html = fs.readFileSync(full, 'utf8');
-                html = obfuscateHtmlInlineScripts(html, releaseClientObfOptions);
+                // FIX: dating "obfuscate inline scripts" muna bago "strip
+                // comments" — kaya kung may HTML comment na nagbabanggit
+                // lang ng literal na text na "<script>" sa loob ng prose
+                // nito (hal. isang comment na nagpapaliwanag TUNGKOL sa
+                // script tags), ang simpleng regex-based na script-scanner
+                // sa ibaba (obfuscateHtmlInlineScripts) ay nalilito —
+                // inaakala niyang totoong opening tag iyon, kaya kinukuha
+                // niya bilang "JS content" ang lahat mula doon hanggang sa
+                // SUSUNOD na tunay na </script> — kasama ang natitirang
+                // comment text — tapos sinusubukan itong i-parse bilang
+                // JavaScript (dito nanggagaling ang "Unexpected token"
+                // error). Sa pag-strip muna ng comments bago hanapin ang
+                // mga script tag, wala nang comment text na makakalito sa
+                // scanner.
                 html = stripHtmlComments(html);
+                html = obfuscateHtmlInlineScripts(html, releaseClientObfOptions);
                 fs.writeFileSync(full, html, 'utf8');
                 obfuscatedCount += 1;
             } else if (rel.toLowerCase().endsWith('.css') && !THIRD_PARTY_CSS.has(rel)) {
