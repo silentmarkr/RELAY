@@ -2904,6 +2904,38 @@ const RELEASE_CLIENT_TARGETS = new Set([
 ]);
 const RELEASE_ENV_LOADER_FILENAME = 'env-loader.js';
 
+// public/index.html — dito ilalagay ang comment-stripping AT
+// pag-obfuscate ng anumang inline <script> na laman nito (hiwalay
+// sa mga hiwalay na .js file na SERVER/CLIENT_TARGETS).
+const RELEASE_HTML_TARGETS = new Set([
+    path.join('public', 'index.html'),
+]);
+
+// Third-party CSS na dapat HUWAG galawin — kasama ang mga license/
+// attribution header comment nito (hal. "/*! Font Awesome Free ...
+// License ...") na kinakailangan panatilihin ayon sa lisensya nila.
+const THIRD_PARTY_CSS = new Set([
+    path.join('public', 'fontawesome.min.css'),
+    path.join('public', 'css', 'all.css'),
+    path.join('public', 'css', 'all.min.css'),
+    path.join('public', 'css', 'brands.css'),
+    path.join('public', 'css', 'brands.min.css'),
+    path.join('public', 'css', 'fontawesome.css'),
+    path.join('public', 'css', 'fontawesome.min.css'),
+    path.join('public', 'css', 'regular.css'),
+    path.join('public', 'css', 'regular.min.css'),
+    path.join('public', 'css', 'solid.css'),
+    path.join('public', 'css', 'solid.min.css'),
+    path.join('public', 'css', 'svg-with-js.css'),
+    path.join('public', 'css', 'svg-with-js.min.css'),
+    path.join('public', 'css', 'v4-font-face.css'),
+    path.join('public', 'css', 'v4-font-face.min.css'),
+    path.join('public', 'css', 'v4-shims.css'),
+    path.join('public', 'css', 'v4-shims.min.css'),
+    path.join('public', 'css', 'v5-font-face.css'),
+    path.join('public', 'css', 'v5-font-face.min.css'),
+]);
+
 const releaseServerObfOptions = {
     compact: true,
     target: 'node',
@@ -2939,6 +2971,32 @@ function obfuscateFileInPlace(fullPath, options) {
     fs.writeFileSync(fullPath, result.getObfuscatedCode(), 'utf8');
 }
 
+// Tinatanggal ang lahat ng <!-- ... --> na comment sa isang HTML file.
+function stripHtmlComments(html) {
+    return html.replace(/<!--[\s\S]*?-->/g, '');
+}
+
+// Tinatanggal ang lahat ng /* ... */ na comment sa isang CSS file.
+function stripCssComments(css) {
+    return css.replace(/\/\*[\s\S]*?\*\//g, '');
+}
+
+// Hinahanap at ino-obfuscate ang laman ng anumang INLINE <script> (walang
+// src="...") sa isang HTML file — dito rin daanan ang comments/logic na
+// direktang nakasulat sa index.html mismo, hindi lang sa hiwalay na .js
+// files. Ang mga <script src="..."> (external references) ay HINDI
+// hinahawakan dito.
+function obfuscateHtmlInlineScripts(html, options) {
+    return html.replace(/<script(\s[^>]*)?>([\s\S]*?)<\/script>/gi, (match, attrs, content) => {
+        const attrStr = attrs || '';
+        if (/\bsrc\s*=/i.test(attrStr)) return match; // external script, walang inline content
+        const trimmed = content.trim();
+        if (!trimmed) return match; // walang laman
+        const obfuscated = JavaScriptObfuscator.obfuscate(content, options).getObfuscatedCode();
+        return `<script${attrStr}>${obfuscated}</script>`;
+    });
+}
+
 function obfuscateReleaseTree(tmpDir) {
     let obfuscatedCount = 0;
 
@@ -2958,6 +3016,16 @@ function obfuscateReleaseTree(tmpDir) {
                 obfuscatedCount += 1;
             } else if (RELEASE_CLIENT_TARGETS.has(rel)) {
                 obfuscateFileInPlace(full, releaseClientObfOptions);
+                obfuscatedCount += 1;
+            } else if (RELEASE_HTML_TARGETS.has(rel)) {
+                let html = fs.readFileSync(full, 'utf8');
+                html = obfuscateHtmlInlineScripts(html, releaseClientObfOptions);
+                html = stripHtmlComments(html);
+                fs.writeFileSync(full, html, 'utf8');
+                obfuscatedCount += 1;
+            } else if (rel.toLowerCase().endsWith('.css') && !THIRD_PARTY_CSS.has(rel)) {
+                const css = fs.readFileSync(full, 'utf8');
+                fs.writeFileSync(full, stripCssComments(css), 'utf8');
                 obfuscatedCount += 1;
             }
         }
