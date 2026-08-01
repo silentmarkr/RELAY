@@ -582,6 +582,83 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
 .timeline-type-device_revoked::before { background: var(--red); box-shadow: 0 0 0 3px var(--red-bg); }
 .timeline-type-restore_checkin::before { background: var(--amber); box-shadow: 0 0 0 3px var(--amber-bg); }
 
+/* ---------- TAB NAVIGATION ---------- */
+.tab-nav {
+  display: flex;
+  gap: 4px;
+  padding: 8px 10px;
+  background: var(--bg-raise);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 61px;
+  z-index: 40;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tab-nav::-webkit-scrollbar { display: none; }
+.tab-btn {
+  position: relative;
+  flex: 1;
+  min-width: 76px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 8px 6px 7px;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color .15s ease, background .15s ease, border-color .15s ease;
+}
+.tab-btn:hover { color: var(--text); background: var(--card-hover); }
+.tab-btn .tab-icon { font-size: 16px; line-height: 1; }
+.tab-btn.active {
+  color: var(--accent-bright);
+  background: var(--accent-soft);
+  border-color: var(--accent-dim);
+}
+.tab-badge {
+  position: absolute;
+  top: 3px;
+  right: 10px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--red);
+  color: #2b0605;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 0 0 2px var(--bg-raise);
+}
+.tab-dot {
+  position: absolute;
+  top: 6px;
+  right: 14px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--amber);
+  box-shadow: 0 0 0 2px var(--bg-raise);
+}
+.tab-panel { animation: tab-fade-in .15s ease-out; }
+@keyframes tab-fade-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.footer-note a { color: var(--muted); text-decoration: underline; }
+.footer-note a:hover { color: var(--accent-bright); }
+
 </style>
 </head>
 <body>
@@ -613,117 +690,143 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
       </div>
     </div>
     <div class="topbar-actions">
-      <button class="icon-btn" onclick="openAnalytics()">📊 Analytics</button>
       <button id="installBtn" class="icon-btn" style="display:none;" onclick="installApp()">⬇️ I-install</button>
-      <button class="icon-btn" onclick="logout()">🚪 Log out</button>
     </div>
   </div>
 
+  <div class="tab-nav">
+    <button class="tab-btn active" data-tab="home" onclick="switchTab('home')">
+      <span class="tab-icon">🏠</span><span>Home</span>
+      <span class="tab-badge" id="tabBadgeHome" style="display:none;">0</span>
+    </button>
+    <button class="tab-btn" data-tab="devices" onclick="switchTab('devices')">
+      <span class="tab-icon">📟</span><span>Devices</span>
+      <span class="tab-badge" id="tabBadgeDevices" style="display:none;">0</span>
+    </button>
+    <button class="tab-btn" data-tab="downloads" onclick="switchTab('downloads')">
+      <span class="tab-icon">📦</span><span>Downloads</span>
+      <span class="tab-dot" id="tabDotDownloads" style="display:none;"></span>
+    </button>
+    <button class="tab-btn" data-tab="analytics" onclick="openAnalytics()">
+      <span class="tab-icon">📊</span><span>Analytics</span>
+    </button>
+  </div>
+
   <div class="wrap">
-    <div id="restrictionStatus" class="status-line"></div>
 
-    <div class="card">
-      <h2>💾 Backup / Restore</h2>
-      <div class="backup-note">
-        Walang persistent disk ang Render free tier — nawawala ang allowed devices, naka-unlock na features, at history sa bawat <code>git push</code>/redeploy, at mawawala LAHAT kung ide-delete mo ang service/domain. I-download ang backup paminsan-minsan (lalo na pagkatapos ng bagong unlock/customer) at itago sa ligtas na lugar.
+    <div class="tab-panel" id="tabPanel-home">
+      <div id="restrictionStatus" class="status-line"></div>
+
+      <div class="stat-strip">
+        <div class="stat-card">
+          <div class="stat-num" id="statAllowed">—</div>
+          <div class="stat-label">Allowed devices</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-num" id="statPending">—</div>
+          <div class="stat-label">Pending OTPs</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-num" id="statSeen">—</div>
+          <div class="stat-label">Seen devices</div>
+        </div>
+        <div class="stat-card" style="cursor:pointer;" onclick="switchTab('devices'); document.getElementById('seenFilterStatus').value='flagged'; renderSeenList(); document.getElementById('seenList').scrollIntoView({behavior:'smooth'});">
+          <div class="stat-num" id="statCloneFlagged" style="color:var(--red);">—</div>
+          <div class="stat-label">🚩 Clone flagged</div>
+        </div>
       </div>
-      <div class="backup-row">
-        <button class="btn-primary" onclick="downloadBackup()">⬇️ I-download ang Backup</button>
-        <button class="btn-ghost" onclick="document.getElementById('restoreFileInput').click()">⬆️ I-restore mula sa Backup</button>
+
+      <div class="card">
+        <h2>🔑 Pending OTP requests <span class="count-pill" id="otpCountPill">0</span></h2>
+        <div id="otpList" class="empty">Loading...</div>
       </div>
-      <input type="file" id="restoreFileInput" accept="application/json" style="display:none;" onchange="restoreBackupFromFile(event)">
-      <div class="backup-lastexport" id="backupLastExport"></div>
-      <label class="auto-backup-toggle">
-        <input type="checkbox" id="autoBackupOnAllowToggle" onchange="onAutoBackupToggleChange()">
-        Awtomatikong i-download ang backup (may petsa/oras stamp) kapag may bagong na-allow na device
-      </label>
-      <div class="backup-note" style="margin-top:6px;">
-        Ang filename ng auto-download ay may petsa/oras stamp (hal. <code>relaybackup07260130.json</code> = July 26, 1:30 AM — LOCAL na oras ng browser mo), kaya iba-ibang file ito kada allow (hindi nag-o-overwrite sa isa't isa). Ito ang mananatili sa Downloads folder mo bilang history ng mga backup.
+
+      <div class="card">
+        <h2>Manual na magdagdag ng device</h2>
+        <input type="text" id="manualIdInput" placeholder="Paste installation ID dito">
+        <button class="btn-primary" onclick="manualAllow()">+ Allow</button>
       </div>
     </div>
 
-    <div class="card">
-      <h2>📦 I-download ang Client Package <span style="font-size:11px; color:var(--muted); font-weight:normal;">(offline setup ng bagong kliyente)</span></h2>
-      <div class="backup-note">
-        Gumawa ng one-time (o limited-use) na link para makapag-download ang bagong kliyente ng <code>omnipos-client.zip</code> — mga files na kailangan niya para i-install at patakbuhin nang offline ang OMNIPOS sa sariling device. I-"Build Release" muna kung may bagong update sa OMNIPOS code bago gumawa ng link.
+    <div class="tab-panel" id="tabPanel-devices" style="display:none;">
+      <div class="card">
+        <h2>Allowed devices <span class="count-pill" id="allowedCountPill">0</span></h2>
+        <div id="allowedList" class="empty">Loading...</div>
       </div>
-      <div class="backup-row">
-        <button class="btn-ghost" onclick="buildRelease()" id="buildReleaseBtn">🛠️ I-build ang Release (git → zip)</button>
-        <button class="btn-ghost" onclick="downloadCodesJSON()">⬇️ I-download ang Listahan (JSON)</button>
-      </div>
-      <div class="backup-row" style="margin-top:10px;">
-        <input type="text" id="newCodeLabel" placeholder="Label (hal. Store ni Juan)" style="flex:2; min-width:160px;">
-        <input type="number" id="newCodeMaxUses" placeholder="Max uses (default 1)" min="1" style="flex:1; min-width:120px;">
-        <input type="number" id="newCodeExpiresHours" placeholder="Mag-e-expire sa (oras)" min="1" style="flex:1; min-width:120px;">
-        <button class="btn-primary" onclick="generateDownloadCode()">➕ Gumawa ng Download Link</button>
-      </div>
-      <div id="downloadCodesList" class="empty" style="margin-top:12px;">Loading...</div>
-    </div>
 
-    <div class="stat-strip">
-      <div class="stat-card">
-        <div class="stat-num" id="statAllowed">—</div>
-        <div class="stat-label">Allowed devices</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-num" id="statPending">—</div>
-        <div class="stat-label">Pending OTPs</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-num" id="statSeen">—</div>
-        <div class="stat-label">Seen devices</div>
-      </div>
-      <div class="stat-card" style="cursor:pointer;" onclick="document.getElementById('seenFilterStatus').value='flagged'; renderSeenList(); document.getElementById('seenList').scrollIntoView({behavior:'smooth'});">
-        <div class="stat-num" id="statCloneFlagged" style="color:var(--red);">—</div>
-        <div class="stat-label">🚩 Clone flagged</div>
+      <div class="card">
+        <h2>Recently seen (lahat ng humiling) <span class="count-pill" id="seenCountPill">0</span></h2>
+        <div class="filter-bar">
+          <input type="text" id="seenFilterInput" placeholder="Hanapin: store, username, o installation ID" oninput="renderSeenList()">
+          <select id="seenFilterStatus" onchange="renderSeenList()">
+            <option value="all">Lahat</option>
+            <option value="allowed">Allowed lang</option>
+            <option value="blocked">Blocked lang</option>
+            <option value="flagged">🚩 Naka-flag na clone lang</option>
+          </select>
+          <select id="seenSortBy" onchange="renderSeenList()">
+            <option value="lastSeen">I-sort: Huling nakita</option>
+            <option value="mostUnlocked">I-sort: Pinaka-marami na-unlock</option>
+            <option value="storeName">I-sort: Pangalan ng tindahan</option>
+          </select>
+          <button class="btn-export" onclick="exportDevicesCSV()">⬇️ Export CSV</button>
+        </div>
+        <div id="seenList" class="empty">Loading...</div>
       </div>
     </div>
 
-    <div class="card">
-      <h2>🔑 Pending OTP requests <span class="count-pill" id="otpCountPill">0</span></h2>
-      <div id="otpList" class="empty">Loading...</div>
-    </div>
+    <div class="tab-panel" id="tabPanel-downloads" style="display:none;">
+      <div id="backupSyncBanner" class="sync-banner sync-orange">
+        <div class="sync-dot-blink sync-orange" id="backupSyncDot"></div>
+        <div class="sync-banner-text">
+          <div id="backupSyncMain">Naghihintay pa ng unang successful auto-backup check-in...</div>
+          <div class="sync-banner-sub" id="backupSyncSub">Database → Download/RELAY_BACKUP</div>
+        </div>
+      </div>
 
-    <div class="card">
-      <h2>Manual na magdagdag ng device</h2>
-      <input type="text" id="manualIdInput" placeholder="Paste installation ID dito">
-      <button class="btn-primary" onclick="manualAllow()">+ Allow</button>
-    </div>
+      <div class="card">
+        <h2>💾 Backup / Restore</h2>
+        <div class="backup-note">
+          Walang persistent disk ang Render free tier — nawawala ang allowed devices, naka-unlock na features, at history sa bawat <code>git push</code>/redeploy, at mawawala LAHAT kung ide-delete mo ang service/domain. I-download ang backup paminsan-minsan (lalo na pagkatapos ng bagong unlock/customer) at itago sa ligtas na lugar.
+        </div>
+        <div class="backup-row">
+          <button class="btn-primary" onclick="downloadBackup()">⬇️ I-download ang Backup</button>
+          <button class="btn-ghost" onclick="document.getElementById('restoreFileInput').click()">⬆️ I-restore mula sa Backup</button>
+        </div>
+        <input type="file" id="restoreFileInput" accept="application/json" style="display:none;" onchange="restoreBackupFromFile(event)">
+        <div class="backup-lastexport" id="backupLastExport"></div>
+        <label class="auto-backup-toggle">
+          <input type="checkbox" id="autoBackupOnAllowToggle" onchange="onAutoBackupToggleChange()">
+          Awtomatikong i-download ang backup (may petsa/oras stamp) kapag may bagong na-allow na device
+        </label>
+        <div class="backup-note" style="margin-top:6px;">
+          Ang filename ng auto-download ay may petsa/oras stamp (hal. <code>relaybackup07260130.json</code> = July 26, 1:30 AM — LOCAL na oras ng browser mo), kaya iba-ibang file ito kada allow (hindi nag-o-overwrite sa isa't isa). Ito ang mananatili sa Downloads folder mo bilang history ng mga backup.
+        </div>
+      </div>
 
-    <div id="backupSyncBanner" class="sync-banner sync-orange">
-      <div class="sync-dot-blink sync-orange" id="backupSyncDot"></div>
-      <div class="sync-banner-text">
-        <div id="backupSyncMain">Naghihintay pa ng unang successful auto-backup check-in...</div>
-        <div class="sync-banner-sub" id="backupSyncSub">Database → Download/RELAY_BACKUP</div>
+      <div class="card">
+        <h2>📦 I-download ang Client Package <span style="font-size:11px; color:var(--muted); font-weight:normal;">(offline setup ng bagong kliyente)</span></h2>
+        <div class="backup-note">
+          Gumawa ng one-time (o limited-use) na link para makapag-download ang bagong kliyente ng <code>omnipos-client.zip</code> — mga files na kailangan niya para i-install at patakbuhin nang offline ang OMNIPOS sa sariling device. I-"Build Release" muna kung may bagong update sa OMNIPOS code bago gumawa ng link.
+        </div>
+        <div class="backup-row">
+          <button class="btn-ghost" onclick="buildRelease()" id="buildReleaseBtn">🛠️ I-build ang Release (git → zip)</button>
+          <button class="btn-ghost" onclick="downloadCodesJSON()">⬇️ I-download ang Listahan (JSON)</button>
+        </div>
+        <div class="backup-row" style="margin-top:10px;">
+          <input type="text" id="newCodeLabel" placeholder="Label (hal. Store ni Juan)" style="flex:2; min-width:160px;">
+          <input type="number" id="newCodeMaxUses" placeholder="Max uses (default 1)" min="1" style="flex:1; min-width:120px;">
+          <input type="number" id="newCodeExpiresHours" placeholder="Mag-e-expire sa (oras)" min="1" style="flex:1; min-width:120px;">
+          <button class="btn-primary" onclick="generateDownloadCode()">➕ Gumawa ng Download Link</button>
+        </div>
+        <div id="downloadCodesList" class="empty" style="margin-top:12px;">Loading...</div>
       </div>
     </div>
 
-    <div class="card">
-      <h2>Allowed devices <span class="count-pill" id="allowedCountPill">0</span></h2>
-      <div id="allowedList" class="empty">Loading...</div>
+    <div class="footer-note">
+      Awtomatikong mag-lo-logout pagkatapos ng 20 minutong walang aktibidad. &middot;
+      <a href="#" onclick="logout(); return false;">Log out</a>
     </div>
-
-    <div class="card">
-      <h2>Recently seen (lahat ng humiling) <span class="count-pill" id="seenCountPill">0</span></h2>
-      <div class="filter-bar">
-        <input type="text" id="seenFilterInput" placeholder="Hanapin: store, username, o installation ID" oninput="renderSeenList()">
-        <select id="seenFilterStatus" onchange="renderSeenList()">
-          <option value="all">Lahat</option>
-          <option value="allowed">Allowed lang</option>
-          <option value="blocked">Blocked lang</option>
-          <option value="flagged">🚩 Naka-flag na clone lang</option>
-        </select>
-        <select id="seenSortBy" onchange="renderSeenList()">
-          <option value="lastSeen">I-sort: Huling nakita</option>
-          <option value="mostUnlocked">I-sort: Pinaka-marami na-unlock</option>
-          <option value="storeName">I-sort: Pangalan ng tindahan</option>
-        </select>
-        <button class="btn-export" onclick="exportDevicesCSV()">⬇️ Export CSV</button>
-      </div>
-      <div id="seenList" class="empty">Loading...</div>
-    </div>
-
-    <div class="footer-note">Awtomatikong mag-lo-logout pagkatapos ng 20 minutong walang aktibidad.</div>
   </div>
 </div>
 
@@ -935,6 +1038,37 @@ document.getElementById('confirmBackdrop').addEventListener('click', (e) => {
     e.currentTarget.style.display = 'none';
   }
 });
+
+// ---------------- TAB NAVIGATION (Home / Devices / Downloads) ----------------
+function switchTab(name) {
+  ['home', 'devices', 'downloads'].forEach(t => {
+    const panel = document.getElementById('tabPanel-' + t);
+    if (panel) panel.style.display = (t === name) ? 'block' : 'none';
+  });
+  document.querySelectorAll('.tab-btn[data-tab]').forEach(btn => {
+    btn.classList.toggle('active', btn.getAttribute('data-tab') === name);
+  });
+}
+
+// Isinasama ang bilang ng "kailangang ayusin" (pending OTP, clone flagged,
+// backup na hindi pa naka-sync) bilang badge/dot sa bawat tab, kaya kahit
+// nasa ibang tab ang admin, alam niya agad kung saan may kailangan siyang
+// tignan nang hindi kailangang i-click isa-isa ang mga tab.
+function updateTabBadges() {
+  const pending = parseInt(document.getElementById('otpCountPill').innerText, 10) || 0;
+  const homeBadge = document.getElementById('tabBadgeHome');
+  homeBadge.innerText = pending;
+  homeBadge.style.display = pending > 0 ? 'flex' : 'none';
+
+  const flagged = parseInt(document.getElementById('statCloneFlagged').innerText, 10) || 0;
+  const devicesBadge = document.getElementById('tabBadgeDevices');
+  devicesBadge.innerText = flagged;
+  devicesBadge.style.display = flagged > 0 ? 'flex' : 'none';
+
+  const syncBanner = document.getElementById('backupSyncBanner');
+  const needsBackupAttention = syncBanner && syncBanner.classList.contains('sync-orange');
+  document.getElementById('tabDotDownloads').style.display = needsBackupAttention ? 'block' : 'none';
+}
 
 // ---------------- SESSION / IDLE HANDLING ----------------
 ['click', 'keydown', 'touchstart'].forEach(evt =>
@@ -1367,6 +1501,7 @@ async function loadDevices() {
   lastLoadedDevices = data.seenDevices;
   document.getElementById('seenCountPill').innerText = data.seenDevices.length;
   renderSeenList();
+  updateTabBadges();
 }
 
 function renderSeenList() {
