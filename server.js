@@ -23,6 +23,7 @@ const os = require('os');
 const { execSync } = require('child_process');
 const archiver = require('archiver');
 const Redis = require('ioredis');
+const JavaScriptObfuscator = require('javascript-obfuscator');
 
 // --------------------------------------------------------------
 // PERSISTENT STORAGE (Render Key Value / Redis) — dating JSON files lang
@@ -2876,6 +2877,130 @@ function removeExcludedRecursive(dir) {
     }
 }
 
+// --------------------------------------------------------------
+// OBFUSCATION NG RELEASE PACKAGE (gagana lang sa loob ng tmpDir —
+// HINDI kailanman ginagalaw ang orihinal na OMNIPOS git repo/main
+// branch mo. Isa lang itong "papel" ng temporary na cloned copy na
+// buburahin din pagkatapos i-zip.)
+//
+// Parehong config ito sa build-release.js na hiwalay na binigay para
+// sa OMNIPOS repo mismo (para consistent ang behavior/quality), pero
+// dito ito tinatawag AWTOMATIKO bawat build-release DITO SA RELAY —
+// kaya hindi na kailangan pang mano-manong tumakbo ng `npm run
+// build:release` sa panig mo bago mag-deploy.
+// --------------------------------------------------------------
+const RELEASE_SERVER_TARGETS = new Set([
+    'server.js',
+    'db.js',
+    'migrate-to-sqlite.js',
+    '_fix_project.js',
+]);
+const RELEASE_CLIENT_TARGETS = new Set([
+    path.join('public', 'app.js'),
+    path.join('public', 'bt-printer.js'),
+    path.join('public', 'faq-engine.js'),
+    path.join('public', 'faq-knowledge.js'),
+    path.join('public', 'service-worker.js'),
+]);
+const RELEASE_ENV_LOADER_FILENAME = 'env-loader.js';
+
+const releaseServerObfOptions = {
+    compact: true,
+    target: 'node',
+    controlFlowFlattening: true,
+    controlFlowFlatteningThreshold: 0.4,
+    deadCodeInjection: true,
+    deadCodeInjectionThreshold: 0.15,
+    debugProtection: false,
+    disableConsoleOutput: false,
+    identifierNamesGenerator: 'hexadecimal',
+    numbersToExpressions: true,
+    renameGlobals: false,
+    selfDefending: true,
+    simplify: true,
+    splitStrings: true,
+    splitStringsChunkLength: 12,
+    stringArray: true,
+    stringArrayEncoding: ['base64'],
+    stringArrayThreshold: 0.75,
+    transformObjectKeys: true,
+    unicodeEscapeSequence: false,
+};
+const releaseClientObfOptions = {
+    ...releaseServerObfOptions,
+    target: 'browser',
+    controlFlowFlatteningThreshold: 0.3,
+    deadCodeInjectionThreshold: 0.1,
+};
+
+function obfuscateFileInPlace(fullPath, options) {
+    const code = fs.readFileSync(fullPath, 'utf8');
+    const result = JavaScriptObfuscator.obfuscate(code, options);
+    fs.writeFileSync(fullPath, result.getObfuscatedCode(), 'utf8');
+}
+
+function obfuscateReleaseTree(tmpDir) {
+    let obfuscatedCount = 0;
+
+    function walk(dir, baseRel) {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            const rel = path.join(baseRel, entry.name);
+            const full = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+                walk(full, rel);
+                continue;
+            }
+            // env-loader.js hawak na ng encryptClientEnvAndPatchLoader().
+            if (rel === RELEASE_ENV_LOADER_FILENAME) continue;
+
+            if (RELEASE_SERVER_TARGETS.has(rel)) {
+                obfuscateFileInPlace(full, releaseServerObfOptions);
+                obfuscatedCount += 1;
+            } else if (RELEASE_CLIENT_TARGETS.has(rel)) {
+                obfuscateFileInPlace(full, releaseClientObfOptions);
+                obfuscatedCount += 1;
+            }
+        }
+    }
+
+    walk(tmpDir, '');
+    return obfuscatedCount;
+}
+
+// Ini-encrypt ang client .env (AES-256-GCM) at ipapasok ang key sa
+// env-loader.js (kung nasa cloned repo ito) BAGO ito i-obfuscate.
+// Kung walang env-loader.js sa cloned repo (hal. hindi mo pa na-commit),
+// babalik lang ito sa dating plaintext .env — walang masisira, pero
+// mananatiling readable ang .env sa ganitong kaso.
+function encryptClientEnvAndPatchLoader(tmpDir, envContent) {
+    const loaderPath = path.join(tmpDir, RELEASE_ENV_LOADER_FILENAME);
+
+    if (!fs.existsSync(loaderPath)) {
+        fs.writeFileSync(path.join(tmpDir, '.env'), envContent);
+        return { encrypted: false };
+    }
+
+    const key = crypto.randomBytes(32);
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+    const encrypted = Buffer.concat([cipher.update(envContent, 'utf8'), cipher.final()]);
+    const tag = cipher.getAuthTag();
+
+    const payload = {
+        iv: iv.toString('hex'),
+        tag: tag.toString('hex'),
+        data: encrypted.toString('base64'),
+    };
+    fs.writeFileSync(path.join(tmpDir, '.env'), JSON.stringify(payload));
+
+    const loaderCode = fs.readFileSync(loaderPath, 'utf8')
+        .replace('__ENV_KEY_HEX__', key.toString('hex'));
+    fs.writeFileSync(loaderPath, loaderCode, 'utf8');
+    obfuscateFileInPlace(loaderPath, releaseServerObfOptions);
+
+    return { encrypted: true };
+}
+
 app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => {
     const repoUrl = (req.body && req.body.repoUrl) || process.env.OMNIPOS_REPO_URL;
     const ref = (req.body && req.body.ref) || 'main';
@@ -2910,7 +3035,12 @@ app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => 
             `PORT=${clientPort}`,
             ''
         ].join('\n');
-        fs.writeFileSync(path.join(tmpDir, '.env'), clientEnvContent);
+        const envResult = encryptClientEnvAndPatchLoader(tmpDir, clientEnvContent);
+
+        // I-obfuscate ang sariling server-side/client-side JS ng OMNIPOS
+        // DITO SA tmpDir lang (staging copy) — hindi kailanman naaapektuhan
+        // ang orihinal na git repo/main branch mo.
+        const obfuscatedCount = obfuscateReleaseTree(tmpDir);
 
         const releaseDir = path.dirname(RELEASE_PACKAGE_PATH);
         if (!fs.existsSync(releaseDir)) fs.mkdirSync(releaseDir, { recursive: true });
@@ -2926,12 +3056,21 @@ app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => 
         });
 
         const stats = fs.statSync(RELEASE_PACKAGE_PATH);
-        logActivity(null, 'release_package_built', { ref, sizeBytes: stats.size });
+        logActivity(null, 'release_package_built', {
+            ref,
+            sizeBytes: stats.size,
+            obfuscatedFiles: obfuscatedCount,
+            envEncrypted: envResult.encrypted
+        });
 
         res.json({
             success: true,
-            message: 'Nagawa ang bagong release package.',
+            message: envResult.encrypted
+                ? `Nagawa ang bagong release package. Na-obfuscate ang ${obfuscatedCount} file(s), naka-encrypt na ang .env.`
+                : `Nagawa ang bagong release package. Na-obfuscate ang ${obfuscatedCount} file(s). PAALALA: walang env-loader.js sa repo mo — plaintext pa rin ang .env.`,
             sizeBytes: stats.size,
+            obfuscatedFiles: obfuscatedCount,
+            envEncrypted: envResult.encrypted,
             builtAt: Date.now()
         });
     } catch (err) {
