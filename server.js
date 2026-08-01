@@ -1958,6 +1958,108 @@ app.get('/relay/admin/api/cloud-backup/:installationId/download', requireAdminKe
 });
 
 // --------------------------------------------------------------
+// POST /relay/cloud-backup/restore  (SELF-SERVICE, tinatawag mismo ng
+// OMNIPOS CLIENT SERVER — hindi ng admin panel)
+//
+// MAHALAGANG PAALALA: ang requireApiKey ay SHARED SECRET — PAREHONG
+// key ang ginagamit ng LAHAT ng kliyente/installation (naka-bake sa
+// bawat client .env). Kaya HINDI ito sapat na proof-of-ownership —
+// kahit sinong may hawak ng leaked/nakitang installationId ng IBANG
+// tindahan ay kayang gumawa ng request papunta rito gamit lang ang
+// parehong shared key. Ang TUNAY na naghihiwalay dito ay ang
+// hardwareFingerprint check sa ibaba: dapat itong TUMUGMA sa huling
+// verified fingerprint na naka-bind sa installationId na ito (mula sa
+// /relay/verify-login flow) — ibig sabihin, dapat mismong ang PARE-
+// PAREHONG pisikal na device na huling nag-verify-login ang humihiling
+// ng restore, hindi lang basta may alam na installationId.
+//
+// Body: { installationId, hardwareFingerprint }
+// --------------------------------------------------------------
+app.post('/relay/cloud-backup/restore', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-restore', 10, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    const { installationId, hardwareFingerprint } = req.body;
+
+    if (!installationId || !hardwareFingerprint) {
+        return res.status(400).json({ success: false, message: 'Kulang ang installationId o hardwareFingerprint.' });
+    }
+
+    if (!isFeatureCurrentlyUnlocked(installationId, 'cloud_backup')) {
+        logActivity(installationId, 'cloud_backup_restore_blocked', { reason: 'feature_not_unlocked' });
+        return res.status(402).json({
+            success: false,
+            featureLocked: true,
+            featureId: 'cloud_backup',
+            featureName: FEATURE_CATALOG.cloud_backup.name,
+            price: FEATURE_CATALOG.cloud_backup.price,
+            message: 'Naka-lock pa ang Cloud Backup feature para sa installation na ito.'
+        });
+    }
+
+    // --- Proof-of-ownership check (HINDI lang basta yung shared API key) ---
+    const fpRecord = deviceFingerprints.get(installationId);
+    if (!fpRecord) {
+        logActivity(installationId, 'cloud_backup_restore_blocked', { reason: 'no_verified_fingerprint' });
+        return res.status(403).json({
+            success: false,
+            message: 'Wala pang na-verify na device fingerprint para sa installation na ito. Mag-login muna online (verify-login) bago mag-restore.'
+        });
+    }
+    if (fpRecord.flagged) {
+        logActivity(installationId, 'cloud_backup_restore_blocked', { reason: 'clone_flagged' });
+        return res.status(403).json({
+            success: false,
+            cloneSuspected: true,
+            message: 'Naka-flag ang device na ito bilang posibleng clone/duplicate. Kontakin ang developer/store owner para i-review at i-reset bago payagan ang restore.'
+        });
+    }
+    if (fpRecord.fingerprint !== hardwareFingerprint) {
+        logActivity(installationId, 'cloud_backup_restore_blocked', { reason: 'fingerprint_mismatch' });
+        return res.status(403).json({
+            success: false,
+            message: 'Hindi tumutugma ang device na ito sa huling na-verify na device para sa installation na ito. Kontakin ang developer/store owner kung totoong ikaw ang may-ari nito.'
+        });
+    }
+
+    if (!pgPool) {
+        return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
+    }
+
+    try {
+        const metaResult = await pgPool.query('SELECT * FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
+        if (!metaResult.rows[0]) {
+            return res.status(404).json({ success: false, message: 'Walang cloud backup na nakita para sa installation na ito.' });
+        }
+        const modulesResult = await pgPool.query('SELECT module, data, record_count FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
+
+        const modules = {};
+        modulesResult.rows.forEach((r) => { modules[r.module] = r.data; });
+
+        logActivity(installationId, 'cloud_backup_restored', {
+            moduleCount: modulesResult.rows.length,
+            lastSyncAt: metaResult.rows[0].last_sync_at
+        });
+
+        res.json({
+            success: true,
+            message: 'Nakuha ang cloud backup para sa installation na ito.',
+            meta: {
+                storeName: metaResult.rows[0].store_name,
+                totalRecords: metaResult.rows[0].total_records,
+                moduleCount: metaResult.rows[0].module_count,
+                lastSyncAt: metaResult.rows[0].last_sync_at
+            },
+            modules,
+            // Alam ng client kung aling fields ang hindi kasama (redacted)
+            // dito, para malinaw sa kanya na kailangan pa ring i-reset ang
+            // password ng mga na-restore na user account.
+            redactedFieldsByModule: CLOUD_BACKUP_REDACTED_FIELDS_BY_MODULE
+        });
+    } catch (err) {
+        console.error('⚠️ CLOUD_BACKUP: hindi na-kuha mula sa Postgres:', err.message);
+        res.status(500).json({ success: false, message: 'May error habang kinukuha mula sa Postgres: ' + err.message });
+    }
+});
+
+// --------------------------------------------------------------
 // POST /relay/verify-login  (ANTI-CLONE)
 // Tinatawag ito ng OMNIPOS CLIENT SERVER bago pumayag ng login sa
 // isang cashier/admin — (a) sa UNANG beses na kailanman gagawin ito
