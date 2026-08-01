@@ -2965,10 +2965,45 @@ const releaseClientObfOptions = {
     deadCodeInjectionThreshold: 0.1,
 };
 
+// PERFORMANCE FIX: control-flow flattening and dead-code injection cost
+// grow much faster than linearly with file size. server.js and
+// public/app.js are each several hundred KB, and running them through
+// the same thresholds as small files is the main reason build-release
+// used to take a very long time (and, on a CPU-constrained host like a
+// Render free instance, block the process long enough to look "stuck").
+// Files at or above this size get scaled-down thresholds instead —
+// still fully obfuscated (renaming, string array encoding, dead code,
+// self-defending all stay on), just without the worst-case blow-up.
+const LARGE_FILE_BYTES = 100 * 1024; // 100KB
+const largeServerObfOptions = {
+    ...releaseServerObfOptions,
+    controlFlowFlatteningThreshold: 0.1,
+    deadCodeInjectionThreshold: 0.04,
+};
+const largeClientObfOptions = {
+    ...releaseClientObfOptions,
+    controlFlowFlatteningThreshold: 0.08,
+    deadCodeInjectionThreshold: 0.03,
+};
+
+function pickReleaseObfOptions(fullPath, isClient) {
+    const isLarge = fs.statSync(fullPath).size >= LARGE_FILE_BYTES;
+    if (isClient) return isLarge ? largeClientObfOptions : releaseClientObfOptions;
+    return isLarge ? largeServerObfOptions : releaseServerObfOptions;
+}
+
 function obfuscateFileInPlace(fullPath, options) {
     const code = fs.readFileSync(fullPath, 'utf8');
     const result = JavaScriptObfuscator.obfuscate(code, options);
     fs.writeFileSync(fullPath, result.getObfuscatedCode(), 'utf8');
+}
+
+// Yields control back to the event loop. Used between obfuscation
+// passes so a long build doesn't fully block RELAY from answering other
+// requests (health checks, status polling, other terminals' API calls)
+// for its entire duration.
+function yieldToEventLoop() {
+    return new Promise((resolve) => setImmediate(resolve));
 }
 
 // Tinatanggal ang lahat ng <!-- ... --> na comment sa isang HTML file.
@@ -2997,8 +3032,12 @@ function obfuscateHtmlInlineScripts(html, options) {
     });
 }
 
-function obfuscateReleaseTree(tmpDir) {
-    let obfuscatedCount = 0;
+// Collects every file that needs obfuscating/stripping first (cheap,
+// synchronous directory walk), then processes that flat list with an
+// event-loop yield between each entry. Splitting "plan" from "execute"
+// like this is what lets us yield between files below.
+function planReleaseTree(tmpDir) {
+    const items = [];
 
     function walk(dir, baseRel) {
         for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -3008,44 +3047,63 @@ function obfuscateReleaseTree(tmpDir) {
                 walk(full, rel);
                 continue;
             }
-            // env-loader.js hawak na ng encryptClientEnvAndPatchLoader().
+            // env-loader.js is already handled by encryptClientEnvAndPatchLoader().
             if (rel === RELEASE_ENV_LOADER_FILENAME) continue;
 
             if (RELEASE_SERVER_TARGETS.has(rel)) {
-                obfuscateFileInPlace(full, releaseServerObfOptions);
-                obfuscatedCount += 1;
+                items.push({ type: 'server', full });
             } else if (RELEASE_CLIENT_TARGETS.has(rel)) {
-                obfuscateFileInPlace(full, releaseClientObfOptions);
-                obfuscatedCount += 1;
+                items.push({ type: 'client', full });
             } else if (RELEASE_HTML_TARGETS.has(rel)) {
-                let html = fs.readFileSync(full, 'utf8');
-                // FIX: dating "obfuscate inline scripts" muna bago "strip
-                // comments" — kaya kung may HTML comment na nagbabanggit
-                // lang ng literal na text na "<script>" sa loob ng prose
-                // nito (hal. isang comment na nagpapaliwanag TUNGKOL sa
-                // script tags), ang simpleng regex-based na script-scanner
-                // sa ibaba (obfuscateHtmlInlineScripts) ay nalilito —
-                // inaakala niyang totoong opening tag iyon, kaya kinukuha
-                // niya bilang "JS content" ang lahat mula doon hanggang sa
-                // SUSUNOD na tunay na </script> — kasama ang natitirang
-                // comment text — tapos sinusubukan itong i-parse bilang
-                // JavaScript (dito nanggagaling ang "Unexpected token"
-                // error). Sa pag-strip muna ng comments bago hanapin ang
-                // mga script tag, wala nang comment text na makakalito sa
-                // scanner.
-                html = stripHtmlComments(html);
-                html = obfuscateHtmlInlineScripts(html, releaseClientObfOptions);
-                fs.writeFileSync(full, html, 'utf8');
-                obfuscatedCount += 1;
+                items.push({ type: 'html', full });
             } else if (rel.toLowerCase().endsWith('.css') && !THIRD_PARTY_CSS.has(rel)) {
-                const css = fs.readFileSync(full, 'utf8');
-                fs.writeFileSync(full, stripCssComments(css), 'utf8');
-                obfuscatedCount += 1;
+                items.push({ type: 'css', full });
             }
         }
     }
 
     walk(tmpDir, '');
+    return items;
+}
+
+async function obfuscateReleaseTree(tmpDir) {
+    const items = planReleaseTree(tmpDir);
+    let obfuscatedCount = 0;
+
+    for (const { type, full } of items) {
+        if (type === 'server') {
+            obfuscateFileInPlace(full, pickReleaseObfOptions(full, false));
+        } else if (type === 'client') {
+            obfuscateFileInPlace(full, pickReleaseObfOptions(full, true));
+        } else if (type === 'html') {
+            let html = fs.readFileSync(full, 'utf8');
+            // FIX: inline-script obfuscation used to run BEFORE comment
+            // stripping — so an HTML comment that merely mentioned the
+            // literal text "<script>" in its prose (e.g. a comment
+            // explaining something about script tags) would confuse the
+            // simple regex-based scanner below (obfuscateHtmlInlineScripts):
+            // it would mistake that for a real opening tag and treat
+            // everything from there up to the NEXT real </script> —
+            // including the rest of the comment text — as "JS content",
+            // then try to parse that as JavaScript (the source of the
+            // "Unexpected token" error). Stripping comments before
+            // scanning for script tags removes any comment text that
+            // could confuse the scanner.
+            html = stripHtmlComments(html);
+            html = obfuscateHtmlInlineScripts(html, pickReleaseObfOptions(full, true));
+            fs.writeFileSync(full, html, 'utf8');
+        } else if (type === 'css') {
+            const css = fs.readFileSync(full, 'utf8');
+            fs.writeFileSync(full, stripCssComments(css), 'utf8');
+        }
+        obfuscatedCount += 1;
+        // Give RELAY a chance to answer other requests (status polling,
+        // health checks, other terminals) between each file instead of
+        // holding the event loop for the whole build in one unbroken
+        // stretch.
+        await yieldToEventLoop();
+    }
+
     return obfuscatedCount;
 }
 
@@ -3119,17 +3177,22 @@ app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => 
         ].join('\n');
         const envResult = encryptClientEnvAndPatchLoader(tmpDir, clientEnvContent);
 
-        // I-obfuscate ang sariling server-side/client-side JS ng OMNIPOS
-        // DITO SA tmpDir lang (staging copy) — hindi kailanman naaapektuhan
-        // ang orihinal na git repo/main branch mo.
-        const obfuscatedCount = obfuscateReleaseTree(tmpDir);
+        // Obfuscate OMNIPOS's own server-side/client-side JS here, inside
+        // tmpDir only (a staging copy) — this never touches your original
+        // git repo/main branch.
+        const obfuscatedCount = await obfuscateReleaseTree(tmpDir);
 
         const releaseDir = path.dirname(RELEASE_PACKAGE_PATH);
         if (!fs.existsSync(releaseDir)) fs.mkdirSync(releaseDir, { recursive: true });
 
         await new Promise((resolve, reject) => {
             const output = fs.createWriteStream(RELEASE_PACKAGE_PATH);
-            const archive = archiver('zip', { zlib: { level: 9 } });
+            // PERFORMANCE FIX: zlib level 9 (max compression) costs
+            // significantly more CPU time than level 6 for only a small
+            // reduction in zip size — not a good trade-off on a
+            // CPU-constrained host. Level 6 is zlib's own default and a
+            // much better time/size balance for a package this size.
+            const archive = archiver('zip', { zlib: { level: 6 } });
             output.on('close', resolve);
             archive.on('error', reject);
             archive.pipe(output);
