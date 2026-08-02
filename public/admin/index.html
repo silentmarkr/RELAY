@@ -841,8 +841,12 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
           Gumawa ng one-time (o limited-use) na link para makapag-download ang bagong kliyente ng <code>omnipos-client.zip</code> — mga files na kailangan niya para i-install at patakbuhin nang offline ang OMNIPOS sa sariling device. I-"Build Release" muna kung may bagong update sa OMNIPOS code bago gumawa ng link.
         </div>
         <div class="backup-row">
+          <input type="text" id="buildCaption" placeholder="Caption ng build na ito (opsyonal, hal. 'hotfix barcode scan')" style="flex:2; min-width:200px;">
           <button class="btn-ghost" onclick="buildRelease()" id="buildReleaseBtn">🛠️ I-build ang Release (git → zip)</button>
           <button class="btn-ghost" onclick="downloadCodesJSON()">⬇️ I-download ang Listahan (JSON)</button>
+        </div>
+        <div class="backup-note" style="margin-top:6px;">
+          Ang caption ay para lang sa history log sa ibaba — hindi ito nagbabago sa filename ng na-build na package (laging <code>omnipos-client.zip</code> pa rin ito, ino-overwrite lang kada build).
         </div>
         <div class="backup-row" style="margin-top:10px;">
           <input type="text" id="newCodeLabel" placeholder="Label (hal. Store ni Juan)" style="flex:2; min-width:160px;">
@@ -851,6 +855,14 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
           <button class="btn-primary" onclick="generateDownloadCode()">➕ Gumawa ng Download Link</button>
         </div>
         <div id="downloadCodesList" class="empty" style="margin-top:12px;">Loading...</div>
+      </div>
+
+      <div class="card">
+        <h2>🕘 History ng mga Build</h2>
+        <div class="backup-note">
+          Listahan ng mga beses na na-build/na-copy ang <code>omnipos-client.zip</code> — caption, ang naka-publish na version number noong oras ng build, at petsa/oras. Log lang ito; hindi nagbabago ang aktwal na filename ng zip.
+        </div>
+        <div id="buildHistoryList" class="empty" style="margin-top:12px;">Loading...</div>
       </div>
     </div>
 
@@ -1304,12 +1316,19 @@ let lastLoadedDownloadCodes = [];
 
 async function buildRelease() {
   const btn = document.getElementById('buildReleaseBtn');
+  const captionInput = document.getElementById('buildCaption');
+  const caption = captionInput ? captionInput.value.trim() : '';
   btn.disabled = true;
   btn.innerText = '⏳ Ginagawa...';
   try {
-    const data = await api('/relay/admin/api/build-release', { method: 'POST' });
+    const data = await api('/relay/admin/api/build-release', {
+      method: 'POST',
+      body: JSON.stringify(caption ? { caption } : {})
+    });
     if (data.success) {
       toast(`✅ Nagawa ang release (${(data.sizeBytes / 1024 / 1024).toFixed(2)} MB).`, 'success');
+      if (captionInput) captionInput.value = '';
+      loadBuildHistory();
     } else {
       toast(data.message || 'Hindi na-build ang release.', 'error');
     }
@@ -1318,6 +1337,43 @@ async function buildRelease() {
   } finally {
     btn.disabled = false;
     btn.innerText = '🛠️ I-build ang Release (git → zip)';
+  }
+}
+
+// --------------------------------------------------------------
+// BUILD HISTORY — log lang ng mga naitala nang "I-build ang Release".
+// Pinaka-bago munang entry (server na ang nag-oorder nito).
+// --------------------------------------------------------------
+function formatBuildTimestamp(ms) {
+  if (!ms) return '—';
+  const d = new Date(ms);
+  return d.toLocaleString('en-PH', { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+async function loadBuildHistory() {
+  const container = document.getElementById('buildHistoryList');
+  if (!container) return;
+  try {
+    const data = await api('/relay/admin/api/build-history');
+    if (!data.success || !Array.isArray(data.history) || data.history.length === 0) {
+      container.className = 'empty';
+      container.innerText = 'Wala pang naitalang build.';
+      return;
+    }
+    container.className = '';
+    container.innerHTML = data.history.map((h) => `
+      <div class="backup-row" style="padding:8px 0; border-bottom:1px solid var(--border, #2a2a2a); align-items:flex-start;">
+        <div style="flex:1; min-width:0;">
+          <div><strong>v${h.version || '0.0.0'}</strong> — ${h.caption || '(walang caption)'}</div>
+          <div style="font-size:11px; color:var(--muted);">
+            ${formatBuildTimestamp(h.builtAt)} · ${h.fileName || 'omnipos-client.zip'} · ${((h.sizeBytes || 0) / 1024 / 1024).toFixed(2)} MB
+          </div>
+        </div>
+      </div>
+    `).join('');
+  } catch (err) {
+    container.className = 'empty';
+    container.innerText = 'Hindi ma-load ang build history.';
   }
 }
 
@@ -2484,6 +2540,7 @@ function promptForLabel(currentLabel) {
 function startPolling() {
   loadDevices();
   loadDownloadCodes();
+  loadBuildHistory();
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(() => { if (adminKey) loadDevices(); }, 8000);
 }

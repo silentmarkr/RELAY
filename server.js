@@ -936,6 +936,54 @@ let downloadCodes = new Map(); // pupunuin sa bootstrapStores()
 const RELEASE_PACKAGE_PATH = path.join(__dirname, 'release', 'omnipos-client.zip');
 
 // --------------------------------------------------------------
+// BUILD HISTORY — log lang ng mga na-build/na-publish na
+// omnipos-client.zip. MAHALAGA: HINDI nito binabago ang filename ng
+// aktwal na na-build na package — laging "omnipos-client.zip" pa rin
+// ito sa RELEASE_PACKAGE_PATH (ino-overwrite lang kada build). Ang
+// history na ito ay HIWALAY na listahan lang (caption/label na inilagay
+// ng admin, ang naka-publish na version number nung oras na iyon, at
+// timestamp) — copy ng "kailan/ano" nangyari, hindi ng mismong file.
+// Pinaka-bago munang entry ang nasa unahan; pinuputol sa
+// BUILD_HISTORY_MAX_ENTRIES para hindi lumaki nang wala sa kontrol.
+// --------------------------------------------------------------
+const BUILD_HISTORY_PATH = path.join(__dirname, 'build-history.json');
+const BUILD_HISTORY_MAX_ENTRIES = 100;
+
+async function loadBuildHistory() {
+    const fromRedis = await redisGetJSON('build-history', null);
+    if (fromRedis !== null) return Array.isArray(fromRedis) ? fromRedis : [];
+    try {
+        const raw = fs.readFileSync(BUILD_HISTORY_PATH, 'utf8');
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+    } catch (err) {
+        return [];
+    }
+}
+
+function saveBuildHistory(list) {
+    if (redisClient) {
+        redisSetJSON('build-history', list);
+        return;
+    }
+    try {
+        fs.writeFileSync(BUILD_HISTORY_PATH, JSON.stringify(list, null, 2));
+    } catch (err) {
+        console.error('Hindi ma-save ang build-history.json:', err);
+    }
+}
+
+function recordBuildHistoryEntry(entry) {
+    buildHistory.unshift(entry); // pinaka-bago sa unahan
+    if (buildHistory.length > BUILD_HISTORY_MAX_ENTRIES) {
+        buildHistory.length = BUILD_HISTORY_MAX_ENTRIES;
+    }
+    saveBuildHistory(buildHistory);
+}
+
+let buildHistory = []; // pupunuin sa bootstrapStores()
+
+// --------------------------------------------------------------
 // ADMIN PANEL — /relay/admin (protektado ng sarili niyang password,
 // HIWALAY sa RELAY_API_KEY). Dito mo makikita ang listahan ng mga
 // device na kailanman humiling ng unlock, at pwede mo silang
@@ -2903,6 +2951,7 @@ const RELEASE_CLIENT_TARGETS = new Set([
     path.join('public', 'service-worker.js'),
 ]);
 const RELEASE_ENV_LOADER_FILENAME = 'env-loader.js';
+const RELEASE_ENV_KEY_FILENAME = '.env.key';
 
 // public/index.html — dito ilalagay ang comment-stripping AT
 // pag-obfuscate ng anumang inline <script> na laman nito (hiwalay
@@ -3107,8 +3156,17 @@ async function obfuscateReleaseTree(tmpDir) {
     return obfuscatedCount;
 }
 
-// Ini-encrypt ang client .env (AES-256-GCM) at ipapasok ang key sa
-// env-loader.js (kung nasa cloned repo ito) BAGO ito i-obfuscate.
+// Ini-encrypt ang client .env (AES-256-GCM) at isusulat ang key sa
+// sarili niyang ".env.key" file (KATABI ng .env) — HINDI na ito
+// ibinabake diretso sa code ng env-loader.js. FIX ito para sa
+// "device revoked after self-update" bug: dati, bawat build ay may
+// BAGONG random key na naka-embed sa loader mismo, pero self-update
+// ay PRESERVED ang .env ng client (hindi ito nagbabago) habang
+// PINAPALITAN ang env-loader.js (may BAGONG di-tugmang key) — kaya
+// laging nabibigo ang decrypt pagkatapos ng unang self-update. Ngayon,
+// preserved din ang .env.key kasabay ng .env sa self-update (tingnan
+// ang SELF_UPDATE_PRESERVE sa OMNIPOS/server.js), kaya magkatugma pa
+// rin sila kahit ilang beses pang mag-rebuild ang loader code.
 // Kung walang env-loader.js sa cloned repo (hal. hindi mo pa na-commit),
 // babalik lang ito sa dating plaintext .env — walang masisira, pero
 // mananatiling readable ang .env sa ganitong kaso.
@@ -3132,10 +3190,8 @@ function encryptClientEnvAndPatchLoader(tmpDir, envContent) {
         data: encrypted.toString('base64'),
     };
     fs.writeFileSync(path.join(tmpDir, '.env'), JSON.stringify(payload));
+    fs.writeFileSync(path.join(tmpDir, RELEASE_ENV_KEY_FILENAME), key.toString('hex'), 'utf8');
 
-    const loaderCode = fs.readFileSync(loaderPath, 'utf8')
-        .replace('__ENV_KEY_HEX__', key.toString('hex'));
-    fs.writeFileSync(loaderPath, loaderCode, 'utf8');
     obfuscateFileInPlace(loaderPath, releaseServerObfOptions);
 
     return { encrypted: true };
@@ -3144,6 +3200,10 @@ function encryptClientEnvAndPatchLoader(tmpDir, envContent) {
 app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => {
     const repoUrl = (req.body && req.body.repoUrl) || process.env.OMNIPOS_REPO_URL;
     const ref = (req.body && req.body.ref) || 'main';
+    // Optional na maikling paglalarawan ng build na ito (hal. "hotfix
+    // barcode scan bug"). Puro history/log lang ang gamit nito — hindi
+    // ito nakakaapekto sa aktwal na filename ng na-build na zip.
+    const caption = String((req.body && req.body.caption) || '').trim();
 
     if (!repoUrl) {
         return res.status(400).json({ success: false, message: 'Walang repoUrl na ibinigay at walang OMNIPOS_REPO_URL env var na naka-set.' });
@@ -3201,11 +3261,30 @@ app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => 
         });
 
         const stats = fs.statSync(RELEASE_PACKAGE_PATH);
+        const builtAt = Date.now();
         logActivity(null, 'release_package_built', {
             ref,
             sizeBytes: stats.size,
             obfuscatedFiles: obfuscatedCount,
             envEncrypted: envResult.encrypted
+        });
+
+        // HISTORY ENTRY: caption (kung binigay), ang naka-publish na
+        // version number nung mismong oras ng build na ito (systemVersionInfo
+        // — HINDI kinukuha mula sa git ref dahil ang version number ay
+        // hiwalay na "opisyal" na ipinapahayag lang via publish-version),
+        // at ang timestamp. Ang filename ng zip mismo ay HINDI nagbabago
+        // — palaging "omnipos-client.zip" pa rin ito.
+        recordBuildHistoryEntry({
+            id: crypto.randomBytes(6).toString('hex'),
+            caption: caption || null,
+            version: systemVersionInfo.version || '0.0.0',
+            ref,
+            builtAt,
+            sizeBytes: stats.size,
+            obfuscatedFiles: obfuscatedCount,
+            envEncrypted: envResult.encrypted,
+            fileName: 'omnipos-client.zip'
         });
 
         res.json({
@@ -3216,7 +3295,7 @@ app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => 
             sizeBytes: stats.size,
             obfuscatedFiles: obfuscatedCount,
             envEncrypted: envResult.encrypted,
-            builtAt: Date.now()
+            builtAt
         });
     } catch (err) {
         console.error('❌ Build-release error:', err.message);
@@ -3224,6 +3303,17 @@ app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => 
     } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+});
+
+// --------------------------------------------------------------
+// GET /relay/admin/api/build-history
+// Listahan lang ng mga naitala nang build (caption, version noong
+// build, timestamp, sizeBytes, atbp.) — pinaka-bago munang entry.
+// Hindi ito ang zip mismo, log lang ito ng "kailan/ano" ang bawat
+// build na ginawa gamit ang "I-build ang Release" sa itaas.
+// --------------------------------------------------------------
+app.get('/relay/admin/api/build-history', requireAdminKey, (req, res) => {
+    res.json({ success: true, history: buildHistory });
 });
 
 // --------------------------------------------------------------
@@ -3320,7 +3410,8 @@ async function bootstrapStores() {
         activityLog,
         backupCheckins,
         systemVersionInfo,
-        downloadCodes
+        downloadCodes,
+        buildHistory
     ] = await Promise.all([
         loadAllowedDevices(),
         loadDeviceLabels(),
@@ -3330,7 +3421,8 @@ async function bootstrapStores() {
         loadActivityLog(),
         loadBackupCheckins(),
         loadSystemVersionInfo(),
-        loadDownloadCodes()
+        loadDownloadCodes(),
+        loadBuildHistory()
     ]);
 
     console.log(
