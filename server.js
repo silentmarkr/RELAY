@@ -3254,6 +3254,36 @@ function encryptClientEnvAndPatchLoader(tmpDir, envContent) {
 // mismo, isang beses lang bawat build ang tatakbo (single global
 // state ang sapat dahil isang admin session/build lang ang
 // inaasahang aktibo sa isang pagkakataon).
+// AYOS (hiling): "hatiin ang 100% base sa bilang ng sunod-sunod na
+// function/hakbang" ng build, sa halip na basta-basta lang na mga
+// percent kada hakbang. Dito, tinutukoy ang pagkakasunod-sunod ng mga
+// hakbang ng "I-build ang Release" (BUILD_STEPS): unang hakbang (clone)
+// ay bigyan ng FIXED na 10% (gaya ng eksaktong hiniling — kaagad itong
+// tumatalon sa 10% pagkatapos matapos ang clone), at ang NATITIRANG 90%
+// ay pantay-pantay na hinahati sa bilang ng mga SUMUSUNOD na hakbang
+// (filter, env, obfuscate, zip = 4 hakbang → 22.5% bawat isa). Kung sa
+// hinaharap ay may idagdag/tanggal na hakbang sa BUILD_STEPS, awtomatiko
+// na lang muling maghahati ang formula na ito — hindi na kailangang
+// i-adjust ang mga percent nang manu-mano bawat pagbabago.
+const BUILD_STEPS = ['clone', 'filter', 'env', 'obfuscate', 'zip'];
+const BUILD_FIRST_STEP_PERCENT = 10;
+const BUILD_STEP_END_PERCENT = (() => {
+    const map = {};
+    const remainingSteps = BUILD_STEPS.length - 1;
+    const perRemainingStep = remainingSteps > 0 ? (100 - BUILD_FIRST_STEP_PERCENT) / remainingSteps : 0;
+    let cumulative = 0;
+    BUILD_STEPS.forEach((step, idx) => {
+        cumulative = idx === 0 ? BUILD_FIRST_STEP_PERCENT : cumulative + perRemainingStep;
+        map[step] = Math.round(cumulative * 10) / 10; // 1 decimal na lang para malinis ang display
+    });
+    return map;
+})();
+
+function buildStepStartPercent(step) {
+    const idx = BUILD_STEPS.indexOf(step);
+    return idx <= 0 ? 0 : BUILD_STEP_END_PERCENT[BUILD_STEPS[idx - 1]];
+}
+
 let buildProgressState = {
     buildId: null,
     stage: 'idle',       // idle | clone | filter | env | obfuscate | zip | done | error
@@ -3287,7 +3317,7 @@ app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => 
 
     const tmpDir = path.join(os.tmpdir(), `omnipos-build-${Date.now()}`);
     const buildId = crypto.randomBytes(6).toString('hex');
-    setBuildProgress({ buildId, stage: 'clone', percent: 2, message: 'Kino-clone ang repo...', startedAt: Date.now(), done: false, error: null });
+    setBuildProgress({ buildId, stage: 'clone', percent: 0, message: 'Kino-clone ang repo...', startedAt: Date.now(), done: false, error: null });
 
     try {
         // SECURITY FIX: dati, sinasalang diretso ang repoUrl/ref (galing
@@ -3301,7 +3331,7 @@ app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => 
         // hindi bilang shell syntax.
         execFileSync('git', ['clone', '--depth', '1', '--branch', ref, repoUrl, tmpDir], { stdio: 'pipe' });
 
-        setBuildProgress({ stage: 'filter', percent: 15, message: 'Tinatanggal ang mga excluded file...' });
+        setBuildProgress({ stage: 'filter', percent: BUILD_STEP_END_PERCENT.clone, message: 'Tinatanggal ang mga excluded file...' });
         removeExcludedRecursive(tmpDir);
 
         // Gumawa ng client .env DIREKTA sa loob ng tmpDir bago mag-zip,
@@ -3323,7 +3353,7 @@ app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => 
             `PORT=${clientPort}`,
             ''
         ].join('\n');
-        setBuildProgress({ stage: 'env', percent: 20, message: 'Ini-encrypt ang client .env...' });
+        setBuildProgress({ stage: 'env', percent: BUILD_STEP_END_PERCENT.filter, message: 'Ini-encrypt ang client .env...' });
         const envResult = encryptClientEnvAndPatchLoader(tmpDir, clientEnvContent);
 
         // Obfuscate OMNIPOS's own server-side/client-side JS here, inside
@@ -3332,13 +3362,15 @@ app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => 
         // ma-update ang % LIVE bawat file (ito karaniwan ang pinakamatagal
         // na hakbang ng buong build), gamit ang existing per-file loop —
         // walang dagdag na I/O, text-lang na update sa in-memory object.
-        setBuildProgress({ stage: 'obfuscate', percent: 25, message: 'Ino-obfuscate ang mga file...' });
+        setBuildProgress({ stage: 'obfuscate', percent: BUILD_STEP_END_PERCENT.env, message: 'Ino-obfuscate ang mga file...' });
+        const obfuscateStart = BUILD_STEP_END_PERCENT.env;
+        const obfuscateEnd = BUILD_STEP_END_PERCENT.obfuscate;
         const obfuscatedCount = await obfuscateReleaseTree(tmpDir, (done, total) => {
-            const pct = total > 0 ? 25 + Math.round((done / total) * 55) : 25; // 25% → 80%
-            setBuildProgress({ stage: 'obfuscate', percent: pct, message: `Ino-obfuscate ang mga file... (${done}/${total})` });
+            const pct = total > 0 ? obfuscateStart + ((done / total) * (obfuscateEnd - obfuscateStart)) : obfuscateStart;
+            setBuildProgress({ stage: 'obfuscate', percent: Math.round(pct * 10) / 10, message: `Ino-obfuscate ang mga file... (${done}/${total})` });
         });
 
-        setBuildProgress({ stage: 'zip', percent: 85, message: 'Ginagawa ang zip package...' });
+        setBuildProgress({ stage: 'zip', percent: BUILD_STEP_END_PERCENT.obfuscate, message: 'Ginagawa ang zip package...' });
         const releaseDir = path.dirname(RELEASE_PACKAGE_PATH);
         if (!fs.existsSync(releaseDir)) fs.mkdirSync(releaseDir, { recursive: true });
 
