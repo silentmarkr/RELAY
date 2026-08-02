@@ -20,7 +20,7 @@ const nodemailer = require('nodemailer');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 const archiver = require('archiver');
 const Redis = require('ioredis');
 const JavaScriptObfuscator = require('javascript-obfuscator');
@@ -1749,6 +1749,29 @@ function requireApiKey(req, res, next) {
 // parehong ISP/NAT o corporate network) ay COLLECTIVELY na-rate-limit
 // sa isa't isa, kahit magkaibang installationId sila.
 const rateBuckets = new Map();
+
+// IMPROVEMENT: dati, hindi na-clean-up ang mga entry ng rateBuckets
+// kapag naubos na ang lahat ng timestamps nito (na-filter na lahat ng
+// "recent" pero nananatili pa rin ang EMPTY array sa Map) — kaya kada
+// bagong unique key (bagong IP, bagong installationId, atbp.) ay
+// PERMANENTENG entry sa memory kahit hindi na ito ginagamit. Sa
+// mahabang uptime na may maraming iba't ibang devices/IPs, unbounded
+// growth ito. Nililinis ito paminsan-minsan (tuwing 30 min) — tinatanggal
+// ang mga key na walang laman/luma nang timestamps.
+const RATE_BUCKET_CLEANUP_INTERVAL_MS = 30 * 60 * 1000;
+const RATE_BUCKET_MAX_AGE_MS = 60 * 60 * 1000; // kahit anong window, 1 oras nang hindi ginagalaw = pwede nang tanggalin
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, timestamps] of rateBuckets) {
+        const recent = timestamps.filter((ts) => now - ts < RATE_BUCKET_MAX_AGE_MS);
+        if (recent.length === 0) {
+            rateBuckets.delete(key);
+        } else if (recent.length !== timestamps.length) {
+            rateBuckets.set(key, recent);
+        }
+    }
+}, RATE_BUCKET_CLEANUP_INTERVAL_MS).unref();
+
 function rateLimit(bucketName, max, windowMs, keyFn) {
     return (req, res, next) => {
         let key = `${bucketName}:${req.ip}`;
@@ -2907,7 +2930,13 @@ app.get('/relay/admin/api/system/version', requireAdminKey, (req, res) => {
 //     ginagamit ng lahat ng kliyente).
 //   - port: default 3000 kung wala.
 // --------------------------------------------------------------
-const BUILD_EXCLUDE_NAMES = new Set(['.git', 'node_modules', 'database', 'release']);
+// BUG FIX: idinagdag ang 'uploads_tmp' — dating wala ito dito kahit
+// kasama na ito sa EXCLUDE set ng OMNIPOS/build-release.js (lokal na
+// build script). Hindi tugma ang dalawa: kung sakaling ma-commit ang
+// uploads_tmp/ (temp uploaded files — resibo/proof-of-payment photos)
+// sa git repo, ma-i-ship ito sa customer release zip dahil hindi ito
+// na-filter dati ng remote build endpoint na ito.
+const BUILD_EXCLUDE_NAMES = new Set(['.git', 'node_modules', 'database', 'release', 'uploads_tmp']);
 const BUILD_EXCLUDE_EXTENSIONS = new Set(['.log', '.patch']);
 
 function removeExcludedRecursive(dir) {
@@ -3225,7 +3254,16 @@ app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => 
     const tmpDir = path.join(os.tmpdir(), `omnipos-build-${Date.now()}`);
 
     try {
-        execSync(`git clone --depth 1 --branch ${ref} "${repoUrl}" "${tmpDir}"`, { stdio: 'pipe' });
+        // SECURITY FIX: dati, sinasalang diretso ang repoUrl/ref (galing
+        // sa admin request body) sa loob ng isang SHELL STRING (execSync
+        // gamit ang template literal) — kung may naka-embed na shell
+        // metacharacter (hal. `; rm -rf /` o `$(...)`) sa alinman sa
+        // dalawa, maaari itong mag-execute ng arbitrary command sa RELAY
+        // host. Ginagamit na ngayon ang execFileSync na may ARGUMENT
+        // ARRAY (hindi dumadaan sa shell), kaya kahit anong laman ng
+        // repoUrl/ref ay ituturing lang na LITERAL na argumento sa git,
+        // hindi bilang shell syntax.
+        execFileSync('git', ['clone', '--depth', '1', '--branch', ref, repoUrl, tmpDir], { stdio: 'pipe' });
 
         removeExcludedRecursive(tmpDir);
 
