@@ -3157,8 +3157,9 @@ function planReleaseTree(tmpDir) {
     return items;
 }
 
-async function obfuscateReleaseTree(tmpDir) {
+async function obfuscateReleaseTree(tmpDir, onProgress) {
     const items = planReleaseTree(tmpDir);
+    const totalItems = items.length;
     let obfuscatedCount = 0;
 
     for (const { type, full } of items) {
@@ -3188,6 +3189,9 @@ async function obfuscateReleaseTree(tmpDir) {
             fs.writeFileSync(full, stripCssComments(css), 'utf8');
         }
         obfuscatedCount += 1;
+        if (typeof onProgress === 'function') {
+            try { onProgress(obfuscatedCount, totalItems); } catch (_) { /* huwag hayaang masira ng UI callback ang build */ }
+        }
         // Give RELAY a chance to answer other requests (status polling,
         // health checks, other terminals) between each file instead of
         // holding the event loop for the whole build in one unbroken
@@ -3239,6 +3243,36 @@ function encryptClientEnvAndPatchLoader(tmpDir, envContent) {
     return { encrypted: true };
 }
 
+// ----------------------------------------------------------------
+// LIVE BUILD PROGRESS (visual %) — walang idinagdag na disk/network
+// I/O, isang plain in-memory object lang ito na ina-update sa bawat
+// hakbang ng build (clone → filter → env-encrypt → obfuscate → zip →
+// tapos). Ang frontend ay pina-poll lang ito paminsan-minsan
+// (GET, mabilis, walang ginagawang mabigat na trabaho) habang
+// naka-disable ang "I-build ang Release" button — hindi ito
+// nagpapabagal at hindi nakakaapekto sa aktwal na proseso ng build
+// mismo, isang beses lang bawat build ang tatakbo (single global
+// state ang sapat dahil isang admin session/build lang ang
+// inaasahang aktibo sa isang pagkakataon).
+let buildProgressState = {
+    buildId: null,
+    stage: 'idle',       // idle | clone | filter | env | obfuscate | zip | done | error
+    percent: 0,
+    message: '',
+    startedAt: null,
+    updatedAt: null,
+    done: true,
+    error: null
+};
+
+function setBuildProgress(patch) {
+    buildProgressState = { ...buildProgressState, ...patch, updatedAt: Date.now() };
+}
+
+app.get('/relay/admin/api/build-progress', requireAdminKey, (req, res) => {
+    res.json({ success: true, progress: buildProgressState });
+});
+
 app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => {
     const repoUrl = (req.body && req.body.repoUrl) || process.env.OMNIPOS_REPO_URL;
     const ref = (req.body && req.body.ref) || 'main';
@@ -3252,6 +3286,8 @@ app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => 
     }
 
     const tmpDir = path.join(os.tmpdir(), `omnipos-build-${Date.now()}`);
+    const buildId = crypto.randomBytes(6).toString('hex');
+    setBuildProgress({ buildId, stage: 'clone', percent: 2, message: 'Kino-clone ang repo...', startedAt: Date.now(), done: false, error: null });
 
     try {
         // SECURITY FIX: dati, sinasalang diretso ang repoUrl/ref (galing
@@ -3265,6 +3301,7 @@ app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => 
         // hindi bilang shell syntax.
         execFileSync('git', ['clone', '--depth', '1', '--branch', ref, repoUrl, tmpDir], { stdio: 'pipe' });
 
+        setBuildProgress({ stage: 'filter', percent: 15, message: 'Tinatanggal ang mga excluded file...' });
         removeExcludedRecursive(tmpDir);
 
         // Gumawa ng client .env DIREKTA sa loob ng tmpDir bago mag-zip,
@@ -3286,13 +3323,22 @@ app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => 
             `PORT=${clientPort}`,
             ''
         ].join('\n');
+        setBuildProgress({ stage: 'env', percent: 20, message: 'Ini-encrypt ang client .env...' });
         const envResult = encryptClientEnvAndPatchLoader(tmpDir, clientEnvContent);
 
         // Obfuscate OMNIPOS's own server-side/client-side JS here, inside
         // tmpDir only (a staging copy) — this never touches your original
-        // git repo/main branch.
-        const obfuscatedCount = await obfuscateReleaseTree(tmpDir);
+        // git repo/main branch. Ipinapasa ang isang progress callback para
+        // ma-update ang % LIVE bawat file (ito karaniwan ang pinakamatagal
+        // na hakbang ng buong build), gamit ang existing per-file loop —
+        // walang dagdag na I/O, text-lang na update sa in-memory object.
+        setBuildProgress({ stage: 'obfuscate', percent: 25, message: 'Ino-obfuscate ang mga file...' });
+        const obfuscatedCount = await obfuscateReleaseTree(tmpDir, (done, total) => {
+            const pct = total > 0 ? 25 + Math.round((done / total) * 55) : 25; // 25% → 80%
+            setBuildProgress({ stage: 'obfuscate', percent: pct, message: `Ino-obfuscate ang mga file... (${done}/${total})` });
+        });
 
+        setBuildProgress({ stage: 'zip', percent: 85, message: 'Ginagawa ang zip package...' });
         const releaseDir = path.dirname(RELEASE_PACKAGE_PATH);
         if (!fs.existsSync(releaseDir)) fs.mkdirSync(releaseDir, { recursive: true });
 
@@ -3338,6 +3384,8 @@ app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => 
             fileName: 'omnipos-client.zip'
         });
 
+        setBuildProgress({ stage: 'done', percent: 100, message: 'Tapos na ang build.', done: true });
+
         res.json({
             success: true,
             message: envResult.encrypted
@@ -3350,6 +3398,7 @@ app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => 
         });
     } catch (err) {
         console.error('❌ Build-release error:', err.message);
+        setBuildProgress({ stage: 'error', percent: buildProgressState.percent, message: err.message, done: true, error: err.message });
         res.status(500).json({ success: false, message: `Hindi na-build ang release: ${err.message}` });
     } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });

@@ -848,6 +848,15 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
         <div class="backup-note" style="margin-top:6px;">
           Ang caption ay para lang sa history log sa ibaba — hindi ito nagbabago sa filename ng na-build na package (laging <code>omnipos-client.zip</code> pa rin ito, ino-overwrite lang kada build).
         </div>
+        <div id="buildProgressWrap" class="abar-row" style="margin-top:12px; display:none;">
+          <div class="abar-label">
+            <span class="name" id="buildProgressLabel">Ginagawa ang build...</span>
+            <span class="count" id="buildProgressPercent">0%</span>
+          </div>
+          <div class="abar-track">
+            <div class="abar-fill" id="buildProgressFill" style="width:0%; transition: width .3s ease;"></div>
+          </div>
+        </div>
         <div class="backup-row" style="margin-top:10px;">
           <input type="text" id="newCodeLabel" placeholder="Label (hal. Store ni Juan)" style="flex:2; min-width:160px;">
           <input type="number" id="newCodeMaxUses" placeholder="Max uses (default 1)" min="1" style="flex:1; min-width:120px;">
@@ -1313,6 +1322,65 @@ async function downloadBackup(auto = false) {
 // ma-download ang zip.
 // --------------------------------------------------------------
 let lastLoadedDownloadCodes = [];
+let buildProgressInterval = null;
+
+function showBuildProgress() {
+  const wrap = document.getElementById('buildProgressWrap');
+  if (wrap) wrap.style.display = 'block';
+  updateBuildProgressUI({ percent: 0, message: 'Sinisimulan ang build...' });
+}
+
+function updateBuildProgressUI(progress) {
+  const fill = document.getElementById('buildProgressFill');
+  const label = document.getElementById('buildProgressLabel');
+  const percentEl = document.getElementById('buildProgressPercent');
+  if (!fill || !label || !percentEl) return;
+  const pct = Math.max(0, Math.min(100, Math.round(progress.percent || 0)));
+  fill.style.width = pct + '%';
+  percentEl.innerText = pct + '%';
+  label.innerText = progress.message || 'Ginagawa ang build...';
+  fill.style.background = progress.stage === 'error'
+    ? '#e05a5a'
+    : 'linear-gradient(90deg, var(--accent-dim), var(--accent))';
+}
+
+function hideBuildProgress(delayMs) {
+  const wrap = document.getElementById('buildProgressWrap');
+  if (!wrap) return;
+  setTimeout(() => { wrap.style.display = 'none'; }, delayMs == null ? 1200 : delayMs);
+}
+
+// Pina-poll ang GET /relay/admin/api/build-progress paminsan-minsan
+// (700ms) habang naka-disable ang build button — mabilis lang ito
+// (nagbabasa ng in-memory object sa RELAY, walang disk/DB access),
+// kaya hindi ito nagpapabagal sa aktwal na build o sa ibang admin
+// requests. Awtomatikong titigil ang polling pagka-"done" na ang
+// progress (tapos man o may error).
+async function pollBuildProgressOnce() {
+  try {
+    const data = await api('/relay/admin/api/build-progress');
+    if (data && data.success && data.progress) {
+      updateBuildProgressUI(data.progress);
+      if (data.progress.done) stopBuildProgressPolling();
+    }
+  } catch (err) {
+    // huwag hayaang isang failed poll ang tumigil sa buong build —
+    // susubukan na lang ulit sa susunod na tick (700ms pa)
+  }
+}
+
+function startBuildProgressPolling() {
+  stopBuildProgressPolling();
+  pollBuildProgressOnce();
+  buildProgressInterval = setInterval(pollBuildProgressOnce, 700);
+}
+
+function stopBuildProgressPolling() {
+  if (buildProgressInterval) {
+    clearInterval(buildProgressInterval);
+    buildProgressInterval = null;
+  }
+}
 
 async function buildRelease() {
   const btn = document.getElementById('buildReleaseBtn');
@@ -1320,21 +1388,27 @@ async function buildRelease() {
   const caption = captionInput ? captionInput.value.trim() : '';
   btn.disabled = true;
   btn.innerText = '⏳ Ginagawa...';
+  showBuildProgress();
+  startBuildProgressPolling();
   try {
     const data = await api('/relay/admin/api/build-release', {
       method: 'POST',
       body: JSON.stringify(caption ? { caption } : {})
     });
     if (data.success) {
+      updateBuildProgressUI({ percent: 100, message: 'Tapos na ang build.' });
       toast(`✅ Nagawa ang release (${(data.sizeBytes / 1024 / 1024).toFixed(2)} MB).`, 'success');
       if (captionInput) captionInput.value = '';
       loadBuildHistory();
     } else {
+      updateBuildProgressUI({ stage: 'error', percent: 100, message: data.message || 'Hindi na-build ang release.' });
       toast(data.message || 'Hindi na-build ang release.', 'error');
     }
   } catch (err) {
     // ipinapakita na ng api() ang toast kung 403/429; iba pang error dito
   } finally {
+    stopBuildProgressPolling();
+    hideBuildProgress();
     btn.disabled = false;
     btn.innerText = '🛠️ I-build ang Release (git → zip)';
   }
