@@ -2943,12 +2943,25 @@ const RELEASE_SERVER_TARGETS = new Set([
     'migrate-to-sqlite.js',
     '_fix_project.js',
 ]);
+// NOTE: public/service-worker.js ay SADYANG HINDI kasama dito. Service
+// workers ay may mas mahigpit na execution context kaysa normal na page
+// scripts, at ang selfDefending/controlFlowFlattening output ng
+// javascript-obfuscator ay may known compatibility issues doon
+// (tamper-check code na umaasa sa Function.prototype.toString()
+// self-comparisons). Dagdag pa rito, ang string-array shuffling ay
+// gumagawa ng byte-different na output KADA BUILD — at ang browser ay
+// gumagawa ng byte-for-byte diff ng service-worker.js para malaman kung
+// kailangan mag-install ng bagong SW version, kaya laging nagiging
+// forced update cycle ang bawat redeploy. Ito ang ugat ng PWA
+// install/offline breakage. Maliit lang ang service-worker.js at wala
+// namang business logic na kailangang itago, kaya verbatim/plain na
+// lang ito kokopyahin (parehong fix gaya ng nasa build-release.js sa
+// OMNIPOS repo mismo — dapat laging magkasabay ang dalawang listahan).
 const RELEASE_CLIENT_TARGETS = new Set([
     path.join('public', 'app.js'),
     path.join('public', 'bt-printer.js'),
     path.join('public', 'faq-engine.js'),
     path.join('public', 'faq-knowledge.js'),
-    path.join('public', 'service-worker.js'),
 ]);
 const RELEASE_ENV_LOADER_FILENAME = 'env-loader.js';
 const RELEASE_ENV_KEY_FILENAME = '.env.key';
