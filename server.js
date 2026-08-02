@@ -1,3 +1,5 @@
+// PATH: RELAY/server.js  <-- I-REPLACE ang luma mong server.js NITO SA RELAY project (hindi sa OMNIPOS) — root ng RELAY project
+
 // ====================================================================
 // OmniPOS Unlock Relay — HIWALAY na maliit na service, hosted lang ng
 // developer/owner (HINDI ito kasama sa client package na binebenta/
@@ -2965,12 +2967,27 @@ function removeExcludedRecursive(dir) {
 // dito ito tinatawag AWTOMATIKO bawat build-release DITO SA RELAY —
 // kaya hindi na kailangan pang mano-manong tumakbo ng `npm run
 // build:release` sa panig mo bago mag-deploy.
+//
+// SYNC FIX: dating hindi kasama dito ang 'mailer.js' at
+// 'verify-gmail-connection.js' — dalawang BAGONG first-party server
+// file (isolated Gmail SMTP + OAuth/API fallback module, at ang
+// standalone CLI verification tool nito, ayon sa hiling na "nakahiwalay
+// ang gmail connection Verification nito at kasama sa package") na
+// naidagdag na sa OMNIPOS/build-release.js's SERVER_TARGETS pero HINDI
+// pa dati dito. Bunga: kapag ang remote/progress-bar na build DITO SA
+// RELAY ang ginamit (sa halip na `npm run build:release` nang lokal),
+// hindi na-o-obfuscate/naisasama ang dalawang file na iyon sa
+// resulting omnipos-client.zip — hindi tugma ang dalawang listahan
+// kahit sinasabi ng komentong ito na "dapat laging magkasabay". Ngayon,
+// pareho na sila.
 // --------------------------------------------------------------
 const RELEASE_SERVER_TARGETS = new Set([
     'server.js',
     'db.js',
     'migrate-to-sqlite.js',
     '_fix_project.js',
+    'mailer.js',
+    'verify-gmail-connection.js',
 ]);
 // NOTE: public/service-worker.js ay SADYANG HINDI kasama dito. Service
 // workers ay may mas mahigpit na execution context kaysa normal na page
