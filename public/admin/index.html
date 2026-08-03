@@ -1628,7 +1628,7 @@ async function loadBuildHistory() {
     container.innerHTML = data.history.map((h) => `
       <div class="backup-row" style="padding:8px 0; border-bottom:1px solid var(--border, #2a2a2a); align-items:flex-start;">
         <div style="flex:1; min-width:0;">
-          <div><strong>v${h.version || '0.0.0'}</strong> — ${h.caption || '(walang caption)'}</div>
+          <div><strong>v${h.version || '0.0.0'}</strong> — ${h.caption || '(walang caption)'}${h.targetInstallationId ? ` <span style="color:var(--accent, #6cf); font-size:11px;">🎯 target: ${h.targetInstallationId}</span>` : ''}</div>
           <div style="font-size:11px; color:var(--muted);">
             ${formatBuildTimestamp(h.builtAt)} · ${h.fileName || 'omnipos-client.zip'} · ${((h.sizeBytes || 0) / 1024 / 1024).toFixed(2)} MB
           </div>

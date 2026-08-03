@@ -3403,7 +3403,7 @@ app.get('/relay/admin/api/build-progress', requireAdminKey, (req, res) => {
 // Nagba-throw ito ng Error sa sinumang caller kapag nabigo — ang
 // route handlers na ang bahalang mag-catch at mag-format ng sagot.
 // --------------------------------------------------------------
-async function performBuildRelease(reqBody, req) {
+async function performBuildRelease(reqBody, req, publishOverride) {
     const repoUrl = (reqBody && reqBody.repoUrl) || process.env.OMNIPOS_REPO_URL;
     const ref = (reqBody && reqBody.ref) || 'main';
     // Optional na maikling paglalarawan ng build na ito (hal. "hotfix
@@ -3503,13 +3503,18 @@ async function performBuildRelease(reqBody, req) {
         // HISTORY ENTRY: caption (kung binigay), ang naka-publish na
         // version number nung mismong oras ng build na ito (systemVersionInfo
         // — HINDI kinukuha mula sa git ref dahil ang version number ay
-        // hiwalay na "opisyal" na ipinapahayag lang via publish-version),
-        // at ang timestamp. Ang filename ng zip mismo ay HINDI nagbabago
+        // hiwalay na "opisyal" na ipinapahayag lang via publish-version) —
+        // MALIBAN kung tumawag ito mula sa publish-release (may
+        // publishOverride), kung saan ang ITINATAKDANG bagong version
+        // (at target installationId kung meron) ang gagamitin sa halip,
+        // dahil ito na mismo ang aktwal na version na kasabay ina-publish
+        // ng build na ito. Ang filename ng zip mismo ay HINDI nagbabago
         // — palaging "omnipos-client.zip" pa rin ito.
         recordBuildHistoryEntry({
             id: crypto.randomBytes(6).toString('hex'),
             caption: caption || null,
-            version: systemVersionInfo.version || '0.0.0',
+            version: (publishOverride && publishOverride.version) || systemVersionInfo.version || '0.0.0',
+            targetInstallationId: (publishOverride && publishOverride.targetInstallationId) || null,
             ref,
             builtAt,
             sizeBytes: stats.size,
@@ -3584,7 +3589,7 @@ app.post('/relay/admin/api/system/publish-release', requireAdminKey, async (req,
 
     let buildResult;
     try {
-        buildResult = await performBuildRelease(req.body, req);
+        buildResult = await performBuildRelease(req.body, req, { version, targetInstallationId: targetId || null });
     } catch (err) {
         return res.status(err.statusCode || 500).json({
             success: false,
