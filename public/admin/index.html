@@ -874,6 +874,39 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
       </div>
 
       <div class="card">
+        <h2>🚀 Mag-publish ng Bagong Update <span style="font-size:11px; color:var(--muted); font-weight:normal;">(build + publish sa isang click — dito na lang, walang Termux/curl kailangan)</span></h2>
+        <div class="backup-note">
+          Isang button na ito para sa DALAWANG hakbang: (1) gagawa ng bagong <code>omnipos-client.zip</code> mula sa pinaka-bagong code sa repo mo, at (2) i-a-announce agad ang bagong version/changelog na ito sa mga existing na kliyente (makikita nila sa "Check for Update" nila). Kung mabigo ang build, HINDI ita-tuloy ang pag-publish ng version.
+        </div>
+        <div class="backup-row">
+          <input type="text" id="publishVersionInput" placeholder="Bagong version (hal. 1.0.43)" style="flex:1; min-width:140px;">
+          <input type="text" id="publishRepoUrlInput" placeholder="repoUrl (opsyonal — iiwan blangko kung naka-set na ang OMNIPOS_REPO_URL)" style="flex:2; min-width:220px;">
+          <input type="text" id="publishRefInput" placeholder="branch/ref (default: main)" style="flex:1; min-width:120px;">
+        </div>
+        <div class="backup-row" style="margin-top:8px;">
+          <textarea id="publishChangelogInput" placeholder="Changelog (opsyonal — ito ang makikita ng customer sa update notice)" rows="2" style="flex:1; min-width:200px; resize:vertical; background:var(--panel-2, #1a1a1a); color:inherit; border:1px solid var(--border, #2a2a2a); border-radius:8px; padding:8px;"></textarea>
+        </div>
+        <div class="backup-row" style="margin-top:8px;">
+          <input type="text" id="publishTargetIdInput" placeholder="Target Installation ID (opsyonal — iiwan blangko para sa LAHAT ng kliyente)" style="flex:1; min-width:220px;">
+        </div>
+        <div class="backup-note" style="margin-top:6px;">
+          Kung punan mo ang Target Installation ID, SA KANYA LANG mapupunta ang "may bagong update" na notice na ito — ibang kliyente, hindi makikita hangga't hindi mo pa siya i-clear o hindi mo pa ginawang global (blangko ang Target ID) ang parehong version. <strong>Paalala:</strong> ang aktwal na zip file ay iisa pa rin/shared — targeting lang ito ng "sino ang makakakita ng notice", hindi hard block sa pag-download.
+        </div>
+        <div class="backup-row" style="margin-top:10px;">
+          <button class="btn-primary" onclick="publishRelease()" id="publishReleaseBtn">🚀 I-build at I-publish</button>
+        </div>
+        <div id="publishProgressWrap" class="abar-row" style="margin-top:12px; display:none;">
+          <div class="abar-label">
+            <span class="name" id="publishProgressLabel">Ginagawa ang build...</span>
+            <span class="count" id="publishProgressPercent">0%</span>
+          </div>
+          <div class="abar-track">
+            <div class="abar-fill" id="publishProgressFill" style="width:0%; transition: width .3s ease;"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
         <h2>📦 I-download ang Client Package <span style="font-size:11px; color:var(--muted); font-weight:normal;">(offline setup ng bagong kliyente)</span></h2>
         <div class="backup-note">
           Gumawa ng one-time (o limited-use) na link para makapag-download ang bagong kliyente ng <code>omnipos-client.zip</code> — mga files na kailangan niya para i-install at patakbuhin nang offline ang OMNIPOS sa sariling device. I-"Build Release" muna kung may bagong update sa OMNIPOS code bago gumawa ng link.
@@ -1449,6 +1482,125 @@ async function buildRelease() {
     hideBuildProgress();
     btn.disabled = false;
     btn.innerText = '🛠️ I-build ang Release (git → zip)';
+  }
+}
+
+// --------------------------------------------------------------
+// PUBLISH RELEASE — "isang click" na bersyon: build-release + publish
+// -version sa IISANG tawag papunta sa '/relay/admin/api/system
+// /publish-release'. Ginagamit ang parehong build-progress polling
+// (isa lang naman ang build na tumatakbo sa RELAY sa isang pagkakataon)
+// pero hiwalay na progress-bar elements dito (publishProgress*) para
+// hindi masalungat sa "I-build ang Release" na card sa itaas.
+// --------------------------------------------------------------
+let publishProgressInterval = null;
+
+function showPublishProgress() {
+  const wrap = document.getElementById('publishProgressWrap');
+  if (wrap) wrap.style.display = 'block';
+  updatePublishProgressUI({ percent: 0, message: 'Sinisimulan ang build...' });
+}
+
+function updatePublishProgressUI(progress) {
+  const fill = document.getElementById('publishProgressFill');
+  const label = document.getElementById('publishProgressLabel');
+  const percentEl = document.getElementById('publishProgressPercent');
+  if (!fill || !label || !percentEl) return;
+  const pct = Math.max(0, Math.min(100, Math.round(progress.percent || 0)));
+  fill.style.width = pct + '%';
+  percentEl.innerText = pct + '%';
+  label.innerText = progress.message || 'Ginagawa ang build...';
+  fill.style.background = progress.stage === 'error'
+    ? '#e05a5a'
+    : 'linear-gradient(90deg, var(--accent-dim), var(--accent))';
+}
+
+function hidePublishProgress(delayMs) {
+  const wrap = document.getElementById('publishProgressWrap');
+  if (!wrap) return;
+  setTimeout(() => { wrap.style.display = 'none'; }, delayMs == null ? 1200 : delayMs);
+}
+
+async function pollPublishProgressOnce() {
+  try {
+    const data = await api('/relay/admin/api/build-progress');
+    if (data && data.success && data.progress) {
+      updatePublishProgressUI(data.progress);
+      if (data.progress.done) stopPublishProgressPolling();
+    }
+  } catch (err) {
+    // huwag hayaang isang failed poll ang tumigil sa buong build
+  }
+}
+
+function startPublishProgressPolling() {
+  stopPublishProgressPolling();
+  pollPublishProgressOnce();
+  publishProgressInterval = setInterval(pollPublishProgressOnce, 700);
+}
+
+function stopPublishProgressPolling() {
+  if (publishProgressInterval) {
+    clearInterval(publishProgressInterval);
+    publishProgressInterval = null;
+  }
+}
+
+async function publishRelease() {
+  const btn = document.getElementById('publishReleaseBtn');
+  const versionInput = document.getElementById('publishVersionInput');
+  const changelogInput = document.getElementById('publishChangelogInput');
+  const repoUrlInput = document.getElementById('publishRepoUrlInput');
+  const refInput = document.getElementById('publishRefInput');
+  const targetIdInput = document.getElementById('publishTargetIdInput');
+
+  const version = versionInput ? versionInput.value.trim() : '';
+  if (!version) {
+    toast('Kailangan ang version (hal. "1.0.43").', 'error');
+    return;
+  }
+
+  const body = { version };
+  const changelog = changelogInput ? changelogInput.value.trim() : '';
+  const repoUrl = repoUrlInput ? repoUrlInput.value.trim() : '';
+  const ref = refInput ? refInput.value.trim() : '';
+  const targetId = targetIdInput ? targetIdInput.value.trim() : '';
+  if (changelog) body.changelog = changelog;
+  if (repoUrl) body.repoUrl = repoUrl;
+  if (ref) body.ref = ref;
+  if (targetId) body.installationId = targetId;
+
+  btn.disabled = true;
+  btn.innerText = '⏳ Ginagawa...';
+  showPublishProgress();
+  startPublishProgressPolling();
+  try {
+    const data = await api('/relay/admin/api/system/publish-release', {
+      method: 'POST',
+      body: JSON.stringify(body)
+    });
+    if (data.success) {
+      updatePublishProgressUI({ percent: 100, message: 'Tapos na — na-publish na.' });
+      const mb = data.build && data.build.sizeBytes ? (data.build.sizeBytes / 1024 / 1024).toFixed(2) : '?';
+      const scopeMsg = data.targeted
+        ? `na-target lang sa installationId ${data.installationId}`
+        : 'makikita na ng LAHAT ng kliyente';
+      toast(`✅ Nabuo ang v${version} (${mb} MB) — ${scopeMsg}.`, 'success');
+      if (versionInput) versionInput.value = '';
+      if (changelogInput) changelogInput.value = '';
+      if (targetIdInput) targetIdInput.value = '';
+      loadBuildHistory();
+    } else {
+      updatePublishProgressUI({ stage: 'error', percent: 100, message: data.message || 'Hindi na-publish ang release.' });
+      toast(data.message || 'Hindi na-publish ang release.', 'error');
+    }
+  } catch (err) {
+    // ipinapakita na ng api() ang toast kung 403/429; iba pang error dito
+  } finally {
+    stopPublishProgressPolling();
+    hidePublishProgress();
+    btn.disabled = false;
+    btn.innerText = '🚀 I-build at I-publish';
   }
 }
 

@@ -894,6 +894,58 @@ function saveSystemVersionInfo(obj) {
 let systemVersionInfo = { ...DEFAULT_SYSTEM_VERSION_INFO }; // pupunuin sa bootstrapStores()
 
 // --------------------------------------------------------------
+// TARGETED RELEASES — opsyonal na PER-DEVICE override sa itaas ng
+// global na SYSTEM VERSION sa itaas. Kapag may naka-store na targeted
+// entry PARA SA isang installationId, ITO ang isasagot ng
+// /relay/latest-version PARA SA installationId na iyon lang — hindi
+// makikita ng ibang device na "may bagong update" kahit tumaas na ang
+// global version. Kung walang targeted entry, babalik sa dating gawi:
+// ang global systemVersionInfo ang sasagutin sa lahat.
+//
+// GAMIT: staged/limited rollout (hal. isang beta customer muna bago
+// i-broadcast sa lahat), o talagang isang partikular na customer/device
+// lang ang dapat makatanggap ng isang partikular na patch/build.
+//
+// PAALALA (mahalaga): ang aktwal na zip file mismo
+// (release/omnipos-client.zip, sinesserve ng /relay/release-package)
+// ay IISA lang at SHARED sa lahat ng device — ang targeting dito ay
+// TUNGKOL LANG SA "sinong nakikita ang 'may bagong update' notice."
+// Ang x-relay-key lang (shared sa lahat ng client) ang gate ng
+// /relay/release-package, HINDI installationId — kaya kung sino man
+// ang mag-trigger ng self-update, ma-a-apply pa rin sa kanila ang
+// parehong zip. Kung kailangan talagang i-block ang PAG-DOWNLOAD mismo
+// (hindi lang ang notice), kailangan pang dagdagan ang
+// /relay/release-package ng parehong installationId check — hindi pa
+// ito kasama dito.
+// --------------------------------------------------------------
+const TARGETED_RELEASES_PATH = path.join(__dirname, 'targeted-releases.json');
+
+async function loadTargetedReleases() {
+    const fromRedis = await redisGetJSON('targeted-releases', null);
+    if (fromRedis !== null) return new Map(Object.entries(fromRedis));
+    try {
+        const raw = fs.readFileSync(TARGETED_RELEASES_PATH, 'utf8');
+        return new Map(Object.entries(JSON.parse(raw)));
+    } catch (err) {
+        return new Map();
+    }
+}
+
+function saveTargetedReleases(map) {
+    if (redisClient) {
+        redisSetJSON('targeted-releases', Object.fromEntries(map));
+        return;
+    }
+    try {
+        fs.writeFileSync(TARGETED_RELEASES_PATH, JSON.stringify(Object.fromEntries(map), null, 2));
+    } catch (err) {
+        console.error('Hindi ma-save ang targeted-releases.json:', err);
+    }
+}
+
+let targetedReleases = new Map(); // installationId -> { version, changelog, publishedAt } — pupunuin sa bootstrapStores()
+
+// --------------------------------------------------------------
 // DOWNLOAD CODES — para sa "one-time online setup, offline pagkatapos"
 // na hiling: ito ang paraan para makapag-download ang isang BAGONG
 // client ng OMNIPOS package (zip) nang HINDI pinapublic ang link —
@@ -2837,11 +2889,21 @@ app.post('/relay/confirm-unlock-bulk', requireApiKey, requireAllowedDevice, rate
 // Allow muna ang device para lang malaman kung may bagong update.
 // --------------------------------------------------------------
 app.get('/relay/latest-version', requireApiKey, rateLimit('latest-version', 60, 10 * 60 * 1000), (req, res) => {
+    // TARGETED RELEASES: kung nagpasa ng ?installationId=... ang client
+    // (bagong bersyon ng OMNIPOS client — tingnan ang /api/system
+    // /update-check doon) AT may targeted entry PARA DITO, ito ang
+    // isasagot sa halip na ang global systemVersionInfo — kaya ibang
+    // device lang (kahit hindi target) ang makakakita ng "may bagong
+    // update" na notice.
+    const installationId = String(req.query.installationId || '').trim();
+    const targeted = installationId ? targetedReleases.get(installationId) : null;
+    const info = targeted || systemVersionInfo;
     res.json({
         success: true,
-        latestVersion: systemVersionInfo.version || '0.0.0',
-        changelog: systemVersionInfo.changelog || '',
-        publishedAt: systemVersionInfo.publishedAt || null
+        latestVersion: info.version || '0.0.0',
+        changelog: info.changelog || '',
+        publishedAt: info.publishedAt || null,
+        targeted: !!targeted
     });
 });
 
@@ -2878,18 +2940,29 @@ app.get('/relay/release-package', requireApiKey, rateLimit('release-package', 10
 });
 
 app.post('/relay/admin/api/system/publish-version', requireAdminKey, (req, res) => {
-    const { version, changelog } = req.body || {};
+    const { version, changelog, installationId } = req.body || {};
     const trimmedVersion = String(version || '').trim();
     if (!trimmedVersion) {
         return res.status(400).json({ success: false, message: 'Kailangan ang "version" (hal. "1.3.0").' });
     }
-    systemVersionInfo = {
+    const entry = {
         version: trimmedVersion,
         changelog: String(changelog || '').trim(),
         publishedAt: Date.now()
     };
+    // TARGETED PUBLISH: kung may binigay na installationId, dito lang
+    // ito ita-tago (targetedReleases) — HINDI apektado ang global
+    // systemVersionInfo, kaya ang ibang device lang ang walang
+    // makikitang bagong update.
+    const targetId = String(installationId || '').trim();
+    if (targetId) {
+        targetedReleases.set(targetId, entry);
+        saveTargetedReleases(targetedReleases);
+        return res.json({ success: true, targeted: true, installationId: targetId, release: entry });
+    }
+    systemVersionInfo = entry;
     saveSystemVersionInfo(systemVersionInfo);
-    res.json({ success: true, systemVersionInfo });
+    res.json({ success: true, targeted: false, systemVersionInfo });
 });
 
 app.get('/relay/admin/api/system/version', requireAdminKey, (req, res) => {
@@ -3320,16 +3393,28 @@ app.get('/relay/admin/api/build-progress', requireAdminKey, (req, res) => {
     res.json({ success: true, progress: buildProgressState });
 });
 
-app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => {
-    const repoUrl = (req.body && req.body.repoUrl) || process.env.OMNIPOS_REPO_URL;
-    const ref = (req.body && req.body.ref) || 'main';
+// --------------------------------------------------------------
+// performBuildRelease(reqBody, req) — ang aktwal na build logic,
+// hiwalay na function para magamit ng DALAWANG route: (1) yung
+// dating '/relay/admin/api/build-release' (build lang, walang
+// publish), at (2) yung bagong '/relay/admin/api/system/publish-release'
+// (build + publish-version sa IISANG request/tawag — para hindi na
+// kailangan pang dalawahin ang curl/HTTP Shortcut sa Termux).
+// Nagba-throw ito ng Error sa sinumang caller kapag nabigo — ang
+// route handlers na ang bahalang mag-catch at mag-format ng sagot.
+// --------------------------------------------------------------
+async function performBuildRelease(reqBody, req) {
+    const repoUrl = (reqBody && reqBody.repoUrl) || process.env.OMNIPOS_REPO_URL;
+    const ref = (reqBody && reqBody.ref) || 'main';
     // Optional na maikling paglalarawan ng build na ito (hal. "hotfix
     // barcode scan bug"). Puro history/log lang ang gamit nito — hindi
     // ito nakakaapekto sa aktwal na filename ng na-build na zip.
-    const caption = String((req.body && req.body.caption) || '').trim();
+    const caption = String((reqBody && reqBody.caption) || '').trim();
 
     if (!repoUrl) {
-        return res.status(400).json({ success: false, message: 'Walang repoUrl na ibinigay at walang OMNIPOS_REPO_URL env var na naka-set.' });
+        const err = new Error('Walang repoUrl na ibinigay at walang OMNIPOS_REPO_URL env var na naka-set.');
+        err.statusCode = 400;
+        throw err;
     }
 
     const tmpDir = path.join(os.tmpdir(), `omnipos-build-${Date.now()}`);
@@ -3354,11 +3439,11 @@ app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => 
         // Gumawa ng client .env DIREKTA sa loob ng tmpDir bago mag-zip,
         // para READY NA AGAD ang zip pagka-download ng bagong kliyente
         // (walang kailangan pang gawin/i-upload na .env sa panig nila).
-        const relayUrl = (req.body && req.body.relayUrl)
+        const relayUrl = (reqBody && reqBody.relayUrl)
             || process.env.RELAY_PUBLIC_URL
             || `${req.protocol}://${req.get('host')}`;
-        const relayApiKey = (req.body && req.body.relayApiKey) || process.env.RELAY_API_KEY;
-        const clientPort = (req.body && req.body.port) || 3000;
+        const relayApiKey = (reqBody && reqBody.relayApiKey) || process.env.RELAY_API_KEY;
+        const clientPort = (reqBody && reqBody.port) || 3000;
 
         if (!relayApiKey) {
             throw new Error('Walang RELAY_API_KEY na naka-set (ni sa request body ni sa RELAY .env) — hindi makakagawa ng client .env.');
@@ -3435,8 +3520,7 @@ app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => 
 
         setBuildProgress({ stage: 'done', percent: 100, message: 'Tapos na ang build.', done: true });
 
-        res.json({
-            success: true,
+        return {
             message: envResult.encrypted
                 ? `Nagawa ang bagong release package. Na-obfuscate ang ${obfuscatedCount} file(s), naka-encrypt na ang .env.`
                 : `Nagawa ang bagong release package. Na-obfuscate ang ${obfuscatedCount} file(s). PAALALA: walang env-loader.js sa repo mo — plaintext pa rin ang .env.`,
@@ -3444,14 +3528,120 @@ app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => 
             obfuscatedFiles: obfuscatedCount,
             envEncrypted: envResult.encrypted,
             builtAt
-        });
+        };
     } catch (err) {
         console.error('❌ Build-release error:', err.message);
         setBuildProgress({ stage: 'error', percent: buildProgressState.percent, message: err.message, done: true, error: err.message });
-        res.status(500).json({ success: false, message: `Hindi na-build ang release: ${err.message}` });
+        throw err;
     } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+}
+
+// --------------------------------------------------------------
+// POST /relay/admin/api/build-release  (route wrapper)
+// Ito pa rin ang dating "build lang, walang publish" na endpoint —
+// gumagamit lang ngayon ng shared performBuildRelease() sa itaas.
+// --------------------------------------------------------------
+app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => {
+    try {
+        const result = await performBuildRelease(req.body, req);
+        res.json({ success: true, ...result });
+    } catch (err) {
+        res.status(err.statusCode || 500).json({ success: false, message: err.statusCode ? err.message : `Hindi na-build ang release: ${err.message}` });
+    }
+});
+
+// --------------------------------------------------------------
+// POST /relay/admin/api/system/publish-release  (BAGO)
+// "Isang tawag lang" na version: pinagsasama nito ang build-release
+// (gumawa ng bagong omnipos-client.zip) AT publish-version (i-set ang
+// bagong version/changelog na titignan ng existing clients) sa IISANG
+// request — para hindi na kailangan pang dalawahing i-curl/Termux/HTTP
+// Shortcut kada bagong update. Ito ang direktang sagot sa "paano para
+// RELAY lang ang gagamitin, makikita na agad ng customer ang update."
+//
+// Body: { version (required), changelog?, repoUrl?, ref?, relayUrl?,
+//         relayApiKey?, port?, caption? }
+//
+// Pagkakasunod: (1) build muna — kung mabigo ito (hal. sirang repoUrl,
+// walang bagong commit, atbp.), HINDI na ita-tuloy ang publish-version,
+// para hindi maka-publish ng version na wala pang katumbas na zip.
+// (2) Kapag successful ang build, saka lang isasagawa ang publish.
+// --------------------------------------------------------------
+app.post('/relay/admin/api/system/publish-release', requireAdminKey, async (req, res) => {
+    const version = String((req.body && req.body.version) || '').trim();
+    if (!version) {
+        return res.status(400).json({ success: false, message: 'Kailangan ang "version" (hal. "1.3.0").' });
+    }
+    // TARGETED PUBLISH (opsyonal): kung may binigay na installationId,
+    // ang build pa rin ay tumatakbo nang normal (iisa lang naman ang
+    // zip para sa lahat), pero ang PAG-ANNOUNCE ng version/changelog na
+    // ito ay sa TARGETED store lang mapupunta — ang global
+    // systemVersionInfo ay hindi magbabago, kaya ang ibang device lang
+    // ang walang makikitang "may bagong update."
+    const targetId = String((req.body && req.body.installationId) || '').trim();
+
+    let buildResult;
+    try {
+        buildResult = await performBuildRelease(req.body, req);
+    } catch (err) {
+        return res.status(err.statusCode || 500).json({
+            success: false,
+            stage: 'build',
+            message: `Hindi na-build ang release — HINDI isinagawa ang publish-version: ${err.message}`
+        });
+    }
+
+    const changelog = String((req.body && req.body.changelog) || '').trim();
+    const entry = { version, changelog, publishedAt: Date.now() };
+
+    if (targetId) {
+        targetedReleases.set(targetId, entry);
+        saveTargetedReleases(targetedReleases);
+    } else {
+        systemVersionInfo = entry;
+        saveSystemVersionInfo(systemVersionInfo);
+    }
+    logActivity(targetId || null, 'release_built_and_published', {
+        version, changelog, sizeBytes: buildResult.sizeBytes, targeted: !!targetId
+    });
+
+    res.json({
+        success: true,
+        message: targetId
+            ? `Nabuo ang bersyon ${version} — na-target lang ito sa installationId ${targetId}. Ibang device, hindi ito makikita.`
+            : `Nabuo at na-publish na ang bersyon ${version}. Makikita na ito ng LAHAT ng kliyente sa susunod na update-check nila.`,
+        build: buildResult,
+        targeted: !!targetId,
+        installationId: targetId || null,
+        systemVersionInfo: targetId ? undefined : systemVersionInfo,
+        targetedRelease: targetId ? entry : undefined
+    });
+});
+
+// --------------------------------------------------------------
+// GET /relay/admin/api/system/targeted-releases
+// Listahan ng lahat ng kasalukuyang naka-target na installationId →
+// {version, changelog, publishedAt}. Para makita mo agad kung sino-sino
+// pa ang may "pending" na targeted release na hindi pa naiaapply/
+// na-clear.
+// --------------------------------------------------------------
+app.get('/relay/admin/api/system/targeted-releases', requireAdminKey, (req, res) => {
+    res.json({ success: true, targeted: Object.fromEntries(targetedReleases) });
+});
+
+// --------------------------------------------------------------
+// POST /relay/admin/api/system/targeted-releases/:installationId/clear
+// Tinatanggal ang targeted override ng isang partikular na
+// installationId — babalik ito sa pagtingin sa GLOBAL systemVersionInfo
+// na lang, tulad ng ibang device.
+// --------------------------------------------------------------
+app.post('/relay/admin/api/system/targeted-releases/:installationId/clear', requireAdminKey, (req, res) => {
+    const { installationId } = req.params;
+    const existed = targetedReleases.delete(installationId);
+    if (existed) saveTargetedReleases(targetedReleases);
+    res.json({ success: true, cleared: existed });
 });
 
 // --------------------------------------------------------------
@@ -3559,6 +3749,7 @@ async function bootstrapStores() {
         activityLog,
         backupCheckins,
         systemVersionInfo,
+        targetedReleases,
         downloadCodes,
         buildHistory
     ] = await Promise.all([
@@ -3570,6 +3761,7 @@ async function bootstrapStores() {
         loadActivityLog(),
         loadBackupCheckins(),
         loadSystemVersionInfo(),
+        loadTargetedReleases(),
         loadDownloadCodes(),
         loadBuildHistory()
     ]);
