@@ -7,7 +7,7 @@
 
 <!-- PWA: para maging "installable" sa Android/iOS/PC gaya ng OMNIPOS client app -->
 <link rel="manifest" href="manifest.json">
-<meta name="theme-color" content="#0b0f14">
+<meta name="theme-color" content="#05070d">
 <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -15,24 +15,26 @@
 <meta name="apple-mobile-web-app-title" content="Relay Admin">
 <meta name="mobile-web-app-capable" content="yes">
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700;800&family=Rajdhani:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 
 :root {
-  --bg: #05070a;
-  --bg-raise: #0a0e14;
-  --card: #0d131b;
-  --card-hover: #101923;
-  --border: #1a2430;
-  --border-soft: #24313e;
-  --line: #17202a;
-  --text: #e7edf3;
-  --muted: #7c8b9a;
-  --muted-dim: #56626e;
-  --accent: #2dd4bf;
-  --accent-bright: #7cf3e3;
-  --accent-dim: #1a463f;
-  --accent-soft: #0e211f;
-  --accent-text: #04211d;
+  /* ===== Cyber Neon Pro palette (galing sa OmniPOS theme-cyber-pro) ===== */
+  --bg: #05070d;
+  --bg-raise: #0b0f1a;
+  --card: #0b0f1a;
+  --card-hover: #101625;
+  --border: #1f2a44;
+  --border-soft: #2a3a5c;
+  --line: #1f2a44;
+  --text: #eafcff;
+  --muted: #8ea3c9;
+  --muted-dim: #5a6a8c;
+  --accent: #22e5ff;
+  --accent-bright: #6df0ff;
+  --accent-hover: #ff2ee6;
+  --accent-dim: #123a47;
+  --accent-soft: rgba(34, 229, 255, 0.16);
+  --accent-text: #031014;
   --green: #3fb950;
   --green-bg: #12301c;
   --green-line: #1e5a2c;
@@ -42,10 +44,46 @@
   --amber: #e3a730;
   --amber-bg: #33270f;
   --amber-line: #5c4318;
-  --font-ui: 'Space Grotesk', system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  --font-ui: 'Rajdhani', 'Space Grotesk', system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  --font-heading: 'Orbitron', 'Space Grotesk', sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --radius: 12px;
-  --radius-sm: 8px;
+  --radius: 4px;
+  --radius-sm: 3px;
+  --radius-lg: 6px;
+  --border-width: 1.5px;
+}
+
+/* ===== Cyber Neon Pro: sharp corners, techy headings, neon glow ===== */
+h1, .card h2, .topbar-title, .otp-code, .stat-num {
+  font-family: var(--font-heading);
+  letter-spacing: .02em;
+}
+.card, .stat-card, .row, .sync-banner, .empty {
+  border-width: var(--border-width);
+}
+.card, .stat-card {
+  box-shadow: 0 0 0 1px rgba(34, 229, 255, 0.06), 0 8px 20px -8px rgba(34, 229, 255, 0.12);
+}
+.row:hover {
+  box-shadow: 0 0 0 1px var(--accent), 0 0 16px rgba(34, 229, 255, 0.3);
+}
+button, input[type=text], input[type=password] {
+  border-radius: var(--radius-sm);
+}
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+  box-shadow: 0 0 14px rgba(34, 229, 255, 0.35), 0 0 0 1px rgba(34, 229, 255, 0.25);
+}
+.icon-btn:hover, .btn-ghost:hover {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 10px rgba(34, 229, 255, 0.25);
+}
+.topbar { box-shadow: 0 1px 0 0 rgba(34, 229, 255, 0.18); }
+.topbar-sub { color: var(--accent); }
+.card h2 .count-pill { border-color: var(--accent); }
+input[type=text]:focus, input[type=password]:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(34, 229, 255, 0.16), 0 0 10px rgba(34, 229, 255, 0.2);
 }
 * { box-sizing: border-box; }
 ::selection { background: var(--accent-dim); color: var(--accent-bright); }
@@ -57,8 +95,8 @@ body {
   margin: 0;
   font-family: var(--font-ui);
   background:
-    radial-gradient(ellipse 900px 480px at 12% -10%, rgba(45,212,191,.08), transparent 60%),
-    radial-gradient(ellipse 700px 420px at 100% 0%, rgba(124,140,255,.05), transparent 55%),
+    radial-gradient(ellipse 900px 480px at 12% -10%, rgba(34,229,255,.09), transparent 60%),
+    radial-gradient(ellipse 700px 420px at 100% 0%, rgba(255,46,230,.06), transparent 55%),
     var(--bg);
   background-attachment: fixed;
   color: var(--text);
@@ -84,19 +122,19 @@ code {
   justify-content: space-between;
   gap: 10px;
   padding: 14px 16px;
-  background: linear-gradient(180deg, #0a0f16f0, #05070af0);
+  background: linear-gradient(180deg, #0b0f1af0, #05070df0);
   backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
   z-index: 50;
-  box-shadow: 0 1px 0 0 rgba(45,212,191,.12);
+  box-shadow: 0 1px 0 0 rgba(34,229,255,.18);
 }
 .topbar-brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .topbar-brand img {
   width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0;
   border: 1px solid var(--border-soft);
-  box-shadow: 0 0 0 3px rgba(45,212,191,.06);
+  box-shadow: 0 0 0 3px rgba(34,229,255,.08);
 }
 .topbar-title { font-size: 15px; font-weight: 700; line-height: 1.2; letter-spacing: -.01em; }
 .topbar-sub {
@@ -280,7 +318,7 @@ input[type=text]::placeholder, input[type=password]::placeholder { color: var(--
 input[type=text]:focus, input[type=password]:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(45,212,191,.12);
+  box-shadow: 0 0 0 3px rgba(34,229,255,.18);
 }
 button {
   font-family: var(--font-ui);
@@ -302,7 +340,7 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
   background: linear-gradient(180deg, var(--accent-bright), var(--accent));
   color: var(--accent-text);
   width: 100%;
-  box-shadow: 0 0 0 1px rgba(45,212,191,.25), 0 6px 16px -8px rgba(45,212,191,.5);
+  box-shadow: 0 0 0 1px rgba(34,229,255,.3), 0 6px 16px -8px rgba(34,229,255,.5);
 }
 .btn-ghost { background: var(--bg-raise); color: var(--text); border: 1px solid var(--border-soft) !important; }
 
