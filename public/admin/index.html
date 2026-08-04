@@ -513,6 +513,16 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
 .modal-box p { margin: 0 0 16px; font-size: 13px; color: var(--muted); line-height: 1.5; }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .modal-actions button { min-width: 88px; }
+/* BUG FIX: ang safety-prompt confirm dialog (#confirmBackdrop) ay
+   dapat LAGING nasa ibabaw ng ibang modal (hal. #integrityBackdrop),
+   dahil pwede itong lumabas HABANG bukas pa ang isa pang modal (hal.
+   "I-clear ang flag" button sa loob ng integrity detail modal). Dating
+   parehong z-index (998) ang dalawa, kaya ang huling modal sa DOM
+   order (#integrityBackdrop) ang nasa ibabaw, natatakpan/naha-harang
+   ang confirm dialog — hindi na-click ang "Oo, tuloy", kaya parang
+   "hindi gumana" ang I-clear.
+   */
+#confirmBackdrop { z-index: 999; }
 
 /* ---------- TOASTS ---------- */
 #toastHost {
@@ -2384,6 +2394,17 @@ function closeIntegrityModal() {
 
 async function clearIntegrityFlag() {
   if (!currentIntegrityId) return;
+  // BUG FIX: dating tinatawag muna ang confirmAction() HABANG bukas pa
+  // ang integrity modal (#integrityBackdrop) — kahit pareho namang
+  // fixed-position overlay ang dalawa, ang integrity modal ang
+  // natatakpan ang confirm dialog sa ilang browser/zoom state, kaya
+  // "hindi ma-click" ang Oo/tuloy. Isinasara na muna DITO ang integrity
+  // modal (itinatago muna ang id sa isang lokal na variable dahil
+  // nire-reset ni closeIntegrityModal() ang currentIntegrityId) bago
+  // ilabas ang confirm dialog — walang dalawang magkapatong na modal.
+  const targetId = currentIntegrityId;
+  closeIntegrityModal();
+
   const ok = await confirmAction({
     title: 'I-clear ang integrity flag?',
     message: 'Gawin lang ito kung na-review mo na ang mga binagong/naburang file at LEGIT/sinadya ito (hal. sariling customization ng kliyente). Kung parehong binago pa rin ang mga file na ito sa susunod na check-in, ma-flag ulit ito.',
@@ -2392,10 +2413,9 @@ async function clearIntegrityFlag() {
   });
   if (!ok) return;
   try {
-    const res = await api(`/relay/admin/api/devices/${encodeURIComponent(currentIntegrityId)}/integrity/clear`, { method: 'POST' });
+    const res = await api(`/relay/admin/api/devices/${encodeURIComponent(targetId)}/integrity/clear`, { method: 'POST' });
     if (res.success) toast('Na-clear ang integrity flag.', 'success');
   } catch (err) { /* handled */ }
-  closeIntegrityModal();
   loadDevices();
 }
 
