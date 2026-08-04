@@ -887,6 +887,9 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
           <textarea id="publishChangelogInput" placeholder="Changelog (opsyonal — ito ang makikita ng customer sa update notice)" rows="2" style="flex:1; min-width:200px; resize:vertical; background:var(--panel-2, #1a1a1a); color:inherit; border:1px solid var(--border, #2a2a2a); border-radius:8px; padding:8px;"></textarea>
         </div>
         <div class="backup-row" style="margin-top:8px;">
+          <input type="text" id="publishCaptionInput" placeholder="Caption (opsyonal — para lang sa history log sa ibaba, hal. &quot;hotfix barcode scan bug&quot;)" style="flex:1; min-width:220px;">
+        </div>
+        <div class="backup-row" style="margin-top:8px;">
           <input type="text" id="publishTargetIdInput" placeholder="Target Installation ID (opsyonal — iiwan blangko para sa LAHAT ng kliyente)" style="flex:1; min-width:220px;">
         </div>
         <div class="backup-note" style="margin-top:6px;">
@@ -1393,65 +1396,139 @@ async function downloadBackup(auto = false) {
 // ma-download ang zip.
 // --------------------------------------------------------------
 let lastLoadedDownloadCodes = [];
-let buildProgressInterval = null;
 
-function showBuildProgress() {
-  const wrap = document.getElementById('buildProgressWrap');
-  if (wrap) wrap.style.display = 'block';
-  updateBuildProgressUI({ percent: 0, message: 'Sinisimulan ang build...' });
-}
+// --------------------------------------------------------------
+// createProgressController(ids) — GAWA-GAWA na progress-bar controller
+// na "sina-smooth" ang pag-akyat ng % sa screen, dahil ang totoong
+// progress mula sa RELAY (GET /relay/admin/api/build-progress) ay
+// TUMATALON sa malalaking hakbang bawat 700ms na poll — halimbawa
+// mula 10% (tapos na ang "clone" step) diretso 32.5% (tapos na rin
+// agad ang "filter" step, dahil halos instant lang ito) — kaya kung
+// direkta lang ilalagay ang bawat poll result sa fill.style.width,
+// parang "tumatalon"/may patlang ang bilang sa screen sa halip na
+// dahan-dahang bumibilang.
+//
+// Ang solusyon: hiwalay na "target" (galing sa totoong poll) at
+// "displayed" (ang aktwal na nakikita sa screen) na percent. May
+// sariling mas mabilis na tick loop (bawat 120ms) na dahan-dahang
+// idinadagdag ang displayed nang +1 pabalik-balik papunta sa target
+// — kaya kahit malaki ang tumalon ng totoong progress sa pagitan ng
+// dalawang poll, tuloy-tuloy pa ring bumibilang ang UI nang 1% bawat
+// tick, WALANG patlang, hanggang maabot ang tunay na value — at kapag
+// "done" na ang totoong build (100% o error), agad na sino-snap dito
+// nang hindi na hinihintay pang umabot nang paisa-isa ang animation.
+// --------------------------------------------------------------
+function createProgressController(ids) {
+  const wrap = document.getElementById(ids.wrap);
+  const fill = document.getElementById(ids.fill);
+  const label = document.getElementById(ids.label);
+  const percentEl = document.getElementById(ids.percent);
 
-function updateBuildProgressUI(progress) {
-  const fill = document.getElementById('buildProgressFill');
-  const label = document.getElementById('buildProgressLabel');
-  const percentEl = document.getElementById('buildProgressPercent');
-  if (!fill || !label || !percentEl) return;
-  const pct = Math.max(0, Math.min(100, Math.round(progress.percent || 0)));
-  fill.style.width = pct + '%';
-  percentEl.innerText = pct + '%';
-  label.innerText = progress.message || 'Ginagawa ang build...';
-  fill.style.background = progress.stage === 'error'
-    ? '#e05a5a'
-    : 'linear-gradient(90deg, var(--accent-dim), var(--accent))';
-}
+  let pollInterval = null;
+  let animInterval = null;
+  let displayed = 0;
+  let target = { percent: 0, message: '', stage: 'idle', done: false };
 
-function hideBuildProgress(delayMs) {
-  const wrap = document.getElementById('buildProgressWrap');
-  if (!wrap) return;
-  setTimeout(() => { wrap.style.display = 'none'; }, delayMs == null ? 1200 : delayMs);
-}
+  function renderPercent(p) {
+    if (fill) fill.style.width = p + '%';
+    if (percentEl) percentEl.innerText = p + '%';
+  }
 
-// Pina-poll ang GET /relay/admin/api/build-progress paminsan-minsan
-// (700ms) habang naka-disable ang build button — mabilis lang ito
-// (nagbabasa ng in-memory object sa RELAY, walang disk/DB access),
-// kaya hindi ito nagpapabagal sa aktwal na build o sa ibang admin
-// requests. Awtomatikong titigil ang polling pagka-"done" na ang
-// progress (tapos man o may error).
-async function pollBuildProgressOnce() {
-  try {
-    const data = await api('/relay/admin/api/build-progress');
-    if (data && data.success && data.progress) {
-      updateBuildProgressUI(data.progress);
-      if (data.progress.done) stopBuildProgressPolling();
+  function applyTarget(progress) {
+    target = progress || target;
+    if (label) label.innerText = target.message || 'Ginagawa ang build...';
+    if (fill) {
+      fill.style.background = target.stage === 'error'
+        ? '#e05a5a'
+        : 'linear-gradient(90deg, var(--accent-dim), var(--accent))';
     }
-  } catch (err) {
-    // huwag hayaang isang failed poll ang tumigil sa buong build —
-    // susubukan na lang ulit sa susunod na tick (700ms pa)
   }
+
+  function tick() {
+    const targetPct = Math.max(0, Math.min(100, Math.round(target.percent || 0)));
+    if (target.done || displayed > targetPct) {
+      // tapos na ang totoong build (o bumaba ang target dahil bagong
+      // build/reset) — agad na i-snap, huwag nang paisa-isahin pa
+      displayed = targetPct;
+    } else if (displayed < targetPct) {
+      displayed += 1;
+    }
+    renderPercent(displayed);
+  }
+
+  function startAnim() {
+    stopAnim();
+    animInterval = setInterval(tick, 120);
+  }
+  function stopAnim() {
+    if (animInterval) { clearInterval(animInterval); animInterval = null; }
+  }
+
+  function show() {
+    if (wrap) wrap.style.display = 'block';
+    displayed = 0;
+    renderPercent(0);
+    applyTarget({ percent: 0, message: 'Sinisimulan ang build...', stage: 'idle', done: false });
+    startAnim();
+  }
+
+  function hide(delayMs) {
+    if (!wrap) return;
+    setTimeout(() => { wrap.style.display = 'none'; }, delayMs == null ? 1200 : delayMs);
+  }
+
+  function setTarget(progress) {
+    applyTarget(progress);
+  }
+
+  // Pina-poll ang GET /relay/admin/api/build-progress paminsan-minsan
+  // (700ms) habang naka-disable ang build button — mabilis lang ito
+  // (nagbabasa ng in-memory object sa RELAY, walang disk/DB access),
+  // kaya hindi ito nagpapabagal sa aktwal na build o sa ibang admin
+  // requests. Awtomatikong titigil ang polling pagka-"done" na ang
+  // progress (tapos man o may error) — ang animation tick loop ang
+  // bahalang tapusin ang pag-akyat papunta sa huling value.
+  async function pollOnce() {
+    try {
+      const data = await api('/relay/admin/api/build-progress');
+      if (data && data.success && data.progress) {
+        applyTarget(data.progress);
+        if (data.progress.done) stopPolling();
+      }
+    } catch (err) {
+      // huwag hayaang isang failed poll ang tumigil sa buong build —
+      // susubukan na lang ulit sa susunod na tick (700ms pa)
+    }
+  }
+
+  function startPolling() {
+    stopPolling();
+    pollOnce();
+    pollInterval = setInterval(pollOnce, 700);
+  }
+  function stopPolling() {
+    if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+  }
+
+  function stop() {
+    stopPolling();
+    // bigyan pa ng ~2s ang animator para maabot/masundan ang huling
+    // totoong value (hal. 100%) bago ito tuluyang itigil sa labas,
+    // sa halip na biglang ma-freeze ang bar sa gitna ng pag-akyat.
+    setTimeout(stopAnim, 2000);
+  }
+
+  return { show, hide, setTarget, startPolling, stop };
 }
 
-function startBuildProgressPolling() {
-  stopBuildProgressPolling();
-  pollBuildProgressOnce();
-  buildProgressInterval = setInterval(pollBuildProgressOnce, 700);
-}
-
-function stopBuildProgressPolling() {
-  if (buildProgressInterval) {
-    clearInterval(buildProgressInterval);
-    buildProgressInterval = null;
-  }
-}
+const buildProgressCtl = createProgressController({
+  wrap: 'buildProgressWrap', fill: 'buildProgressFill',
+  label: 'buildProgressLabel', percent: 'buildProgressPercent'
+});
+const publishProgressCtl = createProgressController({
+  wrap: 'publishProgressWrap', fill: 'publishProgressFill',
+  label: 'publishProgressLabel', percent: 'publishProgressPercent'
+});
 
 async function buildRelease() {
   const btn = document.getElementById('buildReleaseBtn');
@@ -1459,27 +1536,27 @@ async function buildRelease() {
   const caption = captionInput ? captionInput.value.trim() : '';
   btn.disabled = true;
   btn.innerText = '⏳ Ginagawa...';
-  showBuildProgress();
-  startBuildProgressPolling();
+  buildProgressCtl.show();
+  buildProgressCtl.startPolling();
   try {
     const data = await api('/relay/admin/api/build-release', {
       method: 'POST',
       body: JSON.stringify(caption ? { caption } : {})
     });
     if (data.success) {
-      updateBuildProgressUI({ percent: 100, message: 'Tapos na ang build.' });
+      buildProgressCtl.setTarget({ percent: 100, message: 'Tapos na ang build.', stage: 'done', done: true });
       toast(`✅ Nagawa ang release (${(data.sizeBytes / 1024 / 1024).toFixed(2)} MB).`, 'success');
       if (captionInput) captionInput.value = '';
       loadBuildHistory();
     } else {
-      updateBuildProgressUI({ stage: 'error', percent: 100, message: data.message || 'Hindi na-build ang release.' });
+      buildProgressCtl.setTarget({ percent: 100, message: data.message || 'Hindi na-build ang release.', stage: 'error', done: true });
       toast(data.message || 'Hindi na-build ang release.', 'error');
     }
   } catch (err) {
     // ipinapakita na ng api() ang toast kung 403/429; iba pang error dito
   } finally {
-    stopBuildProgressPolling();
-    hideBuildProgress();
+    buildProgressCtl.stop();
+    buildProgressCtl.hide();
     btn.disabled = false;
     btn.innerText = '🛠️ I-build ang Release (git → zip)';
   }
@@ -1490,66 +1567,17 @@ async function buildRelease() {
 // -version sa IISANG tawag papunta sa '/relay/admin/api/system
 // /publish-release'. Ginagamit ang parehong build-progress polling
 // (isa lang naman ang build na tumatakbo sa RELAY sa isang pagkakataon)
-// pero hiwalay na progress-bar elements dito (publishProgress*) para
-// hindi masalungat sa "I-build ang Release" na card sa itaas.
+// pero hiwalay na progress-bar elements dito (publishProgress*) — kaya
+// gumagamit ng sarili nitong `publishProgressCtl` instance (tingnan sa
+// itaas, createProgressController), para hindi masalungat sa
+// "I-build ang Release" na card.
 // --------------------------------------------------------------
-let publishProgressInterval = null;
-
-function showPublishProgress() {
-  const wrap = document.getElementById('publishProgressWrap');
-  if (wrap) wrap.style.display = 'block';
-  updatePublishProgressUI({ percent: 0, message: 'Sinisimulan ang build...' });
-}
-
-function updatePublishProgressUI(progress) {
-  const fill = document.getElementById('publishProgressFill');
-  const label = document.getElementById('publishProgressLabel');
-  const percentEl = document.getElementById('publishProgressPercent');
-  if (!fill || !label || !percentEl) return;
-  const pct = Math.max(0, Math.min(100, Math.round(progress.percent || 0)));
-  fill.style.width = pct + '%';
-  percentEl.innerText = pct + '%';
-  label.innerText = progress.message || 'Ginagawa ang build...';
-  fill.style.background = progress.stage === 'error'
-    ? '#e05a5a'
-    : 'linear-gradient(90deg, var(--accent-dim), var(--accent))';
-}
-
-function hidePublishProgress(delayMs) {
-  const wrap = document.getElementById('publishProgressWrap');
-  if (!wrap) return;
-  setTimeout(() => { wrap.style.display = 'none'; }, delayMs == null ? 1200 : delayMs);
-}
-
-async function pollPublishProgressOnce() {
-  try {
-    const data = await api('/relay/admin/api/build-progress');
-    if (data && data.success && data.progress) {
-      updatePublishProgressUI(data.progress);
-      if (data.progress.done) stopPublishProgressPolling();
-    }
-  } catch (err) {
-    // huwag hayaang isang failed poll ang tumigil sa buong build
-  }
-}
-
-function startPublishProgressPolling() {
-  stopPublishProgressPolling();
-  pollPublishProgressOnce();
-  publishProgressInterval = setInterval(pollPublishProgressOnce, 700);
-}
-
-function stopPublishProgressPolling() {
-  if (publishProgressInterval) {
-    clearInterval(publishProgressInterval);
-    publishProgressInterval = null;
-  }
-}
 
 async function publishRelease() {
   const btn = document.getElementById('publishReleaseBtn');
   const versionInput = document.getElementById('publishVersionInput');
   const changelogInput = document.getElementById('publishChangelogInput');
+  const captionInput = document.getElementById('publishCaptionInput');
   const repoUrlInput = document.getElementById('publishRepoUrlInput');
   const refInput = document.getElementById('publishRefInput');
   const targetIdInput = document.getElementById('publishTargetIdInput');
@@ -1562,25 +1590,33 @@ async function publishRelease() {
 
   const body = { version };
   const changelog = changelogInput ? changelogInput.value.trim() : '';
+  // FIX: dating hindi kasama ang caption dito sa body — kaya lagi itong
+  // "(walang caption)" sa History log tuwing "I-build at I-publish" (one
+  // click) ang ginamit sa halip na yung hiwalay na "I-build ang Release"
+  // button (na may sarili nang caption input at nagpapadala nito). Ang
+  // backend (performBuildRelease) ay tumatanggap na naman talaga ng
+  // reqBody.caption — kulang lang dati ang frontend na magpadala nito.
+  const caption = captionInput ? captionInput.value.trim() : '';
   const repoUrl = repoUrlInput ? repoUrlInput.value.trim() : '';
   const ref = refInput ? refInput.value.trim() : '';
   const targetId = targetIdInput ? targetIdInput.value.trim() : '';
   if (changelog) body.changelog = changelog;
+  if (caption) body.caption = caption;
   if (repoUrl) body.repoUrl = repoUrl;
   if (ref) body.ref = ref;
   if (targetId) body.installationId = targetId;
 
   btn.disabled = true;
   btn.innerText = '⏳ Ginagawa...';
-  showPublishProgress();
-  startPublishProgressPolling();
+  publishProgressCtl.show();
+  publishProgressCtl.startPolling();
   try {
     const data = await api('/relay/admin/api/system/publish-release', {
       method: 'POST',
       body: JSON.stringify(body)
     });
     if (data.success) {
-      updatePublishProgressUI({ percent: 100, message: 'Tapos na — na-publish na.' });
+      publishProgressCtl.setTarget({ percent: 100, message: 'Tapos na — na-publish na.', stage: 'done', done: true });
       const mb = data.build && data.build.sizeBytes ? (data.build.sizeBytes / 1024 / 1024).toFixed(2) : '?';
       const scopeMsg = data.targeted
         ? `na-target lang sa installationId ${data.installationId}`
@@ -1588,17 +1624,18 @@ async function publishRelease() {
       toast(`✅ Nabuo ang v${version} (${mb} MB) — ${scopeMsg}.`, 'success');
       if (versionInput) versionInput.value = '';
       if (changelogInput) changelogInput.value = '';
+      if (captionInput) captionInput.value = '';
       if (targetIdInput) targetIdInput.value = '';
       loadBuildHistory();
     } else {
-      updatePublishProgressUI({ stage: 'error', percent: 100, message: data.message || 'Hindi na-publish ang release.' });
+      publishProgressCtl.setTarget({ percent: 100, message: data.message || 'Hindi na-publish ang release.', stage: 'error', done: true });
       toast(data.message || 'Hindi na-publish ang release.', 'error');
     }
   } catch (err) {
     // ipinapakita na ng api() ang toast kung 403/429; iba pang error dito
   } finally {
-    stopPublishProgressPolling();
-    hidePublishProgress();
+    publishProgressCtl.stop();
+    publishProgressCtl.hide();
     btn.disabled = false;
     btn.innerText = '🚀 I-build at I-publish';
   }
