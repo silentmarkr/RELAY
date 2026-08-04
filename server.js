@@ -3661,6 +3661,23 @@ app.get('/relay/admin/api/build-history', requireAdminKey, (req, res) => {
 });
 
 // --------------------------------------------------------------
+// POST /relay/admin/api/build-history/clear
+// Binubura ang BUONG log ng build history (caption/version/petsa per
+// entry) — LOG LANG ito, hindi ito nagbubura/humihipo sa aktwal na
+// omnipos-client.zip package o sa systemVersionInfo/targeted-releases,
+// kaya ligtas itong i-clear anumang oras; parang "clear activity log"
+// lang, walang epekto sa kung ano ang makikita/ma-download ng mga
+// kliyente.
+// --------------------------------------------------------------
+app.post('/relay/admin/api/build-history/clear', requireAdminKey, (req, res) => {
+    const clearedCount = buildHistory.length;
+    buildHistory = [];
+    saveBuildHistory(buildHistory);
+    logActivity(null, 'build_history_cleared', { clearedCount });
+    res.json({ success: true, clearedCount });
+});
+
+// --------------------------------------------------------------
 // POST /relay/admin/api/download-codes/generate
 // Gumagawa ang developer/admin nito ng isang BAGONG code para sa isang
 // bagong kliyente — walang publicly-listed link, kaya kontrolado kung

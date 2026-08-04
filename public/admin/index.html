@@ -945,6 +945,9 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
         <div class="backup-note">
           Listahan ng mga beses na na-build/na-copy ang <code>omnipos-client.zip</code> — caption, ang naka-publish na version number noong oras ng build, at petsa/oras. Log lang ito; hindi nagbabago ang aktwal na filename ng zip.
         </div>
+        <div class="backup-row" style="margin-top:8px;">
+          <button class="btn-revoke" onclick="clearBuildHistory()" id="clearBuildHistoryBtn">🗑️ I-clear ang History</button>
+        </div>
         <div id="buildHistoryList" class="empty" style="margin-top:12px;">Loading...</div>
       </div>
     </div>
@@ -1675,6 +1678,38 @@ async function loadBuildHistory() {
   } catch (err) {
     container.className = 'empty';
     container.innerText = 'Hindi ma-load ang build history.';
+  }
+}
+
+// I-clear ang BUONG build history log (caption/version/petsa per entry).
+// LOG LANG ito — walang epekto sa aktwal na omnipos-client.zip package
+// o sa mga naka-publish na version/targeted release, kaya safe itong
+// i-clear anumang oras. May safety-prompt muna (parehong modal na
+// ginagamit sa Revoke/Approve) bago tuluyang mabura, dahil hindi na
+// ito mababawi pagkatapos.
+async function clearBuildHistory() {
+  const ok = await confirmAction({
+    title: 'I-clear ang Build History?',
+    message: 'Buburahin ang LAHAT ng naitalang build log (caption, version, petsa). Hindi ito nakakaapekto sa aktwal na omnipos-client.zip o sa mga naka-publish na version — log lang ito. Hindi na ito mababawi.',
+    confirmLabel: 'Oo, i-clear',
+    danger: true
+  });
+  if (!ok) return;
+
+  const btn = document.getElementById('clearBuildHistoryBtn');
+  if (btn) { btn.disabled = true; btn.innerText = '⏳ Kina-clear...'; }
+  try {
+    const data = await api('/relay/admin/api/build-history/clear', { method: 'POST' });
+    if (data.success) {
+      toast(`✅ Na-clear ang build history (${data.clearedCount} entry).`, 'success');
+      loadBuildHistory();
+    } else {
+      toast(data.message || 'Hindi na-clear ang build history.', 'error');
+    }
+  } catch (err) {
+    // ipinapakita na ng api() ang toast kung 403/429; iba pang error dito
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerText = '🗑️ I-clear ang History'; }
   }
 }
 
