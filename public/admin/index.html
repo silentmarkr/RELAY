@@ -913,8 +913,15 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
         </div>
         <div class="backup-row">
           <input type="text" id="buildCaption" placeholder="Caption ng build na ito (opsyonal, hal. 'hotfix barcode scan')" style="flex:2; min-width:200px;">
+          <select id="buildOfflineModeSelect" style="flex:1; min-width:200px; background:var(--panel-2, #1a1a1a); color:inherit; border:1px solid var(--border, #2a2a2a); border-radius:8px; padding:8px;">
+            <option value="toggle" selected>🌐 Online/Offline Toggle (default)</option>
+            <option value="offline">📴 Pure Offline (walang internet ang kliyente)</option>
+          </select>
           <button class="btn-ghost" onclick="buildRelease()" id="buildReleaseBtn">🛠️ I-build ang Release (git → zip)</button>
           <button class="btn-ghost" onclick="downloadCodesJSON()">⬇️ I-download ang Listahan (JSON)</button>
+        </div>
+        <div class="backup-note" style="margin-top:6px;">
+          <strong>Pure Offline</strong> = wala nang CDN attempt ang Font Awesome icons at wala nang connectivity-check pings papuntang gstatic/google sa client — gamitin ito kung sigurado kang WALANG internet talaga ang device ng kliyente. <strong>Online/Offline Toggle</strong> = dating gawi (CDN + auto-detect ng totoong internet) — gamitin kung may internet ang kliyente o hindi ka sigurado. Ito rin ang gagamitin ng "🚀 I-build at I-publish" sa itaas.
         </div>
         <div class="backup-note" style="margin-top:6px;">
           Ang caption ay para lang sa history log sa ibaba — hindi ito nagbabago sa filename ng na-build na package (laging <code>omnipos-client.zip</code> pa rin ito, ino-overwrite lang kada build).
@@ -1457,14 +1464,18 @@ async function buildRelease() {
   const btn = document.getElementById('buildReleaseBtn');
   const captionInput = document.getElementById('buildCaption');
   const caption = captionInput ? captionInput.value.trim() : '';
+  const offlineModeSelect = document.getElementById('buildOfflineModeSelect');
+  const offlineOnly = offlineModeSelect ? offlineModeSelect.value === 'offline' : false;
   btn.disabled = true;
   btn.innerText = '⏳ Ginagawa...';
   showBuildProgress();
   startBuildProgressPolling();
   try {
+    const body = { offlineOnly };
+    if (caption) body.caption = caption;
     const data = await api('/relay/admin/api/build-release', {
       method: 'POST',
-      body: JSON.stringify(caption ? { caption } : {})
+      body: JSON.stringify(body)
     });
     if (data.success) {
       updateBuildProgressUI({ percent: 100, message: 'Tapos na ang build.' });
@@ -1565,6 +1576,8 @@ async function publishRelease() {
   const repoUrl = repoUrlInput ? repoUrlInput.value.trim() : '';
   const ref = refInput ? refInput.value.trim() : '';
   const targetId = targetIdInput ? targetIdInput.value.trim() : '';
+  const offlineModeSelect = document.getElementById('buildOfflineModeSelect');
+  body.offlineOnly = offlineModeSelect ? offlineModeSelect.value === 'offline' : false;
   if (changelog) body.changelog = changelog;
   if (repoUrl) body.repoUrl = repoUrl;
   if (ref) body.ref = ref;
