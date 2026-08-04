@@ -2710,6 +2710,51 @@ app.post('/relay/confirm-demo', requireApiKey, requireAllowedDevice, rateLimit('
 });
 
 // --------------------------------------------------------------
+// POST /relay/end-demo — SELF-SERVICE, client-facing (requireApiKey lang,
+// HINDI requireAdminKey) na endpoint na tinatawag ng OMNIPOS mismo
+// (POST /api/features/end-demo sa server.js nito) sa sandaling manual na
+// tinapos ng admin ng tindahan ang Demo Mode nito nang maaga.
+//
+// BAKIT KAILANGAN ITO: dati, ang "End Demo" sa OMNIPOS ay LOKAL lang —
+// tinatanggal lang nito ang demo token sa sarili nitong featureUnlocks.json,
+// pero HINDI naaalis ang record dito sa RELAY (issuedUnlocks). Kaya kung
+// may NATITIRA pang oras ang demo bago talaga ito mag-expire (hal. RELAY_
+// DEMO_DURATION_HOURS pa rin sa hinaharap), at nag-hard-reset o nag-restore
+// mula sa RELAY ang device (tingnan ang /relay/restore-check-in), maaari
+// pa ring "bumalik" ang parehong demo session — ibinabalik lang kasi ng
+// restore ang LAHAT ng entries na naka-record dito na hindi pa expired.
+//
+// Kaya sa endpoint na ito, tinatanggal na rin DIRETSO dito sa RELAY ang
+// issued demo entry ng installationId na ito (DEMO_FEATURE_ID lang — hindi
+// ito ginagamit para mag-alis ng kahit anong BINAYARANG feature), kaya
+// TULUYAN na itong hindi na maibabalik pa kahit anong restore/check-in pa
+// ang mangyari — kailangan na ng bagong OTP request kung gugustuhin pang
+// muling buksan ang demo sa hinaharap.
+// --------------------------------------------------------------
+app.post('/relay/end-demo', requireApiKey, requireAllowedDevice, rateLimit('end-demo', 20, 10 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
+    const { installationId } = req.body;
+
+    if (!installationId) {
+        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+    }
+
+    const record = issuedUnlocks[installationId];
+    if (!record || !record[DEMO_FEATURE_ID]) {
+        return res.json({ success: true, alreadyInactive: true, message: 'Wala namang naka-record na aktibong Demo Mode dito sa RELAY para sa device na ito.' });
+    }
+
+    delete record[DEMO_FEATURE_ID];
+    saveIssuedUnlocks(issuedUnlocks);
+    logActivity(installationId, 'demo_ended_early', {
+        featureId: DEMO_FEATURE_ID,
+        featureName: 'Full Demo Mode',
+        reason: 'client_self_service'
+    });
+
+    res.json({ success: true, message: 'Tuluyan nang tinapos ang Demo Mode dito sa RELAY — hindi na ito maibabalik kahit pa may natitirang oras dati.' });
+});
+
+// --------------------------------------------------------------
 // POST /relay/admin/api/devices/:installationId/activate-demo
 // Direktang nagbibigay ng FULL DEMO MODE (lahat ng features, pansamantala
 // lang) sa isang device — WALANG OTP kailangan, at HINDI na kailangang
