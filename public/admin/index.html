@@ -803,6 +803,10 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
           <div class="stat-num" id="statCloneFlagged" style="color:var(--red);">—</div>
           <div class="stat-label">🚩 Clone flagged</div>
         </div>
+        <div class="stat-card" style="cursor:pointer;" onclick="switchTab('devices'); document.getElementById('seenFilterStatus').value='integrity'; renderSeenList(); document.getElementById('seenList').scrollIntoView({behavior:'smooth'});">
+          <div class="stat-num" id="statIntegrityFlagged" style="color:var(--red);">—</div>
+          <div class="stat-label">🛠️ May nabago/naburang file</div>
+        </div>
       </div>
 
       <div class="card">
@@ -842,6 +846,7 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
             <option value="allowed">Allowed lang</option>
             <option value="blocked">Blocked lang</option>
             <option value="flagged">🚩 Naka-flag na clone lang</option>
+            <option value="integrity">🛠️ May nabago/naburang file lang</option>
           </select>
           <select id="seenSortBy" onchange="renderSeenList()">
             <option value="lastSeen">I-sort: Huling nakita</option>
@@ -1122,6 +1127,21 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
     <div class="modal-actions">
       <button class="btn-ghost" id="confirmCancelBtn">Kanselahin</button>
       <button class="btn-allow" id="confirmActionBtn">Oo, tuloy</button>
+    </div>
+  </div>
+</div>
+
+<!-- FILE INTEGRITY DETAIL: "git status"-style na listahan ng
+     modified/deleted/added files ng isang device, may button din para
+     i-clear/i-acknowledge ang flag pagkatapos i-review ng developer. -->
+<div id="integrityBackdrop" class="modal-backdrop">
+  <div class="modal-box" style="max-width:640px; max-height:80vh; overflow-y:auto;">
+    <h3>🛠️ Integrity check — <span id="integrityDeviceLabel"></span></h3>
+    <p class="meta" id="integrityMeta" style="margin-bottom:14px;"></p>
+    <div id="integrityBody"></div>
+    <div class="modal-actions">
+      <button class="btn-ghost" onclick="closeIntegrityModal()">Isara</button>
+      <button class="btn-revoke" id="integrityClearBtn" onclick="clearIntegrityFlag()">✅ I-clear ang flag (na-review ko na)</button>
     </div>
   </div>
 </div>
@@ -2018,6 +2038,7 @@ async function loadDevices() {
   document.getElementById('statAllowed').innerText = data.allowedDevices.length;
   document.getElementById('statSeen').innerText = data.seenDevices.length;
   document.getElementById('statCloneFlagged').innerText = data.cloneFlaggedCount || 0;
+  document.getElementById('statIntegrityFlagged').innerText = data.integrityFlaggedCount || 0;
   document.getElementById('allowedCountPill').innerText = data.allowedDevices.length;
 
   renderBackupSyncBanner(data);
@@ -2087,6 +2108,7 @@ function renderSeenList() {
   if (statusFilter === 'allowed') list = list.filter(d => d.allowed);
   if (statusFilter === 'blocked') list = list.filter(d => !d.allowed);
   if (statusFilter === 'flagged') list = list.filter(d => d.cloneFlagged);
+  if (statusFilter === 'integrity') list = list.filter(d => d.integrityFlagged);
 
   if (sortBy === 'mostUnlocked') {
     list.sort((a, b) => (b.unlockedCount || 0) - (a.unlockedCount || 0));
@@ -2102,22 +2124,25 @@ function renderSeenList() {
   }
 
   seenEl.innerHTML = list.map(d => `
-    <div class="row" ${d.cloneFlagged ? 'style="border:1px solid var(--red);"' : ''}>
+    <div class="row" ${(d.cloneFlagged || d.integrityFlagged) ? 'style="border:1px solid var(--red);"' : ''}>
       <div class="row-info">
         <div class="id">${d.installationId}
           <span class="badge ${d.allowed ? 'badge-allowed' : 'badge-blocked'}">${d.allowed ? 'ALLOWED' : 'BLOCKED'}</span>
           <span class="badge" style="${d.online ? 'background:var(--green-bg,#0f2e1c); color:var(--green,#4ade80);' : 'background:var(--gray-bg,#2a2a2a); color:var(--gray,#888);'}">${d.online ? '🟢 ONLINE' : '⚪ OFFLINE'}</span>
           ${d.demoActive ? '<span class="badge" style="background:var(--amber-bg); color:var(--amber);">DEMO</span>' : ''}
           ${d.cloneFlagged ? '<span class="badge badge-blocked">🚩 POSIBLENG CLONE</span>' : ''}
+          ${d.integrityFlagged ? `<span class="badge badge-blocked">🛠️ NABAGO/NABURANG FILE (${d.integrityModifiedCount || 0} binago, ${d.integrityDeletedCount || 0} nabura, ${d.integrityAddedCount || 0} dagdag)</span>` : ''}
         </div>
         <div class="meta">${d.label ? `🏷️ <strong>${d.label}</strong> · ` : ''}${d.storeName || 'Walang self-reported na pangalan'} · ${d.username || '—'} · ${timeAgo(d.lastSeenAt)} · ${d.requestCount} request(s) · ${d.unlockedCount || 0}/${d.totalCatalogCount} naka-unlock</div>
         ${d.cloneFlagged ? '<div class="meta" style="color:var(--red);">⚠️ May dalawang magkaibang device na gumamit ng parehong installationId — malamang kinopya/inilipat ang app folder papunta sa ibang unit.</div>' : ''}
+        ${d.integrityFlagged ? `<div class="meta" style="color:var(--red);">⚠️ May nakitang binagong/naburang file kumpara sa orihinal na ipinadalang release — ${timeAgo(d.integrityCheckedAt)}. I-click ang "Tingnan ang mga binagong file" para sa detalye.</div>` : ''}
       </div>
       <div style="display:flex; flex-direction:column; gap:6px;">
         <button class="btn-detail" onclick="openDeviceDetail('${d.installationId}')">Detalye</button>
         <button class="btn-ghost" onclick="editLabel('${d.installationId}', '${(d.label || '').replace(/'/g, "\\'")}')">🏷️ I-label</button>
         ${d.cloneFlagged ? `<button class="btn-revoke" onclick="resetCloneFlag('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🚩 I-reset ang clone flag</button>` : ''}
         ${d.cloneFlagged ? `<button class="btn-ghost" onclick="splitClone('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🔀 Ibukod bilang bagong device</button>` : ''}
+        ${d.integrityFlagged ? `<button class="btn-revoke" onclick="showIntegrityDetail('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🛠️ Tingnan ang mga binagong file</button>` : ''}
         ${d.allowed
           ? `<button class="btn-revoke" onclick="revoke('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">Alisin</button>`
           : `<button class="btn-allow" onclick="allow('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">Allow</button>`}
@@ -2299,6 +2324,78 @@ async function splitClone(id, storeName) {
       alert(`Bagong installationId:\n\n${res.newInstallationId}\n\nLalabas ito sa listahan sa susunod na mag-verify online ang clone device. Huwag kalimutang i-activate manually ang mga totoong binayaran nitong features sa Detalye page nito.`);
     }
   } catch (err) { /* handled */ }
+  loadDevices();
+}
+
+// ---------------- FILE INTEGRITY DETAIL MODAL ----------------
+let currentIntegrityId = null;
+
+function fileListHtml(title, files, color, emptyNote) {
+  if (!files || files.length === 0) return '';
+  const items = files.map(f => `<li style="font-family:monospace; font-size:13px; word-break:break-all;">${f.replace(/</g, '&lt;')}</li>`).join('');
+  return `<div style="margin-bottom:12px;">
+    <div style="color:${color}; font-weight:600; margin-bottom:4px;">${title} (${files.length})</div>
+    <ul style="margin:0 0 0 18px; padding:0;">${items}</ul>
+  </div>`;
+}
+
+async function showIntegrityDetail(installationId, label) {
+  currentIntegrityId = installationId;
+  document.getElementById('integrityDeviceLabel').innerText = label || installationId;
+  document.getElementById('integrityBody').innerHTML = '<div class="empty">Loading...</div>';
+  document.getElementById('integrityMeta').innerText = '';
+  document.getElementById('integrityBackdrop').style.display = 'flex';
+
+  let data;
+  try {
+    data = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/integrity`);
+  } catch (err) { return; }
+
+  const record = data.record;
+  if (!record) {
+    document.getElementById('integrityBody').innerHTML = '<div class="empty">Wala pang naitalang integrity check-in para sa device na ito.</div>';
+    document.getElementById('integrityClearBtn').style.display = 'none';
+    return;
+  }
+
+  document.getElementById('integrityMeta').innerText =
+    `Version: ${record.baselineVersion || '—'} · Huling na-check: ${timeAgo(record.checkedAt)}` +
+    (record.clearedAt ? ` · Na-clear noong ${timeAgo(record.clearedAt)}${record.clearedNote ? ' (' + record.clearedNote + ')' : ''}` : '');
+
+  const body = document.getElementById('integrityBody');
+  if (!record.hasBaseline) {
+    body.innerHTML = '<div class="empty">Walang naka-imbak na baseline para sa version na ito — hindi pa ito nakukumpara.</div>';
+  } else if (!record.flagged) {
+    body.innerHTML = '<div class="empty">✅ Malinis — walang nakitang binago, naburang, o dagdag na file kumpara sa orihinal na release.</div>';
+  } else {
+    body.innerHTML =
+      fileListHtml('✏️ Binago (modified)', record.modified, 'var(--amber, #f59e0b)') +
+      fileListHtml('🗑️ Nabura (deleted)', record.deleted, 'var(--red)') +
+      fileListHtml('➕ Bagong file (hindi bahagi ng release)', record.added, 'var(--red)');
+  }
+
+  document.getElementById('integrityClearBtn').style.display = record.flagged && !record.clearedAt ? 'inline-block' : 'none';
+}
+
+function closeIntegrityModal() {
+  document.getElementById('integrityBackdrop').style.display = 'none';
+  currentIntegrityId = null;
+}
+
+async function clearIntegrityFlag() {
+  if (!currentIntegrityId) return;
+  const ok = await confirmAction({
+    title: 'I-clear ang integrity flag?',
+    message: 'Gawin lang ito kung na-review mo na ang mga binagong/naburang file at LEGIT/sinadya ito (hal. sariling customization ng kliyente). Kung parehong binago pa rin ang mga file na ito sa susunod na check-in, ma-flag ulit ito.',
+    confirmLabel: 'I-clear',
+    danger: true
+  });
+  if (!ok) return;
+  try {
+    const res = await api(`/relay/admin/api/devices/${encodeURIComponent(currentIntegrityId)}/integrity/clear`, { method: 'POST' });
+    if (res.success) toast('Na-clear ang integrity flag.', 'success');
+  } catch (err) { /* handled */ }
+  closeIntegrityModal();
   loadDevices();
 }
 

@@ -853,6 +853,158 @@ function mostRecentBackupCheckinAt() {
     return values.length ? Math.max(...values) : null;
 }
 
+// ====================================================================
+// FILE INTEGRITY MONITORING ("git status" para sa deployed client)
+// --------------------------------------------------------------------
+// LAYUNIN: malaman ng developer/owner (sa RELAY admin panel) kung may
+// na-edit o na-delete na FILE ang isang client sa loob ng sarili
+// nilang OMNIPOS install — hal. binuksan/binago ang server.js para
+// tanggalin ang isang license/anti-clone check, o binura ang isang
+// file na kasama dapat sa release. Dalawang bahagi ito:
+//
+//   1. BASELINE MANIFEST — kada matagumpay na build (performBuildRelease,
+//      tingnan sa ibaba), kinukuha ang sha256 hash ng BAWAT file na
+//      talagang isinama sa release zip (mula mismo sa tmpDir bago pa
+//      i-zip — ibig sabihin eksaktong kapareho ito ng ibinigay sa
+//      customer), at itinatago bilang "baseline" PARA SA VERSION na
+//      iyon (systemVersionInfo.version ng build na iyon). Maraming
+//      version ang naka-imbak nang sabay (hindi lang "pinaka-huli"),
+//      dahil hindi laging naka-update agad ang lahat ng client.
+//   2. CLIENT CHECK-IN — ang OMNIPOS client mismo (tingnan ang bagong
+//      runRelayIntegrityCheckin() sa OMNIPOS/server.js) ay pana-panahong
+//      kinukuha rin ang sha256 hash ng bawat file sa sarili nitong
+//      install folder (gamit ang PAREHONG exclude list — .env,
+//      .env.key, database/, node_modules/, uploads_tmp/, .git/,
+//      release/, *.log — dahil normal/inaasahan lang na magkaiba ang
+//      mga ito bawat device), at ipinapadala ito dito
+//      (POST /relay/integrity-checkin) kasama ang sariling APP_VERSION
+//      nito. Dito, kino-compare ito sa naka-imbak na baseline PARA SA
+//      VERSION NA IYON — kung walang tugmang baseline (hal. sobrang
+//      luma/bago pa lang i-publish), hindi ito basta-basta finaflag.
+//
+// Resulta ng paghahambing (tatlong klase, gaya ng "git status"):
+//   - modified: nasa parehong panig, pero IBA ang hash (binago)
+//   - deleted:  nasa baseline, WALA sa client (binura)
+//   - added:    WALA sa baseline, NASA client (bagong idinagdag na file
+//               na hindi bahagi ng orihinal na release — hal. isang
+//               ipinasok na backdoor/patch file)
+// Kahit alin sa tatlo ay nagre-red-flag sa device sa admin panel.
+// ====================================================================
+
+// Exclude set na dapat MAG-TUGMA (parehong pangalan) sa ginagamit ng
+// OMNIPOS client mismo (SELF_UPDATE_PRESERVE sa OMNIPOS/server.js) at
+// sa build pipeline dito (BUILD_EXCLUDE_NAMES/EXTENSIONS sa ibaba) —
+// kung hindi tugma ang mga ito, magkakaroon ng maling positibo
+// (false "modified/deleted") na hindi naman talagang tampering, kundi
+// runtime data lang na iba-iba talaga bawat device.
+const INTEGRITY_EXCLUDE_NAMES = new Set([
+    '.env', '.env.key', 'database', 'node_modules', 'uploads_tmp',
+    '.git', 'release', 'cf.log', 'server.log'
+]);
+const INTEGRITY_EXCLUDE_EXTENSIONS = new Set(['.log', '.patch']);
+
+function sha256File(filePath) {
+    const hash = crypto.createHash('sha256');
+    hash.update(fs.readFileSync(filePath));
+    return hash.digest('hex');
+}
+
+// Naglalakad sa isang direktoryo (recursive) at nagbabalik ng plain
+// object { "relative/path.js": "<sha256 hex>", ... }, gamit ang
+// forward-slash PALAGI sa relative path (kahit sa Windows) para
+// tumugma ito sa parehong ginawa ng OMNIPOS client (mas madaling
+// i-compare nang direkta, walang path-separator mismatch).
+function buildFileManifest(rootDir) {
+    const manifest = {};
+    function walk(dir, relBase) {
+        let entries;
+        try {
+            entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch (err) {
+            return;
+        }
+        for (const entry of entries) {
+            if (INTEGRITY_EXCLUDE_NAMES.has(entry.name)) continue;
+            const full = path.join(dir, entry.name);
+            const rel = relBase ? `${relBase}/${entry.name}` : entry.name;
+            if (entry.isDirectory()) {
+                walk(full, rel);
+                continue;
+            }
+            if (INTEGRITY_EXCLUDE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
+            try {
+                manifest[rel] = sha256File(full);
+            } catch (err) {
+                // Hindi mababasa (hal. broken symlink) — laktawan na
+                // lang, hindi dapat pabagsakin ang buong build dahil dito.
+            }
+        }
+    }
+    walk(rootDir, '');
+    return manifest;
+}
+
+// baseline manifests, keyed by VERSION string (hindi installationId) —
+// maraming version ang naka-imbak nang sabay dahil hindi laging
+// naka-update agad ang lahat ng client sa parehong version.
+const RELEASE_BASELINES_PATH = path.join(__dirname, 'release-baselines.json');
+
+async function loadReleaseBaselines() {
+    const fromRedis = await redisGetJSON('release-baselines', null);
+    if (fromRedis !== null) return new Map(Object.entries(fromRedis));
+    try {
+        return new Map(Object.entries(JSON.parse(fs.readFileSync(RELEASE_BASELINES_PATH, 'utf8'))));
+    } catch (err) {
+        return new Map();
+    }
+}
+
+function saveReleaseBaselines(map) {
+    const obj = Object.fromEntries(map);
+    if (redisClient) {
+        redisSetJSON('release-baselines', obj);
+        return;
+    }
+    try {
+        fs.writeFileSync(RELEASE_BASELINES_PATH, JSON.stringify(obj, null, 2));
+    } catch (err) {
+        console.error('Hindi ma-save ang release-baselines.json:', err);
+    }
+}
+
+let releaseBaselines = new Map(); // version -> { builtAt, fileCount, files: {relPath: sha256} } — pupunuin sa bootstrapStores()
+
+// integrity status, keyed by installationId (resulta ng huling
+// check-in ng bawat device).
+const INTEGRITY_STATUS_PATH = path.join(__dirname, 'integrity-status.json');
+
+async function loadIntegrityStatus() {
+    const fromRedis = await redisGetJSON('integrity-status', null);
+    if (fromRedis !== null) return fromRedis;
+    try {
+        return JSON.parse(fs.readFileSync(INTEGRITY_STATUS_PATH, 'utf8'));
+    } catch (err) {
+        return {};
+    }
+}
+
+function saveIntegrityStatus(obj) {
+    if (redisClient) {
+        redisSetJSON('integrity-status', obj);
+        return;
+    }
+    try {
+        fs.writeFileSync(INTEGRITY_STATUS_PATH, JSON.stringify(obj, null, 2));
+    } catch (err) {
+        console.error('Hindi ma-save ang integrity-status.json:', err);
+    }
+}
+
+// installationId -> { checkedAt, baselineVersion, hasBaseline,
+//   flagged, modified: [...], deleted: [...], added: [...],
+//   modifiedCount, deletedCount, addedCount, clearedAt, clearedNote }
+let integrityStatus = {}; // pupunuin sa bootstrapStores()
+
 // --------------------------------------------------------------
 // SYSTEM VERSION — pinapatunayan ng developer/owner dito ang
 // "pinakabagong" version ng OMNIPOS client app (hal. pagkatapos
@@ -1184,6 +1336,7 @@ app.get('/relay/admin/api/devices', requireAdminKey, async (req, res) => {
         const lastActivationAt = activations.length ? Math.max(...activations.map(a => a.issuedAt)) : null;
         const backupCheckin = backupCheckins[installationId] || null;
         const fingerprintRecord = deviceFingerprints.get(installationId) || null;
+        const integrityRecord = integrityStatus[installationId] || null;
         return {
             installationId,
             ...meta,
@@ -1204,7 +1357,15 @@ app.get('/relay/admin/api/devices', requireAdminKey, async (req, res) => {
             // naka-flag bilang posibleng clone (dalawang magkaibang
             // pisikal na makina na nag-claim ng iisang installationId).
             cloneFlagged: !!(fingerprintRecord && fingerprintRecord.flagged),
-            fingerprintVerifyCount: fingerprintRecord ? fingerprintRecord.verifyCount : 0
+            fingerprintVerifyCount: fingerprintRecord ? fingerprintRecord.verifyCount : 0,
+            // FILE INTEGRITY: red-flag view — kung may modified/deleted/
+            // added file ang huling check-in ng device na ito, at hindi
+            // pa ito na-clear/na-acknowledge ng admin.
+            integrityFlagged: !!(integrityRecord && integrityRecord.flagged && !integrityRecord.clearedAt),
+            integrityModifiedCount: integrityRecord ? integrityRecord.modifiedCount : 0,
+            integrityDeletedCount: integrityRecord ? integrityRecord.deletedCount : 0,
+            integrityAddedCount: integrityRecord ? integrityRecord.addedCount : 0,
+            integrityCheckedAt: integrityRecord ? integrityRecord.checkedAt : null
         };
     }).sort((a, b) => b.lastSeenAt - a.lastSeenAt);
 
@@ -1221,7 +1382,10 @@ app.get('/relay/admin/api/devices', requireAdminKey, async (req, res) => {
         // Bilang ng mga device na kasalukuyang naka-flag bilang clone —
         // para sa isang mabilis na "may reklamo ka bang tignan" na counter
         // sa itaas ng admin panel.
-        cloneFlaggedCount: [...deviceFingerprints.values()].filter(r => r.flagged).length
+        cloneFlaggedCount: [...deviceFingerprints.values()].filter(r => r.flagged).length,
+        // Bilang ng mga device na kasalukuyang naka-red-flag dahil sa
+        // may nabago/nabura silang file (hindi pa na-clear ng admin).
+        integrityFlaggedCount: Object.values(integrityStatus).filter(r => r.flagged && !r.clearedAt).length
     });
 });
 
@@ -2032,6 +2196,118 @@ app.post('/relay/backup-checkin', requireApiKey, rateLimit('backup-checkin', 20,
 });
 
 // --------------------------------------------------------------
+// POST /relay/integrity-checkin  (FILE INTEGRITY MONITORING)
+// Tinatawag ito ng OMNIPOS CLIENT SERVER (pana-panahon, awtomatiko —
+// tingnan ang runRelayIntegrityCheckin() sa OMNIPOS/server.js) kasama
+// ang: installationId, version (APP_VERSION nito ngayon), at files
+// (isang { "relative/path.js": "<sha256>" } manifest ng SARILI nitong
+// install folder). Dito, kino-compare ito sa naka-imbak na baseline
+// PARA SA VERSION NA IYON (galing sa huling matagumpay na build para
+// doon) — kung wala pang baseline (hal. hindi pa naka-publish/naka-
+// build dito ang version na iyon), hindi ito ma-flag, sasabihing
+// hasBaseline:false na lang sa resulta.
+// --------------------------------------------------------------
+app.post('/relay/integrity-checkin', requireApiKey, requireAllowedDevice, rateLimit('integrity-checkin', 12, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
+    const { installationId, version, files } = req.body || {};
+
+    if (!installationId) {
+        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+    }
+    if (!files || typeof files !== 'object' || Array.isArray(files)) {
+        return res.status(400).json({ success: false, message: 'Kulang o mali ang format ng "files" (dapat object na { relPath: sha256 }).' });
+    }
+
+    recordDeviceSeen(installationId, {});
+
+    const baselineVersion = String(version || '').trim() || null;
+    const baseline = baselineVersion ? releaseBaselines.get(baselineVersion) : null;
+
+    if (!baseline) {
+        // Walang baseline na maihahambing (bago pang i-publish/i-build
+        // ang version na ito dito, o hindi kilalang version) — itago pa
+        // rin ang huling nakita, pero HUWAG i-flag (iiwasan ang maling
+        // positibo).
+        integrityStatus[installationId] = {
+            checkedAt: Date.now(),
+            baselineVersion,
+            hasBaseline: false,
+            flagged: false,
+            modified: [],
+            deleted: [],
+            added: [],
+            modifiedCount: 0,
+            deletedCount: 0,
+            addedCount: 0,
+            clearedAt: integrityStatus[installationId] ? integrityStatus[installationId].clearedAt || null : null,
+            clearedNote: integrityStatus[installationId] ? integrityStatus[installationId].clearedNote || null : null
+        };
+        saveIntegrityStatus(integrityStatus);
+        return res.json({ success: true, hasBaseline: false, flagged: false, message: `Walang naka-imbak na baseline para sa version "${baselineVersion}" — hindi muna ito na-compare.` });
+    }
+
+    const baselineFiles = baseline.files || {};
+    const modified = [];
+    const deleted = [];
+    const added = [];
+
+    for (const [relPath, baseHash] of Object.entries(baselineFiles)) {
+        const clientHash = files[relPath];
+        if (clientHash === undefined) {
+            deleted.push(relPath);
+        } else if (clientHash !== baseHash) {
+            modified.push(relPath);
+        }
+    }
+    for (const relPath of Object.keys(files)) {
+        if (!(relPath in baselineFiles)) added.push(relPath);
+    }
+
+    modified.sort();
+    deleted.sort();
+    added.sort();
+
+    const flagged = modified.length > 0 || deleted.length > 0 || added.length > 0;
+
+    integrityStatus[installationId] = {
+        checkedAt: Date.now(),
+        baselineVersion,
+        hasBaseline: true,
+        flagged,
+        modified,
+        deleted,
+        added,
+        modifiedCount: modified.length,
+        deletedCount: deleted.length,
+        addedCount: added.length,
+        // Nananatili ang dating clearedAt/clearedNote (kung meron)
+        // hangga't hindi bago-bagong-flag ito — sa susunod na
+        // matagumpay/malinis na check-in, dito rin ito ire-reset sa
+        // ibaba (bagong "clean" state).
+        clearedAt: flagged ? (integrityStatus[installationId] ? integrityStatus[installationId].clearedAt || null : null) : null,
+        clearedNote: flagged ? (integrityStatus[installationId] ? integrityStatus[installationId].clearedNote || null : null) : null
+    };
+    saveIntegrityStatus(integrityStatus);
+
+    if (flagged) {
+        logActivity(installationId, 'integrity_alert', {
+            baselineVersion,
+            modifiedCount: modified.length,
+            deletedCount: deleted.length,
+            addedCount: added.length
+        });
+    }
+
+    res.json({
+        success: true,
+        hasBaseline: true,
+        flagged,
+        modifiedCount: modified.length,
+        deletedCount: deleted.length,
+        addedCount: added.length
+    });
+});
+
+// --------------------------------------------------------------
 // isFeatureCurrentlyUnlocked(installationId, featureId) — GROUND-TRUTH
 // na pagsusuri (kaparehong lohika ng /relay/check-feature-status sa
 // itaas) kung talagang naka-unlock ang isang feature PARA sa
@@ -2456,6 +2732,43 @@ app.post('/relay/admin/api/devices/:installationId/fingerprint/reset', requireAd
     saveDeviceFingerprints(deviceFingerprints);
     logActivity(installationId, 'device_fingerprint_reset', {});
     res.json({ success: true, message: 'Na-clear ang fingerprint binding — kailangan na namang mag-verify online sa susunod na login.' });
+});
+
+// --------------------------------------------------------------
+// GET /relay/admin/api/devices/:installationId/integrity  (FILE INTEGRITY)
+// Detalyadong resulta ng huling integrity check-in ng isang device —
+// listahan ng modified/deleted/added files, parang "git status" na
+// view sa admin panel.
+// --------------------------------------------------------------
+app.get('/relay/admin/api/devices/:installationId/integrity', requireAdminKey, (req, res) => {
+    const { installationId } = req.params;
+    const record = integrityStatus[installationId] || null;
+    res.json({ success: true, record });
+});
+
+// --------------------------------------------------------------
+// POST /relay/admin/api/devices/:installationId/integrity/clear
+// I-a-acknowledge/i-clear ang red flag ng isang device (hal. na-review
+// na ng developer ang mga binagong file at LEGIT na pala ito — hal.
+// sarili nilang customization). HINDI nito binabago ang baseline —
+// sa susunod na check-in, kung parehong "modified" pa rin ang file na
+// iyon, ma-flag ulit ito (sinasadya: hindi ito "puwede ka nang
+// magbago paulit-ulit", isang beses lang na acknowledge ng KASALUKUYAN
+// na state).
+// --------------------------------------------------------------
+app.post('/relay/admin/api/devices/:installationId/integrity/clear', requireAdminKey, (req, res) => {
+    const { installationId } = req.params;
+    const { note } = req.body || {};
+    const record = integrityStatus[installationId];
+    if (!record) {
+        return res.status(404).json({ success: false, message: 'Walang naitalang integrity check-in para sa device na ito.' });
+    }
+    record.clearedAt = Date.now();
+    record.clearedNote = String(note || '').trim() || null;
+    integrityStatus[installationId] = record;
+    saveIntegrityStatus(integrityStatus);
+    logActivity(installationId, 'integrity_alert_cleared', { note: record.clearedNote });
+    res.json({ success: true, message: 'Na-clear ang integrity flag.' });
 });
 
 // --------------------------------------------------------------
@@ -3665,6 +3978,24 @@ async function performBuildRelease(reqBody, req, publishOverride) {
             envEncrypted: envResult.encrypted
         });
 
+        // INTEGRITY BASELINE: kunin ang sha256 ng BAWAT file na eksaktong
+        // isinama sa release na ito (mula sa tmpDir bago pa i-zip — ito
+        // mismo ang binubuksan ng customer), at itago bilang "baseline"
+        // para sa VERSION na ipina-publish/itinatakda ng build na ito.
+        // Dito lang ito ginagawa (hindi sa /relay/admin/api/build-release
+        // route wrapper) para sabay ito laging tumatakbo kada
+        // matagumpay na build, kahit anong entry point ang tumawag dito
+        // (build-only o publish-release).
+        const baselineVersion = (publishOverride && publishOverride.version) || systemVersionInfo.version || '0.0.0';
+        const baselineFiles = buildFileManifest(tmpDir);
+        releaseBaselines.set(baselineVersion, {
+            builtAt,
+            fileCount: Object.keys(baselineFiles).length,
+            files: baselineFiles
+        });
+        saveReleaseBaselines(releaseBaselines);
+        console.log(`🔐 Integrity baseline saved para sa version ${baselineVersion} (${Object.keys(baselineFiles).length} file(s)).`);
+
         // HISTORY ENTRY: caption (kung binigay), ang naka-publish na
         // version number nung mismong oras ng build na ito (systemVersionInfo
         // — HINDI kinukuha mula sa git ref dahil ang version number ay
@@ -3938,7 +4269,9 @@ async function bootstrapStores() {
         systemVersionInfo,
         targetedReleases,
         downloadCodes,
-        buildHistory
+        buildHistory,
+        releaseBaselines,
+        integrityStatus
     ] = await Promise.all([
         loadAllowedDevices(),
         loadDeviceLabels(),
@@ -3950,7 +4283,9 @@ async function bootstrapStores() {
         loadSystemVersionInfo(),
         loadTargetedReleases(),
         loadDownloadCodes(),
-        loadBuildHistory()
+        loadBuildHistory(),
+        loadReleaseBaselines(),
+        loadIntegrityStatus()
     ]);
 
     console.log(
