@@ -1151,6 +1151,7 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
     <div id="integrityBody"></div>
     <div class="modal-actions">
       <button class="btn-ghost" onclick="closeIntegrityModal()">Isara</button>
+      <button class="btn-ghost" onclick="requestIntegrityCheckNow(currentIntegrityId, document.getElementById('integrityDeviceLabel').innerText)">🔄 I-check ngayon</button>
       <button class="btn-revoke" id="integrityClearBtn" onclick="clearIntegrityFlag()">✅ I-clear ang flag (na-review ko na)</button>
     </div>
   </div>
@@ -2153,6 +2154,7 @@ function renderSeenList() {
         ${d.cloneFlagged ? `<button class="btn-revoke" onclick="resetCloneFlag('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🚩 I-reset ang clone flag</button>` : ''}
         ${d.cloneFlagged ? `<button class="btn-ghost" onclick="splitClone('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🔀 Ibukod bilang bagong device</button>` : ''}
         ${d.integrityFlagged ? `<button class="btn-revoke" onclick="showIntegrityDetail('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🛠️ Tingnan ang mga binagong file</button>` : ''}
+        <button class="btn-ghost" onclick="requestIntegrityCheckNow('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🔄 I-check ngayon</button>
         ${d.allowed
           ? `<button class="btn-revoke" onclick="revoke('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">Alisin</button>`
           : `<button class="btn-allow" onclick="allow('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">Allow</button>`}
@@ -2390,6 +2392,15 @@ async function showIntegrityDetail(installationId, label) {
 function closeIntegrityModal() {
   document.getElementById('integrityBackdrop').style.display = 'none';
   currentIntegrityId = null;
+}
+
+async function requestIntegrityCheckNow(installationId, label) {
+  try {
+    const res = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/integrity/check-now`, { method: 'POST' });
+    if (res.success) {
+      toast(`Hihintayin ang susunod na online check-in ng ${label || installationId} (karaniwan ay ilang segundo hanggang ~30s kung online ito ngayon).`, 'success');
+    }
+  } catch (err) { /* handled */ }
 }
 
 async function clearIntegrityFlag() {

@@ -1005,6 +1005,15 @@ function saveIntegrityStatus(obj) {
 //   modifiedCount, deletedCount, addedCount, clearedAt, clearedNote }
 let integrityStatus = {}; // pupunuin sa bootstrapStores()
 
+// Mga installationId na hiniling ng ADMIN (pindot sa "🔄 I-check
+// ngayon" button) na kailangang mag-check-in AGAD, hindi na maghintay
+// pa ng normal na 55s/24h schedule nito. In-memory lang ito (hindi
+// kailangang mag-persist across restart — isang beses lang gagamitin,
+// sasagutin ng client sa susunod na tawag nito sa
+// /relay/check-feature-status, na tumatakbo na kada ~30s), at
+// awtomatikong na-a-"consume"/tinatanggal pagkatapos masagot minsan.
+const pendingIntegrityChecks = new Set();
+
 // --------------------------------------------------------------
 // SYSTEM VERSION — pinapatunayan ng developer/owner dito ang
 // "pinakabagong" version ng OMNIPOS client app (hal. pagkatapos
@@ -1981,7 +1990,18 @@ app.post('/relay/check-feature-status', requireApiKey, requireAllowedDevice, rat
 
     logActivity(installationId, 'feature_status_checked', { featureIds });
 
-    res.json({ success: true, statuses });
+    // Kung may pending na "🔄 I-check ngayon" request ang admin para sa
+    // device na ito (integrity check-now), isama ito dito bilang
+    // forceIntegrityCheck:true — dito rin ito "kina-consume"/tinatanggal
+    // (isang beses lang) para hindi na paulit-ulit i-force sa susunod
+    // pang mga check-feature-status call.
+    let forceIntegrityCheck = false;
+    if (pendingIntegrityChecks.has(installationId)) {
+        forceIntegrityCheck = true;
+        pendingIntegrityChecks.delete(installationId);
+    }
+
+    res.json({ success: true, statuses, forceIntegrityCheck });
 });
 
 if (!MAIL_USER || !MAIL_PASS || !RECIPIENT_EMAIL) {
@@ -2769,6 +2789,25 @@ app.post('/relay/admin/api/devices/:installationId/integrity/clear', requireAdmi
     saveIntegrityStatus(integrityStatus);
     logActivity(installationId, 'integrity_alert_cleared', { note: record.clearedNote });
     res.json({ success: true, message: 'Na-clear ang integrity flag.' });
+});
+
+// --------------------------------------------------------------
+// POST /relay/admin/api/devices/:installationId/integrity/check-now
+// "🔄 I-check ngayon" — hindi direktang tumatawag ang RELAY papunta sa
+// device (walang ganoong push channel sa architecture na ito, laging
+// ang client ang nagsisimula ng connection). Sa halip, dito lang
+// itinatakda ang isang pending flag; ang OMNIPOS client ang bibisita
+// dito (sa loob ng existing na attemptRelayFeatureSync() nito, na
+// tumatakbo na kada ~30s), makikita ang flag, at doon lang mismo agad
+// tatakbo ang integrity check-in nito — kaya ilang segundo hanggang
+// ~30s (hindi instant) ang praktikal na abot ng button na ito, hindi
+// dahil sa delay dito kundi dahil sa polling interval ng client.
+// --------------------------------------------------------------
+app.post('/relay/admin/api/devices/:installationId/integrity/check-now', requireAdminKey, (req, res) => {
+    const { installationId } = req.params;
+    pendingIntegrityChecks.add(installationId);
+    logActivity(installationId, 'integrity_check_requested', {});
+    res.json({ success: true, message: 'Hihintayin ang susunod na online check-in ng device na ito (karaniwan ay ilang segundo hanggang ~30s).' });
 });
 
 // --------------------------------------------------------------
