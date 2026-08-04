@@ -2991,7 +2991,7 @@ app.get('/relay/admin/api/system/version', requireAdminKey, (req, res) => {
 //   5. I-save bilang release/omnipos-client.zip — ito na ang
 //      awtomatikong maiipasa sa /relay/download/:code mula ngayon.
 //
-// Body: { repoUrl?, ref?, relayUrl?, relayApiKey?, port?, offlineOnly? }
+// Body: { repoUrl?, ref?, relayUrl?, relayApiKey?, port? }
 //   - repoUrl/ref: kung wala, gagamit ng OMNIPOS_REPO_URL env var
 //     (dapat naka-set sa Render dashboard). Kung PRIVATE ang repo,
 //     isama ang access token DIREKTA sa URL, hal.:
@@ -3444,23 +3444,15 @@ async function performBuildRelease(reqBody, req, publishOverride) {
             || `${req.protocol}://${req.get('host')}`;
         const relayApiKey = (reqBody && reqBody.relayApiKey) || process.env.RELAY_API_KEY;
         const clientPort = (reqBody && reqBody.port) || 3000;
-        // OFFLINE_ONLY: napili na ito ng developer sa admin panel BAGO
-        // pa man mag-build (dropdown sa "I-build ang Release" card) —
-        // "true" = Pure Offline (walang CDN attempt/connectivity ping
-        // sa client), "false"/wala = Online/Offline Toggle (dating gawi,
-        // default). Ganito na agad ito naka-set sa client .env pagkatapos
-        // i-build — hindi na kailangang i-edit pa ito manually pagkatapos.
-        const offlineOnly = !!(reqBody && reqBody.offlineOnly);
 
         if (!relayApiKey) {
-          throw new Error('Walang RELAY_API_KEY na naka-set (ni sa request body ni sa RELAY .env) — hindi makakagawa ng client .env.');
+            throw new Error('Walang RELAY_API_KEY na naka-set (ni sa request body ni sa RELAY .env) — hindi makakagawa ng client .env.');
         }
 
         const clientEnvContent = [
             `RELAY_URL=${relayUrl}`,
             `RELAY_API_KEY=${relayApiKey}`,
             `PORT=${clientPort}`,
-            `OFFLINE_ONLY=${offlineOnly}`,
             ''
         ].join('\n');
         setBuildProgress({ stage: 'env', percent: BUILD_STEP_END_PERCENT.filter, message: 'Ini-encrypt ang client .env...' });
@@ -3575,7 +3567,7 @@ app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => 
 // RELAY lang ang gagamitin, makikita na agad ng customer ang update."
 //
 // Body: { version (required), changelog?, repoUrl?, ref?, relayUrl?,
-//         relayApiKey?, port?, caption?, offlineOnly? }
+//         relayApiKey?, port?, caption? }
 //
 // Pagkakasunod: (1) build muna — kung mabigo ito (hal. sirang repoUrl,
 // walang bagong commit, atbp.), HINDI na ita-tuloy ang publish-version,
