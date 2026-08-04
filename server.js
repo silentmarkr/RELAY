@@ -1290,6 +1290,126 @@ app.post('/relay/admin/api/devices/clone-reset', requireAdminKey, (req, res) => 
 });
 
 // --------------------------------------------------------------
+// POST /relay/admin/api/devices/bulk-reset  (SELECTIVE RESET)
+// Katulad ng /clone-reset, pero:
+//   1. Pwedeng MARAMI ang installationId sa isang tawag (checkbox-based
+//      selection sa admin panel).
+//   2. Bukod sa fingerprint binding, kasama na rin dito ang device
+//      LABEL, ang CLONE-SPLIT record, at ang ONLINE/heartbeat status.
+// HINDI NAAAPEKTUHAN: allowedDevices (hindi na-a-un-allow ang device —
+// nananatili itong "allowed", linis lang ang labels/fingerprint/
+// clone-split/online nito), issuedUnlocks, activityLog, backupCheckins.
+// --------------------------------------------------------------
+app.post('/relay/admin/api/devices/bulk-reset', requireAdminKey, async (req, res) => {
+    const { installationIds } = req.body;
+    if (!Array.isArray(installationIds) || installationIds.length === 0) {
+        return res.status(400).json({ success: false, message: 'Kulang o mali ang installationIds (dapat non-empty array).' });
+    }
+
+    for (const id of installationIds) {
+        deviceLabels.delete(id);
+        deviceFingerprints.delete(id);
+        cloneSplits.delete(id);
+        seenDevices.delete(id); // "recently seen" entry (self-reported storeName/username, lastSeenAt, requestCount)
+        logActivity(id, 'device_bulk_reset', {});
+    }
+    saveDeviceLabels(deviceLabels);
+    saveDeviceFingerprints(deviceFingerprints);
+    saveCloneSplits(cloneSplits);
+
+    if (redisClient) {
+        try {
+            const onlineKeys = installationIds.map((id) => ONLINE_KEY_PREFIX + id);
+            await redisClient.del(...onlineKeys);
+        } catch (err) {
+            console.error('⚠️  Hindi na-clear ang online heartbeat keys (bulk-reset):', err.message);
+        }
+    }
+
+    res.json({
+        success: true,
+        resetCount: installationIds.length,
+        message: `Na-reset ang ${installationIds.length} device(s): tinanggal ang label, fingerprint binding, clone-split record, at online status. Nananatili silang naka-Allow.`
+    });
+});
+
+// --------------------------------------------------------------
+// POST /relay/admin/api/devices/reset-all  (FULL RESET)
+// I-CLEAR ang LAHAT ng device-related na estado (Redis + in-memory)
+// para ibalik ang RELAY sa parang bagong-deploy — walang naka-Allow,
+// walang naka-label, walang naka-bind na fingerprint, walang
+// clone-split record, walang "seen"/online device, at (opsyonal, kung
+// wipeUnlocksToo=true sa request body) wala rin ANUMANG naka-issue nang
+// unlock/activity-log/backup-checkin.
+//
+// HINDI nito ginagalaw ang: FEATURE_CATALOG/UPGRADE_TIERS (config, hindi
+// data), system-version, targeted-releases, download-codes, build-history
+// — hindi ito "device" data, at kadalasang ayaw mo itong mabura kapag
+// nag-reset ka lang ng device list.
+//
+// Kailangan ng ?confirm=RESET sa query string (o { confirm: "RESET" } sa
+// body) bilang simpleng safety check laban sa aksidenteng pag-tawag dito.
+// --------------------------------------------------------------
+app.post('/relay/admin/api/devices/reset-all', requireAdminKey, async (req, res) => {
+    const confirm = req.query.confirm || req.body?.confirm;
+    if (confirm !== 'RESET') {
+        return res.status(400).json({
+            success: false,
+            message: 'Safety check: kailangan ng ?confirm=RESET (o "confirm":"RESET" sa JSON body) para tuluyang i-reset ang LAHAT ng device data. Hindi na ito mababawi.'
+        });
+    }
+
+    const wipeUnlocksToo = req.body?.wipeUnlocksToo === true;
+
+    // 1. Device allowlist, labels, fingerprints, clone-splits
+    allowedDevices = new Set();
+    deviceLabels = new Map();
+    deviceFingerprints = new Map();
+    cloneSplits = new Map();
+    saveAllowedDevices(allowedDevices);
+    saveDeviceLabels(deviceLabels);
+    saveDeviceFingerprints(deviceFingerprints);
+    saveCloneSplits(cloneSplits);
+
+    // 2. In-memory-only "seen devices" tracker (walang Redis key nito,
+    //    per-installation lang ang ONLINE_KEY_PREFIX heartbeat keys).
+    seenDevices.clear();
+
+    // 3. Online heartbeat keys sa Redis (omnipos-relay:online:*)
+    if (redisClient) {
+        try {
+            const onlineKeys = await redisClient.keys(ONLINE_KEY_PREFIX + '*');
+            if (onlineKeys.length > 0) {
+                await redisClient.del(...onlineKeys);
+            }
+        } catch (err) {
+            console.error('⚠️  Hindi na-clear ang online heartbeat keys:', err.message);
+        }
+    }
+
+    // 4. (Opsyonal) issued unlocks / activity log / backup check-ins —
+    //    ibig sabihin, TOTAL wipe, kasama na ang lahat ng nabenta/
+    //    na-unlock na feature history. Default: HINDI ginagalaw, dahil
+    //    naiiba ito sa "reset device list" — pero available kung talagang
+    //    gusto ng buong simula-ulit.
+    if (wipeUnlocksToo) {
+        issuedUnlocks = {};
+        activityLog = [];
+        backupCheckins = {};
+        saveIssuedUnlocks(issuedUnlocks);
+        saveActivityLog(activityLog);
+        saveBackupCheckins(backupCheckins);
+    }
+
+    res.json({
+        success: true,
+        message: wipeUnlocksToo
+            ? 'Buong reset: wala nang naka-Allow/naka-label/naka-fingerprint na device, wala nang online status, at wala nang issued unlocks/activity log/backup check-ins.'
+            : 'Na-reset ang device list: wala nang naka-Allow/naka-label/naka-fingerprint na device at wala nang online status. Hindi ginalaw ang issued unlocks/activity log/backup check-ins (pasa "wipeUnlocksToo": true kung gusto mo ring buraan iyon).'
+    });
+});
+
+// --------------------------------------------------------------
 // GET /relay/admin/api/catalog
 // Ibinabalik ang FEATURE_CATALOG + UPGRADE_TIERS mirror — ginagamit ng
 // admin panel JS para malaman ang lahat ng posibleng package/presyo

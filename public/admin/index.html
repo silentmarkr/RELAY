@@ -820,6 +820,16 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
     <div class="tab-panel" id="tabPanel-devices" style="display:none;">
       <div class="card">
         <h2>Allowed devices <span class="count-pill" id="allowedCountPill">0</span></h2>
+        <div class="bulk-reset-bar" id="bulkResetBar" style="display:flex; align-items:center; gap:10px; margin-bottom:10px; flex-wrap:wrap;">
+          <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); cursor:pointer;">
+            <input type="checkbox" id="selectAllDevicesCheckbox" onchange="toggleSelectAllDevices(this.checked)">
+            Piliin lahat
+          </label>
+          <span id="selectedCountLabel" style="font-size:12px; color:var(--muted);">0 napili</span>
+          <button class="btn-ghost" id="bulkResetBtn" onclick="bulkResetSelected()" disabled style="margin-left:auto;">
+            🧹 I-reset ang napili (label, fingerprint, clone-split, online status)
+          </button>
+        </div>
         <div id="allowedList" class="empty">Loading...</div>
       </div>
 
@@ -1119,6 +1129,54 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
 <script>
 let adminKey = sessionStorage.getItem('relayAdminKey') || '';
 let lastLoadedDevices = [];
+const selectedForReset = new Set(); // installationIds na naka-check sa "Allowed devices" list
+
+function escapeAttr(str) {
+  return String(str).replace(/'/g, "\\'").replace(/"/g, '&quot;');
+}
+
+function onDeviceCheckboxChange(id, checked) {
+  if (checked) selectedForReset.add(id);
+  else selectedForReset.delete(id);
+  updateBulkResetUI();
+}
+
+function toggleSelectAllDevices(checkAll) {
+  document.querySelectorAll('.device-select-checkbox').forEach((cb) => {
+    cb.checked = checkAll;
+    const id = cb.getAttribute('data-id');
+    if (checkAll) selectedForReset.add(id);
+    else selectedForReset.delete(id);
+  });
+  updateBulkResetUI();
+}
+
+function updateBulkResetUI() {
+  const count = selectedForReset.size;
+  document.getElementById('selectedCountLabel').innerText = `${count} napili`;
+  document.getElementById('bulkResetBtn').disabled = count === 0;
+  const allCbs = document.querySelectorAll('.device-select-checkbox');
+  const selectAllCb = document.getElementById('selectAllDevicesCheckbox');
+  if (selectAllCb) selectAllCb.checked = allCbs.length > 0 && count === allCbs.length;
+}
+
+async function bulkResetSelected() {
+  const ids = [...selectedForReset];
+  if (ids.length === 0) return;
+  const ok = await confirmAction({
+    title: `I-reset ang ${ids.length} device(s)?`,
+    message: `Tatanggalin ang device LABEL, fingerprint binding, clone-split record, at online/heartbeat status ng ${ids.length} napiling device. Nananatili silang naka-Allow — hindi mababawasan ang access nila. Hindi maaapektuhan ang ibang device na hindi napili.`,
+    confirmLabel: 'I-reset ang napili',
+    danger: true
+  });
+  if (!ok) return;
+  try {
+    const res = await api('/relay/admin/api/devices/bulk-reset', { method: 'POST', body: JSON.stringify({ installationIds: ids }) });
+    if (res.success) toast(`Na-reset ang ${res.resetCount} device(s).`, 'success');
+    selectedForReset.clear();
+  } catch (err) { /* handled */ }
+  loadDevices();
+}
 let pollTimer = null;
 let lastActivityAt = Date.now();
 const IDLE_LOGOUT_MS = 20 * 60 * 1000; // 20 minuto — auto-logout kapag tahimik masyado
@@ -1979,7 +2037,9 @@ async function loadDevices() {
       const displayName = devLabel ? `🏷️ ${devLabel}` : fallback;
       const revokeName = devLabel || fallback;
       const online = !!(seen && seen.online);
+      const checked = selectedForReset.has(id) ? 'checked' : '';
       return `<div class="row">
+        <input type="checkbox" class="device-select-checkbox" data-id="${escapeAttr(id)}" ${checked} onchange="onDeviceCheckboxChange('${escapeAttr(id)}', this.checked)" style="flex:0 0 auto; width:16px; height:16px; cursor:pointer;">
         <div class="row-info">
           <div class="id">${id}
             <span class="badge" style="${online ? 'background:var(--green-bg,#0f2e1c); color:var(--green,#4ade80);' : 'background:var(--gray-bg,#2a2a2a); color:var(--gray,#888);'}">${online ? '🟢 ONLINE' : '⚪ OFFLINE'}</span>
@@ -1994,6 +2054,14 @@ async function loadDevices() {
       </div>`;
     }).join('');
   }
+  // Alisin sa selection ang mga ID na hindi na kabilang sa kasalukuyang listahan
+  // (hal. na-revoke na, o na-search/filter out) — iwas "hantak" na paniwalaan
+  // na naka-select pa rin ang isang device na wala na sa view.
+  const currentIds = new Set(data.allowedDevices);
+  for (const id of [...selectedForReset]) {
+    if (!currentIds.has(id)) selectedForReset.delete(id);
+  }
+  updateBulkResetUI();
 
   lastLoadedDevices = data.seenDevices;
   document.getElementById('seenCountPill').innerText = data.seenDevices.length;
