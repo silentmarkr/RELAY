@@ -653,6 +653,7 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
 .timeline-type-unlock_issued::before { background: var(--green); box-shadow: 0 0 0 3px var(--green-bg); }
 .timeline-type-device_revoked::before { background: var(--red); box-shadow: 0 0 0 3px var(--red-bg); }
 .timeline-type-restore_checkin::before { background: var(--amber); box-shadow: 0 0 0 3px var(--amber-bg); }
+.timeline-type-device_history_cleared::before { background: var(--muted); box-shadow: 0 0 0 3px rgba(148,163,184,0.2); }
 
 /* ---------- TAB NAVIGATION ---------- */
 .tab-nav {
@@ -1053,6 +1054,7 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
 
     <div class="card">
       <h2>🕘 History ng device na ito</h2>
+      <button class="btn-revoke" onclick="clearDeviceHistory()" id="clearDeviceHistoryBtn" style="margin-bottom:12px;">🗑️ I-clear ang History ng device na ito</button>
       <div id="detailHistoryList" class="empty">Loading...</div>
     </div>
   </div>
@@ -2473,7 +2475,8 @@ const ACTIVITY_LABELS = {
   device_labeled: '🏷️ Na-update ang label',
   restore_checkin: '🔄 Nag-check-in ulit (posibleng na-hard-reset)',
   backup_checkin: '💾 Auto-backup sync (Download/RELAY_BACKUP)',
-  feature_status_checked: '📡 Ni-check ang status (Sync sa Relay ng client)'
+  feature_status_checked: '📡 Ni-check ang status (Sync sa Relay ng client)',
+  device_history_cleared: '🗑️ Na-clear ang history ng device na ito'
 };
 
 function activityDescription(entry) {
@@ -2491,6 +2494,7 @@ function activityDescription(entry) {
   if (entry.type === 'device_labeled') return d.label ? `→ "${d.label}"` : '(inalis ang label)';
   if (entry.type === 'backup_checkin') return `${d.fileSizeBytes ? (d.fileSizeBytes / 1024).toFixed(0) + ' KB' : ''}${d.newlyAllowed ? ' — awtomatikong na-allow' : ''}`;
   if (entry.type === 'device_allowed' && d.source === 'auto_backup_checkin') return '(awtomatiko, matapos ang successful backup)';
+  if (entry.type === 'device_history_cleared') return `${d.clearedCount || 0} lumang entry na binura`;
   return '';
 }
 
@@ -2513,6 +2517,36 @@ function closeDeviceDetail() {
   document.getElementById('deviceDetailScreen').style.display = 'none';
   document.getElementById('mainScreen').style.display = 'block';
   startPolling();
+}
+
+// I-clear LANG ang activity-log entries ng device na ito (ang mga
+// pina-pakita sa "History ng device na ito" timeline sa itaas) — hindi
+// ito humihipo sa allowed/unlocked/label/fingerprint status ng device.
+async function clearDeviceHistory() {
+  if (!currentDetailId) return;
+  const ok = await confirmAction({
+    title: 'I-clear ang History ng Device na Ito?',
+    message: 'Buburahin ang lahat ng activity log entries ng device na ito (OTP requests, unlocks, check-ins, atbp.). Hindi ito maaaring bawiin, at HINDI nito babaguhin ang allowed/unlocked status ng device.',
+    confirmLabel: 'Oo, i-clear',
+    danger: true
+  });
+  if (!ok) return;
+
+  const btn = document.getElementById('clearDeviceHistoryBtn');
+  if (btn) { btn.disabled = true; btn.innerText = '⏳ Kina-clear...'; }
+  try {
+    const data = await api(`/relay/admin/api/devices/${currentDetailId}/clear-history`, { method: 'POST' });
+    if (data.success) {
+      toast(`✅ Na-clear ang history ng device (${data.clearedCount} entry).`, 'success');
+      loadDeviceDetail();
+    } else {
+      toast(data.message || 'Hindi na-clear ang history.', 'error');
+    }
+  } catch (err) {
+    // ipinapakita na ng api() ang toast kung 403/429; iba pang error dito
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerText = '🗑️ I-clear ang History ng device na ito'; }
+  }
 }
 
 // ---------------- ANALYTICS SCREEN ----------------
@@ -2736,7 +2770,7 @@ function renderDeviceDetail(detail) {
         <div class="timeline-item timeline-type-${h.type}">
           <div>${ACTIVITY_LABELS[h.type] || h.type}</div>
           <div class="feature-meta">${activityDescription(h)}</div>
-          <div class="timeline-time">${timeAgo(h.at)}</div>
+          <div class="timeline-time">${timeAgo(h.at)}${h.count > 1 ? ` · ${h.count}x` : ''}</div>
         </div>
       `).join('') + `</div>`;
 }

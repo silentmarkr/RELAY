@@ -786,12 +786,77 @@ function saveActivityLog(arr) {
 
 let activityLog = []; // pupunuin sa bootstrapStores()
 
+// --------------------------------------------------------------
+// Mga uri ng activity na "ROUTINE"/inaasahang paulit-ulit (feature
+// activate/renew/deactivate, auto-backup sync, status check, relabel,
+// atbp.) — sa halip na dumagdag ng BAGONG ROW kada pangyayari,
+// ii-UPDATE na lang ang PETSA/ORAS (at bilang ng beses) ng ISANG
+// existing na row para sa parehong (device + uri + feature), para
+// hindi kumakapal nang sobra ang History timeline sa mga paulit-ulit
+// na aksyon (hal. maraming "Renew" sa iisang feature).
+//
+// SADYANG HINDI kasama dito ang mga SECURITY-sensitive na event (hal.
+// clone_suspected, integrity_alert, cloud_backup_restore_blocked,
+// device_first_verified, clone_split_*, demo_ended_early, atbp.) —
+// dapat MANATILING MAGKAKAHIWALAY ang bawat isa sa mga iyon, dahil
+// mahalaga ang bawat pagkakataon para sa fraud/abuse detection (hal.
+// paulit-ulit na clone attempt sa loob ng maikling panahon ay dapat
+// makita nang buo, hindi natatago sa likod ng isang "Nx" na bilang).
+// --------------------------------------------------------------
+const MERGEABLE_ACTIVITY_TYPES = new Set([
+    'unlock_issued', 'admin_approved', 'feature_deactivated', 'otp_requested',
+    'device_allowed', 'device_revoked', 'device_labeled', 'device_fingerprint_reset',
+    'device_reverified', 'restore_checkin', 'feature_status_checked', 'backup_checkin',
+    'device_history_cleared', 'device_bulk_reset', 'device_reset',
+    'integrity_check_requested', 'integrity_alert_cleared'
+]);
+
 function logActivity(installationId, type, details = {}) {
+    const now = Date.now();
+
+    if (MERGEABLE_ACTIVITY_TYPES.has(type)) {
+        // Kung may featureId ang event (hal. unlock_issued para sa isang
+        // partikular na module), hiwalay pa rin ang row PER FEATURE —
+        // gusto pa rin nating makita ang "huling ginalaw" ng BAWAT
+        // feature, hindi lang ng device sa kabuuan.
+        const featureId = (details && details.featureId) ? details.featureId : '';
+        const mergeKey = `${installationId || ''}|${type}|${featureId}`;
+        const existingIndex = activityLog.findIndex(e => e._mergeKey === mergeKey);
+
+        if (existingIndex !== -1) {
+            const existing = activityLog[existingIndex];
+            existing.details = details; // pinaka-bagong detalye (hal. bagong price/note)
+            existing.at = now;
+            existing.count = (existing.count || 1) + 1;
+            // Ilipat sa unahan ng listahan — parang "bumped": ang
+            // pinaka-huling ginalaw na row ang unang makikita sa timeline.
+            activityLog.splice(existingIndex, 1);
+            activityLog.unshift(existing);
+            saveActivityLog(activityLog);
+            return;
+        }
+
+        activityLog.unshift({
+            installationId: installationId || null,
+            type,
+            details,
+            at: now,
+            firstAt: now,
+            count: 1,
+            _mergeKey: mergeKey
+        });
+        if (activityLog.length > ACTIVITY_LOG_MAX) activityLog.length = ACTIVITY_LOG_MAX;
+        saveActivityLog(activityLog);
+        return;
+    }
+
+    // Hindi mergeable (security-sensitive/one-off) — dating gawi: laging
+    // BAGONG row, para buo ang record ng bawat pagkakataon.
     activityLog.unshift({
         installationId: installationId || null,
-        type, // 'otp_requested' | 'admin_approved' | 'unlock_issued' | 'device_allowed' | 'device_revoked' | 'restore_checkin'
+        type,
         details,
-        at: Date.now()
+        at: now
     });
     if (activityLog.length > ACTIVITY_LOG_MAX) activityLog.length = ACTIVITY_LOG_MAX;
     saveActivityLog(activityLog);
@@ -1724,6 +1789,34 @@ app.get('/relay/admin/api/devices/:installationId/detail', requireAdminKey, (req
         tiers: UPGRADE_TIERS,
         history
     });
+});
+
+// --------------------------------------------------------------
+// POST /relay/admin/api/devices/:installationId/clear-history
+// Binubura LANG ang mga activity-log entries NG ISANG partikular na
+// device (hal. "otp_requested", "unlock_issued", "restore_checkin",
+// atbp. — ang pina-pakita sa "History" timeline ng Device Detail
+// page). LOG LANG ito, kapareho ng /build-history/clear — WALANG
+// epekto sa aktwal na estado ng device (allowed/unlocked/fingerprint/
+// label/atbp. ay nananatiling buo, hindi ito "reset" ng device).
+// Ang mga entry ng IBANG device sa activityLog ay hindi nagagalaw.
+// --------------------------------------------------------------
+app.post('/relay/admin/api/devices/:installationId/clear-history', requireAdminKey, (req, res) => {
+    const { installationId } = req.params;
+    if (!installationId) {
+        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+    }
+
+    const before = activityLog.length;
+    activityLog = activityLog.filter(entry => entry.installationId !== installationId);
+    const clearedCount = before - activityLog.length;
+    saveActivityLog(activityLog);
+
+    // Itong entry mismo ang magiging bagong unang linya ng history ng
+    // device na ito — parang "audit trail" na may nagbura dito.
+    logActivity(installationId, 'device_history_cleared', { clearedCount });
+
+    res.json({ success: true, clearedCount });
 });
 
 // --------------------------------------------------------------
