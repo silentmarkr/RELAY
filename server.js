@@ -2320,7 +2320,19 @@ app.post('/relay/backup-checkin', requireApiKey, rateLimit('backup-checkin', 20,
 // build dito ang version na iyon), hindi ito ma-flag, sasabihing
 // hasBaseline:false na lang sa resulta.
 // --------------------------------------------------------------
-app.post('/relay/integrity-checkin', requireApiKey, requireAllowedDevice, rateLimit('integrity-checkin', 12, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
+// LIMIT: 12/hour dati (sapat noon dahil once-a-day lang ang tawag).
+// Ngayon may real-time watcher na sa OMNIPOS client (event-driven, min
+// 30s gap sa pagitan ng checkin — tingnan ang REAL-TIME INTEGRITY
+// WATCHER sa OMNIPOS/server.js), kaya dinagdagan dito ang limit
+// (90/hour = 1 kada ~40s pinaka-mabilis) para hindi ma-throttle ang
+// mga lehitimong agad na check-in kapag may nabagong file, pero
+// nananatiling may proteksyon pa rin laban sa abuse/spam.
+// LIMIT: dati 12/hour (once-a-day lang ang tawag), tapos 90/hour (30s
+// client throttle). Ngayon 5s na ang client-side throttle (tingnan ang
+// OMNIPOS/server.js), kaya dinagdagan pa ito (300/hour = 1 kada ~12s
+// average) — sapat na headroom para sa totoong burst ng magkakasunod
+// na file event, pero may bound pa rin laban sa abuse.
+app.post('/relay/integrity-checkin', requireApiKey, requireAllowedDevice, rateLimit('integrity-checkin', 300, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
     const { installationId, version, files } = req.body || {};
 
     if (!installationId) {
