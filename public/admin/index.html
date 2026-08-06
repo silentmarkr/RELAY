@@ -348,6 +348,7 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 10px;
   padding: 11px 12px;
   border-radius: var(--radius-sm);
@@ -357,8 +358,8 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
   transition: border-color .15s ease;
 }
 .row:hover { border-color: var(--border-soft); }
-.row-info { min-width: 0; flex: 1; }
-.id { font-family: var(--font-mono); font-size: 12px; word-break: break-all; color: var(--accent-bright); }
+.row-info { min-width: 0; flex: 1 1 240px; }
+.id { font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; word-break: normal; color: var(--accent-bright); }
 .meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
 .badge {
   display: inline-block;
@@ -370,6 +371,13 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
   padding: 2px 8px;
   border-radius: 999px;
   margin-left: 6px;
+  white-space: nowrap;
+}
+.row-actions { display: flex; flex-direction: column; gap: 6px; flex: 0 0 auto; }
+@media (max-width: 680px) {
+  .row-info { flex-basis: 100%; }
+  .row-actions { flex-direction: row; flex-wrap: wrap; width: 100%; }
+  .row-actions button { flex: 1 1 auto; min-width: 110px; }
 }
 .badge-allowed { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-line); }
 .badge-blocked { background: var(--red-bg); color: var(--red); border: 1px solid var(--red-line); }
@@ -1869,7 +1877,7 @@ function renderDownloadCodesList() {
         <div class="meta">${used}/${c.maxUses} nagamit · ${c.expiresAt ? 'mag-e-expire ' + timeAgo(c.expiresAt) : 'walang expiry'} · ${c.lastUsedAt ? 'huling ginamit ' + timeAgo(c.lastUsedAt) : 'hindi pa ginagamit'}</div>
         <div class="meta" style="word-break:break-all;">${url}</div>
       </div>
-      <div style="display:flex; flex-direction:column; gap:6px;">
+      <div class="row-actions">
         <button class="btn-ghost" onclick="navigator.clipboard.writeText('${url}'); toast('Na-copy ang link.', 'success');">📋 Kopyahin</button>
         <button class="btn-revoke" onclick="revokeDownloadCode('${c.code}', '${(c.label || '').replace(/'/g, "\\'")}')">🗑️ I-revoke</button>
       </div>
@@ -2080,7 +2088,7 @@ async function loadDevices() {
           </div>
           <div class="meta">${displayName}${devLabel && seen ? ' · ' + (seen.storeName || 'walang self-reported na pangalan') : ''}${seen ? ' · ' + timeAgo(seen.lastSeenAt) : ''}</div>
         </div>
-        <div style="display:flex; flex-direction:column; gap:6px;">
+        <div class="row-actions">
           <button class="btn-detail" onclick="openDeviceDetail('${id}')">Detalye</button>
           <button class="btn-ghost" onclick="editLabel('${id}', '${(devLabel || '').replace(/'/g, "\\'")}')">🏷️ I-label</button>
           <button class="btn-revoke" onclick="revoke('${id}', '${(revokeName || '').replace(/'/g, "\\'")}')">Alisin</button>
@@ -2150,7 +2158,7 @@ function renderSeenList() {
         ${d.cloneFlagged ? '<div class="meta" style="color:var(--red);">⚠️ May dalawang magkaibang device na gumamit ng parehong installationId — malamang kinopya/inilipat ang app folder papunta sa ibang unit.</div>' : ''}
         ${d.integrityFlagged ? `<div class="meta" style="color:var(--red);">⚠️ May nakitang binagong/naburang file kumpara sa orihinal na ipinadalang release — ${timeAgo(d.integrityCheckedAt)}. I-click ang "Tingnan ang mga binagong file" para sa detalye.</div>` : ''}
       </div>
-      <div style="display:flex; flex-direction:column; gap:6px;">
+      <div class="row-actions">
         <button class="btn-detail" onclick="openDeviceDetail('${d.installationId}')">Detalye</button>
         <button class="btn-ghost" onclick="editLabel('${d.installationId}', '${(d.label || '').replace(/'/g, "\\'")}')">🏷️ I-label</button>
         ${d.cloneFlagged ? `<button class="btn-revoke" onclick="resetCloneFlag('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🚩 I-reset ang clone flag</button>` : ''}
