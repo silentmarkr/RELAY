@@ -857,15 +857,15 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
       </div>
 
       <div class="card">
-        <h2>Recently seen (lahat ng humiling) <span class="count-pill" id="seenCountPill">0</span></h2>
+        <h2>Recently seen (everyone who requested) <span class="count-pill" id="seenCountPill">0</span></h2>
         <div class="filter-bar">
           <input type="text" id="seenFilterInput" placeholder="Hanapin: store, username, o installation ID" oninput="renderSeenList()">
           <select id="seenFilterStatus" onchange="renderSeenList()">
-            <option value="all">Lahat</option>
+            <option value="all">All</option>
             <option value="allowed">Allowed lang</option>
             <option value="blocked">Blocked lang</option>
-            <option value="flagged">🚩 Naka-flag na clone lang</option>
-            <option value="integrity">🛠️ May nabago/naburang file lang</option>
+            <option value="flagged">🚩 Flagged clone only</option>
+            <option value="integrity">🛠️ Modified/deleted files only</option>
           </select>
           <select id="seenSortBy" onchange="renderSeenList()">
             <option value="lastSeen">I-sort: Huling nakita</option>
@@ -890,7 +890,7 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
       <div class="card">
         <h2>💾 Backup / Restore</h2>
         <div class="backup-note">
-          Walang persistent disk ang Render free tier — nawawala ang allowed devices, naka-unlock na features, at history sa bawat <code>git push</code>/redeploy, at mawawala LAHAT kung ide-delete mo ang service/domain. I-download ang backup paminsan-minsan (lalo na pagkatapos ng bagong unlock/customer) at itago sa ligtas na lugar.
+          Render's free tier has no persistent disk — allowed devices, unlocked features, and history are lost on every <code>git push</code>/redeploy, and everything is lost if you delete the service/domain. Download the backup periodically (especially after a new unlock/customer) and keep it somewhere safe.
         </div>
         <div class="backup-row">
           <button class="btn-primary" onclick="downloadBackup()">⬇️ I-download ang Backup</button>
@@ -987,7 +987,7 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
     </div>
 
     <div class="footer-note">
-      Awtomatikong mag-lo-logout pagkatapos ng 20 minutong walang aktibidad. May countdown na lalabas sa itaas bago mag-logout.
+      Automatically logs out after 20 minutes of inactivity. A countdown will appear at the top before logout.
     </div>
   </div>
 </div>
@@ -1161,7 +1161,7 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; }
     <div id="integrityBody"></div>
     <div class="modal-actions">
       <button class="btn-ghost" onclick="closeIntegrityModal()">Isara</button>
-      <button class="btn-ghost" onclick="requestIntegrityCheckNow(currentIntegrityId, document.getElementById('integrityDeviceLabel').innerText)">🔄 I-check ngayon</button>
+      <button class="btn-ghost" onclick="requestIntegrityCheckNow(currentIntegrityId, document.getElementById('integrityDeviceLabel').innerText)">🔄 Check Now</button>
       <button class="btn-revoke" id="integrityClearBtn" onclick="clearIntegrityFlag()">✅ I-clear ang flag (na-review ko na)</button>
     </div>
   </div>
@@ -1980,7 +1980,7 @@ async function restoreBackupFromFile(event) {
   const exportedNote = parsed.exportedAt ? ` (ginawa noong ${new Date(parsed.exportedAt).toLocaleString('en-PH')})` : '';
   const ok = await confirmAction({
     title: 'I-restore ang backup na ito?',
-    message: `PAPALITAN nito ang KASALUKUYANG allowed devices, naka-unlock na features, at history ng laman ng backup file${exportedNote}. Hindi ito maaaring bawiin maliban kung mayroon kang bagong backup pagkatapos nito.`,
+    message: `This will REPLACE the CURRENT allowed devices, unlocked features, and history with the contents of the backup file${exportedNote}. This cannot be undone unless you have a newer backup after this.`,
     confirmLabel: 'Oo, i-restore',
     danger: true
   });
@@ -2089,9 +2089,9 @@ async function loadDevices() {
           <div class="meta">${displayName}${devLabel && seen ? ' · ' + (seen.storeName || 'walang self-reported na pangalan') : ''}${seen ? ' · ' + timeAgo(seen.lastSeenAt) : ''}</div>
         </div>
         <div class="row-actions">
-          <button class="btn-detail" onclick="openDeviceDetail('${id}')">Detalye</button>
-          <button class="btn-ghost" onclick="editLabel('${id}', '${(devLabel || '').replace(/'/g, "\\'")}')">🏷️ I-label</button>
-          <button class="btn-revoke" onclick="revoke('${id}', '${(revokeName || '').replace(/'/g, "\\'")}')">Alisin</button>
+          <button class="btn-detail" onclick="openDeviceDetail('${id}')">Details</button>
+          <button class="btn-ghost" onclick="editLabel('${id}', '${(devLabel || '').replace(/'/g, "\\'")}')">🏷️ Label</button>
+          <button class="btn-revoke" onclick="revoke('${id}', '${(revokeName || '').replace(/'/g, "\\'")}')">Remove</button>
         </div>
       </div>`;
     }).join('');
@@ -2140,7 +2140,7 @@ function renderSeenList() {
   }
 
   if (list.length === 0) {
-    seenEl.innerHTML = '<div class="empty">Walang tumugma sa filter.</div>';
+    seenEl.innerHTML = '<div class="empty">Nothing matches the filter.</div>';
     return;
   }
 
@@ -2151,22 +2151,22 @@ function renderSeenList() {
           <span class="badge ${d.allowed ? 'badge-allowed' : 'badge-blocked'}">${d.allowed ? 'ALLOWED' : 'BLOCKED'}</span>
           <span class="badge" style="${d.online ? 'background:var(--green-bg,#0f2e1c); color:var(--green,#4ade80);' : 'background:var(--gray-bg,#2a2a2a); color:var(--gray,#888);'}">${d.online ? '🟢 ONLINE' : '⚪ OFFLINE'}</span>
           ${d.demoActive ? '<span class="badge" style="background:var(--amber-bg); color:var(--amber);">DEMO</span>' : ''}
-          ${d.cloneFlagged ? '<span class="badge badge-blocked">🚩 POSIBLENG CLONE</span>' : ''}
-          ${d.integrityFlagged ? `<span class="badge badge-blocked">🛠️ NABAGO/NABURANG FILE (${d.integrityModifiedCount || 0} binago, ${d.integrityDeletedCount || 0} nabura, ${d.integrityAddedCount || 0} dagdag)</span>` : ''}
+          ${d.cloneFlagged ? '<span class="badge badge-blocked">🚩 POSSIBLE CLONE</span>' : ''}
+          ${d.integrityFlagged ? `<span class="badge badge-blocked">🛠️ MODIFIED FILES (${d.integrityModifiedCount || 0} mod, ${d.integrityDeletedCount || 0} del, ${d.integrityAddedCount || 0} add)</span>` : ''}
         </div>
-        <div class="meta">${d.label ? `🏷️ <strong>${d.label}</strong> · ` : ''}${d.storeName || 'Walang self-reported na pangalan'} · ${d.username || '—'} · ${timeAgo(d.lastSeenAt)} · ${d.requestCount} request(s) · ${d.unlockedCount || 0}/${d.totalCatalogCount} naka-unlock</div>
-        ${d.cloneFlagged ? '<div class="meta" style="color:var(--red);">⚠️ May dalawang magkaibang device na gumamit ng parehong installationId — malamang kinopya/inilipat ang app folder papunta sa ibang unit.</div>' : ''}
-        ${d.integrityFlagged ? `<div class="meta" style="color:var(--red);">⚠️ May nakitang binagong/naburang file kumpara sa orihinal na ipinadalang release — ${timeAgo(d.integrityCheckedAt)}. I-click ang "Tingnan ang mga binagong file" para sa detalye.</div>` : ''}
+        <div class="meta">${d.label ? `🏷️ <strong>${d.label}</strong> · ` : ''}${d.storeName || 'No self-reported name'} · ${d.username || '—'} · ${timeAgo(d.lastSeenAt)} · ${d.requestCount} request(s) · ${d.unlockedCount || 0}/${d.totalCatalogCount} unlocked</div>
+        ${d.cloneFlagged ? '<div class="meta" style="color:var(--red);">⚠️ Two different devices used the same installation ID — the app folder was likely copied/moved to another unit.</div>' : ''}
+        ${d.integrityFlagged ? `<div class="meta" style="color:var(--red);">⚠️ Modified/deleted files found vs. the original release — ${timeAgo(d.integrityCheckedAt)}. Click "View Changed Files" for details.</div>` : ''}
       </div>
       <div class="row-actions">
-        <button class="btn-detail" onclick="openDeviceDetail('${d.installationId}')">Detalye</button>
-        <button class="btn-ghost" onclick="editLabel('${d.installationId}', '${(d.label || '').replace(/'/g, "\\'")}')">🏷️ I-label</button>
-        ${d.cloneFlagged ? `<button class="btn-revoke" onclick="resetCloneFlag('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🚩 I-reset ang clone flag</button>` : ''}
-        ${d.cloneFlagged ? `<button class="btn-ghost" onclick="splitClone('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🔀 Ibukod bilang bagong device</button>` : ''}
-        ${d.integrityFlagged ? `<button class="btn-revoke" onclick="showIntegrityDetail('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🛠️ Tingnan ang mga binagong file</button>` : ''}
-        <button class="btn-ghost" onclick="requestIntegrityCheckNow('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🔄 I-check ngayon</button>
+        <button class="btn-detail" onclick="openDeviceDetail('${d.installationId}')">Details</button>
+        <button class="btn-ghost" onclick="editLabel('${d.installationId}', '${(d.label || '').replace(/'/g, "\\'")}')">🏷️ Label</button>
+        ${d.cloneFlagged ? `<button class="btn-revoke" onclick="resetCloneFlag('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🚩 Reset Clone Flag</button>` : ''}
+        ${d.cloneFlagged ? `<button class="btn-ghost" onclick="splitClone('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🔀 Split as New Device</button>` : ''}
+        ${d.integrityFlagged ? `<button class="btn-revoke" onclick="showIntegrityDetail('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🛠️ View Changed Files</button>` : ''}
+        <button class="btn-ghost" onclick="requestIntegrityCheckNow('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🔄 Check Now</button>
         ${d.allowed
-          ? `<button class="btn-revoke" onclick="revoke('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">Alisin</button>`
+          ? `<button class="btn-revoke" onclick="revoke('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">Remove</button>`
           : `<button class="btn-allow" onclick="allow('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">Allow</button>`}
       </div>
     </div>
@@ -2318,7 +2318,7 @@ async function revoke(id, storeName) {
 
 async function resetCloneFlag(id, storeName) {
   const ok = await confirmAction({
-    title: 'I-reset ang clone flag?',
+    title: 'Reset the clone flag?',
     message: `Gawin lang ito kung na-verify mo na na LEGIT na paglipat ito sa bagong device${storeName ? ' (' + storeName + ')' : ''} (hal. pinalitan mo ang unit ng customer) — HINDI totoong cloning. Sa susunod na online verify, mabibind ulit ang installationId na ito sa BAGONG fingerprint.`,
     confirmLabel: 'I-reset',
     danger: true
@@ -2333,8 +2333,8 @@ async function resetCloneFlag(id, storeName) {
 
 async function splitClone(id, storeName) {
   const ok = await confirmAction({
-    title: 'Ibukod bilang bagong device?',
-    message: `Gawin lang ito kung gusto mong PATULOY na gumana ang DALAWA — ang lumang device${storeName ? ' (' + storeName + ')' : ''} AT ang na-flag na clone — bilang dalawang HIWALAY na device mula ngayon (sarili nilang installationId). Ang luma ay mananatiling gaya ng dati. Ang bago ay walang kasamang naka-unlock na feature — kailangan mo pang i-activate manually sa bagong Detalye page nito kung ano ang totoong binayaran.`,
+    title: 'Split as a new device?',
+    message: `Only do this if you want BOTH to keep working — the old device${storeName ? ' (' + storeName + ')' : ''} AND the flagged clone — as two SEPARATE devices from now on (each with its own installation ID). The old one stays exactly as it is. The new one starts with no unlocked features — you'll need to manually activate on its new Details page whatever was actually paid for.`,
     confirmLabel: 'Ibukod',
     danger: false
   });
@@ -2343,7 +2343,7 @@ async function splitClone(id, storeName) {
     const res = await api(`/relay/admin/api/devices/${encodeURIComponent(id)}/split-clone`, { method: 'POST' });
     if (res.success) {
       toast(`Nagawa na ang hiwalay na device.`, 'success');
-      alert(`Bagong installationId:\n\n${res.newInstallationId}\n\nLalabas ito sa listahan sa susunod na mag-verify online ang clone device. Huwag kalimutang i-activate manually ang mga totoong binayaran nitong features sa Detalye page nito.`);
+      alert(`New installationId:\n\n${res.newInstallationId}\n\nThis will appear in the list the next time the clone device verifies online. Don't forget to manually activate whatever features were actually paid for on its Details page.`);
     }
   } catch (err) { /* handled */ }
   loadDevices();
@@ -2428,7 +2428,7 @@ async function clearIntegrityFlag() {
 
   const ok = await confirmAction({
     title: 'I-clear ang integrity flag?',
-    message: 'Gawin lang ito kung na-review mo na ang mga binagong/naburang file at LEGIT/sinadya ito (hal. sariling customization ng kliyente). Kung parehong binago pa rin ang mga file na ito sa susunod na check-in, ma-flag ulit ito.',
+    message: 'Only do this if you have reviewed the modified/deleted files and confirmed it is LEGITIMATE/intentional (e.g. the client\'s own customization). If these files are still changed on the next check-in, it will be flagged again.',
     confirmLabel: 'I-clear',
     danger: true
   });
@@ -2710,7 +2710,7 @@ function renderDeviceDetail(detail) {
     : 'Wala pang record ng aktibidad mula sa device na ito.';
   document.getElementById('detailAllowedBadgeWrap').innerHTML = `<span class="badge ${detail.allowed ? 'badge-allowed' : 'badge-blocked'}">${detail.allowed ? 'ALLOWED' : 'BLOCKED'}</span>` +
     `<button class="icon-btn" style="margin-left:8px;" onclick="toggleAllowFromDetail('${detail.installationId}', ${detail.allowed})">${detail.allowed ? 'Alisin' : 'Allow'}</button>` +
-    `<button class="icon-btn" style="margin-left:8px;" onclick="editLabel('${detail.installationId}', '${(detail.label || '').replace(/'/g, "\\'")}')">🏷️ I-label</button>`;
+    `<button class="icon-btn" style="margin-left:8px;" onclick="editLabel('${detail.installationId}', '${(detail.label || '').replace(/'/g, "\\'")}')">🏷️ Label</button>`;
 
   document.getElementById('detailUnlockedCount').innerText = detail.unlocked.length;
   document.getElementById('detailLockedCount').innerText = detail.locked.length;
@@ -2731,7 +2731,7 @@ function renderDeviceDetail(detail) {
 
   const unlockedEl = document.getElementById('detailUnlockedList');
   unlockedEl.innerHTML = detail.unlocked.length === 0
-    ? '<div class="empty">Walang naka-unlock pa.</div>'
+    ? '<div class="empty">Nothing unlocked yet.</div>'
     : detail.unlocked.map(u => `
       <div class="feature-item">
         <div>
@@ -2852,7 +2852,7 @@ async function deactivateFeature(installationId, featureId, featureName) {
 async function deactivateAllFeatures(installationId) {
   const ok = await confirmAction({
     title: 'I-reset ang device na ito?',
-    message: 'Tatanggalin ang LAHAT ng naka-unlock na feature sa device na ito (pati demo, kung meron). Babalik ito sa default state — walang naka-unlock. Gamitin ito bago ibenta o ilipat ang device sa ibang customer. Hindi ito maaaring bawiin.',
+    message: 'This will remove ALL unlocked features on this device (including demo, if any). It will return to the default state — nothing unlocked. Use this before selling or transferring the device to another customer. This cannot be undone.',
     confirmLabel: 'Oo, i-reset',
     danger: true
   });
@@ -3087,11 +3087,11 @@ function promptForLabel(currentLabel) {
     const okBtn = document.getElementById('confirmActionBtn');
     const cancelBtn = document.getElementById('confirmCancelBtn');
 
-    document.getElementById('confirmTitle').innerText = 'I-label ang Device';
+    document.getElementById('confirmTitle').innerText = 'Label the Device';
     document.getElementById('confirmMessage').innerHTML =
-      'Palayaw/pangalan na PARA SA IYO lang (hindi makikita ng customer) para madali mong makilala ang device na ito — hal. pangalan ng tindahan o customer.' +
-      `<br><br><input type="text" id="deviceLabelInput" placeholder="hal. Aling Nena — Sari-sari Store, Cubao" maxlength="120" value="${(currentLabel || '').replace(/"/g, '&quot;')}" style="margin-top:4px;">`;
-    okBtn.innerText = '💾 I-save';
+      'A nickname/name for YOU only (not visible to the customer) so you can easily recognize this device — e.g. store or customer name.' +
+      `<br><br><input type="text" id="deviceLabelInput" placeholder="e.g. Aling Nena — Sari-sari Store, Cubao" maxlength="120" value="${(currentLabel || '').replace(/"/g, '&quot;')}" style="margin-top:4px;">`;
+    okBtn.innerText = '💾 Save';
     okBtn.className = 'btn-allow';
 
     backdrop.style.display = 'flex';
