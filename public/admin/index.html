@@ -1,11 +1,11 @@
 <!DOCTYPE html>
-<html lang="tl">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OmniPOS Relay — Device Admin</title>
 
-<!-- PWA: para maging "installable" sa Android/iOS/PC gaya ng OMNIPOS client app -->
+<!-- PWA: makes this "installable" on Android/iOS/PC, just like the OMNIPOS client app -->
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#05070d">
 <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
@@ -455,7 +455,7 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
 .status-on { background: rgba(61,220,132,.1); color: var(--green); border-color: var(--green-line); }
 .status-off { background: rgba(255,181,69,.1); color: var(--amber); border-color: var(--amber-line); }
 
-/* ---------- BACKUP SYNC BANNER (dot blinker sa itaas ng "Allowed devices") ---------- */
+/* ---------- BACKUP SYNC BANNER (dot blinker above "Allowed devices") ---------- */
 .sync-banner {
   display: flex;
   align-items: center;
@@ -574,14 +574,14 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
 .modal-box p { margin: 0 0 16px; font-size: 13px; color: var(--muted); line-height: 1.5; }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .modal-actions button { min-width: 88px; }
-/* BUG FIX: ang safety-prompt confirm dialog (#confirmBackdrop) ay
-   dapat LAGING nasa ibabaw ng ibang modal (hal. #integrityBackdrop),
-   dahil pwede itong lumabas HABANG bukas pa ang isa pang modal (hal.
-   "I-clear ang flag" button sa loob ng integrity detail modal). Dating
-   parehong z-index (998) ang dalawa, kaya ang huling modal sa DOM
-   order (#integrityBackdrop) ang nasa ibabaw, natatakpan/naha-harang
-   ang confirm dialog — hindi na-click ang "Oo, tuloy", kaya parang
-   "hindi gumana" ang I-clear.
+/* BUG FIX: the safety-prompt confirm dialog (#confirmBackdrop) must
+   ALWAYS sit above other modals (e.g. #integrityBackdrop), because it
+   can appear WHILE another modal is still open (e.g. the "Clear flag"
+   button inside the integrity detail modal). Both used to share the
+   same z-index (998), so whichever modal came later in DOM order
+   (#integrityBackdrop) ended up on top, covering/blocking the confirm
+   dialog — "Yes, continue" wasn't clickable, making Clear look
+   "broken".
    */
 #confirmBackdrop { z-index: 999; }
 
@@ -651,22 +651,21 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
 .feature-name { font-size: 13px; font-weight: 600; }
 .feature-meta { font-family: var(--font-mono); font-size: 11px; color: var(--muted); margin-top: 2px; }
 .feature-price { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
-/* Deactivate button sa loob ng bawat naka-unlock na feature — ginamit
-   para "i-reset" ang isang device pabalik sa walang naka-unlock (hal.
-   bago ibenta/ilipat ang unit sa ibang customer). Maliit at pula
-   (parang btn-revoke) para malinaw na destructive/pang-alis ang aksyon,
-   pero hindi masyadong kalaki para hindi ma-miss ang buong row. */
+/* Deactivate button inside each unlocked feature — used to "reset"
+   a device back to nothing unlocked (e.g. before selling/transferring
+   the unit to another customer). Small and red (like btn-revoke) to
+   make clear the action is destructive/removes access, but not so
+   large that it's easy to miss the rest of the row. */
 .btn-deactivate {
   background: var(--red-bg); color: var(--red);
   border: 1px solid var(--red-line); border-radius: 6px;
   padding: 6px 10px; font-size: 11px; font-weight: 600; cursor: pointer;
 }
-/* Renew button — kaparehong laki/hugis ng Deactivate para magkatabi
-   silang maayos sa isang column (Renew sa ITAAS, Deactivate sa
-   ILALIM), pero blue/accent ang kulay (parang btn-tier) para malinaw
-   na hindi ito destructive — mag-a-activate lang ulit ng parehong
-   feature gamit ang bagong duration (bagong expiresAt), kagaya ng
-   ginagawa na ng "I-renew / Palitan ang Tagal" sa Demo Mode. */
+/* Renew button — same size/shape as Deactivate so they line up neatly
+   in one column (Renew on TOP, Deactivate on BOTTOM), but blue/accent
+   colored (like btn-tier) to make clear it's not destructive — it just
+   re-activates the same feature with a new duration (new expiresAt),
+   the same way "Renew / Change Duration" works for Demo Mode. */
 .btn-renew {
   background: var(--accent-soft); color: var(--accent-bright);
   border: 1px solid var(--accent-dim); border-radius: 6px;
@@ -690,9 +689,9 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
   flex: 1; min-width: 100px; background: var(--accent-soft); color: var(--accent-bright);
   border: 1px solid var(--accent-dim); border-radius: var(--radius-sm); padding: 10px 8px; font-size: 12px; cursor: pointer;
 }
-/* Demo Mode card sa Device Detail — amber-themed (kapareho ng "DEMO"
-   badge) para agad makilala na PANSAMANTALA/TRIAL ito, iba sa mga
-   regular na paid feature (blue) o destructive na aksyon (red). */
+/* Demo Mode card in Device Detail — amber-themed (matching the "DEMO"
+   badge) so it's immediately recognizable as TEMPORARY/TRIAL, distinct
+   from regular paid features (blue) or destructive actions (red). */
 .btn-demo {
   flex: 1; min-width: 160px; background: var(--amber-bg); color: var(--amber);
   border: 1px solid var(--amber-line); border-radius: var(--radius-sm); padding: 10px 12px;
@@ -998,12 +997,12 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
     <img src="icons/icon-192.png" alt="OmniPOS">
     <div>
       <h1 style="margin:0;" class="glitch-text" id="loginTitle" data-text="Relay — Device Admin">Relay — Device Admin</h1>
-      <div class="sub" style="margin:0;">Ilagay ang admin key para makapasok</div>
+      <div class="sub" style="margin:0;">Enter your admin key to continue</div>
     </div>
   </div>
   <div class="card">
     <input type="password" id="adminKeyInput" placeholder="Admin key" autocomplete="off">
-    <button class="btn-primary" onclick="login()">Pumasok</button>
+    <button class="btn-primary" onclick="login()">Sign in</button>
     <div id="loginError" style="color:var(--red); font-size:12px; margin-top:8px;"></div>
   </div>
 </div>
@@ -1019,8 +1018,8 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
     </div>
     <div class="topbar-actions">
       <span id="idleCountdownPill" class="idle-countdown"></span>
-      <button id="installBtn" class="icon-btn" style="display:none;" onclick="installApp()">⬇️ I-install</button>
-      <button id="logoutBtn" class="icon-btn icon-btn-logout" onclick="logout()" title="Mag-logout" aria-label="Mag-logout">
+      <button id="installBtn" class="icon-btn" style="display:none;" onclick="installApp()">⬇️ Install</button>
+      <button id="logoutBtn" class="icon-btn icon-btn-logout" onclick="logout()" title="Log out" aria-label="Log out">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 2v10"/>
           <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/>
@@ -1071,7 +1070,7 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
         </div>
         <div class="stat-card" style="cursor:pointer;" onclick="switchTab('devices'); document.getElementById('seenFilterStatus').value='integrity'; renderSeenList(); document.getElementById('seenList').scrollIntoView({behavior:'smooth'});">
           <div class="stat-num stat-num-danger" id="statIntegrityFlagged">—</div>
-          <div class="stat-label">🛠️ May nabago/naburang file</div>
+          <div class="stat-label">🛠️ Modified/missing files</div>
         </div>
       </div>
 
@@ -1081,8 +1080,8 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
       </div>
 
       <div class="card">
-        <h2>Manual na magdagdag ng device</h2>
-        <input type="text" id="manualIdInput" placeholder="Paste installation ID dito">
+        <h2>Manually add a device</h2>
+        <input type="text" id="manualIdInput" placeholder="Paste installation ID here">
         <button class="btn-primary" onclick="manualAllow()">+ Allow</button>
       </div>
     </div>
@@ -1093,11 +1092,11 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
         <div class="bulk-reset-bar" id="bulkResetBar" style="display:flex; align-items:center; gap:10px; margin-bottom:10px; flex-wrap:wrap;">
           <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); cursor:pointer;">
             <input type="checkbox" id="selectAllDevicesCheckbox" onchange="toggleSelectAllDevices(this.checked)">
-            Piliin lahat
+            Select all
           </label>
-          <span id="selectedCountLabel" style="font-size:12px; color:var(--muted);">0 napili</span>
+          <span id="selectedCountLabel" style="font-size:12px; color:var(--muted);">0 selected</span>
           <button class="btn-ghost" id="bulkResetBtn" onclick="bulkResetSelected()" disabled style="margin-left:auto;">
-            🧹 I-reset ang napili (label, fingerprint, clone-split, online status)
+            🧹 Reset selected (label, fingerprint, clone-split, online status)
           </button>
         </div>
         <div id="allowedList" class="empty">Loading...</div>
@@ -1106,18 +1105,18 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
       <div class="card">
         <h2>Recently seen (everyone who requested) <span class="count-pill" id="seenCountPill">0</span></h2>
         <div class="filter-bar">
-          <input type="text" id="seenFilterInput" placeholder="Hanapin: store, username, o installation ID" oninput="renderSeenList()">
+          <input type="text" id="seenFilterInput" placeholder="Search: store, username, or installation ID" oninput="renderSeenList()">
           <select id="seenFilterStatus" onchange="renderSeenList()">
             <option value="all">All</option>
-            <option value="allowed">Allowed lang</option>
-            <option value="blocked">Blocked lang</option>
+            <option value="allowed">Allowed only</option>
+            <option value="blocked">Blocked only</option>
             <option value="flagged">🚩 Flagged clone only</option>
             <option value="integrity">🛠️ Modified/deleted files only</option>
           </select>
           <select id="seenSortBy" onchange="renderSeenList()">
-            <option value="lastSeen">I-sort: Huling nakita</option>
-            <option value="mostUnlocked">I-sort: Pinaka-marami na-unlock</option>
-            <option value="storeName">I-sort: Pangalan ng tindahan</option>
+            <option value="lastSeen">Sort: Last seen</option>
+            <option value="mostUnlocked">Sort: Most unlocked</option>
+            <option value="storeName">Sort: Store name</option>
           </select>
           <button class="btn-export" onclick="exportDevicesCSV()">⬇️ Export CSV</button>
         </div>
@@ -1129,7 +1128,7 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
       <div id="backupSyncBanner" class="sync-banner sync-orange">
         <div class="sync-dot-blink sync-orange" id="backupSyncDot"></div>
         <div class="sync-banner-text">
-          <div id="backupSyncMain">Naghihintay pa ng unang successful auto-backup check-in...</div>
+          <div id="backupSyncMain">Waiting for the first successful auto-backup check-in...</div>
           <div class="sync-banner-sub" id="backupSyncSub">Database → Download/RELAY_BACKUP</div>
         </div>
       </div>
@@ -1140,48 +1139,48 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
           Render's free tier has no persistent disk — allowed devices, unlocked features, and history are lost on every <code>git push</code>/redeploy, and everything is lost if you delete the service/domain. Download the backup periodically (especially after a new unlock/customer) and keep it somewhere safe.
         </div>
         <div class="backup-row">
-          <button class="btn-primary" onclick="downloadBackup()">⬇️ I-download ang Backup</button>
-          <button class="btn-ghost" onclick="document.getElementById('restoreFileInput').click()">⬆️ I-restore mula sa Backup</button>
+          <button class="btn-primary" onclick="downloadBackup()">⬇️ Download Backup</button>
+          <button class="btn-ghost" onclick="document.getElementById('restoreFileInput').click()">⬆️ Restore from Backup</button>
         </div>
         <input type="file" id="restoreFileInput" accept="application/json" style="display:none;" onchange="restoreBackupFromFile(event)">
         <div class="backup-lastexport" id="backupLastExport"></div>
         <label class="auto-backup-toggle">
           <input type="checkbox" id="autoBackupOnAllowToggle" onchange="onAutoBackupToggleChange()">
-          Awtomatikong i-download ang backup (may petsa/oras stamp) kapag may bagong na-allow na device
+          Automatically download a timestamped backup whenever a new device is allowed
         </label>
         <div class="backup-note" style="margin-top:6px;">
-          Ang filename ng auto-download ay may petsa/oras stamp (hal. <code>relaybackup07260130.json</code> = July 26, 1:30 AM — LOCAL na oras ng browser mo), kaya iba-ibang file ito kada allow (hindi nag-o-overwrite sa isa't isa). Ito ang mananatili sa Downloads folder mo bilang history ng mga backup.
+          The auto-download filename includes a date/time stamp (e.g. <code>relaybackup07260130.json</code> = July 26, 1:30 AM — your browser's LOCAL time), so each allow creates a new file instead of overwriting the last one. These stay in your Downloads folder as your backup history.
         </div>
       </div>
 
       <div class="card">
-        <h2>🚀 Mag-publish ng Bagong Update <span style="font-size:11px; color:var(--muted); font-weight:normal;">(build + publish sa isang click — dito na lang, walang Termux/curl kailangan)</span></h2>
+        <h2>🚀 Publish a New Update <span style="font-size:11px; color:var(--muted); font-weight:normal;">(build + publish in one click — no Termux/curl required)</span></h2>
         <div class="backup-note">
-          Isang button na ito para sa DALAWANG hakbang: (1) gagawa ng bagong <code>omnipos-client.zip</code> mula sa pinaka-bagong code sa repo mo, at (2) i-a-announce agad ang bagong version/changelog na ito sa mga existing na kliyente (makikita nila sa "Check for Update" nila). Kung mabigo ang build, HINDI ita-tuloy ang pag-publish ng version.
+          One button, two steps: (1) builds a fresh <code>omnipos-client.zip</code> from the latest code in your repo, and (2) immediately announces this new version/changelog to existing clients (they'll see it in their "Check for Update"). If the build fails, the version publish will NOT proceed.
         </div>
         <div class="backup-row">
-          <input type="text" id="publishVersionInput" placeholder="Bagong version (hal. 1.0.43)" style="flex:1; min-width:140px;">
-          <input type="text" id="publishRepoUrlInput" placeholder="repoUrl (opsyonal — iiwan blangko kung naka-set na ang OMNIPOS_REPO_URL)" style="flex:2; min-width:220px;">
+          <input type="text" id="publishVersionInput" placeholder="New version (e.g. 1.0.43)" style="flex:1; min-width:140px;">
+          <input type="text" id="publishRepoUrlInput" placeholder="repoUrl (optional — leave blank if OMNIPOS_REPO_URL is already set)" style="flex:2; min-width:220px;">
           <input type="text" id="publishRefInput" placeholder="branch/ref (default: main)" style="flex:1; min-width:120px;">
         </div>
         <div class="backup-row" style="margin-top:8px;">
-          <textarea id="publishChangelogInput" placeholder="Changelog (opsyonal — ito ang makikita ng customer sa update notice)" rows="2" style="flex:1; min-width:200px; resize:vertical; background:var(--panel-2, #1a1a1a); color:inherit; border:1px solid var(--border, #2a2a2a); border-radius:8px; padding:8px;"></textarea>
+          <textarea id="publishChangelogInput" placeholder="Changelog (optional — this is what customers see in the update notice)" rows="2" style="flex:1; min-width:200px; resize:vertical; background:var(--panel-2, #1a1a1a); color:inherit; border:1px solid var(--border, #2a2a2a); border-radius:8px; padding:8px;"></textarea>
         </div>
         <div class="backup-row" style="margin-top:8px;">
-          <input type="text" id="publishCaptionInput" placeholder="Caption (opsyonal — para lang sa history log sa ibaba, hal. &quot;hotfix barcode scan bug&quot;)" style="flex:1; min-width:220px;">
+          <input type="text" id="publishCaptionInput" placeholder="Caption (optional — for the history log below only, e.g. &quot;hotfix barcode scan bug&quot;)" style="flex:1; min-width:220px;">
         </div>
         <div class="backup-row" style="margin-top:8px;">
-          <input type="text" id="publishTargetIdInput" placeholder="Target Installation ID (opsyonal — iiwan blangko para sa LAHAT ng kliyente)" style="flex:1; min-width:220px;">
+          <input type="text" id="publishTargetIdInput" placeholder="Target Installation ID (optional — leave blank to target ALL clients)" style="flex:1; min-width:220px;">
         </div>
         <div class="backup-note" style="margin-top:6px;">
-          Kung punan mo ang Target Installation ID, SA KANYA LANG mapupunta ang "may bagong update" na notice na ito — ibang kliyente, hindi makikita hangga't hindi mo pa siya i-clear o hindi mo pa ginawang global (blangko ang Target ID) ang parehong version. <strong>Paalala:</strong> ang aktwal na zip file ay iisa pa rin/shared — targeting lang ito ng "sino ang makakakita ng notice", hindi hard block sa pag-download.
+          If you fill in a Target Installation ID, the "update available" notice will go ONLY to that device — other clients won't see it until you clear the target or make the same version global (blank Target ID). <strong>Note:</strong> the actual zip file is still shared/single — this only targets who sees the notice, it's not a hard download block.
         </div>
         <div class="backup-row" style="margin-top:10px;">
-          <button class="btn-primary" onclick="publishRelease()" id="publishReleaseBtn">🚀 I-build at I-publish</button>
+          <button class="btn-primary" onclick="publishRelease()" id="publishReleaseBtn">🚀 Build & Publish</button>
         </div>
         <div id="publishProgressWrap" class="abar-row" style="margin-top:12px; display:none;">
           <div class="abar-label">
-            <span class="name" id="publishProgressLabel">Ginagawa ang build...</span>
+            <span class="name" id="publishProgressLabel">Building...</span>
             <span class="count" id="publishProgressPercent">0%</span>
           </div>
           <div class="abar-track">
@@ -1191,21 +1190,21 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
       </div>
 
       <div class="card">
-        <h2>📦 I-download ang Client Package <span style="font-size:11px; color:var(--muted); font-weight:normal;">(offline setup ng bagong kliyente)</span></h2>
+        <h2>📦 Download Client Package <span style="font-size:11px; color:var(--muted); font-weight:normal;">(offline setup for a new client)</span></h2>
         <div class="backup-note">
-          Gumawa ng one-time (o limited-use) na link para makapag-download ang bagong kliyente ng <code>omnipos-client.zip</code> — mga files na kailangan niya para i-install at patakbuhin nang offline ang OMNIPOS sa sariling device. I-"Build Release" muna kung may bagong update sa OMNIPOS code bago gumawa ng link.
+          Create a one-time (or limited-use) link so a new client can download <code>omnipos-client.zip</code> — the files they need to install and run OMNIPOS offline on their own device. Run "Build Release" first if there's a new update to the OMNIPOS code before generating a link.
         </div>
         <div class="backup-row">
-          <input type="text" id="buildCaption" placeholder="Caption ng build na ito (opsyonal, hal. 'hotfix barcode scan')" style="flex:2; min-width:200px;">
-          <button class="btn-ghost" onclick="buildRelease()" id="buildReleaseBtn">🛠️ I-build ang Release (git → zip)</button>
-          <button class="btn-ghost" onclick="downloadCodesJSON()">⬇️ I-download ang Listahan (JSON)</button>
+          <input type="text" id="buildCaption" placeholder="Caption for this build (optional, e.g. 'hotfix barcode scan')" style="flex:2; min-width:200px;">
+          <button class="btn-ghost" onclick="buildRelease()" id="buildReleaseBtn">🛠️ Build Release (git → zip)</button>
+          <button class="btn-ghost" onclick="downloadCodesJSON()">⬇️ Download List (JSON)</button>
         </div>
         <div class="backup-note" style="margin-top:6px;">
-          Ang caption ay para lang sa history log sa ibaba — hindi ito nagbabago sa filename ng na-build na package (laging <code>omnipos-client.zip</code> pa rin ito, ino-overwrite lang kada build).
+          The caption is only for the history log below — it doesn't change the filename of the built package (it's always <code>omnipos-client.zip</code>, just overwritten each build).
         </div>
         <div id="buildProgressWrap" class="abar-row" style="margin-top:12px; display:none;">
           <div class="abar-label">
-            <span class="name" id="buildProgressLabel">Ginagawa ang build...</span>
+            <span class="name" id="buildProgressLabel">Building...</span>
             <span class="count" id="buildProgressPercent">0%</span>
           </div>
           <div class="abar-track">
@@ -1213,21 +1212,21 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
           </div>
         </div>
         <div class="backup-row" style="margin-top:10px;">
-          <input type="text" id="newCodeLabel" placeholder="Label (hal. Store ni Juan)" style="flex:2; min-width:160px;">
+          <input type="text" id="newCodeLabel" placeholder="Label (e.g. Juan's Store)" style="flex:2; min-width:160px;">
           <input type="number" id="newCodeMaxUses" placeholder="Max uses (default 1)" min="1" style="flex:1; min-width:120px;">
-          <input type="number" id="newCodeExpiresHours" placeholder="Mag-e-expire sa (oras)" min="1" style="flex:1; min-width:120px;">
-          <button class="btn-primary" onclick="generateDownloadCode()">➕ Gumawa ng Download Link</button>
+          <input type="number" id="newCodeExpiresHours" placeholder="Expires in (hours)" min="1" style="flex:1; min-width:120px;">
+          <button class="btn-primary" onclick="generateDownloadCode()">➕ Create Download Link</button>
         </div>
         <div id="downloadCodesList" class="empty" style="margin-top:12px;">Loading...</div>
       </div>
 
       <div class="card">
-        <h2>🕘 History ng mga Build</h2>
+        <h2>🕘 Build History</h2>
         <div class="backup-note">
-          Listahan ng mga beses na na-build/na-copy ang <code>omnipos-client.zip</code> — caption, ang naka-publish na version number noong oras ng build, at petsa/oras. Log lang ito; hindi nagbabago ang aktwal na filename ng zip.
+          A log of every time <code>omnipos-client.zip</code> was built/copied — caption, the published version number at build time, and date/time. This is just a log; it doesn't change the actual zip filename.
         </div>
         <div class="backup-row" style="margin-top:8px;">
-          <button class="btn-revoke" onclick="clearBuildHistory()" id="clearBuildHistoryBtn">🗑️ I-clear ang History</button>
+          <button class="btn-revoke" onclick="clearBuildHistory()" id="clearBuildHistoryBtn">🗑️ Clear History</button>
         </div>
         <div id="buildHistoryList" class="empty" style="margin-top:12px;">Loading...</div>
       </div>
@@ -1249,7 +1248,7 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
       </div>
     </div>
     <div class="topbar-actions">
-      <button class="icon-btn" onclick="closeDeviceDetail()">← Balik</button>
+      <button class="icon-btn" onclick="closeDeviceDetail()">← Back</button>
     </div>
   </div>
   <div class="wrap">
@@ -1265,11 +1264,11 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
     <div class="stat-strip">
       <div class="stat-card">
         <div class="stat-num" id="detailUnlockedCount">—</div>
-        <div class="stat-label">Naka-unlock</div>
+        <div class="stat-label">Unlocked</div>
       </div>
       <div class="stat-card">
         <div class="stat-num" id="detailLockedCount">—</div>
-        <div class="stat-label">Naka-lock pa</div>
+        <div class="stat-label">Still locked</div>
       </div>
       <div class="stat-card">
         <div class="stat-num" id="detailDemoStatus">—</div>
@@ -1278,38 +1277,38 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
     </div>
 
     <div class="card">
-      <h2>🕘 Demo Mode <span style="font-size:11px; color:var(--muted); font-weight:normal;">(direktang i-activate — walang OTP, walang paghihintay sa request)</span></h2>
+      <h2>🕘 Demo Mode <span style="font-size:11px; color:var(--muted); font-weight:normal;">(activates instantly — no OTP, no waiting for a request)</span></h2>
       <div class="demo-status-line" id="demoModeStatusLine">Loading...</div>
       <div style="display:flex; gap:8px; flex-wrap:wrap;">
-        <button class="btn-demo" id="demoActivateBtn" onclick="activateDemoMode(currentDetailId)">▶ I-activate ang Demo Mode</button>
-        <button class="btn-deactivate" id="demoStopBtn" style="display:none; font-size:12px; padding:10px 12px;" onclick="stopDemoMode(currentDetailId)">⏹ Itigil Ngayon</button>
+        <button class="btn-demo" id="demoActivateBtn" onclick="activateDemoMode(currentDetailId)">▶ Activate Demo Mode</button>
+        <button class="btn-deactivate" id="demoStopBtn" style="display:none; font-size:12px; padding:10px 12px;" onclick="stopDemoMode(currentDetailId)">⏹ Stop Now</button>
       </div>
     </div>
 
     <div class="card">
-      <h2>☁️ Cloud Backup <span style="font-size:11px; color:var(--muted); font-weight:normal;">(buong database ng device na ito, maliban sa user accounts)</span></h2>
+      <h2>☁️ Cloud Backup <span style="font-size:11px; color:var(--muted); font-weight:normal;">(this device's full database, excluding user accounts)</span></h2>
       <div id="cloudBackupStatusLine" class="meta">Loading...</div>
       <div id="cloudBackupModuleList" style="margin-top:8px;"></div>
       <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
-        <button class="icon-btn" onclick="loadCloudBackupDetail(currentDetailId)">🔄 I-refresh</button>
-        <button class="icon-btn" id="cloudBackupDownloadBtn" style="display:none;" onclick="downloadCloudBackup(currentDetailId)">⬇️ I-download ang JSON</button>
+        <button class="icon-btn" onclick="loadCloudBackupDetail(currentDetailId)">🔄 Refresh</button>
+        <button class="icon-btn" id="cloudBackupDownloadBtn" style="display:none;" onclick="downloadCloudBackup(currentDetailId)">⬇️ Download JSON</button>
       </div>
     </div>
 
     <div class="card">
-      <h2>✅ Naka-unlock na</h2>
+      <h2>✅ Unlocked</h2>
       <div id="detailUnlockedList" class="empty">Loading...</div>
     </div>
 
     <div class="card">
-      <h2>🔒 Naka-lock pa <span style="font-size:11px; color:var(--muted); font-weight:normal;">(may reference ka na? i-activate agad)</span></h2>
+      <h2>🔒 Still Locked <span style="font-size:11px; color:var(--muted); font-weight:normal;">(already have a reference? activate right away)</span></h2>
       <div id="detailTierRow" class="tier-row"></div>
       <div id="detailLockedList" class="empty">Loading...</div>
     </div>
 
     <div class="card">
-      <h2>🕘 History ng device na ito</h2>
-      <button class="btn-revoke" onclick="clearDeviceHistory()" id="clearDeviceHistoryBtn" style="margin-bottom:12px;">🗑️ I-clear ang History ng device na ito</button>
+      <h2>🕘 History for this device</h2>
+      <button class="btn-revoke" onclick="clearDeviceHistory()" id="clearDeviceHistoryBtn" style="margin-bottom:12px;">🗑️ Clear History for this device</button>
       <div id="detailHistoryList" class="empty">Loading...</div>
     </div>
   </div>
@@ -1325,7 +1324,7 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
       </div>
     </div>
     <div class="topbar-actions">
-      <button class="icon-btn" onclick="closeAnalytics()">← Balik</button>
+      <button class="icon-btn" onclick="closeAnalytics()">← Back</button>
     </div>
   </div>
   <div class="wrap">
@@ -1346,31 +1345,31 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
     <div class="stat-strip">
       <div class="stat-card">
         <div class="stat-num" id="anaActiveUnlocks">—</div>
-        <div class="stat-label">Aktibong lisensya</div>
+        <div class="stat-label">Active licenses</div>
       </div>
       <div class="stat-card">
         <div class="stat-num" id="anaDemoActive">—</div>
-        <div class="stat-label">Aktibong demo</div>
+        <div class="stat-label">Active demos</div>
       </div>
       <div class="stat-card">
         <div class="stat-num" id="anaRevenue">—</div>
-        <div class="stat-label">Kita (aktibo)</div>
+        <div class="stat-label">Revenue (active)</div>
       </div>
     </div>
 
     <div class="card">
-      <h2>📈 Aktibidad</h2>
+      <h2>📈 Activity</h2>
       <div class="meta" id="anaActivitySummary">Loading...</div>
     </div>
 
     <div class="card">
-      <h2>⏳ Malapit nang mag-expire <span class="count-pill" id="anaExpiringPill">0</span></h2>
-      <div class="backup-note">Mga lisensyang mag-e-expire sa loob ng 7 araw — magandang paalala para mag-follow-up sa customer bago sila ma-lock out.</div>
+      <h2>⏳ Expiring Soon <span class="count-pill" id="anaExpiringPill">0</span></h2>
+      <div class="backup-note">Licenses expiring within 7 days — a good reminder to follow up with the customer before they get locked out.</div>
       <div id="anaExpiringList" class="empty" style="margin-top:10px;">Loading...</div>
     </div>
 
     <div class="card">
-      <h2>🏆 Pinaka-paborito na features <span style="font-size:11px; color:var(--muted); font-weight:normal;">(aktibong lisensya lang)</span></h2>
+      <h2>🏆 Top Features <span style="font-size:11px; color:var(--muted); font-weight:normal;">(active licenses only)</span></h2>
       <div id="anaTopFeatures" class="empty">Loading...</div>
     </div>
 
@@ -1385,31 +1384,31 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
   <img id="photoLightboxImg" src="" alt="Requestor photo">
 </div>
 
-<!-- SAFETY PROMPT: lumalabas ito bago ma-execute ang kahit anong "malaking" aksyon
-     (Allow, Revoke, Approve/Run) para hindi masira ng aksidenteng click. -->
+<!-- SAFETY PROMPT: shown before any "big" action (Allow, Revoke, Approve/Run)
+     is executed, so an accidental click can't break anything. -->
 <div id="confirmBackdrop" class="modal-backdrop">
   <div class="modal-box">
-    <h3 id="confirmTitle">Sigurado ka ba?</h3>
+    <h3 id="confirmTitle">Are you sure?</h3>
     <p id="confirmMessage"></p>
     <div class="modal-actions">
-      <button class="btn-ghost" id="confirmCancelBtn">Kanselahin</button>
-      <button class="btn-allow" id="confirmActionBtn">Oo, tuloy</button>
+      <button class="btn-ghost" id="confirmCancelBtn">Cancel</button>
+      <button class="btn-allow" id="confirmActionBtn">Yes, continue</button>
     </div>
   </div>
 </div>
 
-<!-- FILE INTEGRITY DETAIL: "git status"-style na listahan ng
-     modified/deleted/added files ng isang device, may button din para
-     i-clear/i-acknowledge ang flag pagkatapos i-review ng developer. -->
+<!-- FILE INTEGRITY DETAIL: a "git status"-style list of modified/deleted/added
+     files for a device, with a button to clear/acknowledge the flag once
+     the developer has reviewed it. -->
 <div id="integrityBackdrop" class="modal-backdrop">
   <div class="modal-box" style="max-width:640px; max-height:80vh; overflow-y:auto;">
     <h3>🛠️ Integrity check — <span id="integrityDeviceLabel"></span></h3>
     <p class="meta" id="integrityMeta" style="margin-bottom:14px;"></p>
     <div id="integrityBody"></div>
     <div class="modal-actions">
-      <button class="btn-ghost" onclick="closeIntegrityModal()">Isara</button>
+      <button class="btn-ghost" onclick="closeIntegrityModal()">Close</button>
       <button class="btn-ghost" onclick="requestIntegrityCheckNow(currentIntegrityId, document.getElementById('integrityDeviceLabel').innerText)">🔄 Check Now</button>
-      <button class="btn-revoke" id="integrityClearBtn" onclick="clearIntegrityFlag()">✅ I-clear ang flag (na-review ko na)</button>
+      <button class="btn-revoke" id="integrityClearBtn" onclick="clearIntegrityFlag()">✅ Clear flag (I've reviewed it)</button>
     </div>
   </div>
 </div>
@@ -1417,7 +1416,7 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
 <script>
 let adminKey = sessionStorage.getItem('relayAdminKey') || '';
 let lastLoadedDevices = [];
-const selectedForReset = new Set(); // installationIds na naka-check sa "Allowed devices" list
+const selectedForReset = new Set(); // installationIds checked in the "Allowed devices" list
 
 function escapeAttr(str) {
   return String(str).replace(/'/g, "\\'").replace(/"/g, '&quot;');
@@ -1452,15 +1451,15 @@ async function bulkResetSelected() {
   const ids = [...selectedForReset];
   if (ids.length === 0) return;
   const ok = await confirmAction({
-    title: `I-reset ang ${ids.length} device(s)?`,
-    message: `Tatanggalin ang device LABEL, fingerprint binding, clone-split record, at online/heartbeat status ng ${ids.length} napiling device. Nananatili silang naka-Allow — hindi mababawasan ang access nila. Hindi maaapektuhan ang ibang device na hindi napili.`,
-    confirmLabel: 'I-reset ang napili',
+    title: `Reset ${ids.length} device(s)?`,
+    message: `This removes the device LABEL, fingerprint binding, clone-split record, and online/heartbeat status for the ${ids.length} selected device(s). They stay Allowed — their access is not reduced. Devices that are not selected are unaffected.`,
+    confirmLabel: 'Reset selected',
     danger: true
   });
   if (!ok) return;
   try {
     const res = await api('/relay/admin/api/devices/bulk-reset', { method: 'POST', body: JSON.stringify({ installationIds: ids }) });
-    if (res.success) toast(`Na-reset ang ${res.resetCount} device(s).`, 'success');
+    if (res.success) toast(`Reset ${res.resetCount} device(s).`, 'success');
     selectedForReset.clear();
   } catch (err) { /* handled */ }
   loadDevices();
@@ -1484,7 +1483,7 @@ function toast(message, type = 'info') {
 }
 
 // ---------------- SAFETY-PROMPT CONFIRM MODAL ----------------
-function confirmAction({ title, message, confirmLabel = 'Oo, tuloy', danger = false }) {
+function confirmAction({ title, message, confirmLabel = 'Yes, continue', danger = false }) {
   return new Promise((resolve) => {
     const backdrop = document.getElementById('confirmBackdrop');
     const okBtn = document.getElementById('confirmActionBtn');
@@ -1524,10 +1523,10 @@ function switchTab(name) {
   });
 }
 
-// Isinasama ang bilang ng "kailangang ayusin" (pending OTP, clone flagged,
-// backup na hindi pa naka-sync) bilang badge/dot sa bawat tab, kaya kahit
-// nasa ibang tab ang admin, alam niya agad kung saan may kailangan siyang
-// tignan nang hindi kailangang i-click isa-isa ang mga tab.
+// Rolls the count of "needs attention" items (pending OTP, clone flagged,
+// backup not yet synced) into a badge/dot on each tab, so even if
+// the admin is on a different tab, they know right away where they need
+// to look, without having to click through each tab.
 function updateTabBadges() {
   const pending = parseInt(document.getElementById('otpCountPill').innerText, 10) || 0;
   const homeBadge = document.getElementById('tabBadgeHome');
@@ -1545,14 +1544,14 @@ function updateTabBadges() {
 }
 
 // ---------------- MOBILE SWIPE (left/right) PARA MAGPALIT NG TAB ----------------
-// Home ↔ Devices ↔ Downloads lang ang kasama (hindi Analytics dahil hiwalay
-// na full screen 'yun, hindi bahagi ng tab-nav cycle). Gumagana lang ito
-// habang bukas ang mainScreen (hindi sa loob ng Device Detail / Analytics).
+// Only Home ↔ Devices ↔ Downloads are included (not Analytics, since it's a separate
+// it's a separate full screen, not part of the tab-nav cycle). Only works
+// only while mainScreen is open (not inside Device Detail / Analytics).
 (function () {
   const SWIPE_TAB_ORDER = ['home', 'devices', 'downloads'];
-  const SWIPE_MIN_DIST = 55;      // pinakamaliit na distansya (px) para tawaging swipe
-  const SWIPE_MAX_OFF_AXIS = 70;  // kung gaano lang ka-vertical bago ituring na scroll, hindi swipe
-  const SWIPE_MAX_TIME = 600;     // ms — kung mas matagal pa dito, hindi na ituturing na swipe
+  const SWIPE_MIN_DIST = 55;      // minimum distance (px) to be considered a swipe
+  const SWIPE_MAX_OFF_AXIS = 70;  // how vertical it can be before it's treated as a scroll, not a swipe
+  const SWIPE_MAX_TIME = 600;     // ms — if it takes longer than this, it's no longer treated as a swipe
 
   let touchStartX = 0, touchStartY = 0, touchStartTime = 0;
 
@@ -1584,7 +1583,7 @@ function updateTabBadges() {
     if (idx === -1) return;
 
     if (dx < 0 && idx < SWIPE_TAB_ORDER.length - 1) {
-      switchTab(SWIPE_TAB_ORDER[idx + 1]); // swipe left → susunod na tab
+      switchTab(SWIPE_TAB_ORDER[idx + 1]); // swipe left → next tab
     } else if (dx > 0 && idx > 0) {
       switchTab(SWIPE_TAB_ORDER[idx - 1]); // swipe right → nakaraang tab
     }
@@ -1592,8 +1591,8 @@ function updateTabBadges() {
 })();
 
 // ---------------- SESSION / IDLE HANDLING ----------------
-const IDLE_WARNING_MS = 2 * 60 * 1000; // ipakita ang countdown 2 minuto bago mag-logout
-const IDLE_DANGER_MS = 30 * 1000; // pulahin ang countdown sa huling 30 segundo
+const IDLE_WARNING_MS = 2 * 60 * 1000; // show the countdown 2 minutes before logout
+const IDLE_DANGER_MS = 30 * 1000; // turn the countdown red in the last 30 seconds
 
 ['click', 'keydown', 'touchstart'].forEach(evt =>
   document.addEventListener(evt, () => { lastActivityAt = Date.now(); })
@@ -1619,7 +1618,7 @@ function updateIdleCountdown() {
 
 setInterval(() => {
   if (adminKey && Date.now() - lastActivityAt > IDLE_LOGOUT_MS) {
-    logout('Na-logout ka dahil sa 20 minutong walang aktibidad.');
+    logout('You were logged out after 20 minutes of inactivity.');
     return;
   }
   updateIdleCountdown();
@@ -1657,46 +1656,46 @@ async function api(path, opts = {}) {
     }
   });
   if (res.status === 403) {
-    document.getElementById('loginError').innerText = 'Maling admin key.';
+    document.getElementById('loginError').innerText = 'Incorrect admin key.';
     logout();
     throw new Error('forbidden');
   }
   if (res.status === 429) {
-    toast('Sobra sa pinapayagang bilang ng requests. Sandali lang.', 'error');
+    toast('Too many requests. Please wait a moment.', 'error');
     throw new Error('rate-limited');
   }
   return res.json();
 }
 
 // --------------------------------------------------------------
-// BACKUP / RESTORE — mano-manong pag-download ng buong data
-// (allowed devices, naka-unlock na features, history) bilang isang
-// .json file, at pag-restore mula rito. Kailangan ito dahil walang
-// persistent disk ang Render free tier — nawawala ang data sa bawat
-// redeploy, at mawawala LAHAT kung ma-delete ang service/domain.
-// `relayLastBackupAt` sa localStorage (hindi sessionStorage — dapat
-// hindi ito nawawala pag-close ng tab/browser) ay para lang paalala
-// kung kailan huling nag-download, walang sensitive data ito.
+// BACKUP / RESTORE — manually downloading the full dataset
+// (allowed devices, unlocked features, history) as a single
+// .json file, and restoring from it. This is needed because there is no
+// persistent disk on the Render free tier — data is lost on every
+// redeploy, and ALL of it is lost if the service/domain is deleted.
+// `relayLastBackupAt` in localStorage (not sessionStorage — it should
+// not be lost when the tab/browser is closed) is only a reminder
+// of when the last download happened; it holds no sensitive data.
 // --------------------------------------------------------------
 function renderLastExportNote() {
   const el = document.getElementById('backupLastExport');
   if (!el) return;
   const last = localStorage.getItem('relayLastBackupAt');
   el.innerText = last
-    ? `Huling na-download: ${timeAgo(parseInt(last, 10))}`
-    : 'Wala ka pang na-download na backup.';
+    ? `Last downloaded: ${timeAgo(parseInt(last, 10))}`
+    : 'You have not downloaded a backup yet.';
 }
 
-// `auto` = true kapag ito ay awtomatikong tinawag (hal. matapos mag-allow
-// ng device) sa halip na manual na pag-click sa "I-download ang Backup"
-// button. Pareho ang laman/endpoint, pero magkaiba ang filename:
-//   - MANUAL: relay-backup-2026-07-27.json (petsa lang, YYYY-MM-DD).
-//   - AUTO:   relaybackup + MMDDHHmm (2-digit month, araw, oras 24h,
-//     minuto — LOCAL na oras ng browser, hindi UTC), hal.
-//     relaybackup07260130.json = July 26, 1:30 AM. May stamp na ito
-//     kada auto-download (hindi na fixed/"latest" filename) para
-//     malinaw kung ANONG oras nagawa ang bawat isa at para hindi rin
-//     magkapatong-patong kung dalawang magkaibang minuto ang pagitan.
+// `auto` = true when this was called automatically (e.g. after allowing
+// a device) instead of a manual click on the "Download Backup"
+// button. The content/endpoint are the same, but the filename differs:
+//   - MANUAL: relay-backup-2026-07-27.json (date only, YYYY-MM-DD).
+//   - AUTO:   relaybackup + MMDDHHmm (2-digit month, day, 24h hour,
+//     minute — the browser's LOCAL time, not UTC), e.g.
+//     relaybackup07260130.json = July 26, 1:30 AM. This is stamped
+//     on every auto-download (not a fixed/"latest" filename) so it's
+//     clear exactly WHEN each one was made, and so they also don't
+//     overwrite each other if they're a minute or more apart.
 function autoBackupFilename() {
   const now = new Date();
   const pad2 = (n) => String(n).padStart(2, '0');
@@ -1710,7 +1709,7 @@ async function downloadBackup(auto = false) {
     data = await api('/relay/admin/api/backup');
   } catch (err) { return; }
   if (!data.success) {
-    if (!auto) toast(data.message || 'Hindi ma-generate ang backup.', 'error');
+    if (!auto) toast(data.message || 'Could not generate the backup.', 'error');
     return;
   }
 
@@ -1729,43 +1728,43 @@ async function downloadBackup(auto = false) {
   renderLastExportNote();
   toast(
     auto
-      ? `💾 Auto-backup: na-download ang ${a.download} sa Downloads.`
-      : 'Na-download ang backup. Itago ito sa ligtas na lugar.',
+      ? `💾 Auto-backup: ${a.download} downloaded to Downloads.`
+      : 'Backup downloaded. Keep it somewhere safe.',
     'success'
   );
 }
 
 // --------------------------------------------------------------
 // DOWNLOAD CODES — offline client package distribution.
-// "Build Release" = git-clone ng OMNIPOS repo sa RELAY server mismo
-// (Render), linisin, i-zip → release/omnipos-client.zip. Ginagawa lang
-// ito kapag may bagong update sa code (hindi kada bagong customer).
-// "Gumawa ng Download Link" = one-time/limited-use na code na
-// ipapadala mo sa BAGONG kliyente — visit lang nila ang link para
-// ma-download ang zip.
+// "Build Release" = git-clone the OMNIPOS repo on the RELAY server itself
+// (Render), clean it, zip it → release/omnipos-client.zip. This is only done
+// when there is a code update (not for every new customer).
+// "Create Download Link" = a one-time/limited-use code that
+// you send to a NEW client — they just visit the link to
+// download the zip.
 // --------------------------------------------------------------
 let lastLoadedDownloadCodes = [];
 
 // --------------------------------------------------------------
-// createProgressController(ids) — GAWA-GAWA na progress-bar controller
-// na "sina-smooth" ang pag-akyat ng % sa screen, dahil ang totoong
+// createProgressController(ids) — a hand-built progress-bar controller
+// that "smooths" the % climbing on screen, because the real
 // progress mula sa RELAY (GET /relay/admin/api/build-progress) ay
-// TUMATALON sa malalaking hakbang bawat 700ms na poll — halimbawa
-// mula 10% (tapos na ang "clone" step) diretso 32.5% (tapos na rin
-// agad ang "filter" step, dahil halos instant lang ito) — kaya kung
-// direkta lang ilalagay ang bawat poll result sa fill.style.width,
-// parang "tumatalon"/may patlang ang bilang sa screen sa halip na
+// progress JUMPS in big steps on each 700ms poll — for example
+// from 10% (the "clone" step is done) straight to 32.5% (the "filter"
+// step is done too, since it is almost instant) — so if
+// each poll result were put directly into fill.style.width,
+// the number on screen would look like it "jumps"/has gaps instead of
 // dahan-dahang bumibilang.
 //
-// Ang solusyon: hiwalay na "target" (galing sa totoong poll) at
-// "displayed" (ang aktwal na nakikita sa screen) na percent. May
-// sariling mas mabilis na tick loop (bawat 120ms) na dahan-dahang
-// idinadagdag ang displayed nang +1 pabalik-balik papunta sa target
-// — kaya kahit malaki ang tumalon ng totoong progress sa pagitan ng
-// dalawang poll, tuloy-tuloy pa ring bumibilang ang UI nang 1% bawat
-// tick, WALANG patlang, hanggang maabot ang tunay na value — at kapag
-// "done" na ang totoong build (100% o error), agad na sino-snap dito
-// nang hindi na hinihintay pang umabot nang paisa-isa ang animation.
+// The fix: a separate "target" (from the real poll) and
+// "displayed" (what is actually seen on screen) percent. There is
+// its own faster tick loop (every 120ms) that gradually
+// increments displayed by +1 repeatedly toward the target
+// — so even if the real progress jumps a lot between
+// two polls, the UI keeps counting smoothly by 1% on every
+// tick, with NO gaps, until it reaches the real value — and once
+// the real build is "done" (100% or error), it snaps here immediately
+// instead of waiting for the animation to catch up step by step.
 // --------------------------------------------------------------
 function createProgressController(ids) {
   const wrap = document.getElementById(ids.wrap);
@@ -1785,7 +1784,7 @@ function createProgressController(ids) {
 
   function applyTarget(progress) {
     target = progress || target;
-    if (label) label.innerText = target.message || 'Ginagawa ang build...';
+    if (label) label.innerText = target.message || 'Building...';
     if (fill) {
       fill.style.background = target.stage === 'error'
         ? '#e05a5a'
@@ -1796,8 +1795,8 @@ function createProgressController(ids) {
   function tick() {
     const targetPct = Math.max(0, Math.min(100, Math.round(target.percent || 0)));
     if (target.done || displayed > targetPct) {
-      // tapos na ang totoong build (o bumaba ang target dahil bagong
-      // build/reset) — agad na i-snap, huwag nang paisa-isahin pa
+      // the real build finished (or the target dropped due to a new
+      // build/reset) — snap immediately, no need to animate step by step
       displayed = targetPct;
     } else if (displayed < targetPct) {
       displayed += 1;
@@ -1817,7 +1816,7 @@ function createProgressController(ids) {
     if (wrap) wrap.style.display = 'block';
     displayed = 0;
     renderPercent(0);
-    applyTarget({ percent: 0, message: 'Sinisimulan ang build...', stage: 'idle', done: false });
+    applyTarget({ percent: 0, message: 'Starting the build...', stage: 'idle', done: false });
     startAnim();
   }
 
@@ -1830,13 +1829,13 @@ function createProgressController(ids) {
     applyTarget(progress);
   }
 
-  // Pina-poll ang GET /relay/admin/api/build-progress paminsan-minsan
-  // (700ms) habang naka-disable ang build button — mabilis lang ito
-  // (nagbabasa ng in-memory object sa RELAY, walang disk/DB access),
-  // kaya hindi ito nagpapabagal sa aktwal na build o sa ibang admin
-  // requests. Awtomatikong titigil ang polling pagka-"done" na ang
-  // progress (tapos man o may error) — ang animation tick loop ang
-  // bahalang tapusin ang pag-akyat papunta sa huling value.
+  // Polls GET /relay/admin/api/build-progress periodically
+  // (700ms) while the build button is disabled — this is fast
+  // (reads an in-memory object on RELAY, no disk/DB access),
+  // so it doesn't slow down the actual build or other admin
+  // requests. Polling automatically stops once the progress is "done"
+  // (whether finished or errored) — the animation tick loop is
+  // responsible for finishing the climb to the final value.
   async function pollOnce() {
     try {
       const data = await api('/relay/admin/api/build-progress');
@@ -1845,8 +1844,8 @@ function createProgressController(ids) {
         if (data.progress.done) stopPolling();
       }
     } catch (err) {
-      // huwag hayaang isang failed poll ang tumigil sa buong build —
-      // susubukan na lang ulit sa susunod na tick (700ms pa)
+      // don't let one failed poll stop the whole build —
+      // it will just retry on the next tick (700ms later)
     }
   }
 
@@ -1861,9 +1860,9 @@ function createProgressController(ids) {
 
   function stop() {
     stopPolling();
-    // bigyan pa ng ~2s ang animator para maabot/masundan ang huling
-    // totoong value (hal. 100%) bago ito tuluyang itigil sa labas,
-    // sa halip na biglang ma-freeze ang bar sa gitna ng pag-akyat.
+    // give the animator ~2s more to reach/catch up to the final
+    // real value (e.g. 100%) before it fully stops outside,
+    // instead of the bar suddenly freezing mid-climb.
     setTimeout(stopAnim, 2000);
   }
 
@@ -1893,33 +1892,33 @@ async function buildRelease() {
       body: JSON.stringify(caption ? { caption } : {})
     });
     if (data.success) {
-      buildProgressCtl.setTarget({ percent: 100, message: 'Tapos na ang build.', stage: 'done', done: true });
-      toast(`✅ Nagawa ang release (${(data.sizeBytes / 1024 / 1024).toFixed(2)} MB).`, 'success');
+      buildProgressCtl.setTarget({ percent: 100, message: 'Build finished.', stage: 'done', done: true });
+      toast(`✅ Release built (${(data.sizeBytes / 1024 / 1024).toFixed(2)} MB).`, 'success');
       if (captionInput) captionInput.value = '';
       loadBuildHistory();
     } else {
-      buildProgressCtl.setTarget({ percent: 100, message: data.message || 'Hindi na-build ang release.', stage: 'error', done: true });
-      toast(data.message || 'Hindi na-build ang release.', 'error');
+      buildProgressCtl.setTarget({ percent: 100, message: data.message || 'The release could not be built.', stage: 'error', done: true });
+      toast(data.message || 'The release could not be built.', 'error');
     }
   } catch (err) {
-    // ipinapakita na ng api() ang toast kung 403/429; iba pang error dito
+    // api() already shows the toast for 403/429; other errors here
   } finally {
     buildProgressCtl.stop();
     buildProgressCtl.hide();
     btn.disabled = false;
-    btn.innerText = '🛠️ I-build ang Release (git → zip)';
+    btn.innerText = '🛠️ Build Release (git → zip)';
   }
 }
 
 // --------------------------------------------------------------
-// PUBLISH RELEASE — "isang click" na bersyon: build-release + publish
+// PUBLISH RELEASE — the "one click" version: build-release + publish
 // -version sa IISANG tawag papunta sa '/relay/admin/api/system
-// /publish-release'. Ginagamit ang parehong build-progress polling
-// (isa lang naman ang build na tumatakbo sa RELAY sa isang pagkakataon)
-// pero hiwalay na progress-bar elements dito (publishProgress*) — kaya
-// gumagamit ng sarili nitong `publishProgressCtl` instance (tingnan sa
-// itaas, createProgressController), para hindi masalungat sa
-// "I-build ang Release" na card.
+// /publish-release'. Uses the same build-progress polling
+// (only one build ever runs on RELAY at a time)
+// but has separate progress-bar elements here (publishProgress*) — so it
+// uses its own `publishProgressCtl` instance (see
+// createProgressController above), so it does not conflict with
+// the "Build Release" card.
 // --------------------------------------------------------------
 
 async function publishRelease() {
@@ -1933,18 +1932,18 @@ async function publishRelease() {
 
   const version = versionInput ? versionInput.value.trim() : '';
   if (!version) {
-    toast('Kailangan ang version (hal. "1.0.43").', 'error');
+    toast('A version is required (e.g. "1.0.43").', 'error');
     return;
   }
 
   const body = { version };
   const changelog = changelogInput ? changelogInput.value.trim() : '';
-  // FIX: dating hindi kasama ang caption dito sa body — kaya lagi itong
-  // "(walang caption)" sa History log tuwing "I-build at I-publish" (one
-  // click) ang ginamit sa halip na yung hiwalay na "I-build ang Release"
-  // button (na may sarili nang caption input at nagpapadala nito). Ang
-  // backend (performBuildRelease) ay tumatanggap na naman talaga ng
-  // reqBody.caption — kulang lang dati ang frontend na magpadala nito.
+  // FIX: the caption used to be missing from the body here — so it was always
+  // "(no caption)" in the History log whenever "Build & Publish" (one
+  // click) was used instead of the separate "Build Release"
+  // button (which has its own caption input and sends it). The
+  // backend (performBuildRelease) already accepts
+  // reqBody.caption — the frontend just wasn't sending it before.
   const caption = captionInput ? captionInput.value.trim() : '';
   const repoUrl = repoUrlInput ? repoUrlInput.value.trim() : '';
   const ref = refInput ? refInput.value.trim() : '';
@@ -1965,23 +1964,23 @@ async function publishRelease() {
       body: JSON.stringify(body)
     });
     if (data.success) {
-      publishProgressCtl.setTarget({ percent: 100, message: 'Tapos na — na-publish na.', stage: 'done', done: true });
+      publishProgressCtl.setTarget({ percent: 100, message: 'Done — published.', stage: 'done', done: true });
       const mb = data.build && data.build.sizeBytes ? (data.build.sizeBytes / 1024 / 1024).toFixed(2) : '?';
       const scopeMsg = data.targeted
-        ? `na-target lang sa installationId ${data.installationId}`
-        : 'makikita na ng LAHAT ng kliyente';
-      toast(`✅ Nabuo ang v${version} (${mb} MB) — ${scopeMsg}.`, 'success');
+        ? `targeted only at installationId ${data.installationId}`
+        : 'now visible to ALL clients';
+      toast(`✅ Built v${version} (${mb} MB) — ${scopeMsg}.`, 'success');
       if (versionInput) versionInput.value = '';
       if (changelogInput) changelogInput.value = '';
       if (captionInput) captionInput.value = '';
       if (targetIdInput) targetIdInput.value = '';
       loadBuildHistory();
     } else {
-      publishProgressCtl.setTarget({ percent: 100, message: data.message || 'Hindi na-publish ang release.', stage: 'error', done: true });
-      toast(data.message || 'Hindi na-publish ang release.', 'error');
+      publishProgressCtl.setTarget({ percent: 100, message: data.message || 'The release could not be published.', stage: 'error', done: true });
+      toast(data.message || 'The release could not be published.', 'error');
     }
   } catch (err) {
-    // ipinapakita na ng api() ang toast kung 403/429; iba pang error dito
+    // api() already shows the toast for 403/429; other errors here
   } finally {
     publishProgressCtl.stop();
     publishProgressCtl.hide();
@@ -1991,8 +1990,8 @@ async function publishRelease() {
 }
 
 // --------------------------------------------------------------
-// BUILD HISTORY — log lang ng mga naitala nang "I-build ang Release".
-// Pinaka-bago munang entry (server na ang nag-oorder nito).
+// BUILD HISTORY — just a log of recorded "Build Release" runs.
+// Newest entry first (the server does the ordering).
 // --------------------------------------------------------------
 function formatBuildTimestamp(ms) {
   if (!ms) return '—';
@@ -2007,14 +2006,14 @@ async function loadBuildHistory() {
     const data = await api('/relay/admin/api/build-history');
     if (!data.success || !Array.isArray(data.history) || data.history.length === 0) {
       container.className = 'empty';
-      container.innerText = 'Wala pang naitalang build.';
+      container.innerText = 'No builds recorded yet.';
       return;
     }
     container.className = '';
     container.innerHTML = data.history.map((h) => `
       <div class="backup-row" style="padding:8px 0; border-bottom:1px solid var(--border, #2a2a2a); align-items:flex-start;">
         <div style="flex:1; min-width:0;">
-          <div><strong>v${h.version || '0.0.0'}</strong> — ${h.caption || '(walang caption)'}${h.targetInstallationId ? ` <span style="color:var(--accent, #6cf); font-size:11px;">🎯 target: ${h.targetInstallationId}</span>` : ''}</div>
+          <div><strong>v${h.version || '0.0.0'}</strong> — ${h.caption || '(no caption)'}${h.targetInstallationId ? ` <span style="color:var(--accent, #6cf); font-size:11px;">🎯 target: ${h.targetInstallationId}</span>` : ''}</div>
           <div style="font-size:11px; color:var(--muted);">
             ${formatBuildTimestamp(h.builtAt)} · ${h.fileName || 'omnipos-client.zip'} · ${((h.sizeBytes || 0) / 1024 / 1024).toFixed(2)} MB
           </div>
@@ -2023,20 +2022,20 @@ async function loadBuildHistory() {
     `).join('');
   } catch (err) {
     container.className = 'empty';
-    container.innerText = 'Hindi ma-load ang build history.';
+    container.innerText = 'Could not load the build history.';
   }
 }
 
-// I-clear ang BUONG build history log (caption/version/petsa per entry).
-// LOG LANG ito — walang epekto sa aktwal na omnipos-client.zip package
-// o sa mga naka-publish na version/targeted release, kaya safe itong
-// i-clear anumang oras. May safety-prompt muna (parehong modal na
-// ginagamit sa Revoke/Approve) bago tuluyang mabura, dahil hindi na
-// ito mababawi pagkatapos.
+// Clears the ENTIRE build history log (caption/version/date per entry).
+// This is just a LOG — it has no effect on the actual omnipos-client.zip package
+// or on published versions/targeted releases, so it is safe to
+// clear at any time. There is a safety prompt first (the same modal
+// used for Revoke/Approve) before it is actually deleted, since it can no
+// this can be undone afterward.
 async function clearBuildHistory() {
   const ok = await confirmAction({
-    title: 'I-clear ang Build History?',
-    message: 'Buburahin ang LAHAT ng naitalang build log (caption, version, petsa). Hindi ito nakakaapekto sa aktwal na omnipos-client.zip o sa mga naka-publish na version — log lang ito. Hindi na ito mababawi.',
+    title: 'Clear Build History?',
+    message: 'This deletes ALL recorded build log entries (caption, version, date). It does not affect the actual omnipos-client.zip or any published versions — this is just a log. This cannot be undone.',
     confirmLabel: 'Oo, i-clear',
     danger: true
   });
@@ -2047,15 +2046,15 @@ async function clearBuildHistory() {
   try {
     const data = await api('/relay/admin/api/build-history/clear', { method: 'POST' });
     if (data.success) {
-      toast(`✅ Na-clear ang build history (${data.clearedCount} entry).`, 'success');
+      toast(`✅ Cleared build history (${data.clearedCount} entries).`, 'success');
       loadBuildHistory();
     } else {
-      toast(data.message || 'Hindi na-clear ang build history.', 'error');
+      toast(data.message || 'Could not clear the build history.', 'error');
     }
   } catch (err) {
-    // ipinapakita na ng api() ang toast kung 403/429; iba pang error dito
+    // api() already shows the toast for 403/429; other errors here
   } finally {
-    if (btn) { btn.disabled = false; btn.innerText = '🗑️ I-clear ang History'; }
+    if (btn) { btn.disabled = false; btn.innerText = '🗑️ Clear History'; }
   }
 }
 
@@ -2078,7 +2077,7 @@ async function generateDownloadCode() {
   } catch (err) { return; }
 
   if (!data.success) {
-    toast(data.message || 'Hindi nagawa ang download code.', 'error');
+    toast(data.message || 'Could not create the download code.', 'error');
     return;
   }
 
@@ -2087,7 +2086,7 @@ async function generateDownloadCode() {
   document.getElementById('newCodeExpiresHours').value = '';
 
   await navigator.clipboard.writeText(data.downloadUrl).catch(() => {});
-  toast('✅ Nagawa ang link at na-copy sa clipboard: ' + data.downloadUrl, 'success');
+  toast('✅ Link created and copied to clipboard: ' + data.downloadUrl, 'success');
   loadDownloadCodes();
 }
 
@@ -2104,7 +2103,7 @@ async function loadDownloadCodes() {
 function renderDownloadCodesList() {
   const el = document.getElementById('downloadCodesList');
   if (lastLoadedDownloadCodes.length === 0) {
-    el.innerHTML = '<div class="empty">Wala pang nagawang download code.</div>';
+    el.innerHTML = '<div class="empty">No download codes created yet.</div>';
     return;
   }
   const origin = window.location.origin;
@@ -2116,16 +2115,16 @@ function renderDownloadCodesList() {
     return `
     <div class="row" ${(expired || exhausted) ? 'style="opacity:0.55;"' : ''}>
       <div class="row-info">
-        <div class="id">${c.label || '(walang label)'}
+        <div class="id">${c.label || '(no label)'}
           ${expired ? '<span class="badge badge-blocked">EXPIRED</span>' : ''}
           ${!expired && exhausted ? '<span class="badge badge-blocked">NAUBOS ANG USES</span>' : ''}
           ${!expired && !exhausted ? '<span class="badge badge-allowed">AKTIBO</span>' : ''}
         </div>
-        <div class="meta">${used}/${c.maxUses} nagamit · ${c.expiresAt ? 'mag-e-expire ' + timeAgo(c.expiresAt) : 'walang expiry'} · ${c.lastUsedAt ? 'huling ginamit ' + timeAgo(c.lastUsedAt) : 'hindi pa ginagamit'}</div>
+        <div class="meta">${used}/${c.maxUses} used · ${c.expiresAt ? 'expires ' + timeAgo(c.expiresAt) : 'no expiry'} · ${c.lastUsedAt ? 'last used ' + timeAgo(c.lastUsedAt) : 'not used yet'}</div>
         <div class="meta" style="word-break:break-all;">${url}</div>
       </div>
       <div class="row-actions">
-        <button class="btn-ghost" onclick="navigator.clipboard.writeText('${url}'); toast('Na-copy ang link.', 'success');">📋 Kopyahin</button>
+        <button class="btn-ghost" onclick="navigator.clipboard.writeText('${url}'); toast('Link copied.', 'success');">📋 Copy</button>
         <button class="btn-revoke" onclick="revokeDownloadCode('${c.code}', '${(c.label || '').replace(/'/g, "\\'")}')">🗑️ I-revoke</button>
       </div>
     </div>`;
@@ -2134,15 +2133,15 @@ function renderDownloadCodesList() {
 
 async function revokeDownloadCode(code, label) {
   const ok = await confirmAction({
-    title: 'I-revoke ang download link na ito?',
-    message: `Hindi na magagamit ang link para sa "${label || code}" pagkatapos nito.`,
+    title: 'Revoke this download link?',
+    message: `The link for "${label || code}" will no longer work after this.`,
     danger: true
   });
   if (!ok) return;
   try {
     await api(`/relay/admin/api/download-codes/${code}/revoke`, { method: 'POST' });
   } catch (err) { return; }
-  toast('Na-revoke ang download link.', 'success');
+  toast('Download link revoked.', 'success');
   loadDownloadCodes();
 }
 
@@ -2161,18 +2160,18 @@ function downloadCodesJSON() {
 // --------------------------------------------------------------
 // AUTO-BACKUP KAPAG MAY BAGONG NA-ALLOW NA DEVICE
 // --------------------------------------------------------------
-// Ang toggle na ito ("Awtomatikong i-download ang backup kapag may
-// bagong na-allow na device") ay hiwalay sa 24-hour na RELAY_BACKUP
-// auto-sync ng OMNIPOS client (tingnan ang runRelayBackupSync sa
-// OMNIPOS server.js) — ito ay para sa ADMIN PANEL mismo: bawat successful
-// na "Allow" (bago man o mula sa pending OTP list, manual ID, o device
-// detail screen), awtomatiko ring mag-DOWNLOAD (may petsa/oras stamp,
-// tingnan ang autoBackupFilename() sa itaas) ng buong backup papunta sa parehong
-// browser/device kung saan naka-bukas ang admin panel — para hindi na
-// kailangang mag-manual click ng "I-download ang Backup" tuwing may
-// bagong device na papasok.
-// Naka-ON bilang DEFAULT (opt-out sa halip na opt-in) — pero naka-save
-// pa rin sa localStorage ang preference kung gusto mong i-off.
+// This toggle ("Automatically download a backup whenever a
+// new device is allowed") is separate from the 24-hour RELAY_BACKUP
+// auto-sync from the OMNIPOS client (see runRelayBackupSync in
+// OMNIPOS server.js) — this is for the ADMIN PANEL itself: every successful
+// "Allow" (whether new, or from the pending OTP list, manual ID, or the device
+// detail screen) also automatically DOWNLOADS (timestamped,
+// see autoBackupFilename() above) a full backup to the same
+// browser/device where the admin panel is open — so there is no need to
+// manually click "Download Backup" every time there's a
+// new device coming in.
+// ON by DEFAULT (opt-out rather than opt-in) — but the preference is
+// still saved in localStorage if you want to turn it off.
 function isAutoBackupOnAllowEnabled() {
   const saved = localStorage.getItem('relayAutoBackupOnAllow');
   return saved === null ? true : saved === 'true';
@@ -2190,16 +2189,16 @@ function onAutoBackupToggleChange() {
   localStorage.setItem('relayAutoBackupOnAllow', String(el.checked));
   toast(
     el.checked
-      ? 'Naka-ON: mag-a-auto-download ng backup tuwing may na-allow na device.'
-      : 'Naka-OFF: manual na lang ang pag-download ng backup.',
+      ? 'ON: a backup will auto-download whenever a device is allowed.'
+      : 'OFF: backups must be downloaded manually.',
     'success'
   );
 }
 
-// Tinatawag lang kapag SUCCESSFUL ang isang "allow" action (hindi sa
-// revoke) — sinasadya itong hindi mag-block/mag-await sa buong allow()
-// flow (fire-and-forget), para hindi bumagal ang toast/UI feedback ng
-// allow action mismo kung sakaling mabagal ang /backup endpoint.
+// Only called when an "allow" action is SUCCESSFUL (not on
+// revoke) — this is deliberately not blocking/awaited within the allow()
+// flow (fire-and-forget), so it doesn't slow down the toast/UI feedback of
+// the allow action itself if the /backup endpoint happens to be slow.
 function autoBackupAfterAllow() {
   if (!isAutoBackupOnAllowEnabled()) return;
   downloadBackup(true);
@@ -2207,7 +2206,7 @@ function autoBackupAfterAllow() {
 
 async function restoreBackupFromFile(event) {
   const file = event.target.files && event.target.files[0];
-  event.target.value = ''; // para makapili ulit ng parehong file sa susunod
+  event.target.value = ''; // so the same file can be picked again next time
   if (!file) return;
 
   let parsed;
@@ -2215,18 +2214,18 @@ async function restoreBackupFromFile(event) {
     const text = await file.text();
     parsed = JSON.parse(text);
   } catch (err) {
-    toast('Hindi ma-basa ang file — siguraduhing wastong backup .json ito.', 'error');
+    toast('Could not read the file — make sure this is a valid backup .json.', 'error');
     return;
   }
 
   if (!Array.isArray(parsed.allowedDevices) || typeof parsed.issuedUnlocks !== 'object' || !Array.isArray(parsed.activityLog)) {
-    toast('Mukhang hindi ito wastong backup file mula sa Relay.', 'error');
+    toast('This does not look like a valid Relay backup file.', 'error');
     return;
   }
 
   const exportedNote = parsed.exportedAt ? ` (ginawa noong ${new Date(parsed.exportedAt).toLocaleString('en-PH')})` : '';
   const ok = await confirmAction({
-    title: 'I-restore ang backup na ito?',
+    title: 'Restore this backup?',
     message: `This will REPLACE the CURRENT allowed devices, unlocked features, and history with the contents of the backup file${exportedNote}. This cannot be undone unless you have a newer backup after this.`,
     confirmLabel: 'Oo, i-restore',
     danger: true
@@ -2238,8 +2237,8 @@ async function restoreBackupFromFile(event) {
       method: 'POST',
       body: JSON.stringify(parsed)
     });
-    if (res.success) toast(res.message || 'Na-restore ang backup.', 'success');
-    else toast(res.message || 'Hindi na-restore ang backup.', 'error');
+    if (res.success) toast(res.message || 'Backup restored.', 'success');
+    else toast(res.message || 'Could not restore the backup.', 'error');
   } catch (err) { /* handled */ }
   loadDevices();
 }
@@ -2252,15 +2251,15 @@ function timeAgo(ts) {
   return Math.floor(diff / 86400) + 'd ago';
 }
 
-// Blinking dot + notification sa itaas ng "Allowed devices":
+// Blinking dot + notification above "Allowed devices":
 // GREEN  = may successful auto-backup check-in (Download/RELAY_BACKUP)
-//          mula sa kahit anong device sa loob ng nakaraang ~26 oras
-//          (kasabay ng 24-hour na auto-backup schedule ng OMNIPOS client
+//          from any device within the last ~26 hours
+//          (in line with the OMNIPOS client's 24-hour auto-backup schedule
 //          + konting buffer).
-// ORANGE = wala pang nag-check-in kailanman, o luma na (>26h) ang huling
-//          successful sync — parehong pattern gaya ng "connection-dot"
+// ORANGE = nothing has ever checked in, or the last
+//          successful sync is stale (>26h) — same pattern as the "connection-dot"
 //          sa OMNIPOS login screen (orange = waiting/pending, green =
-//          na-sync/updated na).
+//          already synced/updated).
 const BACKUP_SYNC_STALE_MS = 26 * 60 * 60 * 1000;
 
 function renderBackupSyncBanner(data) {
@@ -2279,11 +2278,11 @@ function renderBackupSyncBanner(data) {
   dot.classList.add(state === 'green' ? 'sync-green' : 'sync-orange');
 
   if (state === 'green') {
-    main.innerText = `Naka-sync — huling successful backup: ${timeAgo(lastSync)}`;
+    main.innerText = `Synced — last successful backup: ${timeAgo(lastSync)}`;
   } else if (lastSync) {
-    main.innerText = `Luma na ang huling backup check-in (${timeAgo(lastSync)}) — naghihintay ng bagong sync`;
+    main.innerText = `Last backup check-in is stale (${timeAgo(lastSync)}) — waiting for a new sync`;
   } else {
-    main.innerText = 'Naghihintay pa ng unang successful auto-backup check-in...';
+    main.innerText = 'Waiting for the first successful auto-backup check-in...';
   }
   sub.innerText = `Database → Download/RELAY_BACKUP${data.backupAutoAllowEnabled ? ' · auto-allow naka-ON' : ''}`;
 }
@@ -2297,7 +2296,7 @@ async function loadDevices() {
     data = await api('/relay/admin/api/devices');
     otpData = await api('/relay/admin/api/pending-otps');
   } catch (err) {
-    return; // logout() o toast na ang humawak nito sa loob ng api()
+    // return; // logout() or toast in api() already handles this
   }
 
   renderOtps(otpData.pendingOtps);
@@ -2313,16 +2312,16 @@ async function loadDevices() {
 
   const statusEl = document.getElementById('restrictionStatus');
   statusEl.className = 'status-line status-on';
-  statusEl.innerText = '🔒 Naka-ON palagi ang restriction — ' + data.allowedDevices.length + ' device(s) lang ang pinapayagan. Kailangan mo munang i-Allow ang bagong device dito bago ito makapag-login.';
+  statusEl.innerText = '🔒 Restriction is always ON — only ' + data.allowedDevices.length + ' device(s) are allowed. You must Allow a new device here before it can log in.';
 
   const allowedEl = document.getElementById('allowedList');
   if (data.allowedDevices.length === 0) {
-    allowedEl.innerHTML = '<div class="empty">Wala pang naka-allow. (Kaya WALA pang makakapag-login hangga\'t wala kang ina-Allow dito.)</div>';
+    allowedEl.innerHTML = '<div class="empty">No devices allowed yet. (So NO ONE can log in until you Allow a device here.)</div>';
   } else {
     allowedEl.innerHTML = data.allowedDevices.map(id => {
       const seen = data.seenDevices.find(d => d.installationId === id);
       const devLabel = seen ? seen.label : null;
-      const fallback = seen ? (seen.storeName || 'Walang pangalan') : 'Hindi pa nakikitang gumagawa ng request';
+      const fallback = seen ? (seen.storeName || 'No name') : 'No requests seen yet';
       const displayName = devLabel ? `🏷️ ${devLabel}` : fallback;
       const revokeName = devLabel || fallback;
       const online = !!(seen && seen.online);
@@ -2333,7 +2332,7 @@ async function loadDevices() {
           <div class="id">${id}
             <span class="badge" style="${online ? 'background:var(--green-bg,#0f2e1c); color:var(--green,#4ade80);' : 'background:var(--gray-bg,#2a2a2a); color:var(--gray,#888);'}">${online ? '🟢 ONLINE' : '⚪ OFFLINE'}</span>
           </div>
-          <div class="meta">${displayName}${devLabel && seen ? ' · ' + (seen.storeName || 'walang self-reported na pangalan') : ''}${seen ? ' · ' + timeAgo(seen.lastSeenAt) : ''}</div>
+          <div class="meta">${displayName}${devLabel && seen ? ' · ' + (seen.storeName || 'no self-reported name') : ''}${seen ? ' · ' + timeAgo(seen.lastSeenAt) : ''}</div>
         </div>
         <div class="row-actions">
           <button class="btn-detail" onclick="openDeviceDetail('${id}')">Details</button>
@@ -2343,9 +2342,9 @@ async function loadDevices() {
       </div>`;
     }).join('');
   }
-  // Alisin sa selection ang mga ID na hindi na kabilang sa kasalukuyang listahan
-  // (hal. na-revoke na, o na-search/filter out) — iwas "hantak" na paniwalaan
-  // na naka-select pa rin ang isang device na wala na sa view.
+  // Remove from selection any IDs no longer in the current list
+  // (e.g. already revoked, or filtered/searched out) — avoids wrongly assuming
+  // a device is still selected when it is no longer in view.
   const currentIds = new Set(data.allowedDevices);
   for (const id of [...selectedForReset]) {
     if (!currentIds.has(id)) selectedForReset.delete(id);
@@ -2422,7 +2421,7 @@ function renderSeenList() {
 
 function exportDevicesCSV() {
   if (!lastLoadedDevices || lastLoadedDevices.length === 0) {
-    toast('Walang data na i-export.', 'info');
+    toast('No data to export.', 'info');
     return;
   }
   const headers = ['installationId', 'label', 'storeName', 'username', 'allowed', 'unlockedCount', 'totalCatalogCount', 'demoActive', 'requestCount', 'lastSeenAt'];
@@ -2455,13 +2454,13 @@ function minsLeft(expiresAt) {
   const secs = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
   const m = Math.floor(secs / 60);
   const s = secs % 60;
-  return `${m}:${String(s).padStart(2, '0')} na lang`;
+  return `${m}:${String(s).padStart(2, '0')} left`;
 }
 
 function renderOtps(list) {
   const el = document.getElementById('otpList');
   if (!list || list.length === 0) {
-    el.innerHTML = '<div class="empty">Walang kasalukuyang naghihintay na OTP request.</div>';
+    el.innerHTML = '<div class="empty">No pending OTP requests right now.</div>';
     return;
   }
   el.innerHTML = list.map(o => {
@@ -2471,20 +2470,20 @@ function renderOtps(list) {
 
     let statusHtml;
     if (o.approved) {
-      statusHtml = '<span class="badge badge-allowed">NAAPRUBAHAN — hinihintay i-retry ng kliyente</span>';
+      statusHtml = '<span class="badge badge-allowed">APPROVED — waiting for client to retry</span>';
     } else if (o.otpVerified) {
-      statusHtml = '<span class="badge badge-blocked">TAMA ang OTP — naghihintay ng Run/Allow mo</span>';
+      statusHtml = '<span class="badge badge-blocked">OTP CORRECT — waiting on your Run/Allow</span>';
     } else {
-      statusHtml = '<span class="badge" style="background:#30363d;color:#8b949e;">Naghihintay pang ilagay ang OTP</span>';
+      statusHtml = '<span class="badge" style="background:#30363d;color:#8b949e;">Waiting for OTP entry</span>';
     }
 
     return `<div class="row" style="align-items:flex-start;">
       ${o.photo
         ? `<img src="${o.photo}" class="requestor-photo" onclick="viewPhotoFullSize('${o.photo}')" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'requestor-photo-placeholder',innerText:'⚠️'}))">`
-        : `<div class="requestor-photo-placeholder" title="Walang photo (baka tinanggihan ang camera permission, o walang camera ang device)">🚫</div>`}
+        : `<div class="requestor-photo-placeholder" title="No photo (camera permission may have been denied, or the device has no camera)">🚫</div>`}
       <div class="row-info">
         <div><strong>${label}</strong>${o.price ? ' · ₱' + o.price : ''}</div>
-        <div class="meta">${o.storeName || 'Walang pangalan ng tindahan'} · hiniling ni ${o.requestedBy}</div>
+        <div class="meta">${o.storeName || 'No store name'} · requested by ${o.requestedBy}</div>
         <div style="margin:6px 0;">${statusHtml}</div>
         <div class="countdown">Mag-e-expire sa ${minsLeft(o.expiresAt)}</div>
       </div>
@@ -2502,22 +2501,22 @@ function renderOtps(list) {
 async function approveOtp(key, featureLabel, storeName, featureId) {
   const isDemo = featureId === '__demo__';
   const ok = await confirmAction({
-    title: 'Aprubahan ang unlock?',
+    title: 'Approve the unlock?',
     message: isDemo
-      ? `Bibigyan mo ng FULL DEMO MODE (lahat ng features, pansamantala lang) ang tindahang "${storeName || 'walang pangalan'}".`
-      : `Bibigyan mo ng access sa "${featureLabel}" ang tindahang "${storeName || 'walang pangalan'}". Gawin lang ito kung na-verify mo na ang bayad.`,
+      ? `You are giving FULL DEMO MODE (all features, temporary only) to the store "${storeName || 'unnamed'}".`
+      : `You are giving access to "${featureLabel}" to the store "${storeName || 'unnamed'}". Only do this once you have verified payment.`,
     confirmLabel: '✓ Allow / Run'
   });
   if (!ok) return;
   const durationDays = isDemo
-    ? await promptForDemoDuration(`Gaano katagal dapat tumakbo ang Demo Mode bago mag-expire?`)
-    : await promptForDuration(`Gaano katagal dapat mag-expire ang "${featureLabel}" bago kailanganin ulit ng renewal?`);
+    ? await promptForDemoDuration(`How long should Demo Mode run before it expires?`)
+    : await promptForDuration(`How long until "${featureLabel}" expires and needs renewal?`);
   if (durationDays === null) return; // kinansela
   try {
     const res = await api('/relay/admin/api/pending-otps/approve', { method: 'POST', body: JSON.stringify({ key, durationDays }) });
-    if (res.success) toast('Naaprubahan. Hinihintay ang retry ng kliyente.', 'success');
-    else toast(res.message || 'Hindi na-approve.', 'error');
-  } catch (err) { /* toast na na-handle sa api() */ }
+    if (res.success) toast('Approved. Waiting for the client to retry.', 'success');
+    else toast(res.message || 'Could not approve.', 'error');
+  } catch (err) { /* toast already handled in api() */ }
   loadDevices();
 }
 
@@ -2536,29 +2535,29 @@ function viewPhotoFullSize(dataUrl) {
 
 async function allow(id, storeName) {
   const ok = await confirmAction({
-    title: 'Payagan ang device na ito?',
-    message: `Papayagan mong gumamit ng relay ang device na ito${storeName ? ' (' + storeName + ')' : ''}. Puwede mo pa rin itong alisin anumang oras.`,
+    title: 'Allow this device?',
+    message: `You are allowing this device${storeName ? ' (' + storeName + ')' : ''} to use the relay. You can still remove it at any time.`,
     confirmLabel: 'Allow'
   });
   if (!ok) return;
   try {
     const res = await api('/relay/admin/api/devices/allow', { method: 'POST', body: JSON.stringify({ installationId: id }) });
-    if (res.success) { toast('Na-allow ang device.', 'success'); autoBackupAfterAllow(); }
+    if (res.success) { toast('Device allowed.', 'success'); autoBackupAfterAllow(); }
   } catch (err) { /* handled */ }
   loadDevices();
 }
 
 async function revoke(id, storeName) {
   const ok = await confirmAction({
-    title: 'Alisin ang device na ito?',
-    message: `Mawawalan ng access ang device na ito${storeName ? ' (' + storeName + ')' : ''} sa relay. Kakailanganin nilang humingi ulit ng OTP kung gusto mong payagan sila muli.`,
+    title: 'Remove this device?',
+    message: `This device${storeName ? ' (' + storeName + ')' : ''} will lose access to the relay. They will need to request a new OTP if you want to allow them again.`,
     confirmLabel: 'Alisin',
     danger: true
   });
   if (!ok) return;
   try {
     const res = await api('/relay/admin/api/devices/revoke', { method: 'POST', body: JSON.stringify({ installationId: id }) });
-    if (res.success) toast('Naalis ang device.', 'success');
+    if (res.success) toast('Device removed.', 'success');
   } catch (err) { /* handled */ }
   loadDevices();
 }
@@ -2566,14 +2565,14 @@ async function revoke(id, storeName) {
 async function resetCloneFlag(id, storeName) {
   const ok = await confirmAction({
     title: 'Reset the clone flag?',
-    message: `Gawin lang ito kung na-verify mo na na LEGIT na paglipat ito sa bagong device${storeName ? ' (' + storeName + ')' : ''} (hal. pinalitan mo ang unit ng customer) — HINDI totoong cloning. Sa susunod na online verify, mabibind ulit ang installationId na ito sa BAGONG fingerprint.`,
+    message: `Only do this once you've verified this is a LEGITIMATE move to a new device${storeName ? ' (' + storeName + ')' : ''} (e.g. you replaced the customer's unit) — NOT actual cloning. On the next online verify, this installationId will be bound to the NEW fingerprint.`,
     confirmLabel: 'I-reset',
     danger: true
   });
   if (!ok) return;
   try {
     const res = await api('/relay/admin/api/devices/clone-reset', { method: 'POST', body: JSON.stringify({ installationId: id }) });
-    if (res.success) toast('Na-clear na ang clone flag.', 'success');
+    if (res.success) toast('Clone flag cleared.', 'success');
   } catch (err) { /* handled */ }
   loadDevices();
 }
@@ -2589,7 +2588,7 @@ async function splitClone(id, storeName) {
   try {
     const res = await api(`/relay/admin/api/devices/${encodeURIComponent(id)}/split-clone`, { method: 'POST' });
     if (res.success) {
-      toast(`Nagawa na ang hiwalay na device.`, 'success');
+      toast(`Separate device created.`, 'success');
       alert(`New installationId:\n\n${res.newInstallationId}\n\nThis will appear in the list the next time the clone device verifies online. Don't forget to manually activate whatever features were actually paid for on its Details page.`);
     }
   } catch (err) { /* handled */ }
@@ -2622,25 +2621,25 @@ async function showIntegrityDetail(installationId, label) {
 
   const record = data.record;
   if (!record) {
-    document.getElementById('integrityBody').innerHTML = '<div class="empty">Wala pang naitalang integrity check-in para sa device na ito.</div>';
+    document.getElementById('integrityBody').innerHTML = '<div class="empty">No integrity check-in recorded for this device yet.</div>';
     document.getElementById('integrityClearBtn').style.display = 'none';
     return;
   }
 
   document.getElementById('integrityMeta').innerText =
-    `Version: ${record.baselineVersion || '—'} · Huling na-check: ${timeAgo(record.checkedAt)}` +
+    `Version: ${record.baselineVersion || '—'} · Last checked: ${timeAgo(record.checkedAt)}` +
     (record.clearedAt ? ` · Na-clear noong ${timeAgo(record.clearedAt)}${record.clearedNote ? ' (' + record.clearedNote + ')' : ''}` : '');
 
   const body = document.getElementById('integrityBody');
   if (!record.hasBaseline) {
-    body.innerHTML = '<div class="empty">Walang naka-imbak na baseline para sa version na ito — hindi pa ito nakukumpara.</div>';
+    body.innerHTML = '<div class="empty">No stored baseline for this version — it has not been compared yet.</div>';
   } else if (!record.flagged) {
-    body.innerHTML = '<div class="empty">✅ Malinis — walang nakitang binago, naburang, o dagdag na file kumpara sa orihinal na release.</div>';
+    body.innerHTML = '<div class="empty">✅ Clean — no modified, deleted, or added files found compared to the original release.</div>';
   } else {
     body.innerHTML =
       fileListHtml('✏️ Binago (modified)', record.modified, 'var(--amber, #f59e0b)') +
       fileListHtml('🗑️ Nabura (deleted)', record.deleted, 'var(--red)') +
-      fileListHtml('➕ Bagong file (hindi bahagi ng release)', record.added, 'var(--red)');
+      fileListHtml('➕ New file (not part of the release)', record.added, 'var(--red)');
   }
 
   document.getElementById('integrityClearBtn').style.display = record.flagged && !record.clearedAt ? 'inline-block' : 'none';
@@ -2655,26 +2654,26 @@ async function requestIntegrityCheckNow(installationId, label) {
   try {
     const res = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/integrity/check-now`, { method: 'POST' });
     if (res.success) {
-      toast(`Hihintayin ang susunod na online check-in ng ${label || installationId} (karaniwan ay ilang segundo hanggang ~30s kung online ito ngayon).`, 'success');
+      toast(`Waiting for the next online check-in from ${label || installationId} (usually a few seconds up to ~30s if it's online now).`, 'success');
     }
   } catch (err) { /* handled */ }
 }
 
 async function clearIntegrityFlag() {
   if (!currentIntegrityId) return;
-  // BUG FIX: dating tinatawag muna ang confirmAction() HABANG bukas pa
-  // ang integrity modal (#integrityBackdrop) — kahit pareho namang
-  // fixed-position overlay ang dalawa, ang integrity modal ang
-  // natatakpan ang confirm dialog sa ilang browser/zoom state, kaya
-  // "hindi ma-click" ang Oo/tuloy. Isinasara na muna DITO ang integrity
-  // modal (itinatago muna ang id sa isang lokal na variable dahil
-  // nire-reset ni closeIntegrityModal() ang currentIntegrityId) bago
-  // ilabas ang confirm dialog — walang dalawang magkapatong na modal.
+  // BUG FIX: confirmAction() used to be called WHILE the
+  // integrity modal (#integrityBackdrop) was still open — even though both are
+  // fixed-position overlays, the integrity modal
+  // covered the confirm dialog in some browser/zoom states, so
+  // Yes/Continue became unclickable. The integrity modal is now closed HERE first
+  // (the id is stashed in a local variable first, since
+  // closeIntegrityModal() resets currentIntegrityId) before
+  // showing the confirm dialog — no two overlapping modals.
   const targetId = currentIntegrityId;
   closeIntegrityModal();
 
   const ok = await confirmAction({
-    title: 'I-clear ang integrity flag?',
+    title: 'Clear the integrity flag?',
     message: 'Only do this if you have reviewed the modified/deleted files and confirmed it is LEGITIMATE/intentional (e.g. the client\'s own customization). If these files are still changed on the next check-in, it will be flagged again.',
     confirmLabel: 'I-clear',
     danger: true
@@ -2682,7 +2681,7 @@ async function clearIntegrityFlag() {
   if (!ok) return;
   try {
     const res = await api(`/relay/admin/api/devices/${encodeURIComponent(targetId)}/integrity/clear`, { method: 'POST' });
-    if (res.success) toast('Na-clear ang integrity flag.', 'success');
+    if (res.success) toast('Integrity flag cleared.', 'success');
   } catch (err) { /* handled */ }
   loadDevices();
 }
@@ -2695,7 +2694,7 @@ async function editLabel(id, currentLabel) {
       method: 'POST',
       body: JSON.stringify({ label })
     });
-    if (res.success) toast(label ? 'Na-save ang label.' : 'Naalis ang label.', 'success');
+    if (res.success) toast(label ? 'Label saved.' : 'Label removed.', 'success');
   } catch (err) { /* handled */ }
   loadDevices();
   if (currentDetailId === id) loadDeviceDetail();
@@ -2705,8 +2704,8 @@ async function manualAllow() {
   const id = document.getElementById('manualIdInput').value.trim();
   if (!id) return;
   const ok = await confirmAction({
-    title: 'Manual na payagan?',
-    message: `Idadagdag mo sa allowlist ang installation ID na ito:\n${id}`,
+    title: 'Allow manually?',
+    message: `You are adding this installation ID to the allowlist:\n${id}`,
     confirmLabel: 'Allow'
   });
   if (!ok) return;
@@ -2720,36 +2719,36 @@ async function manualAllow() {
 
 // ---------------- DEVICE DETAIL SCREEN ----------------
 const ACTIVITY_LABELS = {
-  otp_requested: '🔑 Humiling ng OTP',
+  otp_requested: '🔑 Requested OTP',
   admin_approved: '✓ Na-approve mo',
-  unlock_issued: '🔓 Na-isyu ang unlock token',
-  feature_deactivated: '🔒 Na-deactivate ang feature',
-  device_reset: '🗑️ Na-reset ang device (lahat ng feature)',
-  device_allowed: '✅ Na-allow ang device',
-  device_revoked: '⛔ Na-revoke ang device',
-  device_labeled: '🏷️ Na-update ang label',
-  restore_checkin: '🔄 Nag-check-in ulit (posibleng na-hard-reset)',
+  unlock_issued: '🔓 Unlock token issued',
+  feature_deactivated: '🔒 Feature deactivated',
+  device_reset: '🗑️ Device reset (all features)',
+  device_allowed: '✅ Device allowed',
+  device_revoked: '⛔ Device revoked',
+  device_labeled: '🏷️ Label updated',
+  restore_checkin: '🔄 Checked in again (possibly hard-reset)',
   backup_checkin: '💾 Auto-backup sync (Download/RELAY_BACKUP)',
-  feature_status_checked: '📡 Ni-check ang status (Sync sa Relay ng client)',
-  device_history_cleared: '🗑️ Na-clear ang history ng device na ito'
+  feature_status_checked: '📡 Status checked (client synced with Relay)',
+  device_history_cleared: '🗑️ History cleared for this device'
 };
 
 function activityDescription(entry) {
   const d = entry.details || {};
   const durationSuffix = (typeof d.durationDays === 'number' && d.durationDays > 0)
-    ? ` · ${d.durationDays} araw na lisensya`
+    ? ` · ${d.durationDays}-day license`
     : '';
   if (entry.type === 'unlock_issued') return `${d.featureName || d.featureId} (${d.source || 'otp'})${d.note ? ' — ' + d.note : ''}${durationSuffix}`;
   if (entry.type === 'admin_approved') return `${d.featureName || d.featureId}${durationSuffix || ' · permanente'}`;
   if (entry.type === 'feature_deactivated') return `${d.featureName || d.featureId}`;
-  if (entry.type === 'device_reset') return `${d.deactivatedCount || 0} feature(s) na-tanggal`;
+  if (entry.type === 'device_reset') return `${d.deactivatedCount || 0} feature(s) removed`;
   if (entry.type === 'otp_requested') return d.featureNames ? (Array.isArray(d.featureNames) ? d.featureNames.join(', ') : d.featureNames) : (d.featureName || d.featureId || '');
-  if (entry.type === 'restore_checkin') return `${d.restoredCount || 0} feature(s) na-restore`;
-  if (entry.type === 'feature_status_checked') return `${(d.featureIds || []).length} feature(s) na-check`;
-  if (entry.type === 'device_labeled') return d.label ? `→ "${d.label}"` : '(inalis ang label)';
-  if (entry.type === 'backup_checkin') return `${d.fileSizeBytes ? (d.fileSizeBytes / 1024).toFixed(0) + ' KB' : ''}${d.newlyAllowed ? ' — awtomatikong na-allow' : ''}`;
-  if (entry.type === 'device_allowed' && d.source === 'auto_backup_checkin') return '(awtomatiko, matapos ang successful backup)';
-  if (entry.type === 'device_history_cleared') return `${d.clearedCount || 0} lumang entry na binura`;
+  if (entry.type === 'restore_checkin') return `${d.restoredCount || 0} feature(s) restored`;
+  if (entry.type === 'feature_status_checked') return `${(d.featureIds || []).length} feature(s) checked`;
+  if (entry.type === 'device_labeled') return d.label ? `→ "${d.label}"` : '(label removed)';
+  if (entry.type === 'backup_checkin') return `${d.fileSizeBytes ? (d.fileSizeBytes / 1024).toFixed(0) + ' KB' : ''}${d.newlyAllowed ? ' — automatically allowed' : ''}`;
+  if (entry.type === 'device_allowed' && d.source === 'auto_backup_checkin') return '(automatic, after a successful backup)';
+  if (entry.type === 'device_history_cleared') return `${d.clearedCount || 0} old entries cleared`;
   return '';
 }
 
@@ -2774,14 +2773,14 @@ function closeDeviceDetail() {
   startPolling();
 }
 
-// I-clear LANG ang activity-log entries ng device na ito (ang mga
-// pina-pakita sa "History ng device na ito" timeline sa itaas) — hindi
-// ito humihipo sa allowed/unlocked/label/fingerprint status ng device.
+// ONLY clears this device's activity-log entries (the ones
+// shown in the "History for this device" timeline above) — it does
+// not touch the device's allowed/unlocked/label/fingerprint status.
 async function clearDeviceHistory() {
   if (!currentDetailId) return;
   const ok = await confirmAction({
-    title: 'I-clear ang History ng Device na Ito?',
-    message: 'Buburahin ang lahat ng activity log entries ng device na ito (OTP requests, unlocks, check-ins, atbp.). Hindi ito maaaring bawiin, at HINDI nito babaguhin ang allowed/unlocked status ng device.',
+    title: 'Clear History for This Device?',
+    message: 'This deletes all activity log entries for this device (OTP requests, unlocks, check-ins, etc.). This cannot be undone, and it will NOT change the device\'s allowed/unlocked status.',
     confirmLabel: 'Oo, i-clear',
     danger: true
   });
@@ -2792,15 +2791,15 @@ async function clearDeviceHistory() {
   try {
     const data = await api(`/relay/admin/api/devices/${currentDetailId}/clear-history`, { method: 'POST' });
     if (data.success) {
-      toast(`✅ Na-clear ang history ng device (${data.clearedCount} entry).`, 'success');
+      toast(`✅ Cleared device history (${data.clearedCount} entries).`, 'success');
       loadDeviceDetail();
     } else {
-      toast(data.message || 'Hindi na-clear ang history.', 'error');
+      toast(data.message || 'Could not clear the history.', 'error');
     }
   } catch (err) {
-    // ipinapakita na ng api() ang toast kung 403/429; iba pang error dito
+    // api() already shows the toast for 403/429; other errors here
   } finally {
-    if (btn) { btn.disabled = false; btn.innerText = '🗑️ I-clear ang History ng device na ito'; }
+    if (btn) { btn.disabled = false; btn.innerText = '🗑️ Clear History for this device'; }
   }
 }
 
@@ -2828,7 +2827,7 @@ async function loadAnalytics() {
   try {
     data = await api('/relay/admin/api/analytics');
   } catch (err) { return; }
-  if (!data.success) { toast(data.message || 'Hindi makuha ang analytics.', 'error'); return; }
+  if (!data.success) { toast(data.message || 'Could not load analytics.', 'error'); return; }
   renderAnalytics(data.analytics);
 }
 
@@ -2841,30 +2840,30 @@ function renderAnalytics(a) {
   document.getElementById('anaRevenue').innerText = '₱' + a.activeRevenue.toLocaleString('en-PH');
 
   document.getElementById('anaActivitySummary').innerText =
-    `${a.unlocksLast7d} bagong unlock sa nakaraang 7 araw · ${a.unlocksLast30d} sa nakaraang 30 araw.`;
+    `${a.unlocksLast7d} new unlocks in the last 7 days · ${a.unlocksLast30d} in the last 30 days.`;
 
   document.getElementById('anaAllTimeSummary').innerText =
-    `${a.allTimeUnlocksCount} feature unlock(s) na na-isyu simula pa noon (kasama na ang mga na-expire/na-deactivate) · ₱${a.allTimeRevenue.toLocaleString('en-PH')} kabuuang kita.`;
+    `${a.allTimeUnlocksCount} feature unlock(s) issued all-time (including expired/deactivated) · ₱${a.allTimeRevenue.toLocaleString('en-PH')} total revenue.`;
 
   const expiringEl = document.getElementById('anaExpiringList');
   document.getElementById('anaExpiringPill').innerText = a.expiringSoon.length;
   expiringEl.innerHTML = a.expiringSoon.length === 0
-    ? '<div class="empty">Walang lisensyang malapit nang mag-expire sa loob ng 7 araw.</div>'
+    ? '<div class="empty">No licenses expiring within 7 days.</div>'
     : a.expiringSoon.map(e => {
         const daysLeft = Math.max(0, Math.ceil((e.expiresAt - Date.now()) / (24 * 60 * 60 * 1000)));
         const urgency = daysLeft <= 2 ? 'urgent' : 'soon';
         return `<div class="expiring-item">
           <div>
             <div class="feature-name">${e.featureName}</div>
-            <div class="feature-meta">${e.label || 'Walang label'} · <a href="#" onclick="closeAnalytics(); openDeviceDetail('${e.installationId}'); return false;">buksan ang device</a></div>
+            <div class="feature-meta">${e.label || 'No label'} · <a href="#" onclick="closeAnalytics(); openDeviceDetail('${e.installationId}'); return false;">open device</a></div>
           </div>
-          <div class="expiring-days ${urgency}">${daysLeft <= 0 ? 'ngayon na' : daysLeft + ' araw na lang'}</div>
+          <div class="expiring-days ${urgency}">${daysLeft <= 0 ? 'today' : daysLeft + ' day(s) left'}</div>
         </div>`;
       }).join('');
 
   const topEl = document.getElementById('anaTopFeatures');
   if (a.topFeatures.length === 0) {
-    topEl.innerHTML = '<div class="empty">Wala pang aktibong lisensya.</div>';
+    topEl.innerHTML = '<div class="empty">No active licenses yet.</div>';
   } else {
     const maxCount = Math.max(...a.topFeatures.map(f => f.count));
     topEl.innerHTML = a.topFeatures.map(f => `
@@ -2883,7 +2882,7 @@ async function loadDeviceDetail() {
   try {
     detail = await api(`/relay/admin/api/devices/${encodeURIComponent(currentDetailId)}/detail`);
   } catch (err) { return; }
-  if (!detail.success) { toast(detail.message || 'Hindi makuha ang detalye.', 'error'); return; }
+  if (!detail.success) { toast(detail.message || 'Could not load the details.', 'error'); return; }
   renderDeviceDetail(detail);
 }
 
@@ -2906,21 +2905,21 @@ async function loadCloudBackupDetail(installationId) {
   } catch (err) { return; }
 
   if (!data.success) {
-    lineEl.innerHTML = data.message === 'Walang cloud backup na nakita para sa installationId na ito.'
-      ? '⚪ Wala pang cloud backup na na-sync ng device na ito.'
-      : `⚠️ ${data.message || 'Hindi makuha ang cloud backup.'}`;
+    lineEl.innerHTML = data.message === 'No cloud backup found for this installationId.'
+      ? '⚪ This device has not synced a cloud backup yet.'
+      : `⚠️ ${data.message || 'Could not load the cloud backup.'}`;
     return;
   }
 
   lastCloudBackupDetail = data;
   const meta = data.meta;
-  lineEl.innerHTML = `🟢 <strong>${meta.total_records ?? '—'} records</strong> sa ${meta.module_count ?? (data.modules || []).length} module(s) · huling sync ${timeAgo(new Date(meta.last_sync_at).getTime())} · ${meta.sync_count} beses na na-sync`;
+  lineEl.innerHTML = `🟢 <strong>${meta.total_records ?? '—'} records</strong> across ${meta.module_count ?? (data.modules || []).length} module(s) · last sync ${timeAgo(new Date(meta.last_sync_at).getTime())} · synced ${meta.sync_count} time(s)`;
 
   listEl.innerHTML = (data.modules || []).map(m => `
     <div class="feature-item">
       <div>
         <div class="feature-name">${m.module}</div>
-        <div class="feature-meta">${m.record_count} record(s) · na-update ${timeAgo(new Date(m.updated_at).getTime())}</div>
+        <div class="feature-meta">${m.record_count} record(s) · updated ${timeAgo(new Date(m.updated_at).getTime())}</div>
       </div>
     </div>
   `).join('') || '<div class="empty">Walang laman.</div>';
@@ -2930,7 +2929,7 @@ async function loadCloudBackupDetail(installationId) {
 
 function downloadCloudBackup(installationId) {
   if (!lastCloudBackupDetail || !lastCloudBackupDetail.success) {
-    toast('Wala pang cloud backup na na-load. I-refresh muna.', 'error');
+    toast('No cloud backup loaded yet. Refresh first.', 'error');
     return;
   }
   const payload = {};
@@ -2945,7 +2944,7 @@ function downloadCloudBackup(installationId) {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
-  toast('Na-download ang cloud backup na JSON.', 'success');
+  toast('Cloud backup JSON downloaded.', 'success');
 }
 
 function renderDeviceDetail(detail) {
@@ -2953,26 +2952,26 @@ function renderDeviceDetail(detail) {
   const meta = detail.meta;
   document.getElementById('detailStoreName').innerText = detail.label ? `🏷️ ${detail.label}` : ((meta && meta.storeName) || 'Walang pangalan');
   document.getElementById('detailMeta').innerText = meta
-    ? `${meta.username || '—'} · huling nakita ${timeAgo(meta.lastSeenAt)} · ${meta.requestCount} request(s)`
-    : 'Wala pang record ng aktibidad mula sa device na ito.';
+    ? `${meta.username || '—'} · last seen ${timeAgo(meta.lastSeenAt)} · ${meta.requestCount} request(s)`
+    : 'No activity recorded from this device yet.';
   document.getElementById('detailAllowedBadgeWrap').innerHTML = `<span class="badge ${detail.allowed ? 'badge-allowed' : 'badge-blocked'}">${detail.allowed ? 'ALLOWED' : 'BLOCKED'}</span>` +
     `<button class="icon-btn" style="margin-left:8px;" onclick="toggleAllowFromDetail('${detail.installationId}', ${detail.allowed})">${detail.allowed ? 'Alisin' : 'Allow'}</button>` +
     `<button class="icon-btn" style="margin-left:8px;" onclick="editLabel('${detail.installationId}', '${(detail.label || '').replace(/'/g, "\\'")}')">🏷️ Label</button>`;
 
   document.getElementById('detailUnlockedCount').innerText = detail.unlocked.length;
   document.getElementById('detailLockedCount').innerText = detail.locked.length;
-  document.getElementById('detailDemoStatus').innerText = detail.demo.active ? 'Aktibo' : 'Wala';
+  document.getElementById('detailDemoStatus').innerText = detail.demo.active ? 'Active' : 'None';
 
   const demoStatusLineEl = document.getElementById('demoModeStatusLine');
   const demoActivateBtnEl = document.getElementById('demoActivateBtn');
   const demoStopBtnEl = document.getElementById('demoStopBtn');
   if (detail.demo.active) {
-    demoStatusLineEl.innerHTML = `🟢 <strong>Aktibo ngayon</strong>${detail.demo.expiresAt ? ' — mag-e-expire sa ' + new Date(detail.demo.expiresAt).toLocaleString('en-PH') : ' — walang expiry (permanente)'}`;
-    demoActivateBtnEl.innerText = '🔄 I-renew / Palitan ang Tagal';
+    demoStatusLineEl.innerHTML = `🟢 <strong>Currently active</strong>${detail.demo.expiresAt ? ' — expires ' + new Date(detail.demo.expiresAt).toLocaleString('en-PH') : ' — no expiry (permanent)'}`;
+    demoActivateBtnEl.innerText = '🔄 Renew / Change Duration';
     demoStopBtnEl.style.display = 'inline-flex';
   } else {
-    demoStatusLineEl.innerHTML = '⚪ Walang aktibong demo para sa device na ito ngayon.';
-    demoActivateBtnEl.innerText = '▶ I-activate ang Demo Mode';
+    demoStatusLineEl.innerHTML = '⚪ No active demo for this device right now.';
+    demoActivateBtnEl.innerText = '▶ Activate Demo Mode';
     demoStopBtnEl.style.display = 'none';
   }
 
@@ -2994,7 +2993,7 @@ function renderDeviceDetail(detail) {
         </div>
       </div>
     `).join('') + (detail.unlocked.length > 0
-      ? `<button class="btn-deactivate-all" onclick="deactivateAllFeatures('${detail.installationId}')">🗑️ I-reset ang Device (Deactivate LAHAT ng Feature)</button>`
+      ? `<button class="btn-deactivate-all" onclick="deactivateAllFeatures('${detail.installationId}')">🗑️ Reset Device (Deactivate ALL Features)</button>`
       : '');
 
   const tierRowEl = document.getElementById('detailTierRow');
@@ -3004,7 +3003,7 @@ function renderDeviceDetail(detail) {
 
   const lockedEl = document.getElementById('detailLockedList');
   lockedEl.innerHTML = detail.locked.length === 0
-    ? '<div class="empty">Walang naka-lock — pinapasado na lahat!</div>'
+    ? '<div class="empty">Nothing locked — everything is unlocked!</div>'
     : detail.locked.map(f => `
       <div class="feature-item">
         <div>
@@ -3032,10 +3031,10 @@ function renderDeviceDetail(detail) {
 
 async function toggleAllowFromDetail(installationId, currentlyAllowed) {
   const ok = await confirmAction({
-    title: currentlyAllowed ? 'Alisin ang device na ito?' : 'Payagan ang device na ito?',
+    title: currentlyAllowed ? 'Remove this device?' : 'Allow this device?',
     message: currentlyAllowed
-      ? 'Mawawalan ng access ang device na ito sa relay.'
-      : 'Papayagan mong gumamit ng relay ang device na ito.',
+      ? 'This device will lose access to the relay.'
+      : 'You are allowing this device to use the relay.',
     confirmLabel: currentlyAllowed ? 'Alisin' : 'Allow',
     danger: currentlyAllowed
   });
@@ -3045,37 +3044,37 @@ async function toggleAllowFromDetail(installationId, currentlyAllowed) {
       method: 'POST',
       body: JSON.stringify({ installationId })
     });
-    toast(currentlyAllowed ? 'Naalis ang device.' : 'Na-allow ang device.', 'success');
+    toast(currentlyAllowed ? 'Device removed.' : 'Device allowed.', 'success');
     if (!currentlyAllowed) autoBackupAfterAllow();
   } catch (err) { /* handled */ }
   loadDeviceDetail();
 }
 
 async function activateFeature(installationId, featureId, featureName) {
-  const note = await promptForNote(`I-activate ang "${featureName}" para dito ngayon din — walang OTP kailangan. Gamitin lang kung MAY REFERENCE KA NA (dati nang binayaran/na-unlock).`);
+  const note = await promptForNote(`Activate "${featureName}" for this device right now — no OTP needed. Only use this if you ALREADY HAVE A REFERENCE (already paid/previously unlocked).`);
   if (note === null) return; // kinansela
-  const durationDays = await promptForDuration(`Gaano katagal dapat mag-expire ang "${featureName}"? (Gamitin din ito para mag-RENEW — i-activate lang ulit ang parehong feature na may bagong duration.)`);
+  const durationDays = await promptForDuration(`How long until "${featureName}" should expire? (Also use this to RENEW — just activate the same feature again with a new duration.)`);
   if (durationDays === null) return; // kinansela
   try {
     const res = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/activate`, {
       method: 'POST',
       body: JSON.stringify({ featureId, note: note || null, durationDays })
     });
-    if (res.success) toast(`Na-activate ang ${featureName}.`, 'success');
-    else toast(res.message || 'Hindi na-activate.', 'error');
+    if (res.success) toast(`${featureName} activated.`, 'success');
+    else toast(res.message || 'Could not activate.', 'error');
   } catch (err) { /* handled */ }
   loadDeviceDetail();
 }
 
-// Tinatanggal ang isang naka-unlock na feature sa device na ito — hindi
-// nire-refund, hindi rin binabago ang billing, "lokal" lang na alis ito
-// sa panig ng RELAY kaya babalik itong naka-lock ang feature sa device.
-// Gamitin ito kapag: (1) mali ang pagka-activate, o (2) i-a-unbundle mo
-// ang isang feature bago ibenta/ilipat ang device sa ibang customer.
+// Removes an unlocked feature from this device — it does not
+// issue a refund and does not change billing; it is only a "local" removal
+// on the RELAY side, so the feature goes back to locked on the device.
+// Use this when: (1) it was activated by mistake, or (2) you are unbundling
+// a feature before selling/transferring the device to another customer.
 async function deactivateFeature(installationId, featureId, featureName) {
   const ok = await confirmAction({
-    title: `I-deactivate ang "${featureName}"?`,
-    message: `Mawawalan ng access ang device na ito sa "${featureName}". Kung dati na itong binayaran ng customer, tandaan mo munang mag-note bago mo i-deactivate.`,
+    title: `Deactivate "${featureName}"?`,
+    message: `This device will lose access to "${featureName}". If the customer already paid for this, be sure to note that down before deactivating.`,
     confirmLabel: 'I-deactivate',
     danger: true
   });
@@ -3085,20 +3084,20 @@ async function deactivateFeature(installationId, featureId, featureName) {
       method: 'POST',
       body: JSON.stringify({ featureId })
     });
-    if (res.success) toast(`Na-deactivate ang ${featureName}.`, 'success');
-    else toast(res.message || 'Hindi na-deactivate.', 'error');
+    if (res.success) toast(`${featureName} deactivated.`, 'success');
+    else toast(res.message || 'Could not deactivate.', 'error');
   } catch (err) { /* handled */ }
   loadDeviceDetail();
 }
 
-// Buong "factory reset" ng feature unlocks ng device na ito — tinatanggal
-// LAHAT ng naka-unlock (pati demo, kung meron) para bumalik ito sa
-// default na walang naka-unlock. Para ito sa sitwasyon na ibebenta o
-// ililipat mo na ang device/unit sa ibang tao/tindahan at ayaw mong
-// kasamang ma-carry-over ang mga dating binayarang feature.
+// A full "factory reset" of this device's feature unlocks — removes
+// EVERYTHING unlocked (including demo, if any) so it goes back to the
+// default of nothing unlocked. This is for when the device/unit is being sold or
+// transferred to someone else/another store and you don't want
+// previously paid features to carry over with it.
 async function deactivateAllFeatures(installationId) {
   const ok = await confirmAction({
-    title: 'I-reset ang device na ito?',
+    title: 'Reset this device?',
     message: 'This will remove ALL unlocked features on this device (including demo, if any). It will return to the default state — nothing unlocked. Use this before selling or transferring the device to another customer. This cannot be undone.',
     confirmLabel: 'Oo, i-reset',
     danger: true
@@ -3108,44 +3107,44 @@ async function deactivateAllFeatures(installationId) {
     const res = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/deactivate-all`, {
       method: 'POST'
     });
-    if (res.success) toast(res.message || 'Na-reset ang device.', 'success');
-    else toast(res.message || 'Hindi na-reset.', 'error');
+    if (res.success) toast(res.message || 'Device reset.', 'success');
+    else toast(res.message || 'Could not reset.', 'error');
   } catch (err) { /* handled */ }
   loadDeviceDetail();
 }
 
-// Direktang nagbibigay ng FULL DEMO MODE (lahat ng features, pansamantala
-// lang) sa device na ito — WALANG OTP kailangan, at HINDI na kailangang
-// hintayin munang ang customer/device mismo ang humingi (request-demo)
-// bago ito ma-Allow/Approve. Gamitin ito kung PROAKTIBO mong gustong
-// bigyan ng trial ang isang device (hal. bagong prospect, demo booth,
-// follow-up sa naka-Locked pang tindahan). Gumagamit ng parehong
-// oras-based na duration picker (promptForDemoDuration) na ginagamit
-// na rin sa Approve-with-duration flow, para consistent ang UX.
+// Directly grants FULL DEMO MODE (all features, temporary
+// only) to this device — NO OTP required, and there is NO need to
+// wait for the customer/device itself to request it (request-demo)
+// before it can be Allowed/Approved. Use this when you want to PROACTIVELY
+// give a device a trial (e.g. a new prospect, demo booth,
+// following up with a still-Locked store). Uses the same
+// hour-based duration picker (promptForDemoDuration) that is also
+// used in the Approve-with-duration flow, for a consistent UX.
 async function activateDemoMode(installationId) {
   if (!installationId) return;
-  const durationDays = await promptForDemoDuration('Piliin ang tagal ng Full Demo Mode na ibibigay mo ngayon din sa device na ito — walang OTP kailangan, direkta itong ma-a-activate.');
+  const durationDays = await promptForDemoDuration('Choose how long the Full Demo Mode you are granting right now should run for this device — no OTP needed, it activates immediately.');
   if (durationDays === null) return; // kinansela
   try {
     const res = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/activate-demo`, {
       method: 'POST',
       body: JSON.stringify({ durationDays })
     });
-    if (res.success) toast(res.message || 'Na-activate ang Demo Mode.', 'success');
-    else toast(res.message || 'Hindi na-activate ang Demo Mode.', 'error');
+    if (res.success) toast(res.message || 'Demo Mode activated.', 'success');
+    else toast(res.message || 'Could not activate Demo Mode.', 'error');
   } catch (err) { /* handled */ }
   loadDeviceDetail();
 }
 
-// Itinitigil ang Demo Mode BAGO pa ito mag-expire nang mag-isa — parang
-// deactivateFeature() sa itaas, pero laging '__demo__' ang featureId.
-// Gamitin ito kung sobrang aga pa (hal. na-trigger nang hindi sinasadya,
-// o gusto mo nang matapos agad bago ang orihinal na inilaang tagal).
+// Stops Demo Mode BEFORE it expires on its own — essentially
+// deactivateFeature() above, but featureId is always '__demo__'.
+// Use this if it is still too early (e.g. it was triggered accidentally,
+// or you want it to end right away before the originally set duration).
 async function stopDemoMode(installationId) {
   if (!installationId) return;
   const ok = await confirmAction({
-    title: 'Itigil ang Demo Mode ngayon?',
-    message: 'Agad na mawawalan ng access ang device na ito sa lahat ng feature na ibinigay ng Demo Mode.',
+    title: 'Stop Demo Mode now?',
+    message: 'This device will immediately lose access to every feature granted by Demo Mode.',
     confirmLabel: 'Itigil Ngayon',
     danger: true
   });
@@ -3155,39 +3154,39 @@ async function stopDemoMode(installationId) {
       method: 'POST',
       body: JSON.stringify({ featureId: '__demo__' })
     });
-    if (res.success) toast(res.message || 'Natigil ang Demo Mode.', 'success');
-    else toast(res.message || 'Hindi na-stop ang Demo Mode.', 'error');
+    if (res.success) toast(res.message || 'Demo Mode stopped.', 'success');
+    else toast(res.message || 'Could not stop Demo Mode.', 'error');
   } catch (err) { /* handled */ }
   loadDeviceDetail();
 }
 
 async function activateTier(installationId, tierId, tierName) {
-  const note = await promptForNote(`I-activate ang BUONG "${tierName}" tier (lahat ng kasamang feature) para dito ngayon din — walang OTP kailangan.`);
+  const note = await promptForNote(`Activate the ENTIRE "${tierName}" tier (all included features) for this device right now — no OTP needed.`);
   if (note === null) return;
-  const durationDays = await promptForDuration(`Gaano katagal dapat mag-expire ang lahat ng feature sa "${tierName}"?`);
+  const durationDays = await promptForDuration(`How long until all features in "${tierName}" should expire?`);
   if (durationDays === null) return;
   try {
     const res = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/activate`, {
       method: 'POST',
       body: JSON.stringify({ tierId, note: note || null, durationDays })
     });
-    if (res.success) toast(`Na-activate ang ${tierName}.`, 'success');
-    else toast(res.message || 'Hindi na-activate.', 'error');
+    if (res.success) toast(`${tierName} activated.`, 'success');
+    else toast(res.message || 'Could not activate.', 'error');
   } catch (err) { /* handled */ }
   loadDeviceDetail();
 }
 
-// Gumagamit ng parehong confirm-modal pattern (hindi native prompt() para
-// consistent ang look), pero may text input dagdag para sa optional na
-// "note/reference" (hal. invoice #, dahilan ng restore).
+// Uses the same confirm-modal pattern (not the native prompt(), for a
+// consistent look), but adds a text input for an optional
+// "note/reference" (e.g. invoice #, reason for the restore).
 function promptForNote(message) {
   return new Promise((resolve) => {
     const backdrop = document.getElementById('confirmBackdrop');
     const okBtn = document.getElementById('confirmActionBtn');
     const cancelBtn = document.getElementById('confirmCancelBtn');
 
-    document.getElementById('confirmTitle').innerText = 'Kumpirmahin ang Activate';
-    document.getElementById('confirmMessage').innerHTML = `${message}<br><br><input type="text" id="activateNoteInput" placeholder="Opsyonal na reference/note (hal. invoice #)" style="margin-top:4px;">`;
+    document.getElementById('confirmTitle').innerText = 'Confirm Activate';
+    document.getElementById('confirmMessage').innerHTML = `${message}<br><br><input type="text" id="activateNoteInput" placeholder="Optional reference/note (e.g. invoice #)" style="margin-top:4px;">`;
     okBtn.innerText = '✓ I-activate';
     okBtn.className = 'btn-allow';
 
@@ -3207,29 +3206,29 @@ function promptForNote(message) {
   });
 }
 
-// Gumagamit ng parehong confirm-modal pattern — pinapayagan ang admin na
-// pumili ng ILANG ARAW bago mag-expire ang isang lisensya (o "Permanente"
-// para sa dating behavior na walang expiry). Ginagamit ito bago mag-Allow
-// ng OTP (approveOtp) at bago mag-direct Activate (activateFeature /
-// activateTier). Resolve sa isang integer (araw) o `0` (permanente).
+// Uses the same confirm-modal pattern — lets the admin
+// choose the NUMBER OF DAYS before a license expires (or "Permanent"
+// for the old no-expiry behavior). This is used before Allowing
+// an OTP (approveOtp) and before a direct Activate (activateFeature /
+// activateTier). Resolves to an integer (days) or `0` (permanent).
 function promptForDuration(message, defaultLabel) {
   return new Promise((resolve) => {
     const backdrop = document.getElementById('confirmBackdrop');
     const okBtn = document.getElementById('confirmActionBtn');
     const cancelBtn = document.getElementById('confirmCancelBtn');
 
-    document.getElementById('confirmTitle').innerText = 'Gaano katagal ang lisensya?';
+    document.getElementById('confirmTitle').innerText = 'How long should the license run?';
     document.getElementById('confirmMessage').innerHTML = `${message}<br><br>` +
       `<select id="durationSelect" style="width:100%; padding:10px; border-radius:8px; border:1px solid var(--border-soft); background:var(--bg); color:var(--text); margin-top:4px;">` +
-      `<option value="0">Permanente (walang expiry)</option>` +
-      `<option value="7">7 araw</option>` +
-      `<option value="30" selected>30 araw (1 buwan)</option>` +
-      `<option value="90">90 araw (3 buwan)</option>` +
-      `<option value="180">180 araw (6 na buwan)</option>` +
-      `<option value="365">365 araw (1 taon)</option>` +
+      `<option value="0">Permanent (no expiry)</option>` +
+      `<option value="7">7 days</option>` +
+      `<option value="30" selected>30 days (1 month)</option>` +
+      `<option value="90">90 days (3 months)</option>` +
+      `<option value="180">180 days (6 months)</option>` +
+      `<option value="365">365 days (1 year)</option>` +
       `<option value="custom">Custom...</option>` +
       `</select>` +
-      `<input type="text" id="durationCustomInput" placeholder="Bilang ng araw" style="margin-top:8px; display:none;" inputmode="numeric">`;
+      `<input type="text" id="durationCustomInput" placeholder="Number of days" style="margin-top:8px; display:none;" inputmode="numeric">`;
     okBtn.innerText = '✓ Tuloy';
     okBtn.className = 'btn-allow';
 
@@ -3264,31 +3263,31 @@ function promptForDuration(message, defaultLabel) {
   });
 }
 
-// Katulad ng promptForDuration() sa itaas, pero ORAS ang unit sa halip
-// na buwan/taon — mas angkop ito sa isang PANSAMANTALANG trial (Demo
-// Mode) kaysa sa mga presets na 7/30/90/365 araw na para sa matagalang
-// lisensya. Resolve din sa isang FRACTIONAL na bilang ng araw (hal. 0.25
-// = 6 oras) dahil ganito rin ang unit na inaasahan ng
-// /relay/admin/api/pending-otps/approve (durationDays), o `0` para sa
-// "Permanente" (kung sadyang gusto ng admin na hindi mag-expire).
+// Similar to promptForDuration() above, but the unit is HOURS instead
+// of months/years — better suited to a TEMPORARY trial (Demo
+// Mode) than the 7/30/90/365-day presets meant for long-term
+// licenses. It also resolves to a FRACTIONAL number of days (e.g. 0.25
+// = 6 hours) since this is the same unit expected by
+// /relay/admin/api/pending-otps/approve (durationDays), or `0` for
+// "Permanent" (if the admin deliberately wants no expiry).
 function promptForDemoDuration(message) {
   return new Promise((resolve) => {
     const backdrop = document.getElementById('confirmBackdrop');
     const okBtn = document.getElementById('confirmActionBtn');
     const cancelBtn = document.getElementById('confirmCancelBtn');
 
-    document.getElementById('confirmTitle').innerText = 'Gaano katagal ang Demo Mode?';
+    document.getElementById('confirmTitle').innerText = 'How long should Demo Mode run?';
     document.getElementById('confirmMessage').innerHTML = `${message}<br><br>` +
       `<select id="demoDurationSelect" style="width:100%; padding:10px; border-radius:8px; border:1px solid var(--border-soft); background:var(--bg); color:var(--text); margin-top:4px;">` +
-      `<option value="0.25">6 oras</option>` +
-      `<option value="0.5">12 oras</option>` +
-      `<option value="1" selected>24 oras (1 araw)</option>` +
-      `<option value="3">3 araw</option>` +
-      `<option value="7">7 araw</option>` +
-      `<option value="0">Permanente (walang expiry)</option>` +
-      `<option value="custom">Custom (oras)...</option>` +
+      `<option value="0.25">6 hours</option>` +
+      `<option value="0.5">12 hours</option>` +
+      `<option value="1" selected>24 hours (1 day)</option>` +
+      `<option value="3">3 days</option>` +
+      `<option value="7">7 days</option>` +
+      `<option value="0">Permanent (no expiry)</option>` +
+      `<option value="custom">Custom (hours)...</option>` +
       `</select>` +
-      `<input type="text" id="demoDurationCustomInput" placeholder="Bilang ng oras" style="margin-top:8px; display:none;" inputmode="numeric">`;
+      `<input type="text" id="demoDurationCustomInput" placeholder="Number of hours" style="margin-top:8px; display:none;" inputmode="numeric">`;
     okBtn.innerText = '✓ Tuloy';
     okBtn.className = 'btn-allow';
 
@@ -3323,11 +3322,11 @@ function promptForDemoDuration(message) {
   });
 }
 
-// Gumagamit ng parehong confirm-modal pattern — pinapayagan ang admin na
-// magtakda ng SARILING palayaw/label para sa isang device (hal. "Aling
-// Nena — Sari-sari Store, Cubao"), IBA sa self-reported storeName ng
-// device mismo. Gamit ito para MADALING MAKILALA/MATANDAAN ang customer,
-// kahit pa "Recently Seen" pa lang ito (bago pa ma-Allow).
+// Uses the same confirm-modal pattern — lets the admin
+// set their OWN nickname/label for a device (e.g. "Aling
+// Nena — Sari-sari Store, Cubao"), DIFFERENT from the device's own
+// self-reported storeName. Used to EASILY IDENTIFY/REMEMBER the customer,
+// even while it is still only "Recently Seen" (before being Allowed).
 function promptForLabel(currentLabel) {
   return new Promise((resolve) => {
     const backdrop = document.getElementById('confirmBackdrop');
@@ -3369,11 +3368,11 @@ function startPolling() {
 if (adminKey) { renderLastExportNote(); renderAutoBackupToggle(); startPolling(); }
 
 // ---------------- PWA: INSTALL SUPPORT (Android + PC) ----------------
-// Sa Android, kadalasang awtomatikong lumalabas ang install banner kapag
-// tugma na sa criteria ang manifest/service-worker. Sa DESKTOP (Chrome/
-// Edge), kailangan ng explicit button na tumatawag sa prompt() —- kaya
-// dito, hinuhuli natin ang "beforeinstallprompt" event at ipinapakita
-// lang ang button kapag TALAGANG installable na (hindi palagi/basta
+// On Android, the install banner usually appears automatically once
+// the manifest/service-worker match the criteria. On DESKTOP (Chrome/
+// Edge), an explicit button that calls prompt() is needed — so
+// here, we capture the "beforeinstallprompt" event and only show
+// the button once it is ACTUALLY installable (not always/unconditionally
 // nakalagay lang).
 let deferredInstallPrompt = null;
 window.addEventListener('beforeinstallprompt', (e) => {
@@ -3384,7 +3383,7 @@ window.addEventListener('beforeinstallprompt', (e) => {
 window.addEventListener('appinstalled', () => {
   deferredInstallPrompt = null;
   document.getElementById('installBtn').style.display = 'none';
-  toast('Na-install ang Relay Admin!', 'success');
+  toast('Relay Admin installed!', 'success');
 });
 async function installApp() {
   if (!deferredInstallPrompt) return;
