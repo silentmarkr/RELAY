@@ -798,9 +798,198 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
 .footer-note a { color: var(--muted); text-decoration: underline; }
 .footer-note a:hover { color: var(--accent-bright); }
 
+/* ================================================================
+   CYBORG UPGRADE — HUD scanline, glitch readouts, targeting rings,
+   radar pulses, boot sequence. Layered on top of the existing "Cyber
+   Neon Pro" theme; everything here respects prefers-reduced-motion.
+   ================================================================ */
+
+/* Full-viewport HUD scanline sweep (like a cyborg optic sensor) */
+@media (prefers-reduced-motion: no-preference) {
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 2;
+    background: linear-gradient(180deg,
+      transparent 0%,
+      rgba(34,229,255,.05) 46%,
+      rgba(124,243,255,.10) 50%,
+      rgba(34,229,255,.05) 54%,
+      transparent 100%);
+    background-size: 100% 260px;
+    background-repeat: no-repeat;
+    animation: hud-scan 6s linear infinite;
+    mix-blend-mode: screen;
+  }
+}
+@keyframes hud-scan {
+  0%   { background-position: 0 -260px; }
+  100% { background-position: 0 100vh; }
+}
+
+/* Targeting-frame corner brackets, fixed to the viewport */
+.hud-corner {
+  position: fixed;
+  width: 22px; height: 22px;
+  border: 1.5px solid var(--accent);
+  opacity: .3;
+  z-index: 3;
+  pointer-events: none;
+}
+.hud-corner.tl { top: 8px; left: 8px; border-right: none; border-bottom: none; border-radius: 6px 0 0 0; }
+.hud-corner.tr { top: 8px; right: 8px; border-left: none; border-bottom: none; border-radius: 0 6px 0 0; }
+.hud-corner.bl { bottom: 8px; left: 8px; border-right: none; border-top: none; border-radius: 0 0 0 6px; }
+.hud-corner.br { bottom: 8px; right: 8px; border-left: none; border-top: none; border-radius: 0 0 6px 0; }
+
+/* Glitch text — brief RGB-split flicker for brand/title readouts */
+.glitch-text { position: relative; display: inline-block; }
+@media (prefers-reduced-motion: no-preference) {
+  .glitch-text.glitch-active::before,
+  .glitch-text.glitch-active::after {
+    content: attr(data-text);
+    position: absolute; left: 0; top: 0; width: 100%;
+    overflow: hidden; background: transparent;
+  }
+  .glitch-text.glitch-active::before {
+    color: var(--accent-hover);
+    clip-path: inset(0 0 55% 0);
+    animation: glitch-1 .45s steps(2, end) 2;
+  }
+  .glitch-text.glitch-active::after {
+    color: var(--accent);
+    clip-path: inset(55% 0 0 0);
+    animation: glitch-2 .45s steps(2, end) 2;
+  }
+}
+@keyframes glitch-1 {
+  0%   { transform: translate(0,0); }
+  20%  { transform: translate(-2px,-1px); }
+  40%  { transform: translate(2px,1px); }
+  60%  { transform: translate(-1px,1px); }
+  100% { transform: translate(0,0); }
+}
+@keyframes glitch-2 {
+  0%   { transform: translate(0,0); }
+  20%  { transform: translate(2px,1px); }
+  40%  { transform: translate(-2px,-1px); }
+  60%  { transform: translate(1px,-1px); }
+  100% { transform: translate(0,0); }
+}
+
+/* Rotating "targeting lock" ring on card/stat-card hover */
+@media (prefers-reduced-motion: no-preference) {
+  .card, .stat-card { isolation: isolate; }
+  .card::after, .stat-card::after {
+    content: '';
+    position: absolute; inset: 0; border-radius: inherit;
+    padding: 1.5px;
+    background: conic-gradient(from 0deg,
+      transparent 0 76%, var(--accent-bright) 87%, var(--accent-hover) 92%, transparent 100%);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+            mask-composite: exclude;
+    opacity: 0;
+    transition: opacity .25s var(--ease);
+    animation: hud-ring-spin 2.2s linear infinite;
+    animation-play-state: paused;
+    pointer-events: none;
+  }
+  .card:hover::after, .stat-card:hover::after { opacity: 1; animation-play-state: running; }
+}
+@keyframes hud-ring-spin { to { transform: rotate(360deg); } }
+
+/* Radar double-ring pulse — upgrades the existing sync-dot-blink */
+.sync-dot-blink { position: relative; }
+.sync-dot-blink::before {
+  content: '';
+  position: absolute; inset: -6px;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  opacity: 0;
+  animation: radar-ring 1.8s ease-out infinite;
+}
+@keyframes radar-ring {
+  0%   { opacity: .6; transform: scale(.4); }
+  100% { opacity: 0;  transform: scale(2.3); }
+}
+
+/* Tabular count-up glow (toggled by JS while a stat is animating) */
+.stat-num.counting { text-shadow: 0 0 14px rgba(34,229,255,.55); }
+
+/* HUD light-sweep on primary interactive controls */
+.btn-primary, .icon-btn, .btn-ghost, .tab-btn { position: relative; overflow: hidden; }
+.btn-primary::before, .icon-btn::before, .btn-ghost::before, .tab-btn::before {
+  content: '';
+  position: absolute; top: 0; left: -60%;
+  width: 35%; height: 100%;
+  background: linear-gradient(120deg, transparent, rgba(255,255,255,.32), transparent);
+  transform: skewX(-20deg);
+  transition: left .5s var(--ease);
+  pointer-events: none;
+}
+.btn-primary:hover::before, .icon-btn:hover::before, .btn-ghost:hover::before, .tab-btn:hover::before { left: 130%; }
+
+/* ---------- BOOT SEQUENCE OVERLAY ---------- */
+#bootOverlay {
+  position: fixed; inset: 0; z-index: 2000;
+  background: var(--bg);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 16px;
+  font-family: var(--font-mono);
+  transition: opacity .4s var(--ease), visibility .4s var(--ease);
+}
+#bootOverlay.boot-hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+.boot-logo {
+  width: 46px; height: 46px; border-radius: 12px;
+  border: 1px solid var(--border-soft);
+  box-shadow: 0 0 0 6px rgba(34,229,255,.08), 0 0 30px rgba(34,229,255,.28);
+  animation: boot-logo-pulse 1.6s ease-in-out infinite;
+}
+@keyframes boot-logo-pulse {
+  0%, 100% { box-shadow: 0 0 0 6px rgba(34,229,255,.08), 0 0 30px rgba(34,229,255,.28); }
+  50%      { box-shadow: 0 0 0 9px rgba(34,229,255,.14), 0 0 42px rgba(34,229,255,.42); }
+}
+.boot-line {
+  font-size: 11.5px; color: var(--accent); letter-spacing: .09em; text-transform: uppercase;
+  min-height: 16px;
+}
+.boot-line .boot-cursor {
+  display: inline-block; width: 7px; height: 12px; background: var(--accent);
+  margin-left: 3px; vertical-align: -2px; animation: boot-blink 1s steps(1) infinite;
+}
+@keyframes boot-blink { 50% { opacity: 0; } }
+.boot-bar {
+  width: 220px; height: 3px; border-radius: 999px;
+  background: var(--bg-raise); border: 1px solid var(--line); overflow: hidden;
+}
+.boot-bar-fill {
+  height: 100%; width: 0%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-hover));
+  animation: boot-fill 1.1s var(--ease) forwards;
+}
+@keyframes boot-fill { to { width: 100%; } }
+@media (prefers-reduced-motion: reduce) {
+  #bootOverlay { transition: none; }
+  .boot-logo { animation: none; }
+  .boot-bar-fill { animation: none; width: 100%; }
+}
+
 </style>
 </head>
 <body>
+
+<div class="hud-corner tl"></div>
+<div class="hud-corner tr"></div>
+<div class="hud-corner bl"></div>
+<div class="hud-corner br"></div>
+
+<div id="bootOverlay">
+  <img src="icons/icon-192.png" alt="" class="boot-logo">
+  <div class="boot-line" id="bootLine">INITIALIZING RELAY UPLINK<span class="boot-cursor"></span></div>
+  <div class="boot-bar"><div class="boot-bar-fill"></div></div>
+</div>
 
 <div id="toastHost"></div>
 
@@ -808,7 +997,7 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
   <div class="brand-badge">
     <img src="icons/icon-192.png" alt="OmniPOS">
     <div>
-      <h1 style="margin:0;">Relay — Device Admin</h1>
+      <h1 style="margin:0;" class="glitch-text" id="loginTitle" data-text="Relay — Device Admin">Relay — Device Admin</h1>
       <div class="sub" style="margin:0;">Ilagay ang admin key para makapasok</div>
     </div>
   </div>
@@ -824,7 +1013,7 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
     <div class="topbar-brand">
       <img src="icons/icon-192.png" alt="OmniPOS">
       <div>
-        <div class="topbar-title">Device Admin</div>
+        <div class="topbar-title glitch-text" id="topbarTitle" data-text="Device Admin">Device Admin</div>
         <div class="topbar-sub">OmniPOS Unlock Relay</div>
       </div>
     </div>
@@ -3211,7 +3400,106 @@ if ('serviceWorker' in navigator) {
       .catch((err) => console.warn('[Admin] SW registration failed:', err));
   });
 }
-  
+
+// ================= CYBORG UPGRADE: boot sequence, glitch, HUD count-up =================
+(function cyborgBootSequence() {
+  const overlay = document.getElementById('bootOverlay');
+  const line = document.getElementById('bootLine');
+  if (!overlay) return;
+
+  const prefersReduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const alreadyBooted = sessionStorage.getItem('relayBooted') === '1';
+
+  const steps = [
+    'INITIALIZING RELAY UPLINK',
+    'VERIFYING DEVICE FINGERPRINTS',
+    'SYSTEM ONLINE'
+  ];
+
+  function hideOverlay() {
+    overlay.classList.add('boot-hidden');
+    sessionStorage.setItem('relayBooted', '1');
+    setTimeout(() => overlay.remove(), 450);
+  }
+
+  if (prefersReduced || alreadyBooted) {
+    hideOverlay();
+    return;
+  }
+
+  let i = 0;
+  if (line) line.innerHTML = steps[0] + '<span class="boot-cursor"></span>';
+  const stepTimer = setInterval(() => {
+    i++;
+    if (i < steps.length && line) {
+      line.innerHTML = steps[i] + '<span class="boot-cursor"></span>';
+    } else {
+      clearInterval(stepTimer);
+    }
+  }, 380);
+
+  setTimeout(hideOverlay, 1200);
+})();
+
+(function cyborgGlitchTitles() {
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const targets = ['topbarTitle', 'loginTitle'].map((id) => document.getElementById(id)).filter(Boolean);
+  if (targets.length === 0) return;
+  setInterval(() => {
+    const el = targets[Math.floor(Math.random() * targets.length)];
+    if (el.offsetParent === null) return; // hidden/not visible right now
+    el.classList.add('glitch-active');
+    setTimeout(() => el.classList.remove('glitch-active'), 480);
+  }, 6500);
+})();
+
+(function cyborgStatCountUp() {
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+  function animateStatNum(el, targetText) {
+    const newVal = parseInt(String(targetText).replace(/[^0-9-]/g, ''), 10);
+    if (isNaN(newVal)) { el.textContent = targetText; return; }
+    let oldVal = parseInt(el.getAttribute('data-cyborg-val') || '0', 10);
+    if (isNaN(oldVal)) oldVal = 0;
+    if (oldVal === newVal) { el.setAttribute('data-cyborg-val', String(newVal)); return; }
+
+    const duration = 500;
+    let start = null;
+    el.classList.add('counting');
+
+    function step(ts) {
+      if (!start) start = ts;
+      const p = Math.min(1, (ts - start) / duration);
+      const eased = 1 - Math.pow(1 - p, 3);
+      const val = Math.round(oldVal + (newVal - oldVal) * eased);
+      el.textContent = String(val);
+      if (p < 1) {
+        requestAnimationFrame(step);
+      } else {
+        el.textContent = String(newVal);
+        el.setAttribute('data-cyborg-val', String(newVal));
+        el.classList.remove('counting');
+      }
+    }
+    requestAnimationFrame(step);
+  }
+
+  document.querySelectorAll('.stat-num').forEach((el) => {
+    const initial = parseInt(el.textContent, 10);
+    el.setAttribute('data-cyborg-val', String(isNaN(initial) ? 0 : initial));
+
+    const observer = new MutationObserver(() => {
+      const target = el.textContent;
+      observer.disconnect();
+      animateStatNum(el, target);
+      setTimeout(() => {
+        observer.observe(el, { childList: true, characterData: true, subtree: true });
+      }, 520);
+    });
+    observer.observe(el, { childList: true, characterData: true, subtree: true });
+  });
+})();
+
 </script>
 
 </body>
