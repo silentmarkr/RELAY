@@ -803,29 +803,20 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
    Neon Pro" theme; everything here respects prefers-reduced-motion.
    ================================================================ */
 
-/* Full-viewport HUD scanline sweep (like a cyborg optic sensor) */
-@media (prefers-reduced-motion: no-preference) {
-  body::after {
-    content: '';
-    position: fixed;
-    inset: 0;
-    pointer-events: none;
-    z-index: 2;
-    background: linear-gradient(180deg,
-      transparent 0%,
-      rgba(34,229,255,.05) 46%,
-      rgba(124,243,255,.10) 50%,
-      rgba(34,229,255,.05) 54%,
-      transparent 100%);
-    background-size: 100% 260px;
-    background-repeat: no-repeat;
-    animation: hud-scan 6s linear infinite;
-    mix-blend-mode: screen;
-  }
+/* Full-viewport "Advanced Pro Matrix" digital-rain overlay — replaces the
+   old HUD scanline sweep. Rendered on a <canvas> (#matrixCanvas) driven by
+   JS further down; this block only positions/blends it. Respects
+   prefers-reduced-motion (canvas simply stays empty/paused — see JS). */
+#matrixCanvas {
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  mix-blend-mode: screen;
+  opacity: .55;
 }
-@keyframes hud-scan {
-  0%   { background-position: 0 -260px; }
-  100% { background-position: 0 100vh; }
+@media (prefers-reduced-motion: reduce) {
+  #matrixCanvas { display: none; }
 }
 
 /* Targeting-frame corner brackets, fixed to the viewport */
@@ -938,8 +929,18 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
   gap: 16px;
   font-family: var(--font-mono);
   transition: opacity .4s var(--ease), visibility .4s var(--ease);
+  overflow: hidden;
 }
 #bootOverlay.boot-hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+/* Vivid "Advanced Pro Matrix" rain behind the boot readout — its own
+   brighter/faster canvas instance, only animated while booting. */
+#bootMatrixCanvas {
+  position: absolute; inset: 0; z-index: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  #bootMatrixCanvas { display: none; }
+}
+#bootOverlay > *:not(#bootMatrixCanvas) { position: relative; z-index: 1; }
 .boot-logo {
   width: 46px; height: 46px; border-radius: 12px;
   border: 1px solid var(--border-soft);
@@ -979,12 +980,15 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
 </head>
 <body>
 
+<canvas id="matrixCanvas"></canvas>
+
 <div class="hud-corner tl"></div>
 <div class="hud-corner tr"></div>
 <div class="hud-corner bl"></div>
 <div class="hud-corner br"></div>
 
 <div id="bootOverlay">
+  <canvas id="bootMatrixCanvas"></canvas>
   <img src="icons/icon-192.png" alt="" class="boot-logo">
   <div class="boot-line" id="bootLine">INITIALIZING RELAY UPLINK<span class="boot-cursor"></span></div>
   <div class="boot-bar"><div class="boot-bar-fill"></div></div>
@@ -3400,6 +3404,120 @@ if ('serviceWorker' in navigator) {
   });
 }
 
+// ================= ADVANCED PRO MATRIX — digital-rain canvas engine =================
+// Reusable renderer used both as the always-on ambient background
+// (#matrixCanvas) and as the vivid boot-screen backdrop (#bootMatrixCanvas).
+// Cyber Neon Pro palette: cyan primary digits, magenta "glitch" heads.
+// Binary-only glyphs (0/1), tiny 5px lines, a handful of streaks moving
+// both vertically (top-to-bottom) and horizontally (left-to-right) — kept
+// sparse on purpose so it reads as an accent, not a wall of text.
+function createMatrixRain(canvas, opts) {
+  if (!canvas) return { stop() {} };
+  const prefersReduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (prefersReduced) return { stop() {} };
+
+  const ctx = canvas.getContext('2d');
+  const settings = Object.assign({
+    fontSize: 5,
+    speedMin: 0.6,
+    speedMax: 2.2,
+    fade: 0.10,        // trail persistence (lower = longer streaks)
+    headColor: '#eafcff',
+    bodyColors: ['#22e5ff', '#7cf3ff', '#22e5ff', '#ff2ee6'], // mostly cyan, rare magenta glitch line
+    glow: 1.5,
+    lineCount: 16,      // total number of streaks on screen (few, not a wall of text)
+    lineLenMin: 8,
+    lineLenMax: 16
+  }, opts || {});
+
+  const glyphs = ['0', '1']; // binary only, no kanji/katakana
+
+  let lines = [], w = 0, h = 0, raf = null;
+
+  function randomText(len) {
+    let s = '';
+    for (let i = 0; i < len; i++) s += glyphs[(Math.random() * 2) | 0];
+    return s;
+  }
+
+  function makeLine() {
+    const dir = Math.random() < 0.5 ? 'v' : 'h'; // mix of vertical + horizontal streaks
+    const len = (settings.lineLenMin + Math.random() * (settings.lineLenMax - settings.lineLenMin)) | 0;
+    const speed = settings.speedMin + Math.random() * (settings.speedMax - settings.speedMin);
+    const color = settings.bodyColors[(Math.random() * settings.bodyColors.length) | 0];
+    if (dir === 'v') {
+      return { dir, cross: Math.random() * w, progress: -len * settings.fontSize - Math.random() * h, speed, color, text: randomText(len), len };
+    }
+    return { dir, cross: Math.random() * h, progress: -len * settings.fontSize - Math.random() * w, speed, color, text: randomText(len), len };
+  }
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    w = canvas.clientWidth || canvas.parentElement.clientWidth;
+    h = canvas.clientHeight || canvas.parentElement.clientHeight;
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    lines = new Array(settings.lineCount).fill(0).map(makeLine);
+  }
+
+  function frame() {
+    ctx.fillStyle = `rgba(6, 8, 16, ${settings.fade})`;
+    ctx.fillRect(0, 0, w, h);
+    // NOTE: canvas 2D `font` does not resolve CSS custom properties
+    // (var(--font-mono)) — must be a concrete font stack or it silently
+    // falls back to a much larger default font and renders as an
+    // unreadable blurry smear instead of crisp small digits.
+    ctx.font = `${settings.fontSize}px 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace`;
+    ctx.textBaseline = 'top';
+
+    for (const ln of lines) {
+      const bound = ln.dir === 'v' ? h : w;
+      for (let i = 0; i < ln.len; i++) {
+        const p = ln.progress - i * ln.speed - i * settings.fontSize * 0.4;
+        if (p < -settings.fontSize || p > bound) continue;
+        const ch = ln.text[i];
+        const isHead = i === 0;
+        ctx.shadowBlur = isHead ? settings.glow * 1.5 : settings.glow * 0.5;
+        ctx.shadowColor = isHead ? settings.headColor : ln.color;
+        ctx.fillStyle = isHead ? settings.headColor : ln.color;
+        if (ln.dir === 'v') ctx.fillText(ch, ln.cross, p);
+        else ctx.fillText(ch, p, ln.cross);
+      }
+      ctx.shadowBlur = 0;
+
+      ln.progress += ln.speed;
+      if (ln.progress - ln.len * settings.fontSize > bound) {
+        Object.assign(ln, makeLine(), { progress: -ln.len * settings.fontSize });
+      }
+    }
+    raf = requestAnimationFrame(frame);
+  }
+
+  resize();
+  ctx.fillStyle = '#06080f';
+  ctx.fillRect(0, 0, w, h);
+  raf = requestAnimationFrame(frame);
+  window.addEventListener('resize', resize);
+
+  return {
+    stop() {
+      if (raf) cancelAnimationFrame(raf);
+      window.removeEventListener('resize', resize);
+    }
+  };
+}
+
+// Ambient matrix rain — subtle, sits behind the whole admin UI at all times.
+createMatrixRain(document.getElementById('matrixCanvas'), {
+  fontSize: 5,
+  speedMin: 0.5,
+  speedMax: 1.6,
+  fade: 0.07,
+  lineCount: 12,
+  glow: 1.5
+});
+
 // ================= CYBORG UPGRADE: boot sequence, glitch, HUD count-up =================
 (function cyborgBootSequence() {
   const overlay = document.getElementById('bootOverlay');
@@ -3415,13 +3533,25 @@ if ('serviceWorker' in navigator) {
     'SYSTEM ONLINE'
   ];
 
+  // Vivid, fast "Advanced Pro Matrix" rain just for the boot screen —
+  // stopped as soon as the overlay finishes hiding to save CPU.
+  const bootRain = createMatrixRain(document.getElementById('bootMatrixCanvas'), {
+    fontSize: 5,
+    speedMin: 1.2,
+    speedMax: 3,
+    fade: 0.12,
+    lineCount: 22,
+    glow: 2
+  });
+
   function hideOverlay() {
     overlay.classList.add('boot-hidden');
     sessionStorage.setItem('relayBooted', '1');
-    setTimeout(() => overlay.remove(), 450);
+    setTimeout(() => { bootRain.stop(); overlay.remove(); }, 450);
   }
 
   if (prefersReduced || alreadyBooted) {
+    bootRain.stop();
     hideOverlay();
     return;
   }
