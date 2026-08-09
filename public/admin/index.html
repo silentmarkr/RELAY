@@ -18,22 +18,26 @@
 @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700;800&family=Space+Grotesk:wght@400;500;600;700&family=Rajdhani:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 
 :root {
-  /* ===== Cyber Neon Pro palette — modernized: glass surfaces, softer geometry ===== */
-  --bg: #060810;
-  --bg-raise: #0d1120;
-  --card: rgba(15, 20, 36, 0.66);
-  --card-hover: rgba(20, 26, 46, 0.8);
-  --border: rgba(255, 255, 255, 0.08);
-  --border-soft: rgba(148, 197, 255, 0.22);
-  --line: rgba(255, 255, 255, 0.07);
-  --text: #f2fbff;
-  --muted: #93a4c9;
-  --muted-dim: #5c6a8c;
-  --accent: #22e5ff;
+  /* ===== Cyber Neon Pro palette — matched 1:1 to OmniPOS's official
+     "Cyber Neon Pro" theme (theme-cyber-pro.css): same base/surface/
+     border/text/accent values, same Orbitron+Rajdhani pairing, same
+     sharp "circuit board" corner language — then pushed further with
+     extra HUD/glow layers below. ===== */
+  --bg: #05070d;              /* = OmniPOS --dm-bg */
+  --bg-raise: #101625;        /* = OmniPOS --dm-surface-alt */
+  --card: rgba(11, 15, 26, 0.72);       /* OmniPOS --dm-surface, glassed */
+  --card-hover: rgba(16, 22, 37, 0.85); /* OmniPOS --dm-surface-alt, glassed */
+  --border: #1f2a44;          /* = OmniPOS --dm-border */
+  --border-soft: rgba(34, 229, 255, 0.28);
+  --line: rgba(31, 42, 68, 0.7);
+  --text: #eafcff;            /* = OmniPOS --dm-text-primary */
+  --muted: #8ea3c9;           /* = OmniPOS --dm-text-secondary */
+  --muted-dim: #5a6a8c;       /* = OmniPOS --dm-text-muted */
+  --accent: #22e5ff;          /* = OmniPOS --dm-accent */
   --accent-bright: #7cf3ff;
-  --accent-hover: #ff2ee6;
+  --accent-hover: #ff2ee6;    /* = OmniPOS --dm-accent-hover */
   --accent-dim: #123a47;
-  --accent-soft: rgba(34, 229, 255, 0.14);
+  --accent-soft: rgba(34, 229, 255, 0.16); /* = OmniPOS --dm-accent-soft */
   --accent-text: #031014;
   --green: #3ddc84;
   --green-bg: rgba(61, 220, 132, 0.12);
@@ -44,15 +48,19 @@
   --amber: #ffb545;
   --amber-bg: rgba(255, 181, 69, 0.12);
   --amber-line: rgba(255, 181, 69, 0.32);
-  --font-ui: 'Space Grotesk', 'Rajdhani', system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  /* Font pairing — identical priority order to OmniPOS's --dm-font-heading
+     / --dm-font-body so headings and body text render the same family. */
+  --font-ui: 'Rajdhani', 'Inter', 'Segoe UI', system-ui, -apple-system, Roboto, sans-serif;
   --font-heading: 'Orbitron', 'Space Grotesk', sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --radius: 16px;
-  --radius-sm: 12px;
-  --radius-lg: 20px;
-  --border-width: 1px;
+  /* Border language — sharp "circuit board" corners + thicker line
+     weight, matching OmniPOS --dm-radius / --dm-border-width exactly. */
+  --radius: 6px;
+  --radius-sm: 4px;
+  --radius-lg: 8px;
+  --border-width: 1.5px;
   --ease: cubic-bezier(.16, 1, .3, 1);
-  --shadow-ambient: 0 20px 44px -22px rgba(0,0,0,.65);
+  --shadow-ambient: 0 20px 44px -22px rgba(0,0,0,.7);
 }
 
 /* ===== Cyber Neon: soft glass panels, techy display type, restrained glow ===== */
@@ -975,6 +983,80 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
   .boot-logo { animation: none; }
   .boot-bar-fill { animation: none; width: 100%; }
 }
+
+/* ================================================================
+   CYBER NEON PRO — ADVANCED LAYER
+   Pushes the theme further than the base OmniPOS "Cyber Neon Pro"
+   palette: circuit-trace border animation, per-card HUD corner
+   brackets, and a neon power-on flicker for headings. Same
+   var(--accent)/var(--accent-hover) pair throughout, so it always
+   tracks the palette above. All respect prefers-reduced-motion.
+   ================================================================ */
+
+/* Circuit-trace: a thin light pulse that travels the topbar's bottom
+   border, like current running through a PCB trace. */
+.topbar::after {
+  content: '';
+  position: absolute;
+  left: -30%; bottom: 0;
+  width: 30%; height: 1.5px;
+  background: linear-gradient(90deg, transparent, var(--accent), var(--accent-hover), transparent);
+  filter: drop-shadow(0 0 6px var(--accent));
+  animation: circuit-trace 5.5s linear infinite;
+  pointer-events: none;
+}
+@keyframes circuit-trace { to { left: 130%; } }
+@media (prefers-reduced-motion: reduce) { .topbar::after { display: none; } }
+
+/* Per-card HUD corner brackets — small sci-fi tick marks that sharpen
+   into view on hover, reinforcing the "circuit board" border language
+   borrowed from OmniPOS's Cyber Neon Pro (sharp corners, --dm-border). */
+/* Note: only .card gets this — .stat-card already owns ::before for its
+   top accent bar and ::after for the HUD lock-ring, so we don't want to
+   clash with either. */
+.card { position: relative; }
+.card::before {
+  content: '';
+  position: absolute;
+  top: -1px; left: -1px; right: -1px; bottom: -1px;
+  border-radius: inherit;
+  background:
+    linear-gradient(var(--accent-bright), var(--accent-bright)) top left / 10px 1.5px no-repeat,
+    linear-gradient(var(--accent-bright), var(--accent-bright)) top left / 1.5px 10px no-repeat,
+    linear-gradient(var(--accent-bright), var(--accent-bright)) top right / 10px 1.5px no-repeat,
+    linear-gradient(var(--accent-bright), var(--accent-bright)) top right / 1.5px 10px no-repeat,
+    linear-gradient(var(--accent-bright), var(--accent-bright)) bottom left / 10px 1.5px no-repeat,
+    linear-gradient(var(--accent-bright), var(--accent-bright)) bottom left / 1.5px 10px no-repeat,
+    linear-gradient(var(--accent-bright), var(--accent-bright)) bottom right / 10px 1.5px no-repeat,
+    linear-gradient(var(--accent-bright), var(--accent-bright)) bottom right / 1.5px 10px no-repeat;
+  opacity: 0;
+  transition: opacity .25s var(--ease);
+  pointer-events: none;
+}
+.card:hover::before { opacity: .85; }
+
+/* Neon power-on flicker for the brand title + section headings — a
+   one-shot "tube warming up" flicker on load, echoing the boot
+   sequence's own power-up feel. */
+@media (prefers-reduced-motion: no-preference) {
+  h1, .topbar-title {
+    animation: neon-power-on 1.6s var(--ease) 1;
+    text-shadow: 0 0 12px rgba(34,229,255,.35);
+  }
+}
+@keyframes neon-power-on {
+  0%   { opacity: 0; text-shadow: none; }
+  4%   { opacity: 1; text-shadow: 0 0 2px rgba(34,229,255,.8); }
+  6%   { opacity: .3; text-shadow: none; }
+  10%  { opacity: 1; text-shadow: 0 0 18px rgba(34,229,255,.7); }
+  12%  { opacity: .5; }
+  16%  { opacity: 1; text-shadow: 0 0 12px rgba(34,229,255,.35); }
+  100% { opacity: 1; text-shadow: 0 0 12px rgba(34,229,255,.35); }
+}
+
+/* stat-card corner brackets need overflow visible for the hover glow
+   from .card::before to read correctly against the top accent bar. */
+.stat-card { isolation: isolate; }
 
 </style>
 </head>
@@ -3462,7 +3544,7 @@ function createMatrixRain(canvas, opts) {
   }
 
   function frame() {
-    ctx.fillStyle = `rgba(6, 8, 16, ${settings.fade})`;
+    ctx.fillStyle = `rgba(5, 7, 13, ${settings.fade})`;
     ctx.fillRect(0, 0, w, h);
     // NOTE: canvas 2D `font` does not resolve CSS custom properties
     // (var(--font-mono)) — must be a concrete font stack or it silently
@@ -3495,7 +3577,7 @@ function createMatrixRain(canvas, opts) {
   }
 
   resize();
-  ctx.fillStyle = '#06080f';
+  ctx.fillStyle = '#05070d';
   ctx.fillRect(0, 0, w, h);
   raf = requestAnimationFrame(frame);
   window.addEventListener('resize', resize);
