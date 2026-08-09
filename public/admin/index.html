@@ -2069,6 +2069,8 @@ function createProgressController(ids) {
   let startedAt = null;           // Date.now() ng simula ng build na ito (para sa elapsed/ETA)
   let lastRealChangeAt = Date.now(); // huling oras na TUMAAS ang totoong target % (para sa trickle)
   let lastRealPercent = 0;
+  let attemptStartedAt = Date.now(); // Date.now() nung tinawag ang show() — para sa stale-state guard
+  let seenInProgress = false;        // nakita na ba nating "done:false" (totoong tumatakbo) sa build attempt na ito
 
   if (stepsEl) {
     stepsEl.innerHTML = BUILD_STAGE_SEQUENCE.map(s =>
@@ -2181,6 +2183,8 @@ function createProgressController(ids) {
     startedAt = Date.now();
     lastRealChangeAt = Date.now();
     lastRealPercent = 0;
+    attemptStartedAt = Date.now();
+    seenInProgress = false;
     renderPercent(0);
     applyTarget({ percent: 0, message: 'Starting the build...', stage: 'idle', done: false, startedAt });
     startAnim();
@@ -2202,12 +2206,38 @@ function createProgressController(ids) {
   // requests. Polling automatically stops once the progress is "done"
   // (whether finished or errored) — the animation tick loop is
   // responsible for finishing the climb to the final value.
+  //
+  // STALE-STATE GUARD (fix para sa "biglang nag-Tapos/frozen sa 0%"
+  // report): sa MABAGAL na koneksyon, ang GAAN (walang laman) na GET
+  // request na ito ay maaaring umabot at masagot ng RELAY server BAGO
+  // pa man kumpletong dumating/na-parse ang buong BODY ng mas mabigat
+  // na POST /build-release o /publish-release request — kaya wala pa
+  // talagang tumatakbong build sa server sa oras na iyon. Ang problema:
+  // ang DEFAULT/idle state ng server (`buildProgressState`) ay may
+  // `done: true` bilang default — kahit walang build na tumatakbo pa
+  // man! Kung agad nating pagtitiwalaan ang unang "done:true" na ito,
+  // akala natin TAPOS NA agad ang build (at itigil ang polling) gayong
+  // hindi pa nga ito nagsisimula — nagre-resulta sa isang UI na
+  // naka-freeze magpakailanman (0%/lumang %) habang totoong tumatakbo
+  // pa rin ang build sa likod. Ang fix: hindi muna pinagtitiwalaan ang
+  // "done:true" HANGGA'T hindi pa natin nakikitang totoong "done:false"
+  // (aktwal na tumatakbong build) para sa attempt na ito — MALIBAN
+  // kung lumagpas na ng 5s (grace period, sapat na oras para makumpleto
+  // ang pagdating ng POST body kahit sa mabagal na koneksyon), kung
+  // saan pinagtitiwalaan na rin natin ito (fallback, para hindi rin
+  // ito walang katapusang maghintay kung talagang mabilis lang matapos
+  // ang build o may ibang aberya).
   async function pollOnce() {
     try {
       const data = await api('/relay/admin/api/build-progress');
       if (data && data.success && data.progress) {
-        applyTarget(data.progress);
-        if (data.progress.done) stopPolling();
+        const p = data.progress;
+        if (p.done && !seenInProgress && (Date.now() - attemptStartedAt) < 5000) {
+          return; // malamang leftover pa lang mula sa nakaraang build — balewalain, hintayin ang susunod na poll
+        }
+        if (!p.done) seenInProgress = true;
+        applyTarget(p);
+        if (p.done) stopPolling();
       }
     } catch (err) {
       // don't let one failed poll stop the whole build —
