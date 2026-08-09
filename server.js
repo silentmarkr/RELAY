@@ -2097,6 +2097,41 @@ app.post('/relay/check-feature-status', requireApiKey, requireAllowedDevice, rat
     res.json({ success: true, statuses, forceIntegrityCheck });
 });
 
+// --------------------------------------------------------------
+// POST /relay/pending-integrity-check
+// BAGONG dagdag — LAYUNIN: pabilisin ang "🔄 I-check ngayon" (Check
+// Now) na pindot ng admin sa integrity monitor. Dati, ang tanging
+// paraan para maabot ng OMNIPOS client ang forceIntegrityCheck flag
+// ay ang /relay/check-feature-status, na tumatakbo lang kada ~30s
+// (RELAY_FEATURE_SYNC_INTERVAL_MS sa client) — ibig sabihin, pwedeng
+// umabot ng malapit 30 segundo bago talaga ma-trigger ang check-in
+// pagkatapos pindutin ng admin ang "Check Now".
+//
+// Ito ay ISANG MABILIS, MAGAAN na endpoint na LAMANG — isang Set
+// lookup (walang manifest, walang file hashing, walang
+// logActivity spam) — para SEPARADO itong ma-poll ng client sa MAS
+// MADALAS na pagitan (ilang segundo lang) nang hindi kinakailangang
+// baguhin ang normal na 30s na cadence ng check-feature-status
+// (na siyang humahawak pa rin ng feature lockdown/restore, hindi ito
+// pinapalitan). Kapag "may pending" (true) ang sagot dito, agad na
+// tinatawag ng client ang buong runRelayIntegrityCheckin() (kasama
+// ang buong manifest) — doon pa rin talaga nangyayari ang aktwal na
+// paghahambing sa baseline.
+// Body: { installationId }
+// --------------------------------------------------------------
+app.post('/relay/pending-integrity-check', requireApiKey, requireAllowedDevice, rateLimit('pending-integrity-check', 150, 5 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
+    const { installationId } = req.body;
+    if (!installationId) {
+        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+    }
+    let pending = false;
+    if (pendingIntegrityChecks.has(installationId)) {
+        pending = true;
+        pendingIntegrityChecks.delete(installationId);
+    }
+    res.json({ success: true, pending });
+});
+
 if (!MAIL_USER || !MAIL_PASS || !RECIPIENT_EMAIL) {
     console.error('❌ Kulang ang env vars: RELAY_MAIL_USER, RELAY_MAIL_PASS, RELAY_RECIPIENT_EMAIL. Tingnan ang .env.example.');
     process.exit(1);
