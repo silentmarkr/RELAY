@@ -3,7 +3,7 @@
 // ====================================================================
 // OmniPOS Unlock Relay — HIWALAY na maliit na service, hosted lang ng
 // developer/owner (HINDI ito kasama sa client package na binebenta/
-// dinideploy sa mga kliyente).
+// dinideploy sa mga kliyente). 
 //
 // LAYUNIN: dating nangyayari LAHAT (OTP generation, storage,
 // verification) sa loob ng server ng bawat kliyente — kaya kahit
