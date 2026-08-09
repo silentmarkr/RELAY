@@ -1507,11 +1507,22 @@ function getActiveUnlockedFeatureIds(installationId) {
 }
 
 app.get('/relay/admin/api/devices', requireAdminKey, async (req, res) => {
-    const ids = [...seenDevices.keys()];
+    // FIX: dati, `ids` ay mula lang sa seenDevices.keys() — ang isang
+    // in-memory Map na NAWAWALA tuwing mag-restart ang RELAY server
+    // (hal. git push/redeploy sa Render). Kaya kung offline/hindi pa
+    // ulit nag-request ang isang ALLOWED device mula noong huling
+    // restart, TANGGAL ITO sa listahan na ito (wala kang makikitang
+    // row para dito) — kasama na ang naka-save nitong LABEL, kahit
+    // permanente itong naka-imbak sa deviceLabels (na naka-persist).
+    // Ngayon, ID UNION ng seenDevices AT allowedDevices ang ginagamit
+    // dito, para LAGING lumabas ang bawat allowed device sa listahan
+    // — may label pa rin (mula sa persisted deviceLabels), kahit
+    // offline ito o wala pang "seen" na record sa memory ngayon.
+    const ids = [...new Set([...seenDevices.keys(), ...allowedDevices])];
     const onlineMap = await getOnlineStatusMap(ids);
 
     const seen = ids.map((installationId) => {
-        const meta = seenDevices.get(installationId);
+        const meta = seenDevices.get(installationId) || null;
         const unlockedIds = getActiveUnlockedFeatureIds(installationId).filter(id => id !== DEMO_FEATURE_ID);
         const activations = Object.values(issuedUnlocks[installationId] || {});
         const lastActivationAt = activations.length ? Math.max(...activations.map(a => a.issuedAt)) : null;
@@ -1563,7 +1574,7 @@ app.get('/relay/admin/api/devices', requireAdminKey, async (req, res) => {
             integrityHasBaseline: integrityRecord ? !!integrityRecord.hasBaseline : null,
             integrityBaselineVersion: integrityRecord ? integrityRecord.baselineVersion : null
         };
-    }).sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+    }).sort((a, b) => (b.lastSeenAt || 0) - (a.lastSeenAt || 0)); // FIX: kung wala pang meta (hindi pa na-"seen" mula noong huling restart), walang lastSeenAt (undefined) — treat as 0 para hindi maging NaN ang sort at para bumaba na lang sila sa ibaba ng listahan sa halip na basta-basta ang pagkakasunod-sunod
 
     res.json({
         success: true,

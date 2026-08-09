@@ -312,6 +312,52 @@ h1 { font-family: var(--font-ui); font-size: 19px; font-weight: 700; margin: 0 0
   background: linear-gradient(90deg, var(--accent-dim), var(--accent));
   border-radius: 999px;
 }
+
+/* ---------- MODERN BUILD PROGRESS (build-release / publish-release) ---------- */
+.bprog { margin-top: 14px; padding: 12px 14px; background: var(--bg-raise); border: 1px solid var(--line); border-radius: 12px; }
+.bprog-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 8px; }
+.bprog-label { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.bprog-label .name { font-size: 12.5px; color: var(--text); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bprog-pct { font-family: var(--font-mono); font-size: 20px; font-weight: 700; color: var(--accent); flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.bprog-pct small { font-size: 12px; font-weight: 600; opacity: .7; }
+.bprog-spinner {
+  flex: 0 0 auto; width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid var(--accent-dim); border-top-color: var(--accent);
+  animation: bprog-spin .7s linear infinite;
+}
+.bprog.is-done .bprog-spinner, .bprog.is-error .bprog-spinner { display: none; }
+@keyframes bprog-spin { to { transform: rotate(360deg); } }
+.bprog-track {
+  position: relative; background: var(--bg); border: 1px solid var(--line); border-radius: 999px;
+  height: 12px; overflow: hidden;
+}
+.bprog-fill {
+  position: relative; height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+  transition: width .18s linear;
+  overflow: hidden;
+}
+.bprog.is-error .bprog-fill { background: #e05a5a; }
+.bprog.is-done .bprog-fill { background: linear-gradient(90deg, #2fae66, #4ade80); }
+/* diagonal "marching" shine para VISIBLE na TUMATAKBO/live ang build kahit
+   nasa gitna lang ng isang mahabang hakbang (hal. zip) na walang granular
+   % update galing sa server bawat segundo — hindi ito static/frozen bar */
+.bprog-shine {
+  position: absolute; inset: 0;
+  background: repeating-linear-gradient(-45deg, rgba(255,255,255,.22) 0 8px, rgba(255,255,255,0) 8px 16px);
+  animation: bprog-shine-move 1s linear infinite;
+}
+.bprog.is-done .bprog-shine, .bprog.is-error .bprog-shine { display: none; }
+@keyframes bprog-shine-move { from { background-position-x: 0; } to { background-position-x: 32px; } }
+.bprog-steps { display: flex; justify-content: space-between; margin-top: 8px; font-size: 10px; }
+.bprog-step { color: var(--muted); display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+.bprog-step .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--line); flex: 0 0 auto; transition: background .2s ease, box-shadow .2s ease; }
+.bprog-step.is-active { color: var(--accent); font-weight: 600; }
+.bprog-step.is-active .dot { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+.bprog-step.is-complete .dot { background: var(--accent); }
+.bprog.is-error .bprog-step.is-active { color: #e05a5a; }
+.bprog.is-error .bprog-step.is-active .dot { background: #e05a5a; box-shadow: 0 0 0 3px rgba(224,90,90,.25); }
+.bprog-meta { display: flex; justify-content: space-between; margin-top: 6px; font-size: 11px; color: var(--muted); font-family: var(--font-mono); }
 .expiring-item {
   display: flex;
   justify-content: space-between;
@@ -1345,13 +1391,21 @@ a:focus-visible,
         <div class="backup-row" style="margin-top:10px;">
           <button class="btn-primary" onclick="publishRelease()" id="publishReleaseBtn">🚀 Build & Publish</button>
         </div>
-        <div id="publishProgressWrap" class="abar-row" style="margin-top:12px; display:none;">
-          <div class="abar-label">
-            <span class="name" id="publishProgressLabel">Building...</span>
-            <span class="count" id="publishProgressPercent">0%</span>
+        <div id="publishProgressWrap" class="bprog" style="display:none;">
+          <div class="bprog-top">
+            <div class="bprog-label">
+              <span class="bprog-spinner" id="publishProgressSpinner"></span>
+              <span class="name" id="publishProgressLabel">Starting the build...</span>
+            </div>
+            <span class="bprog-pct" id="publishProgressPercent">0<small>%</small></span>
           </div>
-          <div class="abar-track">
-            <div class="abar-fill" id="publishProgressFill" style="width:0%; transition: width .3s ease;"></div>
+          <div class="bprog-track">
+            <div class="bprog-fill" id="publishProgressFill" style="width:0%;"><div class="bprog-shine"></div></div>
+          </div>
+          <div class="bprog-steps" id="publishProgressSteps"></div>
+          <div class="bprog-meta">
+            <span id="publishProgressElapsed">0s lumipas</span>
+            <span id="publishProgressEta">Kinukwenta ang natitirang oras...</span>
           </div>
         </div>
       </div>
@@ -1369,13 +1423,21 @@ a:focus-visible,
         <div class="backup-note" style="margin-top:6px;">
           The caption is only for the history log below — it doesn't change the filename of the built package (it's always <code>omnipos-client.zip</code>, just overwritten each build).
         </div>
-        <div id="buildProgressWrap" class="abar-row" style="margin-top:12px; display:none;">
-          <div class="abar-label">
-            <span class="name" id="buildProgressLabel">Building...</span>
-            <span class="count" id="buildProgressPercent">0%</span>
+        <div id="buildProgressWrap" class="bprog" style="display:none;">
+          <div class="bprog-top">
+            <div class="bprog-label">
+              <span class="bprog-spinner" id="buildProgressSpinner"></span>
+              <span class="name" id="buildProgressLabel">Starting the build...</span>
+            </div>
+            <span class="bprog-pct" id="buildProgressPercent">0<small>%</small></span>
           </div>
-          <div class="abar-track">
-            <div class="abar-fill" id="buildProgressFill" style="width:0%; transition: width .3s ease;"></div>
+          <div class="bprog-track">
+            <div class="bprog-fill" id="buildProgressFill" style="width:0%;"><div class="bprog-shine"></div></div>
+          </div>
+          <div class="bprog-steps" id="buildProgressSteps"></div>
+          <div class="bprog-meta">
+            <span id="buildProgressElapsed">0s lumipas</span>
+            <span id="buildProgressEta">Kinukwenta ang natitirang oras...</span>
           </div>
         </div>
         <div class="backup-row" style="margin-top:10px;">
@@ -1938,77 +2000,189 @@ async function downloadBackup(auto = false) {
 let lastLoadedDownloadCodes = [];
 
 // --------------------------------------------------------------
-// createProgressController(ids) — a hand-built progress-bar controller
-// that "smooths" the % climbing on screen, because the real
-// progress mula sa RELAY (GET /relay/admin/api/build-progress) ay
-// progress JUMPS in big steps on each 700ms poll — for example
-// from 10% (the "clone" step is done) straight to 32.5% (the "filter"
-// step is done too, since it is almost instant) — so if
-// each poll result were put directly into fill.style.width,
-// the number on screen would look like it "jumps"/has gaps instead of
-// dahan-dahang bumibilang.
+// createProgressController(ids) — modernized build-progress-bar
+// controller.
 //
-// The fix: a separate "target" (from the real poll) and
-// "displayed" (what is actually seen on screen) percent. There is
-// its own faster tick loop (every 120ms) that gradually
-// increments displayed by +1 repeatedly toward the target
-// — so even if the real progress jumps a lot between
-// two polls, the UI keeps counting smoothly by 1% on every
-// tick, with NO gaps, until it reaches the real value — and once
-// the real build is "done" (100% or error), it snaps here immediately
-// instead of waiting for the animation to catch up step by step.
+// Ang REAL progress mula sa RELAY (GET /relay/admin/api/build-progress)
+// ay JUMPS in big steps sa bawat 700ms poll — hal. mula 10% (tapos na
+// ang "clone" step) diretso sa 32.5% (tapos na rin ang "filter" step,
+// dahil halos instant lang ito). Kung ito lang ang basta ipapakita,
+// dalawang problema: (1) "jumpy"/parang may laktaw ang bilang sa
+// screen sa halip na dahan-dahang bumibilang, at (2) sa mga
+// MAHABANG hakbang na WALANG granular na update mula sa server sa
+// pagitan ng dalawang totoong % (particular na ang "zip" step —
+// walang per-file/per-chunk na progress callback ito, kaya iisang
+// bigla-bigla lang na jump mula sa simula ng zip step papuntang
+// 100% pag "done" na) — MUKHANG NAG-FREEZE ang bar nang ilang
+// segundo (o minuto sa malaking release) bago biglang tumalon sa
+// 100%, imbes na makita talagang TUMATAKBO ito.
+//
+// Ang fix dito ay may TATLONG bahagi:
+//   1. "target" (galing sa totoong 700ms poll) vs "displayed" (ang
+//      talagang nakikita sa screen) — animate papunta dito nang
+//      smooth sa halip na direktang i-render ang bawat poll result.
+//   2. "TRICKLE" — habang naka-stall ang target (walang bagong %
+//      mula sa server sa loob ng >1.2s, hal. sa gitna ng "zip" step),
+//      dahan-dahan pa ring dumadagdag ang displayed % papunta sa isang
+//      "soft ceiling" (hindi lalampas sa totoong target + isang maliit
+//      na buffer, at hinding-hindi aabot sa 100% hangga't hindi pa
+//      talaga "done"), gamit ang exponential easing — kaya laging may
+//      TAKBO/kilos ang bar bawat segundo, hindi ito tumitigil habang
+//      naghihintay.
+//   3. Live na "Xs lumipas" (elapsed) at "~Ys natitira" (ETA) na
+//      countdown, kinakalkula mula sa startedAt (mula mismo sa server
+//      progress object) at sa kasalukuyang rate ng pag-angat ng %,
+//      updated bawat tick (250ms) — hindi lang nag-uupdate bawat
+//      pag-abot ng bagong integer % kundi live TALAGA per second.
 // --------------------------------------------------------------
+const BUILD_STAGE_SEQUENCE = [
+  { key: 'clone', label: 'Clone' },
+  { key: 'filter', label: 'Filter' },
+  { key: 'env', label: 'Env' },
+  { key: 'obfuscate', label: 'Obfuscate' },
+  { key: 'zip', label: 'Zip' },
+  { key: 'done', label: 'Tapos' }
+];
+
+function formatDuration(ms) {
+  if (!isFinite(ms) || ms < 0) ms = 0;
+  const totalSec = Math.round(ms / 1000);
+  if (totalSec < 60) return totalSec + 's';
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  return `${min}m ${sec}s`;
+}
+
 function createProgressController(ids) {
   const wrap = document.getElementById(ids.wrap);
   const fill = document.getElementById(ids.fill);
   const label = document.getElementById(ids.label);
   const percentEl = document.getElementById(ids.percent);
+  const stepsEl = document.getElementById(ids.steps);
+  const elapsedEl = document.getElementById(ids.elapsed);
+  const etaEl = document.getElementById(ids.eta);
 
   let pollInterval = null;
   let animInterval = null;
-  let displayed = 0;
+  let displayed = 0;              // ang % na TALAGANG nakikita sa screen ngayon
   let target = { percent: 0, message: '', stage: 'idle', done: false };
+  let startedAt = null;           // Date.now() ng simula ng build na ito (para sa elapsed/ETA)
+  let lastRealChangeAt = Date.now(); // huling oras na TUMAAS ang totoong target % (para sa trickle)
+  let lastRealPercent = 0;
+
+  if (stepsEl) {
+    stepsEl.innerHTML = BUILD_STAGE_SEQUENCE.map(s =>
+      `<span class="bprog-step" data-stage="${s.key}"><span class="dot"></span>${s.label}</span>`
+    ).join('');
+  }
+
+  function renderSteps(stage, done, isError) {
+    if (!stepsEl) return;
+    const order = BUILD_STAGE_SEQUENCE.map(s => s.key);
+    let activeIdx = order.indexOf(stage);
+    if (stage === 'idle') activeIdx = -1;
+    if (done && !isError) activeIdx = order.length - 1; // "done" step
+    stepsEl.querySelectorAll('.bprog-step').forEach((el) => {
+      const idx = order.indexOf(el.dataset.stage);
+      el.classList.toggle('is-active', idx === activeIdx);
+      el.classList.toggle('is-complete', idx > -1 && idx < activeIdx);
+    });
+  }
 
   function renderPercent(p) {
-    if (fill) fill.style.width = p + '%';
-    if (percentEl) percentEl.innerText = p + '%';
+    const shown = Math.max(0, Math.min(100, p));
+    const rounded = Math.round(shown * 10) / 10; // 1 decimal — para makita talagang "tumatakbo per second" ang bilang, hindi lang buo-buong integer steps
+    if (fill) fill.style.width = shown + '%';
+    if (percentEl) percentEl.innerHTML = rounded + '<small>%</small>';
+  }
+
+  function renderMeta() {
+    if (!startedAt) return;
+    const now = Date.now();
+    const elapsedMs = now - startedAt;
+    if (elapsedEl) elapsedEl.innerText = formatDuration(elapsedMs) + ' lumipas';
+    if (!etaEl) return;
+    if (target.done) {
+      etaEl.innerText = target.stage === 'error' ? 'Nabigo.' : 'Tapos na!';
+      return;
+    }
+    // ETA estimate: sa kasalukuyang rate (displayed% sa loob ng elapsed
+    // time), gaano pa katagal bago umabot sa 100%. Kailangan ng >2%
+    // progress bago tumatak ang unang estimate (kung hindi, sobrang
+    // maingay/nagbabago-bago pa ang estimate sa napakaagang segundo).
+    if (displayed < 2 || elapsedMs < 800) {
+      etaEl.innerText = 'Kinukwenta ang natitirang oras...';
+      return;
+    }
+    const msPerPercent = elapsedMs / displayed;
+    const remainingPercent = Math.max(0, 100 - displayed);
+    const etaMs = msPerPercent * remainingPercent;
+    etaEl.innerText = '~' + formatDuration(etaMs) + ' na lang';
   }
 
   function applyTarget(progress) {
+    const prevPercent = target.percent || 0;
     target = progress || target;
-    if (label) label.innerText = target.message || 'Building...';
-    if (fill) {
-      fill.style.background = target.stage === 'error'
-        ? '#e05a5a'
-        : 'linear-gradient(90deg, var(--accent-dim), var(--accent))';
+    const newPercent = target.percent || 0;
+    if (newPercent > prevPercent || target.done) {
+      lastRealChangeAt = Date.now();
     }
+    lastRealPercent = newPercent;
+    if (progress && progress.startedAt) startedAt = progress.startedAt;
+    if (label) label.innerText = target.message || 'Building...';
+    if (wrap) {
+      wrap.classList.toggle('is-error', target.stage === 'error');
+      wrap.classList.toggle('is-done', !!target.done && target.stage !== 'error');
+    }
+    renderSteps(target.stage, target.done, target.stage === 'error');
   }
 
   function tick() {
-    const targetPct = Math.max(0, Math.min(100, Math.round(target.percent || 0)));
-    if (target.done || displayed > targetPct) {
-      // the real build finished (or the target dropped due to a new
-      // build/reset) — snap immediately, no need to animate step by step
+    const targetPct = Math.max(0, Math.min(100, target.percent || 0));
+    if (target.done) {
+      // tapos na ang totoong build (o nag-error) — i-snap agad, walang
+      // dahilan pang mag-antay pa ang animation na umabot dito paunti-unti
       displayed = targetPct;
-    } else if (displayed < targetPct) {
-      displayed += 1;
+    } else if (displayed > targetPct) {
+      displayed = targetPct;
+    } else {
+      // TRICKLE: kung matagal nang walang bagong totoong % (>1.2s),
+      // dahan-dahan pa ring gumagalaw ang displayed pasulong papunta sa
+      // isang soft ceiling na HINDI lalampas ng ~2.5% mula sa huling
+      // totoong % — hindi ito basta-basta hihinto/mag-i-freeze kahit
+      // matagal ang kasalukuyang hakbang (hal. "zip"), pero hinding-hindi
+      // rin ito uunahan ang totoong progress papuntang 100%.
+      const stalledMs = Date.now() - lastRealChangeAt;
+      const trickleRoom = stalledMs > 1200 ? Math.min(2.5, (stalledMs - 1200) / 4000 * 2.5) : 0;
+      const softCeiling = Math.min(99.4, targetPct + trickleRoom);
+      if (displayed < softCeiling) {
+        // exponential easing papunta sa soft ceiling — mabilis sa simula,
+        // dumadahan-dahan habang papalapit — kaya laging may TAKBO/kilos
+        // bawat tick (250ms) sa halip na tumigil bigla
+        displayed += Math.max(0.05, (softCeiling - displayed) * 0.12);
+      }
     }
     renderPercent(displayed);
+    renderMeta();
   }
 
   function startAnim() {
     stopAnim();
-    animInterval = setInterval(tick, 120);
+    animInterval = setInterval(tick, 250);
+    tick();
   }
   function stopAnim() {
     if (animInterval) { clearInterval(animInterval); animInterval = null; }
   }
 
   function show() {
-    if (wrap) wrap.style.display = 'block';
+    if (wrap) { wrap.style.display = 'block'; wrap.classList.remove('is-error', 'is-done'); }
     displayed = 0;
+    startedAt = Date.now();
+    lastRealChangeAt = Date.now();
+    lastRealPercent = 0;
     renderPercent(0);
-    applyTarget({ percent: 0, message: 'Starting the build...', stage: 'idle', done: false });
+    applyTarget({ percent: 0, message: 'Starting the build...', stage: 'idle', done: false, startedAt });
     startAnim();
   }
 
@@ -2052,10 +2226,10 @@ function createProgressController(ids) {
 
   function stop() {
     stopPolling();
-    // give the animator ~2s more to reach/catch up to the final
+    // give the animator ~1.5s more to reach/catch up to the final
     // real value (e.g. 100%) before it fully stops outside,
     // instead of the bar suddenly freezing mid-climb.
-    setTimeout(stopAnim, 2000);
+    setTimeout(stopAnim, 1500);
   }
 
   return { show, hide, setTarget, startPolling, stop };
@@ -2063,11 +2237,13 @@ function createProgressController(ids) {
 
 const buildProgressCtl = createProgressController({
   wrap: 'buildProgressWrap', fill: 'buildProgressFill',
-  label: 'buildProgressLabel', percent: 'buildProgressPercent'
+  label: 'buildProgressLabel', percent: 'buildProgressPercent',
+  steps: 'buildProgressSteps', elapsed: 'buildProgressElapsed', eta: 'buildProgressEta'
 });
 const publishProgressCtl = createProgressController({
   wrap: 'publishProgressWrap', fill: 'publishProgressFill',
-  label: 'publishProgressLabel', percent: 'publishProgressPercent'
+  label: 'publishProgressLabel', percent: 'publishProgressPercent',
+  steps: 'publishProgressSteps', elapsed: 'publishProgressElapsed', eta: 'publishProgressEta'
 });
 
 async function buildRelease() {
@@ -2513,8 +2689,18 @@ async function loadDevices() {
   } else {
     allowedEl.innerHTML = data.allowedDevices.map(id => {
       const seen = data.seenDevices.find(d => d.installationId === id);
+      // FIX: dating ang "label" ay basta na lang nawawala kapag OFFLINE
+      // ang device (o offline pa mula noong huling RELAY restart) —
+      // dahil ang buong row entry para dito ay nawawala rin sa dati.
+      // Ngayon, LAGING may row entry ang bawat allowed device (server
+      // fix sa /relay/admin/api/devices) — pero ang `seen.lastSeenAt`
+      // ang tanging tamang paraan para malaman kung may aktwal na
+      // "seen" (heartbeat/request) na data talaga tayong meron, dahil
+      // ang ibang fields (storeName, requestCount, atbp.) ay pwede pa
+      // ring wala kahit LABELED na ang device.
+      const hasSeenData = !!(seen && seen.lastSeenAt);
       const devLabel = seen ? seen.label : null;
-      const fallback = seen ? (seen.storeName || 'No name') : 'No requests seen yet';
+      const fallback = hasSeenData ? (seen.storeName || 'No name') : 'No requests seen yet';
       const displayName = devLabel ? `🏷️ ${devLabel}` : fallback;
       const revokeName = devLabel || fallback;
       const online = !!(seen && seen.online);
@@ -2525,7 +2711,7 @@ async function loadDevices() {
           <div class="id">${id}
             <span class="badge" style="${online ? 'background:var(--green-bg,#0f2e1c); color:var(--green,#4ade80);' : 'background:var(--gray-bg,#2a2a2a); color:var(--gray,#888);'}">${online ? '🟢 ONLINE' : '⚪ OFFLINE'}</span>
           </div>
-          <div class="meta">${displayName}${devLabel && seen ? ' · ' + (seen.storeName || 'no self-reported name') : ''}${seen ? ' · ' + timeAgo(seen.lastSeenAt) : ''}</div>
+          <div class="meta">${displayName}${devLabel && hasSeenData ? ' · ' + (seen.storeName || 'no self-reported name') : ''}${hasSeenData ? ' · ' + timeAgo(seen.lastSeenAt) : ''}</div>
         </div>
         <div class="row-actions">
           <button class="btn-detail" onclick="openDeviceDetail('${id}')">Details</button>
