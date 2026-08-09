@@ -1561,6 +1561,31 @@ let adminKey = sessionStorage.getItem('relayAdminKey') || '';
 let lastLoadedDevices = [];
 const selectedForReset = new Set(); // installationIds checked in the "Allowed devices" list
 
+// FIX: "kusang bumabalik sa taas" / auto-scroll-to-top bug — the periodic
+// background refreshers (loadDevices every 8s, loadDeviceDetail every 8s,
+// loadAnalytics every 15s) rebuild list containers via innerHTML, which
+// can change the page's total height for a moment (fewer/more rows,
+// images loading, etc). When that happens while the page is scrolled
+// down, the browser clamps the scroll position to the new (shorter)
+// height — which reads as "the page blinked and jumped to the top",
+// even though nothing was actually wrong with your scrolling. This
+// wrapper simply remembers where you were and puts you back after the
+// refresh finishes, so background polling no longer moves your scroll
+// position at all.
+function withScrollPreserved(fn) {
+  return async function (...args) {
+    const scrollY = window.scrollY;
+    const result = await fn.apply(this, args);
+    // Restore after the browser has applied the DOM changes (next paint),
+    // not synchronously — otherwise we'd restore before the layout that
+    // caused the jump has actually happened.
+    requestAnimationFrame(() => {
+      if (Math.abs(window.scrollY - scrollY) > 0) window.scrollTo(0, scrollY);
+    });
+    return result;
+  };
+}
+
 function escapeAttr(str) {
   return String(str).replace(/'/g, "\\'").replace(/"/g, '&quot;');
 }
@@ -2906,7 +2931,7 @@ async function openDeviceDetail(installationId) {
   await loadDeviceDetail();
   await loadCloudBackupDetail(installationId);
   if (detailPollTimer) clearInterval(detailPollTimer);
-  detailPollTimer = setInterval(loadDeviceDetail, 8000);
+  detailPollTimer = setInterval(withScrollPreserved(loadDeviceDetail), 8000);
 }
 
 function closeDeviceDetail() {
@@ -2955,7 +2980,7 @@ async function openAnalytics() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   await loadAnalytics();
   if (analyticsPollTimer) clearInterval(analyticsPollTimer);
-  analyticsPollTimer = setInterval(loadAnalytics, 15000);
+  analyticsPollTimer = setInterval(withScrollPreserved(loadAnalytics), 15000);
 }
 
 function closeAnalytics() {
@@ -3505,7 +3530,8 @@ function startPolling() {
   loadDownloadCodes();
   loadBuildHistory();
   if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(() => { if (adminKey) loadDevices(); }, 8000);
+  const loadDevicesNoJump = withScrollPreserved(loadDevices);
+  pollTimer = setInterval(() => { if (adminKey) loadDevicesNoJump(); }, 8000);
 }
 
 if (adminKey) { renderLastExportNote(); renderAutoBackupToggle(); startPolling(); }
