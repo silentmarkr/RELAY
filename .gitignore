@@ -1,6 +1,30 @@
 node_modules/
 .env
 relay-fallback.log
+
+# Runtime data files written by server.js at runtime — these contain
+# real customer/device data (and in some cases secrets), never source
+# code, so none of them belong in git. Previously only 3 of these were
+# listed; the rest were an accidental leak risk if this repo is ever
+# pushed to a remote.
 allowed-devices.json
 issued-unlocks.json
 activity-log.json
+backup-checkins.json
+build-history.json
+clone-splits.json
+device-fingerprints.json
+device-labels.json
+download-codes.json
+integrity-status.json
+release-baselines.json
+system-version.json
+targeted-releases.json
+
+# Private signing key — CRITICAL, must only ever live on the developer's
+# own hosting (or as the RELAY_PRIVATE_KEY_PEM env var). Committing this
+# would let anyone who gets repo access forge valid unlock signatures.
+relay-private-key.pem
+
+# Misc runtime logs
+*.log

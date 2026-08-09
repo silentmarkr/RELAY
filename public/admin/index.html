@@ -32,7 +32,9 @@
   --line: rgba(31, 42, 68, 0.7);
   --text: #eafcff;            /* = OmniPOS --dm-text-primary */
   --muted: #8ea3c9;           /* = OmniPOS --dm-text-secondary */
-  --muted-dim: #5a6a8c;       /* = OmniPOS --dm-text-muted */
+  --muted-dim: #7186ab;       /* lightened from OmniPOS --dm-text-muted (#5a6a8c) for
+                                  readable contrast against the darker --bg here (#05070d
+                                  is deeper than OmniPOS's typical panel background) */
   --accent: #22e5ff;          /* = OmniPOS --dm-accent */
   --accent-bright: #7cf3ff;
   --accent-hover: #ff2ee6;    /* = OmniPOS --dm-accent-hover */
@@ -379,6 +381,16 @@ button {
 button:hover { filter: brightness(1.12); transform: translateY(-1px); }
 button:active { transform: scale(0.97); }
 button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: none; }
+/* Keyboard focus — neon ring for Tab navigation, mirrors the text-input
+   focus glow so keyboard users get the same "powered on" feedback as
+   mouse hover (buttons previously had no visible focus state at all). */
+button:focus-visible,
+a:focus-visible,
+.icon-btn:focus-visible,
+.tab-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent), 0 0 14px rgba(34,229,255,.5);
+}
 .btn-allow { background: linear-gradient(135deg, var(--green), #2fb56e); color: #052b0c; }
 .btn-revoke { background: linear-gradient(135deg, var(--red), #d43a52); color: #2b0605; }
 .btn-primary {
@@ -427,6 +439,7 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
 .badge-allowed { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-line); }
 .badge-blocked { background: var(--red-bg); color: var(--red); border: 1px solid var(--red-line); }
 .otp-code {
+  position: relative;
   font-family: var(--font-mono);
   font-size: 22px;
   font-weight: 700;
@@ -437,10 +450,31 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
   padding: 6px 13px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--green-line);
+  /* Left accent tick in the theme's cyan/magenta — keeps green as the
+     semantic "valid code" color (matches .badge-allowed) while still
+     visually tying the OTP readout into the Cyber Neon Pro accent. */
+  box-shadow: inset 3px 0 0 0 var(--accent);
 }
+.otp-code::after {
+  content: '';
+  position: absolute;
+  right: 8px; top: 50%;
+  width: 5px; height: 5px;
+  transform: translateY(-50%);
+  border-radius: 50%;
+  background: var(--accent);
+  animation: otp-accent-pulse 1.4s ease-in-out infinite;
+}
+@keyframes otp-accent-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(34,229,255,.6); opacity: 1; }
+  70%  { box-shadow: 0 0 0 6px rgba(34,229,255,0); opacity: .55; }
+  100% { box-shadow: 0 0 0 0 rgba(34,229,255,0); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) { .otp-code::after { animation: none; } }
 .btn-copy { background: rgba(255,255,255,.05); color: var(--text); border: 1px solid var(--border-soft); }
 .countdown { font-family: var(--font-mono); font-size: 11px; color: var(--amber); }
 .empty {
+  position: relative;
   color: var(--muted-dim);
   font-family: var(--font-mono);
   font-size: 12px;
@@ -450,7 +484,26 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
   border-radius: var(--radius-sm);
   letter-spacing: .02em;
   background: rgba(255,255,255,.015);
+  overflow: hidden;
 }
+/* Idle scan-line sweep — a soft cyan band drifts through empty states so
+   they read as "listening/idle", not just a dead placeholder box. */
+.empty::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, transparent, rgba(34,229,255,.08), transparent);
+  transform: translateY(-100%);
+  animation: empty-scan 3.2s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes empty-scan {
+  0%   { transform: translateY(-100%); }
+  50%  { transform: translateY(100%); }
+  100% { transform: translateY(100%); }
+}
+@media (prefers-reduced-motion: reduce) { .empty::after { display: none; } }
+
 .status-line {
   font-family: var(--font-mono);
   font-size: 12.5px;
@@ -1005,6 +1058,12 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
 }
 @keyframes circuit-trace { to { left: 130%; } }
 @media (prefers-reduced-motion: reduce) { .topbar::after { display: none; } }
+/* On narrow/mobile widths the topbar is much shorter, so the same 30%
+   segment reads as a barely-visible sliver — widen it and boost the
+   glow a bit so the trace stays legible on phones too. */
+@media (max-width: 480px) {
+  .topbar::after { width: 45%; filter: drop-shadow(0 0 8px var(--accent)); }
+}
 
 /* Per-card HUD corner brackets — small sci-fi tick marks that sharpen
    into view on hover, reinforcing the "circuit board" border language
