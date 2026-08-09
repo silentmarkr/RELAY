@@ -4201,6 +4201,39 @@ function setBuildProgress(patch) {
     buildProgressState = { ...buildProgressState, ...patch, updatedAt: Date.now() };
 }
 
+// --------------------------------------------------------------
+// BUILD LOCK — pinipigilan ang DALAWANG build na tumakbo nang
+// SABAY-SABAY.
+//
+// BAKIT ITO KINAKAILANGAN NGAYON (dating hindi, pero ngayon
+// kailangan na): dati, ang git clone step ay gumagamit ng
+// `execFileSync` — isang BLOCKING call na humaharang sa buong
+// Node.js event loop. Bunga (aksidente lang, hindi sinadya):
+// SAMANTALANG naka-block ang server, HINDI TALAGA MATATANGGAP ng
+// Node ang ANUMANG ibang papasok na request — kasama na ang isa
+// pang "Build Release"/"Build & Publish" click habang may
+// tumatakbo nang build — kaya HINDI TALAGA MAGKAKAROON ng dalawang
+// magkasabay na build noon, KAHIT WALANG explicit na lock dito.
+//
+// Nang gawing ASYNCHRONOUS (`execFileAsync`) ang clone step (fix
+// para sa "nagfe-freeze ang progress bar" na isyu), NAWALA ang
+// hindi-sinasadyang proteksyon na ito — ngayon ay talagang
+// posible nang MAGSIMULA ng IKALAWANG build habang tumatakbo pa
+// ang una (hal. dalawang beses pinindot ang "Build Release" nang
+// magkalapit, o dalawang tab/session, o curl/HTTP Shortcut na
+// tumakbo kasabay ng admin panel). Dahil ang DALAWANG build ay
+// SUMUSULAT sa IISANG SHARED na path (`RELEASE_PACKAGE_PATH`),
+// kung magsabay ang dalawa, ang isa ay maaaring MAG-TRUNCATE/
+// magsimulang muli sa parehong file habang isinusulat pa rin ito
+// ng isa — resulta: SIRANG/corrupt na zip ("start of central
+// directory not found") — mismong nangyari sa report ng user.
+//
+// FIX: isang simpleng module-level lock — kung may build na
+// tumatakbo pa, tatanggihan (HTTP 409) ang bagong build request sa
+// halip na hayaang mag-overlap sila.
+// --------------------------------------------------------------
+let buildInFlight = false;
+
 app.get('/relay/admin/api/build-progress', requireAdminKey, (req, res) => {
     res.json({ success: true, progress: buildProgressState });
 });
@@ -4216,6 +4249,13 @@ app.get('/relay/admin/api/build-progress', requireAdminKey, (req, res) => {
 // route handlers na ang bahalang mag-catch at mag-format ng sagot.
 // --------------------------------------------------------------
 async function performBuildRelease(reqBody, req, publishOverride) {
+    if (buildInFlight) {
+        const err = new Error('May build na kasalukuyang tumatakbo — hintayin munang matapos ito bago mag-build ulit (para hindi masira/mag-overlap ang zip package).');
+        err.statusCode = 409;
+        throw err;
+    }
+    buildInFlight = true;
+
     const repoUrl = (reqBody && reqBody.repoUrl) || process.env.OMNIPOS_REPO_URL;
     const ref = (reqBody && reqBody.ref) || 'main';
     // Optional na maikling paglalarawan ng build na ito (hal. "hotfix
@@ -4224,12 +4264,14 @@ async function performBuildRelease(reqBody, req, publishOverride) {
     const caption = String((reqBody && reqBody.caption) || '').trim();
 
     if (!repoUrl) {
+        buildInFlight = false;
         const err = new Error('Walang repoUrl na ibinigay at walang OMNIPOS_REPO_URL env var na naka-set.');
         err.statusCode = 400;
         throw err;
     }
 
     const tmpDir = path.join(os.tmpdir(), `omnipos-build-${Date.now()}`);
+    let tmpZipPath = null; // ide-declare dito (hindi sa loob ng try{}) para ma-access din ito ng finally{} block sa ibaba para sa cleanup
     const buildId = crypto.randomBytes(6).toString('hex');
     setBuildProgress({ buildId, stage: 'clone', percent: 0, message: 'Kino-clone ang repo...', startedAt: Date.now(), done: false, error: null });
 
@@ -4332,8 +4374,25 @@ async function performBuildRelease(reqBody, req, publishOverride) {
         const releaseDir = path.dirname(RELEASE_PACKAGE_PATH);
         if (!fs.existsSync(releaseDir)) fs.mkdirSync(releaseDir, { recursive: true });
 
+        // ATOMIC WRITE (defense-in-depth): dati, direktang sinusulat
+        // ang zip papunta mismo sa RELEASE_PACKAGE_PATH — kung may
+        // humihiling (`res.download`) mag-download NG EKSAKTONG ORAS
+        // na iyon (halimbawa isang kliyenteng nagda-download habang
+        // may bagong build na kasabay na tumatakbo), maaari niyang
+        // makuha ang FILE NA HALF-WRITTEN pa lang (dahil sinisimulan
+        // ng `fs.createWriteStream` na i-TRUNCATE ang file sa pagbukas
+        // nito) — ito ang "zipfile corrupt / start of central
+        // directory not found" na error sa panig ng kliyente. Ngayon,
+        // sumusulat muna sa isang PANSAMANTALANG filename (naka-unique
+        // sa `buildId`), at saka lang ito ni-rename papunta sa
+        // TALAGANG RELEASE_PACKAGE_PATH pagkatapos MATAGUMPAY na
+        // ma-finalize/ma-close ang buong zip — ang `fs.renameSync` ay
+        // ATOMIC sa parehong filesystem/volume, kaya walang sandaling
+        // makikita ng sinumang bumabasa (res.download) ang isang
+        // half-written na file.
+        tmpZipPath = `${RELEASE_PACKAGE_PATH}.building-${buildId}.tmp`;
         await new Promise((resolve, reject) => {
-            const output = fs.createWriteStream(RELEASE_PACKAGE_PATH);
+            const output = fs.createWriteStream(tmpZipPath);
             // PERFORMANCE FIX: zlib level 9 (max compression) costs
             // significantly more CPU time than level 6 for only a small
             // reduction in zip size — not a good trade-off on a
@@ -4346,6 +4405,7 @@ async function performBuildRelease(reqBody, req, publishOverride) {
             archive.directory(tmpDir, false);
             archive.finalize();
         });
+        fs.renameSync(tmpZipPath, RELEASE_PACKAGE_PATH);
 
         const stats = fs.statSync(RELEASE_PACKAGE_PATH);
         const builtAt = Date.now();
@@ -4414,6 +4474,12 @@ async function performBuildRelease(reqBody, req, publishOverride) {
         throw err;
     } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
+        // linisin din ang pansamantalang zip kung may naiwan (hal.
+        // nag-error bago pa nakarating sa rename)
+        try {
+            if (tmpZipPath && fs.existsSync(tmpZipPath)) fs.rmSync(tmpZipPath, { force: true });
+        } catch (_) { /* huwag hayaang masira ng cleanup na ito ang response */ }
+        buildInFlight = false; // laging i-release ang lock, kahit magtagumpay o mabigo ang build
     }
 }
 
