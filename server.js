@@ -671,7 +671,7 @@ function requireAllowedDevice(req, res, next) {
 // sarili nito), at para bigyan ng tamang featureName/price ang mga
 // direct-activate na token na ginagawa mula sa admin panel.
 // --------------------------------------------------------------
-const FEATURE_CATALOG = {
+const FEATURE_CATALOG_BASE = {
     ocean: { name: 'Ocean Pro', price: 149, category: 'theme' },
     emerald: { name: 'Emerald Pro', price: 149, category: 'theme' },
     sunset: { name: 'Sunset Pro', price: 149, category: 'theme' },
@@ -679,6 +679,8 @@ const FEATURE_CATALOG = {
     cyber: { name: 'Cyber Neon Pro', price: 149, category: 'theme' },
     noir: { name: 'Coffee Noir Pro', price: 149, category: 'theme' },
     mintfrost: { name: 'Mint Frost Pro', price: 149, category: 'theme' },
+    liquidglass: { name: 'Liquid Glass Pro', price: 149, category: 'theme' },
+    galaxyambient: { name: 'Galaxy Ambient Pro', price: 149, category: 'theme' },
     purchase_orders: { name: 'Purchase Orders Module', price: 999, category: 'module' },
     customer_crm: { name: 'Customer Profiles & Loyalty', price: 799, category: 'module' },
     promo_codes: { name: 'Promo Codes Module', price: 499, category: 'module' },
@@ -688,11 +690,110 @@ const FEATURE_CATALOG = {
     cloud_backup: { name: 'Cloud Backup (Postgres)', price: 1499, category: 'module' }
 };
 
+// --------------------------------------------------------------
+// AUTO-LEARNED FEATURES — kapag may dumaang unlock request papunta sa
+// RELAY na ang featureId ay HINDI pa kilala dito sa FEATURE_CATALOG_BASE
+// (hal. bagong theme/module na idinagdag sa OMNIPOS pero nakalimutang
+// i-mirror dito), awtomatikong idinadagdag ito sa "overrides" store na
+// ito sa SANDALING ma-isyu na ang unlock nito (tingnan ang
+// registerFeatureIfUnknown() at recordIssuedUnlock() sa ibaba) — hindi
+// agad sa pagdating pa lang ng /relay/request-unlock (dahil client-
+// supplied pa lang ang featureName/price doon; ang totoong "ground
+// truth" ay ang sandaling aktwal nang na-isyu ang token, pagkatapos ng
+// OTP/admin approval). Kaya awtomatiko nang naka-sync ang FEATURE_CATALOG
+// mirror na ito sa OMNIPOS sa paglipas ng panahon, kahit walang manual
+// pag-edit dito — pero PANSAMANTALA lang ito bilang "narinig na namin
+// ito" na entry; puwede pa ring i-refine ang pangalan/presyo/category
+// nito dito sa FEATURE_CATALOG_BASE paglipas ng panahon kung gusto.
+// --------------------------------------------------------------
+const FEATURE_CATALOG_OVERRIDES_PATH = path.join(__dirname, 'feature-catalog-overrides.json');
+
+async function loadFeatureCatalogOverrides() {
+    const fromRedis = await redisGetJSON('feature-catalog-overrides', null);
+    if (fromRedis !== null) return fromRedis;
+    try {
+        return JSON.parse(fs.readFileSync(FEATURE_CATALOG_OVERRIDES_PATH, 'utf8'));
+    } catch (err) {
+        return {};
+    }
+}
+
+function saveFeatureCatalogOverrides(obj) {
+    if (redisClient) {
+        redisSetJSON('feature-catalog-overrides', obj);
+        return;
+    }
+    try {
+        fs.writeFileSync(FEATURE_CATALOG_OVERRIDES_PATH, JSON.stringify(obj, null, 2));
+    } catch (err) {
+        console.error('Hindi ma-save ang feature-catalog-overrides.json:', err);
+    }
+}
+
+let featureCatalogOverrides = {}; // pupunuin sa bootstrapStores()
+
+// Ang mismong FEATURE_CATALOG na ginagamit ng buong file (admin panel,
+// pricing, atbp.) ay ang BASE + anumang auto-learned na overrides.
+// `let` (hindi `const`) dahil dinadagdagan ito sa runtime ng
+// registerFeatureIfUnknown() sa sandaling may bagong featureId na
+// ma-detect.
+let FEATURE_CATALOG = { ...FEATURE_CATALOG_BASE };
+
 const UPGRADE_TIERS = [
     { id: 'basic', name: 'Basic Upgrade', featureIds: ['advanced_reports', 'promo_codes'], bundlePrice: 999 },
     { id: 'standard', name: 'Standard Upgrade', featureIds: ['advanced_reports', 'promo_codes', 'customer_crm', 'shift_management'], bundlePrice: 1999 },
+    // 'pro' ay laging LAHAT ng laman ng FEATURE_CATALOG sa oras na ito i-
+    // resolve (tingnan ang recomputeProTierFeatureIds(), tinatawag sa
+    // bootstrapStores() at muli sa tuwing may auto-add) — kaya kasama na
+    // rito agad ang anumang bagong theme/module, manual man o auto-learned.
     { id: 'pro', name: 'Pro Upgrade (Complete)', featureIds: Object.keys(FEATURE_CATALOG), bundlePrice: 4499 }
 ];
+
+function recomputeProTierFeatureIds() {
+    const proTier = UPGRADE_TIERS.find(t => t.id === 'pro');
+    if (proTier) proTier.featureIds = Object.keys(FEATURE_CATALOG);
+}
+
+// Tinatawag sa sandaling AKTWAL nang na-isyu ang isang unlock token (hindi
+// sa simpleng pagdating pa lang ng request) para sa featureId na wala pa
+// sa FEATURE_CATALOG — ibig sabihin, may bagong locked feature sa
+// OMNIPOS client na hindi pa naka-mirror dito. Gumagamit ng
+// meta.featureName/meta.price na sinama na ng OMNIPOS client sa unlock
+// request bilang panimulang detalye ng bagong entry.
+function registerFeatureIfUnknown(featureId, meta = {}, installationId = null) {
+    if (!featureId || FEATURE_CATALOG[featureId]) return false;
+    if (!meta.featureName) return false; // walang sapat na detalye para awtomatikong idagdag
+    // Ang DEMO_FEATURE_ID ('__demo__') ay SADYANG HINDI kasama sa
+    // FEATURE_CATALOG (hindi ito isang binibiling feature/theme/module,
+    // kundi ang pansamantalang "buksan lahat" demo mode) — huwag itong
+    // idagdag dito o sa 'pro' bundle kahit pa dumaan ito sa
+    // recordIssuedUnlock().
+    if (typeof DEMO_FEATURE_ID !== 'undefined' && featureId === DEMO_FEATURE_ID) return false;
+
+    const entry = {
+        name: meta.featureName,
+        price: typeof meta.price === 'number' ? meta.price : null,
+        category: meta.category || 'module',
+        autoAdded: true,
+        learnedAt: Date.now(),
+        learnedFrom: meta.source || null
+    };
+
+    featureCatalogOverrides[featureId] = entry;
+    FEATURE_CATALOG = { ...FEATURE_CATALOG, [featureId]: entry };
+    recomputeProTierFeatureIds();
+    saveFeatureCatalogOverrides(featureCatalogOverrides);
+
+    console.log(`🆕 Bagong feature na na-detect at awtomatikong idinagdag sa RELAY catalog mirror: ${featureId} (${entry.name}, ${entry.price !== null ? '₱' + entry.price : 'walang presyo'}).`);
+    try {
+        logActivity(installationId, 'feature_auto_registered', { featureId, featureName: entry.name, price: entry.price, source: entry.learnedFrom });
+    } catch (err) {
+        // logActivity/activityLog ay maaaring wala pa sa unang pagkakataong
+        // ito ay tawagin habang naglo-load pa lang (di malamang, pero safe
+        // guard lang) — hindi dapat ma-block ang auto-registration dahil dito.
+    }
+    return true;
+}
 
 // --------------------------------------------------------------
 // ISSUED UNLOCKS — persistent na "memory" ng RELAY kung anong mga
@@ -737,6 +838,12 @@ function saveIssuedUnlocks(obj) {
 let issuedUnlocks = {}; // pupunuin sa bootstrapStores()
 
 function recordIssuedUnlock(installationId, featureId, token, meta = {}) {
+    // Bago i-record, tingnan muna kung ito ay isang featureId na wala pa
+    // sa FEATURE_CATALOG mirror ng RELAY — kung gayon, awtomatiko itong
+    // idadagdag dito gamit ang featureName/price na ipinasa ng OMNIPOS
+    // client (tingnan ang registerFeatureIfUnknown() sa itaas).
+    registerFeatureIfUnknown(featureId, { featureName: meta.featureName, price: meta.price, source: meta.source }, installationId);
+
     if (!issuedUnlocks[installationId]) issuedUnlocks[installationId] = {};
     issuedUnlocks[installationId][featureId] = {
         featureName: meta.featureName || (FEATURE_CATALOG[featureId] && FEATURE_CATALOG[featureId].name) || featureId,
@@ -4473,7 +4580,8 @@ async function bootstrapStores() {
         downloadCodes,
         buildHistory,
         releaseBaselines,
-        integrityStatus
+        integrityStatus,
+        featureCatalogOverrides
     ] = await Promise.all([
         loadAllowedDevices(),
         loadDeviceLabels(),
@@ -4487,8 +4595,18 @@ async function bootstrapStores() {
         loadDownloadCodes(),
         loadBuildHistory(),
         loadReleaseBaselines(),
-        loadIntegrityStatus()
+        loadIntegrityStatus(),
+        loadFeatureCatalogOverrides()
     ]);
+
+    // I-merge ang anumang dating naka-auto-learn na features papunta sa
+    // FEATURE_CATALOG mirror (BASE + overrides), tapos i-sync ang 'pro'
+    // tier para makasama agad ang mga ito.
+    FEATURE_CATALOG = { ...FEATURE_CATALOG_BASE, ...featureCatalogOverrides };
+    recomputeProTierFeatureIds();
+    if (Object.keys(featureCatalogOverrides).length > 0) {
+        console.log(`🆕 Na-load ang ${Object.keys(featureCatalogOverrides).length} dating auto-learned na feature(s) papunta sa catalog mirror: ${Object.keys(featureCatalogOverrides).join(', ')}.`);
+    }
 
     console.log(
         redisClient
