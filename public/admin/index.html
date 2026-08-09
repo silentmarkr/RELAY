@@ -876,7 +876,8 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
   100% { transform: translate(0,0); }
 }
 
-/* Rotating "targeting lock" ring on card/stat-card hover */
+/* Static "targeting lock" ring on card/stat-card hover — accent
+   outline fades in on hover, no longer rotates. */
 @media (prefers-reduced-motion: no-preference) {
   .card, .stat-card { isolation: isolate; }
   .card::after, .stat-card::after {
@@ -890,13 +891,10 @@ button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: non
             mask-composite: exclude;
     opacity: 0;
     transition: opacity .25s var(--ease);
-    animation: hud-ring-spin 2.2s linear infinite;
-    animation-play-state: paused;
     pointer-events: none;
   }
-  .card:hover::after, .stat-card:hover::after { opacity: 1; animation-play-state: running; }
+  .card:hover::after, .stat-card:hover::after { opacity: 1; }
 }
-@keyframes hud-ring-spin { to { transform: rotate(360deg); } }
 
 /* Radar double-ring pulse — upgrades the existing sync-dot-blink */
 .sync-dot-blink { position: relative; }
