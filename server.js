@@ -1633,6 +1633,19 @@ app.post('/relay/admin/api/devices/revoke', requireAdminKey, (req, res) => {
     }
     allowedDevices.delete(installationId);
     saveAllowedDevices(allowedDevices);
+
+    // FIX: i-clear din ang naka-imbak na integrity record ng device na
+    // ito sa sandaling ma-revoke ito. Kung hindi ito ginawa, maaaring
+    // manatili sa listahan ang isang lumang "⚠️ NOT ACTUALLY CHECKED
+    // (no baseline...)" o kahit "🛠️ MODIFIED FILES" na badge para sa
+    // device na ito kahit na naalis na ito sa allowed list — mukhang
+    // may kailangan pang aksyunan ang admin (o mukhang may laman pa
+    // itong data) gayong hindi na naman ito active/allowed device.
+    if (integrityStatus[installationId]) {
+        delete integrityStatus[installationId];
+        saveIntegrityStatus(integrityStatus);
+    }
+
     logActivity(installationId, 'device_revoked', {});
     res.json({ success: true, allowedDevices: [...allowedDevices] });
 });
