@@ -1234,6 +1234,10 @@ a:focus-visible,
           <div class="stat-num stat-num-danger" id="statIntegrityFlagged">—</div>
           <div class="stat-label">🛠️ Modified/missing files</div>
         </div>
+        <div class="stat-card" style="cursor:pointer;" onclick="switchTab('devices'); document.getElementById('seenFilterStatus').value='noBaseline'; renderSeenList(); document.getElementById('seenList').scrollIntoView({behavior:'smooth'});">
+          <div class="stat-num" style="color:var(--amber,#f5a623);" id="statIntegrityNoBaseline">—</div>
+          <div class="stat-label">⚠️ Not actually checked (no baseline)</div>
+        </div>
       </div>
 
       <div class="card">
@@ -1274,6 +1278,7 @@ a:focus-visible,
             <option value="blocked">Blocked only</option>
             <option value="flagged">🚩 Flagged clone only</option>
             <option value="integrity">🛠️ Modified/deleted files only</option>
+            <option value="noBaseline">⚠️ No baseline (not actually checked)</option>
           </select>
           <select id="seenSortBy" onchange="renderSeenList()">
             <option value="lastSeen">Sort: Last seen</option>
@@ -2493,6 +2498,7 @@ async function loadDevices() {
   document.getElementById('statSeen').innerText = data.seenDevices.length;
   document.getElementById('statCloneFlagged').innerText = data.cloneFlaggedCount || 0;
   document.getElementById('statIntegrityFlagged').innerText = data.integrityFlaggedCount || 0;
+  document.getElementById('statIntegrityNoBaseline').innerText = data.integrityNoBaselineCount || 0;
   document.getElementById('allowedCountPill').innerText = data.allowedDevices.length;
 
   renderBackupSyncBanner(data);
@@ -2563,6 +2569,7 @@ function renderSeenList() {
   if (statusFilter === 'blocked') list = list.filter(d => !d.allowed);
   if (statusFilter === 'flagged') list = list.filter(d => d.cloneFlagged);
   if (statusFilter === 'integrity') list = list.filter(d => d.integrityFlagged);
+  if (statusFilter === 'noBaseline') list = list.filter(d => d.integrityHasBaseline === false);
 
   if (sortBy === 'mostUnlocked') {
     list.sort((a, b) => (b.unlockedCount || 0) - (a.unlockedCount || 0));
@@ -2586,10 +2593,12 @@ function renderSeenList() {
           ${d.demoActive ? '<span class="badge" style="background:var(--amber-bg); color:var(--amber);">DEMO</span>' : ''}
           ${d.cloneFlagged ? '<span class="badge badge-blocked">🚩 POSSIBLE CLONE</span>' : ''}
           ${d.integrityFlagged ? `<span class="badge badge-blocked">🛠️ MODIFIED FILES (${d.integrityModifiedCount || 0} mod, ${d.integrityDeletedCount || 0} del, ${d.integrityAddedCount || 0} add)</span>` : ''}
+          ${(!d.integrityFlagged && d.integrityHasBaseline === false) ? `<span class="badge" style="background:var(--amber-bg,#3a2c0f); color:var(--amber,#f5a623);">⚠️ NOT ACTUALLY CHECKED (no baseline for v${d.integrityBaselineVersion || '?'})</span>` : ''}
         </div>
         <div class="meta">${d.label ? `🏷️ <strong>${d.label}</strong> · ` : ''}${d.storeName || 'No self-reported name'} · ${d.username || '—'} · ${timeAgo(d.lastSeenAt)} · ${d.requestCount} request(s) · ${d.unlockedCount || 0}/${d.totalCatalogCount} unlocked</div>
         ${d.cloneFlagged ? '<div class="meta" style="color:var(--red);">⚠️ Two different devices used the same installation ID — the app folder was likely copied/moved to another unit.</div>' : ''}
         ${d.integrityFlagged ? `<div class="meta" style="color:var(--red);">⚠️ Modified/deleted files found vs. the original release — ${timeAgo(d.integrityCheckedAt)}. Click "View Changed Files" for details.</div>` : ''}
+        ${(!d.integrityFlagged && d.integrityHasBaseline === false) ? `<div class="meta" style="color:var(--amber,#f5a623);">⚠️ This device HAS checked in, but there's no published baseline for version "${d.integrityBaselineVersion || 'unknown'}" on this Relay — so nothing has actually been compared yet. Run "Build Release" for this version on Relay (or check REDIS_URL/persistent disk if a baseline was lost after a redeploy).</div>` : ''}
       </div>
       <div class="row-actions">
         <button class="btn-detail" onclick="openDeviceDetail('${d.installationId}')">Details</button>

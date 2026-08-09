@@ -1439,7 +1439,22 @@ app.get('/relay/admin/api/devices', requireAdminKey, async (req, res) => {
             integrityModifiedCount: integrityRecord ? integrityRecord.modifiedCount : 0,
             integrityDeletedCount: integrityRecord ? integrityRecord.deletedCount : 0,
             integrityAddedCount: integrityRecord ? integrityRecord.addedCount : 0,
-            integrityCheckedAt: integrityRecord ? integrityRecord.checkedAt : null
+            integrityCheckedAt: integrityRecord ? integrityRecord.checkedAt : null,
+            // BAGONG dagdag — FIX: dati, kapag WALANG naka-publish na
+            // baseline para sa version na iniulat ng device (hal.
+            // bagong version pero hindi pa na-"Build Release" dito, o
+            // nawala ang baseline dahil sa redeploy na walang persistent
+            // disk/REDIS_URL), ang tanging paraan para malaman ito ay
+            // pumunta sa "View Changed Files" modal — pero LALABAS LANG
+            // ang button na iyon kapag integrityFlagged na (na hindi
+            // mangyayari kailanman kung walang baseline). Ibig sabihin,
+            // walang KAHIT ANONG makikita sa admin — mukhang "gumagana"
+            // pero silent lang ito. Ngayon, isinasama na dito ang
+            // hasBaseline/baselineVersion para may makita agad na
+            // babala ang admin sa MAIN LIST mismo, hindi na kailangang
+            // hintayin munang ma-flag.
+            integrityHasBaseline: integrityRecord ? !!integrityRecord.hasBaseline : null,
+            integrityBaselineVersion: integrityRecord ? integrityRecord.baselineVersion : null
         };
     }).sort((a, b) => b.lastSeenAt - a.lastSeenAt);
 
@@ -1459,7 +1474,15 @@ app.get('/relay/admin/api/devices', requireAdminKey, async (req, res) => {
         cloneFlaggedCount: [...deviceFingerprints.values()].filter(r => r.flagged).length,
         // Bilang ng mga device na kasalukuyang naka-red-flag dahil sa
         // may nabago/nabura silang file (hindi pa na-clear ng admin).
-        integrityFlaggedCount: Object.values(integrityStatus).filter(r => r.flagged && !r.clearedAt).length
+        integrityFlaggedCount: Object.values(integrityStatus).filter(r => r.flagged && !r.clearedAt).length,
+        // BAGONG dagdag — bilang ng mga device na may CHECK-IN NA pero
+        // WALANG naka-imbak na baseline para sa iniulat nilang version
+        // (hindi pa na-"Build Release"/na-publish, o nawala dahil sa
+        // redeploy na walang persistent disk/REDIS_URL). Zero flags man
+        // ang mga ito, kailangan pa ring makita ng admin dahil ang ibig
+        // sabihin talaga nito ay "HINDI pa aktwal na na-che-check" ang
+        // device, kahit successful ang tawag nito papunta dito.
+        integrityNoBaselineCount: Object.values(integrityStatus).filter(r => r.hasBaseline === false).length
     });
 });
 
