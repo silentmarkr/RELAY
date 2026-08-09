@@ -22,7 +22,8 @@ const nodemailer = require('nodemailer');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { execSync, execFileSync } = require('child_process');
+const { execSync, execFileSync, execFile } = require('child_process');
+const execFileAsync = require('util').promisify(execFile);
 const archiver = require('archiver');
 const Redis = require('ioredis');
 const JavaScriptObfuscator = require('javascript-obfuscator');
@@ -4233,16 +4234,60 @@ async function performBuildRelease(reqBody, req, publishOverride) {
     setBuildProgress({ buildId, stage: 'clone', percent: 0, message: 'Kino-clone ang repo...', startedAt: Date.now(), done: false, error: null });
 
     try {
-        // SECURITY FIX: dati, sinasalang diretso ang repoUrl/ref (galing
-        // sa admin request body) sa loob ng isang SHELL STRING (execSync
-        // gamit ang template literal) — kung may naka-embed na shell
-        // metacharacter (hal. `; rm -rf /` o `$(...)`) sa alinman sa
-        // dalawa, maaari itong mag-execute ng arbitrary command sa RELAY
-        // host. Ginagamit na ngayon ang execFileSync na may ARGUMENT
-        // ARRAY (hindi dumadaan sa shell), kaya kahit anong laman ng
-        // repoUrl/ref ay ituturing lang na LITERAL na argumento sa git,
-        // hindi bilang shell syntax.
-        execFileSync('git', ['clone', '--depth', '1', '--branch', ref, repoUrl, tmpDir], { stdio: 'pipe' });
+        // ============================================================
+        // ROOT CAUSE ng "nagfe-freeze tapos bumibigla sa 100%" na
+        // report: `execFileSync` ay isang BLOCKING/SYNCHRONOUS na
+        // call — habang tumatakbo ang git clone (network-bound,
+        // kadalasan ang PINAKAMATAGAL na hakbang sa buong build),
+        // hinaharang NITO ang buong Node.js event loop (isang thread
+        // lang ito) at HINDI matutugunan ng server ang KAHIT ANONG
+        // ibang request habang naghihintay — kasama na mismo ang
+        // GET /relay/admin/api/build-progress na paulit-ulit na
+        // pino-poll ng admin browser bawat 700ms. Kaya nakikita ng
+        // admin: naka-freeze ang % (walang response ang mga poll)
+        // sa BUONG tagal ng clone, pagkatapos biglang "sumusulpot"/
+        // rumaragasa papuntang 100% — dahil sa oras na iyon, saka
+        // lang ulit nakakasagot ang server sa mga naka-pila (queued)
+        // na poll, at ang natitirang mga hakbang (filter/env/
+        // obfuscate/zip) ay karaniwang mabilis lang matapos kumpara
+        // sa clone.
+        //
+        // FIX: gamitin ang ASYNCHRONOUS na bersyon (`execFileAsync`,
+        // batay sa child_process.execFile) sa halip na ang *Sync
+        // variant — hindi ito humaharang sa event loop, kaya
+        // PATULOY pa ring nakakasagot ang server sa mga progress
+        // poll (at sa "heartbeat" interval sa ibaba) HABANG
+        // tumatakbo pa ang git clone sa likod. Dagdag pa rito, may
+        // TUNAY/server-driven na heartbeat na ngayon habang
+        // tumatakbo ang clone mismo (hindi lang basta 0% hanggang
+        // matapos) — dahan-dahang gumagalaw ang % papalapit sa 10%
+        // (asymptotic, hindi lalampas) habang tumatagal ang clone,
+        // kasama ang bilang ng segundong lumipas sa message, kaya
+        // may TALAGANG makikitang kilos ang admin bawat segundo, at
+        // hindi lang basta pinaggagagad/pinipeke ng client-side
+        // animation.
+        // ============================================================
+        const cloneStartedAt = Date.now();
+        const cloneHeartbeat = setInterval(() => {
+            const elapsedS = (Date.now() - cloneStartedAt) / 1000;
+            const heartbeatPct = Math.min(9.4, BUILD_FIRST_STEP_PERCENT * (1 - Math.exp(-elapsedS / 12)));
+            setBuildProgress({ percent: Math.round(heartbeatPct * 10) / 10, message: `Kino-clone ang repo... (${Math.round(elapsedS)}s)` });
+        }, 500);
+
+        try {
+            // SECURITY FIX: dati, sinasalang diretso ang repoUrl/ref (galing
+            // sa admin request body) sa loob ng isang SHELL STRING (execSync
+            // gamit ang template literal) — kung may naka-embed na shell
+            // metacharacter (hal. `; rm -rf /` o `$(...)`) sa alinman sa
+            // dalawa, maaari itong mag-execute ng arbitrary command sa RELAY
+            // host. Ginagamit na ngayon ang execFileAsync (execFile, ARGUMENT
+            // ARRAY, hindi dumadaan sa shell) kaya kahit anong laman ng
+            // repoUrl/ref ay ituturing lang na LITERAL na argumento sa git,
+            // hindi bilang shell syntax.
+            await execFileAsync('git', ['clone', '--depth', '1', '--branch', ref, repoUrl, tmpDir], { stdio: 'pipe' });
+        } finally {
+            clearInterval(cloneHeartbeat);
+        }
 
         setBuildProgress({ stage: 'filter', percent: BUILD_STEP_END_PERCENT.clone, message: 'Tinatanggal ang mga excluded file...' });
         removeExcludedRecursive(tmpDir);
