@@ -1561,7 +1561,14 @@ app.get('/relay/admin/api/devices', requireAdminKey, async (req, res) => {
             // babala ang admin sa MAIN LIST mismo, hindi na kailangang
             // hintayin munang ma-flag.
             integrityHasBaseline: integrityRecord ? !!integrityRecord.hasBaseline : null,
-            integrityBaselineVersion: integrityRecord ? integrityRecord.baselineVersion : null
+            integrityBaselineVersion: integrityRecord ? integrityRecord.baselineVersion : null,
+            // BAGONG dagdag — DIAGNOSTIC: true/false kung aktibo ba
+            // talaga ang real-time fs.watch() sa device na ito noong
+            // huli itong nag-check-in (null = lumang OMNIPOS build,
+            // wala pang field na ito). Kung false, event-driven/instant
+            // detection ang HINDI gumagana dito — 24h scheduled
+            // check-in/"Check Now" na lang ang natitirang paraan.
+            integrityWatcherActive: integrityRecord ? (integrityRecord.watcherActive ?? null) : null
         };
     }).sort((a, b) => b.lastSeenAt - a.lastSeenAt);
 
@@ -2511,7 +2518,12 @@ app.post('/relay/backup-checkin', requireApiKey, rateLimit('backup-checkin', 20,
 // average) — sapat na headroom para sa totoong burst ng magkakasunod
 // na file event, pero may bound pa rin laban sa abuse.
 app.post('/relay/integrity-checkin', requireApiKey, requireAllowedDevice, rateLimit('integrity-checkin', 300, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
-    const { installationId, version, files } = req.body || {};
+    const { installationId, version, files, watcherActive } = req.body || {};
+    // DIAGNOSTIC: true/false galing mismo sa client kung aktibo talaga
+    // ang real-time fs.watch() nito ngayong check-in na ito — undefined
+    // kung mula pa sa lumang OMNIPOS build (bago idagdag ang field na
+    // ito), kaya hindi natin ito basta-basta ituturing na "false".
+    const watcherActiveFlag = typeof watcherActive === 'boolean' ? watcherActive : null;
 
     if (!installationId) {
         return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
@@ -2541,6 +2553,7 @@ app.post('/relay/integrity-checkin', requireApiKey, requireAllowedDevice, rateLi
             modifiedCount: 0,
             deletedCount: 0,
             addedCount: 0,
+            watcherActive: watcherActiveFlag,
             clearedAt: integrityStatus[installationId] ? integrityStatus[installationId].clearedAt || null : null,
             clearedNote: integrityStatus[installationId] ? integrityStatus[installationId].clearedNote || null : null
         };
@@ -2582,6 +2595,7 @@ app.post('/relay/integrity-checkin', requireApiKey, requireAllowedDevice, rateLi
         modifiedCount: modified.length,
         deletedCount: deleted.length,
         addedCount: added.length,
+        watcherActive: watcherActiveFlag,
         // Nananatili ang dating clearedAt/clearedNote (kung meron)
         // hangga't hindi bago-bagong-flag ito — sa susunod na
         // matagumpay/malinis na check-in, dito rin ito ire-reset sa

@@ -2594,11 +2594,13 @@ function renderSeenList() {
           ${d.cloneFlagged ? '<span class="badge badge-blocked">🚩 POSSIBLE CLONE</span>' : ''}
           ${d.integrityFlagged ? `<span class="badge badge-blocked">🛠️ MODIFIED FILES (${d.integrityModifiedCount || 0} mod, ${d.integrityDeletedCount || 0} del, ${d.integrityAddedCount || 0} add)</span>` : ''}
           ${(!d.integrityFlagged && d.integrityHasBaseline === false) ? `<span class="badge" style="background:var(--amber-bg,#3a2c0f); color:var(--amber,#f5a623);">⚠️ NOT ACTUALLY CHECKED (no baseline for v${d.integrityBaselineVersion || '?'})</span>` : ''}
+          ${d.integrityWatcherActive === false ? `<span class="badge" style="background:var(--amber-bg,#3a2c0f); color:var(--amber,#f5a623);">🐢 REAL-TIME WATCHER OFF</span>` : ''}
         </div>
         <div class="meta">${d.label ? `🏷️ <strong>${d.label}</strong> · ` : ''}${d.storeName || 'No self-reported name'} · ${d.username || '—'} · ${timeAgo(d.lastSeenAt)} · ${d.requestCount} request(s) · ${d.unlockedCount || 0}/${d.totalCatalogCount} unlocked</div>
         ${d.cloneFlagged ? '<div class="meta" style="color:var(--red);">⚠️ Two different devices used the same installation ID — the app folder was likely copied/moved to another unit.</div>' : ''}
         ${d.integrityFlagged ? `<div class="meta" style="color:var(--red);">⚠️ Modified/deleted files found vs. the original release — ${timeAgo(d.integrityCheckedAt)}. Click "View Changed Files" for details.</div>` : ''}
         ${(!d.integrityFlagged && d.integrityHasBaseline === false) ? `<div class="meta" style="color:var(--amber,#f5a623);">⚠️ This device HAS checked in, but there's no published baseline for version "${d.integrityBaselineVersion || 'unknown'}" on this Relay — so nothing has actually been compared yet. Run "Build Release" for this version on Relay (or check REDIS_URL/persistent disk if a baseline was lost after a redeploy).</div>` : ''}
+        ${d.integrityWatcherActive === false ? `<div class="meta" style="color:var(--amber,#f5a623);">🐢 This device's real-time file watcher is NOT active (fs.watch likely failed to start — common on Termux/Android permission limits, or DISABLE_INTEGRITY_MONITOR is set). It's falling back to the 55s-after-startup + 24h scheduled check-in only — changes here will NOT be near-instant. Use "🔄 Check Now" to force an immediate check, and check that device's logs/env for the cause.</div>` : ''}
       </div>
       <div class="row-actions">
         <button class="btn-detail" onclick="openDeviceDetail('${d.installationId}')">Details</button>
