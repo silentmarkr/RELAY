@@ -1,1093 +1,2558 @@
-// PATH: RELAY/server.js  <-- I-REPLACE ang luma mong server.js NITO SA RELAY project (hindi sa OMNIPOS) — root ng RELAY project
+// PATH: OMNIPOS/server.js  <-- I-REPLACE ang luma mong server.js nito (root ng OMNIPOS project)
 
-// ====================================================================
-// OmniPOS Unlock Relay — HIWALAY na maliit na service, hosted lang ng
-// developer/owner (HINDI ito kasama sa client package na binebenta/
-// dinideploy sa mga kliyente). 
-//
-// LAYUNIN: dating nangyayari LAHAT (OTP generation, storage,
-// verification) sa loob ng server ng bawat kliyente — kaya kahit
-// technical lang ang isang kliyente, kayang basahin ang sariling
-// database nila at makita ang OTP code mismo. Dito, LUMILIPAT ang
-// buong desisyon kung "totoo ba ang unlock na ito" papunta rito — sa
-// makinang HAWAK lang ng developer. Ang client server ay tumatawag
-// lang dito sa network, at nagve-verify ng SIGNATURE gamit ang isang
-// PUBLIC key (ligtas ipamahagi) — hindi nito kayang gumawa ng sarili
-// niyang balidong approval kahit basahin niya lahat ng sariling code.
-// ====================================================================
-
+const net = require('net');
 const express = require('express');
-const crypto = require('crypto');
-const nodemailer = require('nodemailer');
-const path = require('path');
+const cors = require('cors');
 const fs = require('fs');
+const path = require('path');
 const os = require('os');
-const { execSync, execFileSync, execFile } = require('child_process');
-const execFileAsync = require('util').promisify(execFile);
-const archiver = require('archiver');
-const Redis = require('ioredis');
-const JavaScriptObfuscator = require('javascript-obfuscator');
+const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
+const ExcelJS = require('exceljs');
+const multer = require('multer');
+const { execSync } = require('child_process');
+const { readData, writeData, runLocalDatabaseBackup, checkModuleBlobSizes, mirrorBackupToDownloads, getCloudBackupPayload, getBackupStatus } = require('./db');
+const webauthn = require('./webauthn');
 
-// --------------------------------------------------------------
-// PERSISTENT STORAGE (Render Key Value / Redis) — dating JSON files lang
-// sa loob ng service folder ang ginagamit dito (allowed-devices.json,
-// issued-unlocks.json, atbp.), pero MAWAWALA ang mga iyon sa bawat
-// restart/redeploy/spin-down kung ephemeral ang filesystem (hal. Render
-// free/free-tier web service, walang naka-attach na persistent Disk).
-//
-// Kung naka-set ang REDIS_URL (hal. mula sa isang Render Key Value
-// instance), gagamitin ito bilang TUNAY na persistent na imbakan — hindi
-// na aasa sa lokal na disk. Kung WALA namang REDIS_URL (hal. sarili
-// mong VPS na may sariling disk), babalik ito sa dating file-based na
-// pamamaraan — walang kailangang baguhin doon.
-// --------------------------------------------------------------
-const REDIS_URL = process.env.REDIS_URL || null;
-const redisClient = REDIS_URL
-    ? new Redis(REDIS_URL, { maxRetriesPerRequest: 3, lazyConnect: false })
-    : null;
+try {
+    // Dati: process.loadEnvFile(); — pinalitan para sumuporta sa
+    // naka-encrypt na .env sa release build (env-loader.js). Sa dev
+    // (plain .env pa), babalik din ito sa normal na loader.
+    require('./env-loader')();
+} catch (err) {
 
-if (redisClient) {
-    redisClient.on('error', (err) => {
-        console.error('⚠️  Redis connection error (persistent storage):', err.message);
-    });
-    redisClient.on('connect', () => {
-        console.log('✅ Nakakonekta sa Redis/Render Key Value — gagamitin ito bilang persistent storage.');
-    });
-} else {
-    console.warn('⚠️  Walang REDIS_URL na naka-set — babalik sa file-based na storage (mawawala ito sa ephemeral filesystem, hal. Render free web service, kada restart/redeploy).');
 }
 
-const REDIS_KEY_PREFIX = 'omnipos-relay:';
-
-// --------------------------------------------------------------
-// CLOUD BACKUP STORAGE (Postgres) — ito ang "malayong disk" na
-// pinag-iimbakan ng BUONG na-sync na database (maliban sa user
-// accounts) ng BAWAT OMNIPOS installation na naka-unlock ang
-// 'cloud_backup' feature nito. IISANG Postgres instance lang ang
-// ginagamit dito (env DATABASE_URL — pwedeng Render Postgres, Neon,
-// Supabase, sariling VPS, atbp., kahit saan available), pero
-// ISOLATED PER installationId ang bawat row (walang installationId
-// ang makakabasa/makakapag-overwrite ng datos ng IBANG installationId
-// — tingnan ang mga endpoints sa ibaba).
-//
-// Ang "bagong account" na ibinibigay ng developer sa isang customer
-// (per instructions) ay ang PAG-UNLOCK mismo ng 'cloud_backup' feature
-// sa kanilang installationId (parehong OTP/admin-activate na flow gaya
-// ng ibang FEATURE_CATALOG entries) — hindi kailangan ng hiwalay na
-// Postgres user/role bawat kliyente, dahil ang RELAY (na HAWAK LANG ng
-// developer) ang tanging bagay na dumidiretso sa Postgres na ito.
-// --------------------------------------------------------------
-const { Pool } = require('pg');
-const DATABASE_URL = process.env.DATABASE_URL || null;
-const pgPool = DATABASE_URL
-    ? new Pool({ connectionString: DATABASE_URL, ssl: process.env.PGSSL === 'false' ? false : { rejectUnauthorized: false } })
-    : null;
-
-if (pgPool) {
-    pgPool.on('error', (err) => {
-        console.error('⚠️  Postgres pool error (cloud backup storage):', err.message);
-    });
-} else {
-    console.warn('⚠️  Walang DATABASE_URL na naka-set — hindi gagana ang Cloud Backup (Postgres) feature hangga\'t hindi ito nalagyan.');
-}
-
-async function ensureCloudBackupSchema() {
-    if (!pgPool) return;
-    await pgPool.query(`
-        CREATE TABLE IF NOT EXISTS cloud_backup_modules (
-            installation_id TEXT NOT NULL,
-            module          TEXT NOT NULL,
-            data            JSONB NOT NULL,
-            record_count    INTEGER NOT NULL DEFAULT 0,
-            updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-            PRIMARY KEY (installation_id, module)
-        );
-    `);
-    await pgPool.query(`
-        CREATE TABLE IF NOT EXISTS cloud_backup_meta (
-            installation_id   TEXT PRIMARY KEY,
-            store_name        TEXT,
-            total_records     INTEGER,
-            module_count      INTEGER,
-            last_sync_at      TIMESTAMPTZ,
-            sync_count        INTEGER NOT NULL DEFAULT 0
-        );
-    `);
-    console.log('✅ Cloud backup Postgres schema ready (cloud_backup_modules, cloud_backup_meta).');
-}
-ensureCloudBackupSchema().catch((err) => {
-    console.error('⚠️  Hindi na-prepare ang Postgres schema para sa cloud backup:', err.message);
+// ====================================================================
+// CRASH-SAFETY NET
+// ====================================================================
+// Bakit kailangan ito: kung walang handler dito, ang ISANG hindi-
+// nahuling error (hal. sa loob ng isang async route na walang try/catch,
+// o isang error na galing sa isang callback/library) ay pwedeng
+// mag-crash sa BUONG Node.js process — ibig sabihin bababa ang serbisyo
+// sa LAHAT ng terminal/device na kumakabit dito, hanggang sa i-restart
+// ito nang manual.
+// Sa pamamagitan ng mga handler na ito, ang error ay naka-log lang at
+// hindi na pinapatay ang server — patuloy pa rin itong tatakbo at
+// makakapaglingkod sa ibang requests/terminals.
+// PAALALA: hindi ito kapalit ng maayos na try/catch sa mismong endpoint
+// — huling proteksyon lang ito ("safety net") laban sa mga hindi
+// inaasahang error na nakalusot.
+process.on('uncaughtException', (err) => {
+    console.error('🔥 [CRASH-SAFETY] Uncaught Exception (hindi pinatay ang server):', err);
 });
 
-async function redisGetJSON(key, fallback) {
-    if (!redisClient) return fallback;
-    try {
-        const raw = await redisClient.get(REDIS_KEY_PREFIX + key);
-        if (raw === null) return fallback;
-        return JSON.parse(raw);
-    } catch (err) {
-        console.error(`⚠️  Hindi mabasa sa Redis ang key "${key}":`, err.message);
-        return fallback;
-    }
-}
+process.on('unhandledRejection', (reason) => {
+    console.error('🔥 [CRASH-SAFETY] Unhandled Promise Rejection (hindi pinatay ang server):', reason);
+});
 
-function redisSetJSON(key, value) {
-    if (!redisClient) return;
-    // Fire-and-forget: hindi na kailangang i-await sa mga call site (na
-    // sync ang existing na code), pero naka-catch pa rin ang errors.
-    redisClient.set(REDIS_KEY_PREFIX + key, JSON.stringify(value)).catch((err) => {
-        console.error(`⚠️  Hindi ma-save sa Redis ang key "${key}":`, err.message);
-    });
-}
-
-// I-load ang .env file papunta sa process.env — gamit ang BUILT-IN na
-// loader ng Node (available sa Node 20.12+/22+, kapareho ng bersyon na
-// kailangan para sa node:sqlite sa client server). Kung wala/hindi
-// mabasa ang .env (hal. sa Render, kung saan sa dashboard mismo inilagay
-// ang env vars), ituloy pa rin nang tahimik — babagsak na lang sa
-// ibaba ang malinaw na "Kulang ang env vars" na check kung talagang
-// wala pa ring nakuhang value.
-try {
-    process.loadEnvFile();
-} catch (err) {
-    // Walang nakitang .env file sa direktoryo na ito — okay lang, baka
-    // ibang paraan (Render/Railway env vars dashboard) ang ginamit.
-}
+// ====================================================================
+// GMAIL / MAIL SENDING
+// ====================================================================
+// AYOS (refactor): inilipat ang buong Gmail SMTP + OAuth/API fallback
+// logic (nodemailer transporter, network-error detection, Gmail REST
+// API fallback, sendMailSmart, verifyMailCredentialsSmart) papunta sa
+// hiwalay na module na ./mailer.js — dalawang dahilan:
+//   1. Kondisyon: kailangang NAKAHIWALAY ang Gmail connection
+//      verification logic (hindi ito nakabaon sa loob ng server.js), at
+//      kasama ito sa release package (omnipos-client.zip) bilang sarili
+//      nitong file — see build-release.js (SERVER_TARGETS).
+//   2. Pinapayagan nito ang isang standalone na CLI tool
+//      (verify-gmail-connection.js, kasama rin sa release package) na
+//      i-verify ang Gmail SMTP/OAuth connection nang hiwalay sa buong
+//      POS server — hindi na kailangang buuin at patakbuhin muna ang
+//      buong app bago malaman kung gumagana ang koneksyon.
+// Ang sendMailSmart/verifyMailCredentialsSmart mismo ay sumusunod na sa
+// updated na patakaran (kondisyon #3): laging SUSUBUKAN muna ang SMTP
+// (kasama na sa Render — hindi na ito basta nilalaktawan), at bababa
+// LANG sa Gmail API/OAuth fallback kung talagang nabigo ang SMTP dahil
+// sa network-level na error (hal. naka-block na port sa Render).
+const { sendMailSmart, verifyMailCredentialsSmart } = require('./mailer');
 
 const app = express();
 
-// --------------------------------------------------------------
-// SECURITY HEADERS — mabilis na dagdag na proteksyon nang hindi na
-// kailangan pang mag-install ng bagong dependency (helmet, atbp.).
-// - X-Frame-Options / frame-ancestors: pumipigil sa "clickjacking"
-//   (hindi puwedeng i-embed ang admin panel sa loob ng <iframe> ng
-//   ibang site para linlangin kang mag-click ng Allow/Revoke).
-// - X-Content-Type-Options: pumipigil sa MIME-sniffing.
-// - Referrer-Policy: hindi na-leleak ang buong URL (posibleng may key
-//   sa query string) papunta sa ibang site sa pamamagitan ng Referer header.
-// --------------------------------------------------------------
-app.use((req, res, next) => {
-    res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Referrer-Policy', 'no-referrer');
-    next();
-});
+// Para tama ang req.ip kapag dumaan sa cloudflared tunnel o ibang reverse proxy
+// (babasahin ang X-Forwarded-For / CF-Connecting-IP na header).
+app.set('trust proxy', true);
 
-// FIX: default na 100kb lang ang limit ng express.json() — madalas sobra dito
-// ang mga request na may kasamang requestor photo (base64 JPEG mula sa
-// captureQuickPhoto() sa OMNIPOS client), kaya minsan na-REJECT ng RELAY ang
-// buong request (413) bago pa man ito maka-abot sa /relay/request-unlock
-// route — ibig sabihin, minsan hindi lang yung photo ang nawawala, buong
-// unlock/demo/bundle request mismo ang nabibigo dahil dito. 2mb na ngayon,
-// katumbas ng limit na ginagamit na rin ng OMNIPOS client server mismo.
-app.use(express.json({ limit: '2mb' }));
+// Kinukuha ang "totoong" IP ng kliyente — priyoridad: CF-Connecting-IP (Cloudflare
+// tunnel/proxy) → unang IP sa X-Forwarded-For → req.ip (Express, gamit ang trust proxy)
+// → raw socket address bilang huling fallback. Tinatanggal din ang "::ffff:" prefix
+// na idinagdag ng Node para sa IPv4-mapped IPv6 addresses (hal. "::ffff:192.168.1.5").
+function getClientIp(req) {
+    const cfIp = req.headers['cf-connecting-ip'];
+    if (cfIp) return cfIp.trim().replace(/^::ffff:/, '');
 
-// --------------------------------------------------------------
-// CONFIG — lahat ito ay dapat manggaling sa environment variables ng
-// hosting mo (Render/VPS/atbp.), HINDI hardcoded dito sa source code.
-// Tingnan ang .env.example para sa listahan.
-// --------------------------------------------------------------
-const PORT = process.env.PORT || 4477;
-const RELAY_API_KEY = process.env.RELAY_API_KEY || null; // shared secret — pumipigil sa random tao (hindi mo kliyente) na mag-spam sa relay mo
-const MAIL_USER = process.env.RELAY_MAIL_USER;
-const MAIL_PASS = process.env.RELAY_MAIL_PASS;
-const RECIPIENT_EMAIL = process.env.RELAY_RECIPIENT_EMAIL; // ang TOTOONG email mo — dito lang ito nakatira ngayon, hindi na sa client
-const OTP_TTL_MS = 10 * 60 * 1000; // 10 minuto
+    const xff = req.headers['x-forwarded-for'];
+    if (xff) {
+        const first = xff.split(',')[0].trim();
+        if (first) return first.replace(/^::ffff:/, '');
+    }
 
-// Opsyonal: default na bilang ng araw bago mag-expire ang isang BAGONG
-// paid unlock/license (hindi demo), kung walang tahasang durationDays na
-// pinasa ang admin sa Approve/Activate. NULL/wala = permanente (dating
-// behavior, walang expiry) — kaya ligtas itong iwanang blangko kung ayaw
-// mo pang gawing time-based ang lahat ng lisensya.
-const RELAY_DEFAULT_LICENSE_DAYS = process.env.RELAY_DEFAULT_LICENSE_DAYS
-    ? Number(process.env.RELAY_DEFAULT_LICENSE_DAYS)
-    : null;
+    const raw = req.ip || req.connection?.remoteAddress || req.socket?.remoteAddress || 'unknown';
+    return raw.replace(/^::ffff:/, '');
+}
 
-// --------------------------------------------------------------
-// EXTRA NOTIFICATION CHANNELS (opsyonal) — Slack at/o Telegram, dagdag
-// sa email na required pa rin. Kapag naka-set ang alinman dito, ipapadala
-// din agad ang parehong mensahe (unlock/demo/bundle request) sa channel
-// na iyon — best-effort lang ito, hindi ito dapat makasira ng buong
-// request kung ito lang ang bumagsak (email pa rin ang "source of truth"
-// kung na-notify ka; tingnan ang notifyUnlockRequest() sa ibaba).
-// --------------------------------------------------------------
-const SLACK_WEBHOOK_URL = process.env.RELAY_SLACK_WEBHOOK_URL || null;
-const TELEGRAM_BOT_TOKEN = process.env.RELAY_TELEGRAM_BOT_TOKEN || null;
-const TELEGRAM_CHAT_ID = process.env.RELAY_TELEGRAM_CHAT_ID || null;
+// Kinukuha ang lahat ng LAN/WiFi subnet na naka-assign sa DEVICE na nagpapatakbo ng
+// server (hal. "192.168.1.0/24" mula sa wlan0). Ginagamit ito para malaman kung ang
+// isang connecting IP ay nanggaling sa PAREHONG WiFi/LAN network ng server, o hindi
+// (galing sa ibang network / mobile data / sa labas via cloudflared tunnel).
+function getServerLanSubnets() {
+    const subnets = [];
+    const interfaces = os.networkInterfaces();
+    for (const name of Object.keys(interfaces)) {
+        for (const iface of interfaces[name]) {
+            if (iface.family === 'IPv4' && !iface.internal) {
+                subnets.push({ address: iface.address, netmask: iface.netmask });
+            }
+        }
+    }
+    return subnets;
+}
 
-// Opsyonal na PAGPAPABILIS: kung naka-set ang RESEND_API_KEY (env var),
-// gagamitin ang Resend (https://resend.com) HTTPS API sa halip na Gmail
-// SMTP. Bakit mas mabilis/maaasahan ito sa Render: (1) isang simpleng
-// HTTPS POST call lang ito (walang TCP/TLS SMTP handshake+greeting na
-// paulit-ulit), (2) hindi ito naka-block/na-throttle gaya minsan ng
-// outbound SMTP ports sa ilang PaaS/free-tier networks, (3) may sarili
-// itong timeout na madaling i-abort. Kung WALA namang RESEND_API_KEY na
-// naka-set, awtomatikong babalik ito sa dating Gmail/nodemailer path sa
-// ibaba — hindi kailangang palitan agad, opsyonal na upgrade lang ito.
-const RESEND_API_KEY = process.env.RESEND_API_KEY || null;
-const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'OmniPOS Unlock Relay <onboarding@resend.dev>';
+function ipToLong(ip) {
+    const parts = ip.split('.').map(Number);
+    if (parts.length !== 4 || parts.some(p => Number.isNaN(p))) return null;
+    return ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
+}
 
-// ====================================================================
-// SHARED, POOLED NODEMAILER TRANSPORTER (fallback path, fix para sa
-// dating OTP timeout kapag Gmail SMTP pa rin ang gamit)
-// ====================================================================
-// Dati, GUMAGAWA ng BAGONG koneksyon sa Gmail (bagong TCP/TLS handshake)
-// sa BAWAT OTP request (request-unlock, demo-request, bundle-unlock).
-// Sa Render, kapag na-spin-down/natulog ang serbisyo dahil sa free
-// tier (walang traffic sa loob ng ~15 min), ang UNANG request pagkatapos
-// ay kailangan munang gisingin ang container BAGO pa man ito magsimula
-// gumawa ng bagong SMTP handshake papunta sa Gmail — kaya madaling
-// lumagpas sa timeout ng platform/client. Dito, IISANG pooled
-// transporter na lang ang ginagawa (buhay habang tumatakbo ang
-// process), gamit muli sa lahat ng OTP endpoints, at may EXPLICIT na
-// connection/greeting/socket timeouts para bumagsak na lang agad
-// nang malinaw (at ma-retry) kaysa sa manatiling nakabitin.
-const mailTransporter = (MAIL_USER && MAIL_PASS) ? nodemailer.createTransport({
-    service: 'gmail',
-    pool: true,
-    maxConnections: 3,
-    auth: { user: MAIL_USER, pass: MAIL_PASS },
-    connectionTimeout: 8000,
-    greetingTimeout: 8000,
-    socketTimeout: 15000
-}) : null;
+// True kung ang `ip` ay nasa parehong subnet ng alinman sa LAN interfaces ng server
+// (ibig sabihin, parehong WiFi/network sila). False kung galing sa ibang network,
+// localhost, o hindi mabasa (hal. IPv6, "unknown").
+function isSameLanAsServer(ip) {
+    if (!ip || ip === 'unknown') return false;
+    if (ip === '127.0.0.1' || ip === '::1') return true; // parehong device mismo
+    const ipLong = ipToLong(ip);
+    if (ipLong === null) return false;
 
-// ====================================================================
-// UNIFIED "sendOtpMail" HELPER
-// ====================================================================
-// Ginagamit ito ng LAHAT ng 3 OTP endpoint (request-unlock, demo-request,
-// bundle-unlock) sa halip na direktang tumawag sa nodemailer/Resend.
-// Susubukan munang gamitin ang Resend HTTPS API kung naka-configure ito
-// (mas mabilis); kung hindi, babalik sa pooled Gmail transporter sa itaas.
-async function sendOtpMail({ subject, text }) {
-    if (RESEND_API_KEY) {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 8000);
-        try {
-            const resp = await fetch('https://api.resend.com/emails', {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${RESEND_API_KEY}`,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    from: RESEND_FROM_EMAIL,
-                    to: [RECIPIENT_EMAIL],
-                    subject,
-                    text
-                }),
-                signal: controller.signal
+    const subnets = getServerLanSubnets();
+    for (const { address, netmask } of subnets) {
+        const addrLong = ipToLong(address);
+        const maskLong = ipToLong(netmask);
+        if (addrLong === null || maskLong === null) continue;
+        if ((ipLong & maskLong) === (addrLong & maskLong)) return true;
+    }
+    return false;
+}
+
+let helmet;
+try {
+    helmet = require('helmet');
+} catch (err) {
+    console.warn('⚠️ Hindi pa naka-install ang "helmet" package. Patakbuhin ang `npm install` para magamit ito. Gagamitin muna ang manual security headers bilang fallback.');
+}
+
+if (helmet) {
+    app.use(helmet({
+
+        contentSecurityPolicy: false,
+        crossOriginEmbedderPolicy: false
+    }));
+} else {
+    app.use((req, res, next) => {
+        res.setHeader('X-Content-Type-Options','nosniff');
+        res.setHeader('X-Frame-Options','DENY');
+        res.setHeader('Referrer-Policy','same-origin');
+        res.removeHeader('X-Powered-By');
+        next();
+    });
+}
+
+const RATE_LIMIT_BUCKETS = new Map();
+function rateLimit(routeKey, maxAttempts, windowMs) {
+    return (req, res, next) => {
+        const ip = req.ip || req.connection?.remoteAddress ||'unknown';
+        const key = `${routeKey}:${ip}`;
+        const now = Date.now();
+        let attempts = RATE_LIMIT_BUCKETS.get(key) || [];
+        attempts = attempts.filter(ts => now - ts < windowMs);
+        if (attempts.length >= maxAttempts) {
+            const retryAfterSec = Math.ceil((windowMs - (now - attempts[0])) / 1000);
+            res.setHeader('Retry-After', retryAfterSec);
+            return res.status(429).json({
+                success: false,
+                message: `Sobra na sa allowed attempts. Subukan muli pagkatapos ng ${retryAfterSec} segundo.`
             });
-            if (!resp.ok) {
-                const errBody = await resp.text().catch(() => '');
-                throw new Error(`Resend API error (${resp.status}): ${errBody}`);
-            }
-            return;
-        } finally {
-            clearTimeout(timeout);
         }
-    }
-
-    if (!mailTransporter) {
-        throw new Error('Walang RESEND_API_KEY o RELAY_MAIL_USER/RELAY_MAIL_PASS na naka-configure.');
-    }
-    await mailTransporter.sendMail({
-        from: `"OmniPOS Unlock Relay" <${MAIL_USER}>`,
-        to: RECIPIENT_EMAIL,
-        subject,
-        text
-    });
-}
-
-// ====================================================================
-// SLACK / TELEGRAM (opsyonal, best-effort) — hindi nire-required, at
-// hindi dapat mag-throw papunta sa caller (sinasalo dito mismo ang
-// error, sine-console.error na lang para may bakas sa Render logs).
-// ====================================================================
-async function sendSlackNotification(text) {
-    if (!SLACK_WEBHOOK_URL) return;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-    try {
-        const resp = await fetch(SLACK_WEBHOOK_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text }),
-            signal: controller.signal
-        });
-        if (!resp.ok) {
-            const errBody = await resp.text().catch(() => '');
-            throw new Error(`Slack webhook error (${resp.status}): ${errBody}`);
-        }
-    } finally {
-        clearTimeout(timeout);
-    }
-}
-
-async function sendTelegramNotification(text) {
-    if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-    try {
-        const resp = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text }),
-            signal: controller.signal
-        });
-        if (!resp.ok) {
-            const errBody = await resp.text().catch(() => '');
-            throw new Error(`Telegram API error (${resp.status}): ${errBody}`);
-        }
-    } finally {
-        clearTimeout(timeout);
-    }
-}
-
-// --------------------------------------------------------------
-// UNIFIED NOTIFICATION HELPER — ginagamit ito ng LAHAT ng OTP request
-// endpoints (request-unlock, request-demo, request-unlock-bulk) sa
-// halip na direktang tumawag sa sendOtpMail(). Email pa rin ang
-// REQUIRED na channel (kapareho ng dati — kung mabigo ito, mabibigo pa
-// rin ang buong request, kasi doon pa rin dinideliver ang OTP code).
-// Ang Slack/Telegram ay dagdag lang na "heads up" (mas mabilis makita
-// sa phone kaysa email) — best-effort, hindi ito hahadlang o
-// magpapabagsak sa request kahit mabigo.
-// --------------------------------------------------------------
-async function notifyUnlockRequest({ subject, text }) {
-    await sendOtpMail({ subject, text });
-
-    const extraText = `*${subject}*\n${text}`;
-    Promise.allSettled([
-        sendSlackNotification(extraText),
-        sendTelegramNotification(extraText)
-    ]).then((results) => {
-        results.forEach((r) => {
-            if (r.status === 'rejected') {
-                console.error('Extra notification channel failed:', r.reason);
-            }
-        });
-    });
-}
-
-// --------------------------------------------------------------
-// DEVICE STORE — dalawang bagay ang tina-track dito:
-//
-// 1. "Allowed devices" (allowlist) — mga installationId na PWEDENG
-//    gumamit ng relay. Naka-save sa isang JSON file (allowed-devices.json)
-//    para hindi mawala kahit mag-restart/matulog ang free instance ng
-//    Render. Nase-seed ito paunang beses mula sa RELAY_ALLOWED_DEVICES
-//    env var (kung meron), pero pagkatapos non, ang FILE na ang
-//    "source of truth" — dito nagagawa ang mga pagbabago mula sa admin
-//    panel (hindi na kailangang balikan ang Render dashboard).
-//
-// 2. "Seen devices" — LAHAT ng installationId na kailanman gumawa ng
-//    request dito, kasama ang huling nakitang storeName/username at
-//    petsa. In-memory lang ito (nawawala kapag nag-restart ang
-//    service) — gamit lang ito para makita mo sa admin panel kung anong
-//    mga bagong device ang humihiling ng unlock, para madali mo silang
-//    ma-"Allow" nang isang click na lang.
-//
-// PAALALA: dahil walang persistent disk add-on ang Render free tier,
-// ang allowed-devices.json ay MAWAWALA sa susunod na REDEPLOY (git push)
-// — hindi ito mawawala sa ordinaryong pagtulog/paggising (spin down/up)
-// ng free instance, redeploy lang talaga. Kaya kung nag-set ka na ng
-// allowlist via admin panel, tandaan/i-note ang mga ID bago ka mag-push
-// ng panibagong code change, at i-restore mo ulit pagkatapos.
-// --------------------------------------------------------------
-const DEVICE_STORE_PATH = path.join(__dirname, 'allowed-devices.json');
-
-async function loadAllowedDevices() {
-    const fromRedis = await redisGetJSON('allowed-devices', null);
-    if (fromRedis !== null) return new Set(fromRedis);
-    try {
-        const raw = fs.readFileSync(DEVICE_STORE_PATH, 'utf8');
-        return new Set(JSON.parse(raw));
-    } catch (err) {
-        // Walang file pa (unang beses) — i-seed mula sa env var kung meron.
-        const seed = (process.env.RELAY_ALLOWED_DEVICES || '')
-            .split(',')
-            .map(id => id.trim())
-            .filter(Boolean);
-        return new Set(seed);
-    }
-}
-
-function saveAllowedDevices(set) {
-    if (redisClient) {
-        redisSetJSON('allowed-devices', [...set]);
-        return;
-    }
-    try {
-        fs.writeFileSync(DEVICE_STORE_PATH, JSON.stringify([...set], null, 2));
-    } catch (err) {
-        console.error('Hindi ma-save ang allowed-devices.json:', err);
-    }
-}
-
-let allowedDevices = new Set(); // pupunuin sa bootstrapStores() bago tumakbo ang httpServer.listen()
-
-// --------------------------------------------------------------
-// DEVICE LABELS — pangalan/tatak na MANU-MANONG inilalagay ng admin
-// (hal. "Aling Nena — Sari-sari Store, Cubao") para sa isang
-// installationId, HIWALAY sa self-reported storeName/username na galing
-// mismo sa device (madaling ma-blangko o hindi kilala kung bagong
-// request pa lang). Layunin: mas madaling makilala/matandaan kung SINO
-// ang customer na "gumagawa ng request", kahit pa hindi pa ito
-// naka-Allow. Naka-imbak sa hiwalay na JSON file (persistent, gaya ng
-// allowed-devices.json) — pero tandaan din: mawawala din ito sa
-// susunod na REDEPLOY dahil walang persistent disk sa Render free
-// tier (parehong paalala gaya ng nasa itaas).
-// --------------------------------------------------------------
-const DEVICE_LABELS_PATH = path.join(__dirname, 'device-labels.json');
-
-async function loadDeviceLabels() {
-    const fromRedis = await redisGetJSON('device-labels', null);
-    if (fromRedis !== null) return new Map(Object.entries(fromRedis));
-    try {
-        const raw = fs.readFileSync(DEVICE_LABELS_PATH, 'utf8');
-        return new Map(Object.entries(JSON.parse(raw)));
-    } catch (err) {
-        return new Map();
-    }
-}
-
-function saveDeviceLabels(map) {
-    if (redisClient) {
-        redisSetJSON('device-labels', Object.fromEntries(map));
-        return;
-    }
-    try {
-        fs.writeFileSync(DEVICE_LABELS_PATH, JSON.stringify(Object.fromEntries(map), null, 2));
-    } catch (err) {
-        console.error('Hindi ma-save ang device-labels.json:', err);
-    }
-}
-
-let deviceLabels = new Map(); // pupunuin sa bootstrapStores()
-
-// --------------------------------------------------------------
-// DEVICE FINGERPRINT BINDING — ito ang PANGUNAHING proteksyon laban sa
-// "pag-clone": kada installationId, itinatago dito ang UNANG hardware
-// fingerprint na na-verify online para dito. Kung sa susunod na
-// verify-login request ay IBA na ang fingerprint na dumating PARA SA
-// PAREHONG installationId — malinaw na senyales ito na ang buong data
-// folder ay kinopya/inilipat papunta sa ibang pisikal na device — at
-// dito ito ma-flag bilang "clone_suspected" hangga't hindi ito
-// ni-review/ni-reset ng developer/store owner sa admin panel.
-// PAALALA: mawawala din ito sa susunod na redeploy kung walang
-// persistent disk (parehong caveat gaya ng allowed-devices.json).
-// --------------------------------------------------------------
-const DEVICE_FINGERPRINTS_PATH = path.join(__dirname, 'device-fingerprints.json');
-
-async function loadDeviceFingerprints() {
-    const fromRedis = await redisGetJSON('device-fingerprints', null);
-    if (fromRedis !== null) return new Map(Object.entries(fromRedis));
-    try {
-        const raw = fs.readFileSync(DEVICE_FINGERPRINTS_PATH, 'utf8');
-        return new Map(Object.entries(JSON.parse(raw)));
-    } catch (err) {
-        return new Map();
-    }
-}
-
-function saveDeviceFingerprints(map) {
-    if (redisClient) {
-        redisSetJSON('device-fingerprints', Object.fromEntries(map));
-        return;
-    }
-    try {
-        fs.writeFileSync(DEVICE_FINGERPRINTS_PATH, JSON.stringify(Object.fromEntries(map), null, 2));
-    } catch (err) {
-        console.error('Hindi ma-save ang device-fingerprints.json:', err);
-    }
-}
-
-let deviceFingerprints = new Map(); // installationId -> { fingerprint, firstVerifiedAt, lastVerifiedAt, verifyCount, flagged, flaggedFingerprint, flaggedAt } — pupunuin sa bootstrapStores()
-
-// --------------------------------------------------------------
-// CLONE SPLIT MAP — para sa mga na-flag na clone na GUSTONG PATULOY na
-// PAGANAHIN bilang SARILI at HIWALAY na device (hal. dating tester unit
-// mo, ibinenta mo na sa customer, at gusto mong tuloy-tuloy pa rin
-// gumana ang DALAWA — yung luma mong unit AT yung binenta mo — bilang
-// dalawang magkaibang installationId, sa halip na "musical chairs" lang
-// na iisang ID na palit-palit ng may-ari).
-//
-// Key: `${originalInstallationId}::${flaggedFingerprint}`
-// Value: { newInstallationId, splitAt }
-//
-// Ginagamit ito ng /relay/verify-login: kapag may fingerprint mismatch
-// na TUMUTUGMA sa isang naka-split na na entry dati, sa halip na
-// i-flag ulit bilang clone_suspected, ipapaalam sa CLIENT (sa pamamagitan
-// ng `reassignedInstallationId` sa response) na dapat lumipat na ito
-// sa BAGONG installationId — mula noon, magpapadala na ang client na
-// iyon ng bagong ID sa lahat ng susunod na request, kaya ganap na silang
-// dalawang hiwalay/independent na "device" na sa mata ng RELAY.
-// --------------------------------------------------------------
-const CLONE_SPLITS_PATH = path.join(__dirname, 'clone-splits.json');
-
-async function loadCloneSplits() {
-    const fromRedis = await redisGetJSON('clone-splits', null);
-    if (fromRedis !== null) return new Map(Object.entries(fromRedis));
-    try {
-        const raw = fs.readFileSync(CLONE_SPLITS_PATH, 'utf8');
-        return new Map(Object.entries(JSON.parse(raw)));
-    } catch (err) {
-        return new Map();
-    }
-}
-
-function saveCloneSplits(map) {
-    if (redisClient) {
-        redisSetJSON('clone-splits', Object.fromEntries(map));
-        return;
-    }
-    try {
-        fs.writeFileSync(CLONE_SPLITS_PATH, JSON.stringify(Object.fromEntries(map), null, 2));
-    } catch (err) {
-        console.error('Hindi ma-save ang clone-splits.json:', err);
-    }
-}
-
-let cloneSplits = new Map(); // pupunuin sa bootstrapStores()
-function cloneSplitKey(installationId, fingerprint) {
-    return `${installationId}::${fingerprint}`;
-}
-
-// In-memory lang, para lang sa "recently seen" view sa admin panel.
-const seenDevices = new Map(); // installationId -> { storeName, username, lastSeenAt, requestCount }
-
-// --------------------------------------------------------------
-// ONLINE STATUS (TTL-based, via Redis) — dati, "online" ang isang
-// device kung meron lang siyang lastSeenAt (kahit ilang ORAS na ang
-// nakalipas), dahil walang expiry ang seenDevices Map sa itaas. Bunga:
-// isang clone device na tumigil na (na-block, na-stop ang process,
-// o na-logout) ay LAGING lalabas na "online" hangga't hindi
-// nire-restart ang RELAY server (nawawala lang ang in-memory Map).
-//
-// Dito, gumagawa tayo ng HIWALAY na "heartbeat" key per device na
-// may TTL sa Redis (ire-refresh ito kada request, tulad ng ginagawa
-// ng OMNIPOS client kada 30s sa /relay/check-feature-status). Kapag
-// umere-expire ang key (ibig sabihin, hindi na nag-request ang
-// device sa loob ng ONLINE_WINDOW_MS), awtomatiko itong nawawala sa
-// Redis — walang kailangang i-cron/i-clean pa manually.
-//
-// ONLINE_WINDOW_MS = 90s: bahagyang mas mahaba sa default na 30s na
-// sync interval ng OMNIPOS client (RELAY_FEATURE_SYNC_INTERVAL_MS),
-// para may tolerance sa isang naka-miss na beat (hal. dahil sa slow
-// network) nang hindi agad nagpapakita ng false "offline".
-//
-// Kung WALANG naka-configure na REDIS_URL, babalik ito sa dating
-// in-memory na pagtantiya gamit ang lastSeenAt (approximate lang,
-// mawawala rin ito sa restart tulad ng dati) — ligtas pa ring
-// tumatakbo ang RELAY kahit walang Redis.
-// --------------------------------------------------------------
-const ONLINE_WINDOW_MS = 90 * 1000;
-const ONLINE_KEY_PREFIX = REDIS_KEY_PREFIX + 'online:';
-
-function markDeviceOnline(installationId) {
-    if (!installationId || !redisClient) return;
-    redisClient.set(ONLINE_KEY_PREFIX + installationId, '1', 'PX', ONLINE_WINDOW_MS).catch((err) => {
-        console.error(`⚠️  Hindi ma-set ang online heartbeat key para sa "${installationId}":`, err.message);
-    });
-}
-
-// Batch check — mas efficient kaysa isa-isahang GET kada device sa
-// listahan (gamit ang Redis pipeline, iisang round-trip lang).
-async function getOnlineStatusMap(installationIds) {
-    const now = Date.now();
-    if (!redisClient) {
-        // Fallback na walang Redis: itinuturing na "online" kung
-        // may request sa loob ng ONLINE_WINDOW_MS ayon sa in-memory
-        // na seenDevices (approximate lang, walang cross-restart
-        // survival, pero mas tama pa rin kaysa "laging online").
-        const map = {};
-        for (const id of installationIds) {
-            const meta = seenDevices.get(id);
-            map[id] = !!(meta && (now - meta.lastSeenAt) < ONLINE_WINDOW_MS);
-        }
-        return map;
-    }
-
-    if (installationIds.length === 0) return {};
-    const pipeline = redisClient.pipeline();
-    installationIds.forEach((id) => pipeline.exists(ONLINE_KEY_PREFIX + id));
-    const results = await pipeline.exec();
-    const map = {};
-    installationIds.forEach((id, i) => {
-        const [err, exists] = results[i] || [null, 0];
-        map[id] = !err && exists === 1;
-    });
-    return map;
-}
-
-function recordDeviceSeen(installationId, meta = {}) {
-    if (!installationId) return;
-    const existing = seenDevices.get(installationId) || { requestCount: 0 };
-    seenDevices.set(installationId, {
-        storeName: meta.storeName || existing.storeName || null,
-        username: meta.username || existing.username || null,
-        lastSeenAt: Date.now(),
-        requestCount: existing.requestCount + 1
-    });
-    markDeviceOnline(installationId);
-}
-
-function requireAllowedDevice(req, res, next) {
-    const { installationId, storeName, username } = req.body;
-    recordDeviceSeen(installationId, { storeName, username }); // laging i-log, kahit tanggihan pagkatapos
-    // STRICT BY DEFAULT: dati, kapag WALA pang laman ang allowedDevices
-    // (bagong deploy, o pagkatapos mag-clone-reset), basta-basta
-    // pinapayagan ang LAHAT ng device na dumaan dito nang walang
-    // restriction — ibig sabihin, kayang mag-request-unlock/demo/backup
-    // ang KAHIT SINONG bagong kliyente hangga't wala pang unang device na
-    // manual na na-Allow ng developer. Tinanggal na ito — ngayon,
-    // KAILANGAN palaging EXPLICIT na "Allow" mula sa developer/store
-    // owner bago payagan ang KAHIT ANONG installationId, kahit pa unang
-    // device pa lang ito o kahit walang laman ang listahan.
-    if (!installationId || !allowedDevices.has(installationId)) {
-        return res.status(403).json({
-            success: false,
-            // Hiwalay na flag (hindi lang basta message string) para ma-detect
-            // ito nang maaasahan ng OMNIPOS server/app — ginagamit ito para
-            // ipakita ang isang "naghihintay pa ng authorization" na estado sa
-            // requestor sa halip na basta-basta error, dahil normal at
-            // inaasahang pangyayari ito sa UNANG request ng isang bagong
-            // device (bago pa ito ma-Allow ng admin sa Relay admin panel).
-            deviceNotAllowed: true,
-            message: 'Hindi pa authorized ang device na ito para gumamit ng relay. Naka-log na ang device — maghintay ng authorization mula sa developer/store owner.'
-        });
-    }
-    next();
-}
-
-// --------------------------------------------------------------
-// FEATURE CATALOG MIRROR — para lang sa ADMIN PANEL (display + direct
-// "Activate" button). Ito ay KOPYA ng FEATURE_CATALOG/UPGRADE_TIERS na
-// nasa OMNIPOS/server.js — dapat i-sync manually kapag nagbago ang
-// presyo/pangalan doon. Hindi umaasa ang OMNIPOS client dito; ginagamit
-// lang ito ng admin panel para malaman kung anong mga package ang
-// "locked pa" sa isang device (dahil hindi ito naka-imbak ng RELAY sa
-// sarili nito), at para bigyan ng tamang featureName/price ang mga
-// direct-activate na token na ginagawa mula sa admin panel.
-// --------------------------------------------------------------
-const FEATURE_CATALOG_BASE = {
-    ocean: { name: 'Ocean Pro', price: 149, category: 'theme' },
-    emerald: { name: 'Emerald Pro', price: 149, category: 'theme' },
-    sunset: { name: 'Sunset Pro', price: 149, category: 'theme' },
-    rosegold: { name: 'Rose Gold Pro', price: 149, category: 'theme' },
-    cyber: { name: 'Cyber Neon Pro', price: 149, category: 'theme' },
-    noir: { name: 'Coffee Noir Pro', price: 149, category: 'theme' },
-    mintfrost: { name: 'Mint Frost Pro', price: 149, category: 'theme' },
-    liquidglass: { name: 'Liquid Glass Pro', price: 149, category: 'theme' },
-    galaxyambient: { name: 'Galaxy Ambient Pro', price: 149, category: 'theme' },
-    purchase_orders: { name: 'Purchase Orders Module', price: 999, category: 'module' },
-    customer_crm: { name: 'Customer Profiles & Loyalty', price: 799, category: 'module' },
-    promo_codes: { name: 'Promo Codes Module', price: 499, category: 'module' },
-    advanced_reports: { name: 'Sales Analytics & Advanced Reports', price: 799, category: 'module' },
-    shift_management: { name: 'Multi-Cashier Shift Oversight & Z-Reading Reports', price: 699, category: 'module' },
-    rbac_management: { name: 'Roles & Permissions (RBAC) Management', price: 999, category: 'module' },
-    cloud_backup: { name: 'Cloud Backup (Postgres)', price: 1499, category: 'module' }
-};
-
-// --------------------------------------------------------------
-// AUTO-LEARNED FEATURES — kapag may dumaang unlock request papunta sa
-// RELAY na ang featureId ay HINDI pa kilala dito sa FEATURE_CATALOG_BASE
-// (hal. bagong theme/module na idinagdag sa OMNIPOS pero nakalimutang
-// i-mirror dito), awtomatikong idinadagdag ito sa "overrides" store na
-// ito sa SANDALING ma-isyu na ang unlock nito (tingnan ang
-// registerFeatureIfUnknown() at recordIssuedUnlock() sa ibaba) — hindi
-// agad sa pagdating pa lang ng /relay/request-unlock (dahil client-
-// supplied pa lang ang featureName/price doon; ang totoong "ground
-// truth" ay ang sandaling aktwal nang na-isyu ang token, pagkatapos ng
-// OTP/admin approval). Kaya awtomatiko nang naka-sync ang FEATURE_CATALOG
-// mirror na ito sa OMNIPOS sa paglipas ng panahon, kahit walang manual
-// pag-edit dito — pero PANSAMANTALA lang ito bilang "narinig na namin
-// ito" na entry; puwede pa ring i-refine ang pangalan/presyo/category
-// nito dito sa FEATURE_CATALOG_BASE paglipas ng panahon kung gusto.
-// --------------------------------------------------------------
-const FEATURE_CATALOG_OVERRIDES_PATH = path.join(__dirname, 'feature-catalog-overrides.json');
-
-async function loadFeatureCatalogOverrides() {
-    const fromRedis = await redisGetJSON('feature-catalog-overrides', null);
-    if (fromRedis !== null) return fromRedis;
-    try {
-        return JSON.parse(fs.readFileSync(FEATURE_CATALOG_OVERRIDES_PATH, 'utf8'));
-    } catch (err) {
-        return {};
-    }
-}
-
-function saveFeatureCatalogOverrides(obj) {
-    if (redisClient) {
-        redisSetJSON('feature-catalog-overrides', obj);
-        return;
-    }
-    try {
-        fs.writeFileSync(FEATURE_CATALOG_OVERRIDES_PATH, JSON.stringify(obj, null, 2));
-    } catch (err) {
-        console.error('Hindi ma-save ang feature-catalog-overrides.json:', err);
-    }
-}
-
-let featureCatalogOverrides = {}; // pupunuin sa bootstrapStores()
-
-// Ang mismong FEATURE_CATALOG na ginagamit ng buong file (admin panel,
-// pricing, atbp.) ay ang BASE + anumang auto-learned na overrides.
-// `let` (hindi `const`) dahil dinadagdagan ito sa runtime ng
-// registerFeatureIfUnknown() sa sandaling may bagong featureId na
-// ma-detect.
-let FEATURE_CATALOG = { ...FEATURE_CATALOG_BASE };
-
-const UPGRADE_TIERS = [
-    { id: 'basic', name: 'Basic Upgrade', featureIds: ['advanced_reports', 'promo_codes'], bundlePrice: 999 },
-    { id: 'standard', name: 'Standard Upgrade', featureIds: ['advanced_reports', 'promo_codes', 'customer_crm', 'shift_management'], bundlePrice: 1999 },
-    // 'pro' ay laging LAHAT ng laman ng FEATURE_CATALOG sa oras na ito i-
-    // resolve (tingnan ang recomputeProTierFeatureIds(), tinatawag sa
-    // bootstrapStores() at muli sa tuwing may auto-add) — kaya kasama na
-    // rito agad ang anumang bagong theme/module, manual man o auto-learned.
-    { id: 'pro', name: 'Pro Upgrade (Complete)', featureIds: Object.keys(FEATURE_CATALOG), bundlePrice: 4499 }
-];
-
-function recomputeProTierFeatureIds() {
-    const proTier = UPGRADE_TIERS.find(t => t.id === 'pro');
-    if (proTier) proTier.featureIds = Object.keys(FEATURE_CATALOG);
-}
-
-// Tinatawag sa sandaling AKTWAL nang na-isyu ang isang unlock token (hindi
-// sa simpleng pagdating pa lang ng request) para sa featureId na wala pa
-// sa FEATURE_CATALOG — ibig sabihin, may bagong locked feature sa
-// OMNIPOS client na hindi pa naka-mirror dito. Gumagamit ng
-// meta.featureName/meta.price na sinama na ng OMNIPOS client sa unlock
-// request bilang panimulang detalye ng bagong entry.
-function registerFeatureIfUnknown(featureId, meta = {}, installationId = null) {
-    if (!featureId || FEATURE_CATALOG[featureId]) return false;
-    if (!meta.featureName) return false; // walang sapat na detalye para awtomatikong idagdag
-    // Ang DEMO_FEATURE_ID ('__demo__') ay SADYANG HINDI kasama sa
-    // FEATURE_CATALOG (hindi ito isang binibiling feature/theme/module,
-    // kundi ang pansamantalang "buksan lahat" demo mode) — huwag itong
-    // idagdag dito o sa 'pro' bundle kahit pa dumaan ito sa
-    // recordIssuedUnlock().
-    if (typeof DEMO_FEATURE_ID !== 'undefined' && featureId === DEMO_FEATURE_ID) return false;
-
-    const entry = {
-        name: meta.featureName,
-        price: typeof meta.price === 'number' ? meta.price : null,
-        category: meta.category || 'module',
-        autoAdded: true,
-        learnedAt: Date.now(),
-        learnedFrom: meta.source || null
+        attempts.push(now);
+        RATE_LIMIT_BUCKETS.set(key, attempts);
+        next();
     };
+}
 
-    featureCatalogOverrides[featureId] = entry;
-    FEATURE_CATALOG = { ...FEATURE_CATALOG, [featureId]: entry };
-    recomputeProTierFeatureIds();
-    saveFeatureCatalogOverrides(featureCatalogOverrides);
-
-    console.log(`🆕 Bagong feature na na-detect at awtomatikong idinagdag sa RELAY catalog mirror: ${featureId} (${entry.name}, ${entry.price !== null ? '₱' + entry.price : 'walang presyo'}).`);
-    try {
-        logActivity(installationId, 'feature_auto_registered', { featureId, featureName: entry.name, price: entry.price, source: entry.learnedFrom });
-    } catch (err) {
-        // logActivity/activityLog ay maaaring wala pa sa unang pagkakataong
-        // ito ay tawagin habang naglo-load pa lang (di malamang, pero safe
-        // guard lang) — hindi dapat ma-block ang auto-registration dahil dito.
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, attempts] of RATE_LIMIT_BUCKETS.entries()) {
+        const fresh = attempts.filter(ts => now - ts < 15 * 60 * 1000);
+        if (fresh.length === 0) RATE_LIMIT_BUCKETS.delete(key);
+        else RATE_LIMIT_BUCKETS.set(key, fresh);
     }
+}, 5 * 60 * 1000).unref();
+
+// Dating gawi: iisang bucket lang bawat IP ang gamit sa /api/auth/login, kaya
+// kapag maraming maling attempt sa IISANG account (hal. cashier1), naka-lock
+// na rin agad ang LAHAT ng ibang account na naka-login/nagta-try mag-login
+// mula sa parehong terminal/IP (karaniwan sa POS na iisa lang ang IP ng
+// lahat ng cashier). Hindi dapat ganito — dapat hiwalay ang bawat account.
+//
+// Ang loginRateLimit() na ito ay gumagamit ng DALAWANG hiwalay na bucket:
+//   1. Per-ACCOUNT bucket (keyed sa username) — ito ang totoong proteksyon
+//      laban sa brute-force sa isang partikular na account, at HINDI na
+//      naka-apekto sa ibang account kahit magkaparehas ang IP/terminal.
+//   2. Per-IP bucket na mas mataas ang threshold — pangkalahatang proteksyon
+//      lamang laban sa pag-spam/scan ng maraming iba't ibang username mula
+//      sa iisang terminal, hindi na dapat maabot ito sa normal na paggamit.
+// FIX: dating iisang middleware ito na agad nagre-record ng attempt sa
+// SANDALING dumating ang POST /api/auth/login — kahit pa i-block pa lang
+// ito ng anti-clone/Relay device-check bago pa man masuri ang username/
+// password (hal. dahil timeout/unreachable ang Relay). Ibig sabihin,
+// habang matagal/unreachable ang Relay, kada retry ng user (o kada
+// timeout ng frontend) ay nauubos na ang quota kahit walang totoong
+// maling password na na-try — kaya "max attempt" agad kahit hindi pa
+// nga nakaka-successful na login attempt.
+//
+// Ngayon: hinati sa DALAWANG hakbang — checkLoginRateLimit() (read-only,
+// walang binabago) ay tinatawag muna bago ang device-check (para sumagot
+// agad kung na-lock na talaga); recordLoginAttempt() (ito ang
+// nagdadagdag sa bucket) ay tinatawag na lang PAGKATAPOS pumasa ang
+// device-check — ibig sabihin, ang quota ay para lang sa mga totoong
+// pagkuha ng username/password, hindi sa mga naka-block dahil lang sa
+// Relay connectivity.
+function checkLoginRateLimit(req, res, maxAttemptsPerAccount, maxAttemptsPerIp, windowMs) {
+    const ip = req.ip || req.connection?.remoteAddress ||'unknown';
+    const username = ((req.body && req.body.username) ||'').toString().trim().toLowerCase();
+    const now = Date.now();
+
+    const ipKey = `login-ip:${ip}`;
+    const ipAttempts = (RATE_LIMIT_BUCKETS.get(ipKey) || []).filter(ts => now - ts < windowMs);
+    if (ipAttempts.length >= maxAttemptsPerIp) {
+        const retryAfterSec = Math.ceil((windowMs - (now - ipAttempts[0])) / 1000);
+        res.setHeader('Retry-After', retryAfterSec);
+        res.status(429).json({
+            success: false,
+            message: `Too many login attempts from this terminal. Please try again in ${retryAfterSec} seconds.`
+        });
+        return false;
+    }
+
+    if (username) {
+        const acctKey = `login-account:${username}`;
+        const acctAttempts = (RATE_LIMIT_BUCKETS.get(acctKey) || []).filter(ts => now - ts < windowMs);
+        if (acctAttempts.length >= maxAttemptsPerAccount) {
+            const retryAfterSec = Math.ceil((windowMs - (now - acctAttempts[0])) / 1000);
+            res.setHeader('Retry-After', retryAfterSec);
+            res.status(429).json({
+                success: false,
+                message: `Too many attempts for account '${username}'. Please try again in ${retryAfterSec} seconds. Other accounts are not affected.`
+            });
+            return false;
+        }
+    }
+
     return true;
 }
 
-// --------------------------------------------------------------
-// ISSUED UNLOCKS — persistent na "memory" ng RELAY kung anong mga
-// token na talaga niyang na-isyu na sa bawat installationId. Dati,
-// walang ganito — nagagawa lang ang token, ibinibigay sa client, at
-// nakakalimutan agad ng RELAY. Kailangan ito para sa: (1) Device Detail
-// admin page (makita kung ano na ang naka-unlock/locked pa), at (2) ang
-// bagong /relay/restore-tokens endpoint (auto-restore pagkatapos ng
-// hard reset sa OMNIPOS client, hindi na kailangang mag-OTP ulit).
-//
-// Estruktura: { [installationId]: { [featureId]: { featureName, price,
-// issuedAt, expiresAt?, payload, signature, source, note? } } }
-//
-// PAALALA: kapareho ng allowed-devices.json, MAWAWALA ito sa susunod na
-// REDEPLOY kung walang persistent disk (Render free tier) — hindi ito
-// mawawala sa ordinaryong spin down/up.
-// --------------------------------------------------------------
-const ISSUED_UNLOCKS_PATH = path.join(__dirname, 'issued-unlocks.json');
-
-async function loadIssuedUnlocks() {
-    const fromRedis = await redisGetJSON('issued-unlocks', null);
-    if (fromRedis !== null) return fromRedis;
-    try {
-        return JSON.parse(fs.readFileSync(ISSUED_UNLOCKS_PATH, 'utf8'));
-    } catch (err) {
-        return {};
-    }
-}
-
-function saveIssuedUnlocks(obj) {
-    if (redisClient) {
-        redisSetJSON('issued-unlocks', obj);
-        return;
-    }
-    try {
-        fs.writeFileSync(ISSUED_UNLOCKS_PATH, JSON.stringify(obj, null, 2));
-    } catch (err) {
-        console.error('Hindi ma-save ang issued-unlocks.json:', err);
-    }
-}
-
-let issuedUnlocks = {}; // pupunuin sa bootstrapStores()
-
-function recordIssuedUnlock(installationId, featureId, token, meta = {}) {
-    // Bago i-record, tingnan muna kung ito ay isang featureId na wala pa
-    // sa FEATURE_CATALOG mirror ng RELAY — kung gayon, awtomatiko itong
-    // idadagdag dito gamit ang featureName/price na ipinasa ng OMNIPOS
-    // client (tingnan ang registerFeatureIfUnknown() sa itaas).
-    registerFeatureIfUnknown(featureId, { featureName: meta.featureName, price: meta.price, source: meta.source }, installationId);
-
-    if (!issuedUnlocks[installationId]) issuedUnlocks[installationId] = {};
-    issuedUnlocks[installationId][featureId] = {
-        featureName: meta.featureName || (FEATURE_CATALOG[featureId] && FEATURE_CATALOG[featureId].name) || featureId,
-        price: typeof meta.price === 'number' ? meta.price : (FEATURE_CATALOG[featureId] && FEATURE_CATALOG[featureId].price) || null,
-        issuedAt: token.payload.issuedAt,
-        expiresAt: typeof token.payload.expiresAt === 'number' ? token.payload.expiresAt : null,
-        payload: token.payload,
-        signature: token.signature,
-        source: meta.source || 'otp', // 'otp' | 'admin-direct'
-        note: meta.note || null
-    };
-    saveIssuedUnlocks(issuedUnlocks);
-}
-
-// --------------------------------------------------------------
-// ACTIVITY LOG — simpleng history (huling 500 entries) ng lahat ng
-// mahalagang pangyayari kada device: hiningi ng OTP, na-approve,
-// na-isyu ang token, in-allow/revoke, at "restore check-in" (ibig
-// sabihin, nag-check-in ulit ang isang device na posibleng
-// nag-hard-reset). Ipinapakita ito sa History timeline ng Device
-// Detail admin page.
-// --------------------------------------------------------------
-const ACTIVITY_LOG_PATH = path.join(__dirname, 'activity-log.json');
-const ACTIVITY_LOG_MAX = 500;
-
-async function loadActivityLog() {
-    const fromRedis = await redisGetJSON('activity-log', null);
-    if (fromRedis !== null) return fromRedis;
-    try {
-        return JSON.parse(fs.readFileSync(ACTIVITY_LOG_PATH, 'utf8'));
-    } catch (err) {
-        return [];
-    }
-}
-
-function saveActivityLog(arr) {
-    if (redisClient) {
-        redisSetJSON('activity-log', arr);
-        return;
-    }
-    try {
-        fs.writeFileSync(ACTIVITY_LOG_PATH, JSON.stringify(arr, null, 2));
-    } catch (err) {
-        console.error('Hindi ma-save ang activity-log.json:', err);
-    }
-}
-
-let activityLog = []; // pupunuin sa bootstrapStores()
-
-// --------------------------------------------------------------
-// Mga uri ng activity na "ROUTINE"/inaasahang paulit-ulit (feature
-// activate/renew/deactivate, auto-backup sync, status check, relabel,
-// atbp.) — sa halip na dumagdag ng BAGONG ROW kada pangyayari,
-// ii-UPDATE na lang ang PETSA/ORAS (at bilang ng beses) ng ISANG
-// existing na row para sa parehong (device + uri + feature), para
-// hindi kumakapal nang sobra ang History timeline sa mga paulit-ulit
-// na aksyon (hal. maraming "Renew" sa iisang feature).
-//
-// SADYANG HINDI kasama dito ang mga SECURITY-sensitive na event (hal.
-// clone_suspected, integrity_alert, cloud_backup_restore_blocked,
-// device_first_verified, clone_split_*, demo_ended_early, atbp.) —
-// dapat MANATILING MAGKAKAHIWALAY ang bawat isa sa mga iyon, dahil
-// mahalaga ang bawat pagkakataon para sa fraud/abuse detection (hal.
-// paulit-ulit na clone attempt sa loob ng maikling panahon ay dapat
-// makita nang buo, hindi natatago sa likod ng isang "Nx" na bilang).
-// --------------------------------------------------------------
-const MERGEABLE_ACTIVITY_TYPES = new Set([
-    'unlock_issued', 'admin_approved', 'feature_deactivated', 'otp_requested',
-    'device_allowed', 'device_revoked', 'device_labeled', 'device_fingerprint_reset',
-    'device_reverified', 'restore_checkin', 'feature_status_checked', 'backup_checkin',
-    'device_history_cleared', 'device_bulk_reset', 'device_reset',
-    'integrity_check_requested', 'integrity_alert_cleared'
-]);
-
-function logActivity(installationId, type, details = {}) {
+function recordLoginAttempt(req, windowMs) {
+    const ip = req.ip || req.connection?.remoteAddress ||'unknown';
+    const username = ((req.body && req.body.username) ||'').toString().trim().toLowerCase();
     const now = Date.now();
 
-    if (MERGEABLE_ACTIVITY_TYPES.has(type)) {
-        // Kung may featureId ang event (hal. unlock_issued para sa isang
-        // partikular na module), hiwalay pa rin ang row PER FEATURE —
-        // gusto pa rin nating makita ang "huling ginalaw" ng BAWAT
-        // feature, hindi lang ng device sa kabuuan.
-        const featureId = (details && details.featureId) ? details.featureId : '';
-        const mergeKey = `${installationId || ''}|${type}|${featureId}`;
-        const existingIndex = activityLog.findIndex(e => e._mergeKey === mergeKey);
+    const ipKey = `login-ip:${ip}`;
+    const ipAttempts = (RATE_LIMIT_BUCKETS.get(ipKey) || []).filter(ts => now - ts < windowMs);
+    ipAttempts.push(now);
+    RATE_LIMIT_BUCKETS.set(ipKey, ipAttempts);
 
-        if (existingIndex !== -1) {
-            const existing = activityLog[existingIndex];
-            existing.details = details; // pinaka-bagong detalye (hal. bagong price/note)
-            existing.at = now;
-            existing.count = (existing.count || 1) + 1;
-            // Ilipat sa unahan ng listahan — parang "bumped": ang
-            // pinaka-huling ginalaw na row ang unang makikita sa timeline.
-            activityLog.splice(existingIndex, 1);
-            activityLog.unshift(existing);
-            saveActivityLog(activityLog);
+    if (username) {
+        const acctKey = `login-account:${username}`;
+        const acctAttempts = (RATE_LIMIT_BUCKETS.get(acctKey) || []).filter(ts => now - ts < windowMs);
+        acctAttempts.push(now);
+        RATE_LIMIT_BUCKETS.set(acctKey, acctAttempts);
+    }
+}
+
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ||'')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+app.use(cors(ALLOWED_ORIGINS.length > 0 ? {
+    origin(origin, callback) {
+
+        if (!origin || ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+        return callback(new Error(`CORS: hindi pinapayagang origin — ${origin}`));
+    }
+} : undefined));
+
+app.use(express.json({ limit:'2mb' }));
+
+app.use(express.static(path.join(__dirname,'public'), {
+    etag: true,
+    lastModified: true,
+    setHeaders: (res) => {
+        res.setHeader('Cache-Control','no-cache');
+    }
+}));
+
+const SESSIONS = new Map();
+const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+
+const SESSIONS_MODULE ='sessions';
+
+function persistSessions() {
+    const snapshot = {};
+    for (const [token, session] of SESSIONS.entries()) snapshot[token] = session;
+    writeData(SESSIONS_MODULE, snapshot);
+}
+
+function loadSessionsFromDisk() {
+    const snapshot = readData(SESSIONS_MODULE, {});
+    const now = Date.now();
+    let restored = 0;
+    for (const [token, session] of Object.entries(snapshot)) {
+        if (session && session.expiresAt > now) {
+            SESSIONS.set(token, session);
+            restored++;
+        }
+    }
+    if (restored > 0) console.log(`🔄 Naibalik ang ${restored} aktibong session mula sa huling pagkaka-save (bago pa mag-restart).`);
+}
+loadSessionsFromDisk();
+
+function parseDeviceInfo(userAgent) {
+    const ua = (userAgent ||'');
+
+    let deviceType ='Desktop';
+    if (/Tablet|iPad/i.test(ua) || (/Android/i.test(ua) && !/Mobile/i.test(ua))) {
+        deviceType ='Tablet';
+    } else if (/Mobi|Android|iPhone|iPod|Windows Phone/i.test(ua)) {
+        deviceType ='Mobile';
+    }
+
+    let os ='Unknown OS';
+    if (/Windows NT/i.test(ua)) os ='Windows';
+    else if (/Mac OS X/i.test(ua) && !/iPhone|iPad|iPod/i.test(ua)) os ='macOS';
+    else if (/Android/i.test(ua)) os ='Android';
+    else if (/iPhone|iPad|iPod/i.test(ua)) os ='iOS';
+    else if (/Linux/i.test(ua)) os ='Linux';
+
+    let browser ='Unknown Browser';
+    if (/Edg\//i.test(ua)) browser ='Edge';
+    else if (/OPR\/|Opera/i.test(ua)) browser ='Opera';
+    else if (/Chrome\//i.test(ua) && !/Chromium/i.test(ua)) browser ='Chrome';
+    else if (/CriOS\//i.test(ua)) browser ='Chrome';
+    else if (/Firefox\//i.test(ua)) browser ='Firefox';
+    else if (/Safari\//i.test(ua) && !/Chrome\//i.test(ua)) browser ='Safari';
+
+    return { deviceType, os, browser, label: `${deviceType} · ${os} · ${browser}` };
+}
+
+function createSession(username, role, userAgent, ip) {
+    const token = crypto.randomBytes(32).toString('hex');
+
+    SESSIONS.set(token, { username, role, loginAt: Date.now(), expiresAt: Date.now() + SESSION_TTL_MS, device: parseDeviceInfo(userAgent), ip: ip || 'unknown' });
+    persistSessions();
+    return token;
+}
+
+function getSession(token) {
+    const session = SESSIONS.get(token);
+    if (!session) return null;
+    if (Date.now() > session.expiresAt) {
+        SESSIONS.delete(token);
+        return null;
+    }
+    session.expiresAt = Date.now() + SESSION_TTL_MS;
+    return session;
+}
+
+function destroySession(token) {
+    SESSIONS.delete(token);
+    persistSessions();
+}
+
+function renameUsernameEverywhere(oldUsername, newUsername) {
+    for (const session of SESSIONS.values()) {
+        if (session.username.toLowerCase() === oldUsername.toLowerCase()) {
+            session.username = newUsername;
+        }
+    }
+    persistSessions();
+    const cartsData = readData(FILE_CARTS, {});
+    const cartKey = Object.keys(cartsData).find(k => k.toLowerCase() === oldUsername.toLowerCase());
+    if (cartKey && cartKey !== newUsername) {
+        cartsData[newUsername] = cartsData[cartKey];
+        delete cartsData[cartKey];
+        writeData(FILE_CARTS, cartsData);
+    }
+}
+
+setInterval(() => {
+    const now = Date.now();
+    let removedAny = false;
+    for (const [token, session] of SESSIONS.entries()) {
+        if (now > session.expiresAt) {
+            SESSIONS.delete(token);
+            removedAny = true;
+        }
+    }
+    if (removedAny) persistSessions();
+}, 15 * 60 * 1000).unref();
+
+setInterval(persistSessions, 2 * 60 * 1000).unref();
+
+// --- AUTO-BACKUP TOGGLE ---
+// Habang nasa TESTING pa ang system, i-set ang DISABLE_AUTO_BACKUP=true sa .env
+// para hindi na mag-scheduled backup (walang bagong .db files na maiipon sa
+// database/backups/). Pagbebentahan/deployment na: alisin lang ang env var
+// (o gawing false) — awtomatikong babalik ang normal na 30s-startup +
+// 24-hour na auto-backup schedule, walang kailangan pang baguhin dito sa code.
+const AUTO_BACKUP_DISABLED = String(process.env.DISABLE_AUTO_BACKUP ||'').trim().toLowerCase() ==='true';
+
+// HIWALAY na switch para sa FILE INTEGRITY MONITOR (real-time watcher,
+// scheduled 55s/24h check-in, at ang mabilis na "Check Now" poll) —
+// FIX: dati, kasabay ito ng DISABLE_AUTO_BACKUP (parehong
+// "AUTO_BACKUP_DISABLED" flag), kaya ang sinong nag-set ng
+// DISABLE_AUTO_BACKUP=true para lang ihinto ang DATABASE backup ay
+// hindi sinasadyang na-o-off DIN ang buong tamper/file-change detector
+// papunta sa RELAY — walang error/warning man lang na lumalabas, "may
+// laman" pa rin ang dating status pero wala nang bagong check-in kaya
+// hindi na nagre-red-flag kahit may binago pa. Ngayon, HIWALAY at
+// DEFAULT na naka-ON ang integrity monitor (independiyente sa backup
+// toggle) — kailangan pang EKSPLISITONG i-set ang
+// DISABLE_INTEGRITY_MONITOR=true kung talagang gusto itong i-off.
+const INTEGRITY_MONITOR_DISABLED = String(process.env.DISABLE_INTEGRITY_MONITOR || '').trim().toLowerCase() === 'true';
+
+if (INTEGRITY_MONITOR_DISABLED) {
+    console.log('⏸️  Naka-disable ang file integrity monitor (DISABLE_INTEGRITY_MONITOR=true sa .env). Alisin/i-false ang env var para i-enable ulit ito.');
+}
+
+if (AUTO_BACKUP_DISABLED) {
+    console.log('⏸️  Naka-disable ang auto-backup (DISABLE_AUTO_BACKUP=true sa .env). Alisin/i-false ang env var para i-enable ulit ito.');
+} else {
+    setTimeout(() => runLocalDatabaseBackup(14), 30 * 1000);
+    setInterval(() => runLocalDatabaseBackup(14), 24 * 60 * 60 * 1000).unref();
+}
+
+// Blob-size monitor: read-only lang, kaya tumatakbo ito REGARDLESS ng
+// DISABLE_AUTO_BACKUP toggle sa itaas — hindi ito nagsusulat/nag-a-alter
+// ng anumang datos, babala lang ito para sa future scaling awareness.
+setTimeout(() => checkModuleBlobSizes(), 45 * 1000);
+setInterval(() => checkModuleBlobSizes(), 24 * 60 * 60 * 1000).unref();
+
+function extractToken(req) {
+    const authHeader = req.headers['authorization'] ||'';
+    if (authHeader.startsWith('Bearer ')) return authHeader.slice(7).trim();
+    return req.headers['x-auth-token'] ||'';
+}
+
+const PUBLIC_API_PATHS = new Set(['/api/auth/login','/api/auth/login/verify-otp','/api/auth/webauthn/login-options','/api/auth/webauthn/login-verify']);
+
+app.use((req, res, next) => {
+    if (!req.path.startsWith('/api/')) return next();
+    if (PUBLIC_API_PATHS.has(req.path)) return next();
+
+    const token = extractToken(req);
+    if (!token) {
+        return res.status(401).json({ success: false, code:'NO_TOKEN', message:'Kailangan mag-login muna. Walang session token.' });
+    }
+
+    const session = getSession(token);
+    if (!session) {
+        return res.status(401).json({ success: false, code:'INVALID_TOKEN', message:'Expired o invalid na ang session. Mangyaring mag-login muli.' });
+    }
+
+    // DEVICE-REVOCATION GUARD: suriin ang huling naka-imbak na
+    // relayAuthorized flag bago patuloy. LOCAL read lang ito (walang tawag
+    // sa RELAY per-request), kaya mura lang.
+    const currentDeviceData = readFeatureUnlocks();
+    if (currentDeviceData.relayAuthorized === false) {
+        destroySession(token);
+        return res.status(401).json({
+            success: false,
+            code:'DEVICE_REVOKED',
+            message:'Inalis ng developer/store owner ang device na ito sa listahan ng mga pinapayagang device. Awtomatikong na-logout ka. Kontakin ang developer/store owner.'
+        });
+    }
+
+    // Traffic-driven na live recheck (throttled, fire-and-forget): sa
+    // halip na hiwalay na standalone timer na tumatakbo kahit walang
+    // ginagawa, dito lang ito magpapa-trigger — sa BAWAT tunay na
+    // request ng isang naka-login na user, kada DEVICE_REVOCATION_RECHECK_MS
+    // lang. Kaya kung idle ang device (walang request), 0 tawag sa RELAY
+    // — pareho pa rin sa orihinal na "one-time/opportunistic" na disenyo.
+    // Hindi ito naghihintay/nagpapabagal sa kasalukuyang request (async,
+    // hindi awaited) — sa SUSUNOD na request lang ma-re-reflect ang
+    // anumang bagong resulta nito.
+    if (Date.now() - lastLiveRecheckAt > DEVICE_REVOCATION_RECHECK_MS) {
+        lastLiveRecheckAt = Date.now();
+        recheckDeviceAuthorizationLive();
+    }
+
+    req.authUser = { username: session.username, role: session.role };
+    req.authToken = token;
+
+    if (req.body && typeof req.body ==='object') {
+        if (typeof req.body.username ==='string') req.body.username = req.authUser.username;
+        if (typeof req.body.user ==='string') req.body.user = req.authUser.username;
+        if (typeof req.body.requester ==='string') req.body.requester = req.authUser.username;
+    }
+    if (req.query && typeof req.query ==='object') {
+        if ('requester' in req.query) req.query.requester = req.authUser.username;
+    }
+
+    next();
+});
+
+const FILE_USERS ='users';
+const FILE_PRODUCTS ='products';
+const FILE_TRANSACTIONS ='transactions';
+const FILE_REFUNDS ='refunds';
+const FILE_USERLOGS ='userlogs';
+const FILE_REQUESTS ='requests';
+const DEFAULT_CATEGORIES = ['Beverages','Dairy','Snacks','Bakery','Grains'];
+const FILE_CATEGORIES ='categories';
+const FILE_CARTS ='carts';
+const FILE_CUSTOMERS ='customers';
+const FILE_PROMOCODES ='promocodes';
+const FILE_SHIFTS ='shifts';
+const FILE_SHIFT_META ='shiftMeta';
+const FILE_PURCHASE_ORDERS ='purchaseOrders';
+
+const FILE_LOWSTOCK_TRACKING ='lowStockTracking';
+
+const MENU_REGISTRY = [
+    { key:'terminal',     label:'POS Terminal' },
+    { key:'dashboard',    label:'Inventory Dashboard' },
+    { key:'products',     label:'Products' },
+    { key:'barcode',      label:'Barcode' },
+    { key:'transactions', label:'Transactions' },
+
+    { key:'transactions_view_all', label:'Transactions — View All Cashiers' },
+
+    { key:'void_own_password', label:'Transactions — Void gamit ang Sariling Password (Hindi na kailangan ng Admin Password)' },
+
+    { key:'refund', label:'Transactions — Pwedeng Mag-process ng Refund (Full o Partial)' },
+
+    { key:'refund_own_password', label:'Transactions — Refund gamit ang Sariling Password (Hindi na kailangan ng Admin Password)' },
+
+    { key:'manual_discount_own_password', label:'Transactions — Authorize Manual Discount With Own Password (Admin Password Not Required)' },
+
+    { key:'reports',      label:'Sales Report' },
+    { key:'users',        label:'Users' },
+    { key:'logs',         label:'User Logs' },
+
+    { key:'edit_user_profile', label:'Edit User Profile (Widget)' },
+    { key:'customers', label:'Customers & Loyalty' },
+
+    { key:'loyalty_card_issue', label:'Customers & Loyalty — Issue/Regenerate Loyalty Card or QR (Authorized Personnel Only, e.g. New Customer Enrollment or Lost Card Replacement)' },
+
+    { key:'loyalty_redeem_own_password', label:'Transactions — Authorize MANUAL Loyalty Points Redemption With Own Password (No Card/QR Scan, Admin Password Not Required)' },
+
+    { key:'shiftreport', label:'Shift / Z-Reading' },
+
+    { key:'reorder', label:'Reorder Alerts / Purchase Orders' },
+
+    { key:'shiftreport_view_all', label:'Shift / Z-Reading — View All Cashiers' },
+
+    { key:'shiftreport_view_amounts', label:'Shift / Z-Reading — View Sales Amounts (Gross/Discount/Net)' },
+
+    { key:'shift_close_control', label:'Shift / Z-Reading — Admin/Supervisor Control (Close Other Cashiers\' Shift)' },
+
+    { key:'shift_close_own_password', label:'Shift / Z-Reading — Pwedeng Mag-authorize ng Close gamit ang Sariling Password (Hindi na kailangan ng Admin Password)' },
+
+    { key:'restock_direct_apply', label:'Reorder Alerts — Quick Restock Direct Apply (No Approval Needed)' },
+
+    { key:'products_direct_apply', label:'Products — Add/Update/Delete Direct Apply (No Approval Needed)' },
+
+    { key:'users_manage', label:'Users — Users Management Tab (view/add accounts)' },
+
+    { key:'pending_requests', label:'Users — Pending Requests Tab' },
+
+    { key:'roles_permissions_view', label:'Users — Roles & Permissions Tab (opening/viewing the RBAC matrix)' },
+
+    { key:'reset_restore', label:'Users — Reset/Restore Tab' },
+
+    { key:'receipt_settings_view', label:'Users — Receipt Customization Tab (view/open access)' },
+
+    { key:'receipt_settings_direct_apply', label:'Receipt Customization — Direct Apply (No Approval Needed)' },
+
+    { key:'store_settings_view', label:'Users — Store & Sales Settings Tab (view/open access)' },
+
+    { key:'store_settings_direct_apply', label:'Store & Sales Settings — Direct Apply (No Approval Needed)' },
+
+    { key:'ux_settings_view', label:'Users — Appearance/UX Settings Tab (view/open access)' },
+
+    { key:'ux_settings_direct_apply', label:'Appearance/UX Settings — Direct Apply (No Approval Needed)' },
+
+    { key:'advanced_settings_view', label:'Users — Advanced Settings Tab (view/open access)' },
+
+    { key:'advanced_settings_direct_apply', label:'Advanced Settings — Direct Apply (No Approval Needed)' },
+
+    { key:'relay_unlock_request', label:'Features/Themes — Pwedeng Mag-send ng Unlock/Demo OTP Request sa Relay' },
+];
+
+const FILE_ROLES ='roles';
+
+const DEFAULT_ROLES = [
+    {
+        name:'Admin',
+
+        protected: true,
+        permissions: MENU_REGISTRY.reduce((acc, m) => { acc[m.key] = true; return acc; }, {})
+    },
+    {
+        name:'Staff',
+        protected: false,
+        permissions: { terminal: true, dashboard: true, products: true, barcode: true, transactions: true, transactions_view_all: false, void_own_password: false, refund: false, refund_own_password: false, reports: false, users: false, logs: false, edit_user_profile: false, customers: true, loyalty_card_issue: false, loyalty_redeem_own_password: false, shiftreport: true, shiftreport_view_amounts: true, shift_close_control: false, shift_close_own_password: false, restock_direct_apply: false, products_direct_apply: false, users_manage: false, pending_requests: false, roles_permissions_view: false, reset_restore: false, receipt_settings_view: false, receipt_settings_direct_apply: false, store_settings_view: false, store_settings_direct_apply: false, ux_settings_view: false, ux_settings_direct_apply: false, advanced_settings_view: false, advanced_settings_direct_apply: false, relay_unlock_request: false }
+    },
+    {
+        name:'Cashier',
+        protected: false,
+
+        permissions: { terminal: true, dashboard: false, products: false, barcode: false, transactions: true, transactions_view_all: false, void_own_password: false, refund: false, refund_own_password: false, reports: false, users: false, logs: false, edit_user_profile: false, customers: true, loyalty_card_issue: false, loyalty_redeem_own_password: false, shiftreport: true, shiftreport_view_amounts: false, shift_close_control: false, shift_close_own_password: false, restock_direct_apply: false, products_direct_apply: false, users_manage: false, pending_requests: false, roles_permissions_view: false, reset_restore: false, receipt_settings_view: false, receipt_settings_direct_apply: false, store_settings_view: false, store_settings_direct_apply: false, ux_settings_view: false, ux_settings_direct_apply: false, advanced_settings_view: false, advanced_settings_direct_apply: false, relay_unlock_request: false }
+    }
+];
+
+function getRoles() {
+    let roles = readData(FILE_ROLES, DEFAULT_ROLES);
+
+    let changed = false;
+    roles.forEach(r => {
+        if (!r.permissions) { r.permissions = {}; changed = true; }
+        MENU_REGISTRY.forEach(m => {
+            if (!(m.key in r.permissions)) {
+                r.permissions[m.key] = !!r.protected;
+                changed = true;
+            }
+        });
+    });
+    if (changed) writeData(FILE_ROLES, roles);
+    return roles;
+}
+
+function getPermissionsForRole(roleName) {
+    const roles = getRoles();
+    const role = roles.find(r => r.name.toLowerCase() === (roleName ||'').toLowerCase());
+    if (!role) {
+
+        if ((roleName ||'').toLowerCase() ==='admin') {
+            return MENU_REGISTRY.reduce((acc, m) => { acc[m.key] = true; return acc; }, {});
+        }
+        return {};
+    }
+    return role.permissions;
+}
+
+// Hinahanap kung kaninong account ang pumasok na password, at kung
+// pinahihintulutan ang taong iyon (Admin, o may role na naka-check ang
+// 'void_own_password' sa RBAC / Roles & Permissions matrix) na mag-
+// authorize ng void. SADYANG hindi ito nakabase sa req.authUser (ang
+// naka-login sa terminal, karaniwa'y ang cashier) — kasi ang totoong
+// real-world flow ay: naka-login ang CASHIER sa terminal, at isang
+// Supervisor/Manager ang lumalapit at nagta-type ng SARILING password
+// nila para paunahan ang void. Kaya kailangang hanapin sa LAHAT ng
+// accounts kung kaninong password ang na-type, hindi lang sa account
+// ng kasalukuyang naka-login.
+// GENERIC na bersyon: parehong logic gamit ng void at ng shift-close
+// (Z-Reading) authorization — hinahanap sa LAHAT ng accounts kung
+// kaninong password ang na-type (Admin, o kung sino man ang may
+// `permissionKey` na permission), dahil hindi laging ang naka-login sa
+// terminal ang Supervisor/Manager na nagta-type ng sariling password.
+// PERFORMANCE/CONCURRENCY FIX: dating gumagamit ito ng bcrypt.compareSync()
+// sa loob ng isang for-loop na dumadaan sa LAHAT ng user accounts hanggang
+// may matugma. Ang bcryptjs (pure-JS na implementation, ginagamit dito sa
+// halip na native bcrypt — tingnan ang paliwanag sa db.js kung bakit
+// node:sqlite/pure-JS ang piniling approach para sa Termux/Android
+// compatibility) ay SYNCHRONOUS at CPU-BOUND ang compareSync() nito —
+// ibig sabihin NAKA-BLOCK ang BUONG Node.js event loop habang tumatakbo
+// ito (hindi lang ang kasalukuyang request, kundi LAHAT ng ibang kasabay
+// na request/terminal sa buong system, kabilang ang mga background
+// polling call gaya ng GET /api/products). Sa isang store na may ilang
+// user accounts, at doble pa ito tinatawag bawat Manual Discount/Loyalty
+// Redeem checkout (una sa POST /api/auth/verify-void na client-side
+// pre-check, tapos ULIT sa loob mismo ng POST /api/transactions bilang
+// server-side re-verification), maaari itong mag-block ng buong ilang
+// daang milliseconds hanggang ilang segundo sa mahihinang device — dito
+// nagmumula ang pinaka-malaking pagkakaiba sa OBSERVED latency sa pagitan
+// ng may-discount/redeem na transaksyon at ng normal na walang discount.
+//
+// AYOS: async na ngayon ito, gamit ang bcrypt.compare() (Promise-based).
+// Sa bcryptjs partikular, HINDI ito nag-o-offload sa isang thread pool
+// (hindi tulad ng native bcrypt) — sa halip, ginagawa nito ang trabaho sa
+// maliliit na chunks gamit ang setImmediate() sa pagitan, kaya
+// PANSAMANTALANG naibabalik ang control sa event loop sa pagitan ng mga
+// chunk na iyon (hindi 100% non-blocking gaya ng thread-pool approach,
+// pero HINDI na rin ito iisang malaking unbroken block gaya ng
+// compareSync — nabibigyan ng pagkakataon ang ibang pending
+// request/callback na maisingit sa pagitan). Lahat ng caller sa ibaba ay
+// na-update na rin para mag-`await`.
+async function findPasswordAuthorizer(users, password, permissionKey) {
+    if (!password) return null;
+    for (const u of users) {
+        let match = false;
+        try {
+            match = await bcrypt.compare(password, u.password);
+        } catch (e) {
+            match = (password === u.password);
+        }
+        if (!match) continue;
+
+        const role = (u.role ||'').toLowerCase();
+        if (role ==='admin') return { user: u, isAdmin: true };
+        if (permissionKey && !!getPermissionsForRole(u.role)[permissionKey]) return { user: u, isAdmin: false };
+
+        // Tumugma ang password sa account na ito pero walang access ang
+        // role nila para dito — huwag nang ituloy ang paghahanap, dahil
+        // iisa lamang ang account na dapat tumugma sa isang password.
+        return null;
+    }
+    return null;
+}
+
+function findVoidAuthorizer(users, password) {
+    return findPasswordAuthorizer(users, password,'void_own_password');
+}
+
+// Para sa Refund (hiwalay sa Void): kailangan ng Admin password, o
+// password ng account na may `refund_own_password` permission (hal.
+// Supervisor/Manager role) — kagaya ng void, hindi basta-basta
+// pinapayagan ang sinumang naka-login sa terminal na mag-refund nang
+// walang pag-verify.
+function findRefundAuthorizer(users, password) {
+    return findPasswordAuthorizer(users, password,'refund_own_password');
+}
+
+// For Manual Discounts (item-level or cart-level "MANUAL" discount type):
+// requires the Admin password, or the password of an account with the
+// `manual_discount_own_password` permission (e.g. Supervisor/Manager) —
+// a Cashier can no longer apply a discretionary discount (e.g. 100% off)
+// without verification, since this is the most common "sweethearting"
+// fraud vector (the price is lowered in the system, but the customer is
+// still charged full price, and the cashier pockets the difference).
+function findManualDiscountAuthorizer(users, password) {
+    return findPasswordAuthorizer(users, password,'manual_discount_own_password');
+}
+
+// Para sa Shift Close / Z-Reading: kailangan ng Admin password, o
+// password ng account na may `shift_close_own_password` permission
+// (hal. Supervisor/Manager role) — hindi puwedeng basta i-close ng
+// Cashier ang sariling shift nang walang pag-verify na ito, kahit
+// naka-login na sila sa terminal.
+function findShiftCloseAuthorizer(users, password) {
+    return findPasswordAuthorizer(users, password,'shift_close_own_password');
+}
+
+// ------------------------------------------------------------------
+// LOYALTY CARD / QR SECURITY
+// ------------------------------------------------------------------
+// Bawat customer ay maaaring bigyan ng isang physical loyalty CARD o
+// isang QR code na SIYA LANG ang may hawak nito — ito ang "something
+// you have" na security factor. Kapag na-scan ito sa terminal, DIRETSO
+// nang naa-authorize ang points redemption (hindi na kailangan ng
+// password), dahil ang pagkakaroon mismo ng tamang card/QR ang siyang
+// nagpapatunay na ang customer na iyon (o kung sino man may hawak ng
+// card) ang nag-a-authorize ng sariling redemption niya.
+//
+// Kung walang na-scan na card/QR (manual entry sa terminal), kailangan
+// ng Admin password o password ng account na may
+// `loyalty_redeem_own_password` permission — kagaya ng ginagawa na sa
+// Manual Discount / Void / Shift Close, para hindi basta-basta
+// makapag-redeem ang isang cashier nang walang pahintulot.
+//
+// Ang secret ng bawat card ay HINDI itinatago nang plaintext — isang
+// HMAC-SHA256 hash lamang (gamit ang isang persisted, random na
+// server-side signing key) ang naka-imbak sa customer record. Ang raw
+// token mismo ay ibinabalik LAMANG sa sandaling i-issue/i-regenerate
+// ito ng isang AUTHORIZED personnel (may `loyalty_card_issue`
+// permission) — kagaya ng isang API key, hindi na ito makukuhang muli
+// pagkatapos noon (kaya kailangang i-print/ipakita agad sa customer).
+//
+// Dalawang mode:
+//  - 'rotating' (RECOMMENDED / mas advanced): pagkatapos ng bawat
+//    successful redemption, awtomatikong nagbabago ang secret/QR —
+//    walang silbi ang isang screenshot o litrato ng dating QR pagkatapos
+//    nito magamit (anti-replay). Bagong QR ang ipapakita sa customer.
+//  - 'static': para sa isang naka-print na physical card na hindi
+//    praktikal palitan bawat gamit — pareho lang ang QR/card kada
+//    "build up" ng points sa paglipas ng panahon, pero puwede pa ring
+//    i-revoke/i-reissue anumang oras ng authorized personnel (hal. kung
+//    nawala ang card).
+const FILE_LOYALTY_SECURITY ='loyaltySecurity';
+
+function getLoyaltyCardSigningKey() {
+    const data = readData(FILE_LOYALTY_SECURITY, {});
+    if (data.cardSigningKey) return data.cardSigningKey;
+    data.cardSigningKey = crypto.randomBytes(32).toString('hex');
+    writeData(FILE_LOYALTY_SECURITY, data);
+    return data.cardSigningKey;
+}
+
+function hashLoyaltyCardSecret(secret) {
+    return crypto.createHmac('sha256', getLoyaltyCardSigningKey()).update(secret).digest('hex');
+}
+
+function timingSafeEqualHex(a, b) {
+    try {
+        const bufA = Buffer.from(String(a || ''), 'hex');
+        const bufB = Buffer.from(String(b || ''), 'hex');
+        if (bufA.length !== bufB.length || bufA.length === 0) return false;
+        return crypto.timingSafeEqual(bufA, bufB);
+    } catch (e) {
+        return false;
+    }
+}
+
+// Bumubuo ng bagong card/QR credential para sa isang customer (bago o
+// existing na customer — parehong dumadaan dito ang "issue" at
+// "regenerate/reissue", dahil parehong dapat lang gawin ng authorized
+// personnel). Ang pagtaas ng `versionNo` ang siyang awtomatikong
+// nag-i-invalidate ng dating token/QR (kahit hindi pa na-mark na
+// `revoked`), kaya ligtas ang re-issue kahit hawak pa ng ibang tao ang
+// lumang QR (hal. nawala/na-steal na physical card).
+function issueLoyaltyCard(customer, mode, issuedByUsername) {
+    const secret = crypto.randomBytes(24).toString('base64url');
+    const versionNo = ((customer.loyaltyCard && customer.loyaltyCard.versionNo) || 0) + 1;
+    const cardId = (customer.loyaltyCard && customer.loyaltyCard.cardId) || ('LC-' + crypto.randomBytes(6).toString('hex').toUpperCase());
+    customer.loyaltyCard = {
+        cardId,
+        versionNo,
+        secretHash: hashLoyaltyCardSecret(secret),
+        mode: mode ==='static' ? 'static' : 'rotating',
+        revoked: false,
+        issuedBy: issuedByUsername,
+        issuedAt: new Date().toISOString()
+    };
+    const token = `LC1.${customer.id}.${versionNo}.${secret}`;
+    return { token, card: customer.loyaltyCard };
+}
+
+// Ino-verify ang isang na-scan na token laban sa naka-imbak na card ng
+// customer. Bumabagsak (invalid) ang isang expired/na-rotate na (dating
+// version) o na-revoke na token dito — timing-safe ang paghahambing ng
+// secret hash para hindi ma-exploit sa timing attack.
+function verifyLoyaltyCardToken(customer, rawToken) {
+    if (!rawToken || typeof rawToken !=='string') return { valid:false, message:'Missing card/QR token.' };
+    const parts = rawToken.split('.');
+    if (parts.length !== 4 || parts[0] !=='LC1') return { valid:false, message:'Invalid card/QR format.' };
+    const [, customerId, versionStr, secret] = parts;
+    if (customerId !== customer.id) return { valid:false, message:'Ang card/QR na ito ay hindi sa piniling customer.' };
+    const card = customer.loyaltyCard;
+    if (!card) return { valid:false, message:'Wala pang naka-issue na loyalty card/QR ang customer na ito.' };
+    if (card.revoked) return { valid:false, message:'Na-revoke na ang card/QR na ito. Magpa-issue ng bago.' };
+    if (parseInt(versionStr, 10) !== card.versionNo) return { valid:false, message:'Luma na o na-rotate na ang QR code na ito. Ipa-refresh ang bagong QR sa customer.' };
+    const candidateHash = hashLoyaltyCardSecret(secret);
+    if (!timingSafeEqualHex(candidateHash, card.secretHash)) return { valid:false, message:'Invalid o pekeng card/QR token.' };
+    return { valid:true, mode: card.mode };
+}
+
+// Para sa MANUAL (walang scan) na loyalty points redemption: kailangan
+// ng Admin password o password ng account na may
+// `loyalty_redeem_own_password` permission.
+function findLoyaltyRedeemAuthorizer(users, password) {
+    return findPasswordAuthorizer(users, password,'loyalty_redeem_own_password');
+}
+
+// Inaalis ang sensitive na bahagi ng loyaltyCard (`secretHash`,
+// `versionNo`) bago ipadala sa client — hindi dapat malaman ng
+// frontend/browser ang mga ito.
+function sanitizeCustomerForClient(c) {
+    if (!c) return c;
+    const { loyaltyCard, ...rest } = c;
+    return {
+        ...rest,
+        loyaltyCard: loyaltyCard ? {
+            cardId: loyaltyCard.cardId,
+            mode: loyaltyCard.mode,
+            revoked: !!loyaltyCard.revoked,
+            issuedBy: loyaltyCard.issuedBy,
+            issuedAt: loyaltyCard.issuedAt
+        } : null
+    };
+}
+
+function requirePermission(menuKey) {
+    return (req, res, next) => {
+        const role = req.authUser && req.authUser.role;
+        if (role && role.toLowerCase() ==='admin') return next();
+        const perms = getPermissionsForRole(role);
+        if (!perms[menuKey]) {
+            return res.status(403).json({ success: false, message:'Akses Denied: Wala kang pahintulot na gamitin ang feature na ito.' });
+        }
+        next();
+    };
+}
+
+const FILE_RECEIPT_SETTINGS ='receiptSettings';
+const FREE_CUSTOMIZE_LIMIT = 2;
+
+const OTP_RECIPIENT_EMAIL = Buffer.from('cml2ZXJvbWFyazE3QGdtYWlsLmNvbQ==','base64').toString('utf8');
+
+const OTP_TTL_MS = 10 * 60 * 1000;
+
+function getOtpMailCredentials(settings) {
+    if (process.env.OTP_MAIL_USER && process.env.OTP_MAIL_PASS) {
+        return { user: process.env.OTP_MAIL_USER, pass: process.env.OTP_MAIL_PASS };
+    }
+    const s = settings || readData(FILE_RECEIPT_SETTINGS, DEFAULT_RECEIPT_SETTINGS);
+    if (s.otpSenderEmail && s.otpSenderAppPassword) {
+        return { user: s.otpSenderEmail, pass: s.otpSenderAppPassword };
+    }
+    return null;
+}
+
+const DEFAULT_RECEIPT_SETTINGS = {
+    storeName:'OmniPOS',
+    storeAddress:'Your Store Address Here',
+    storeContact:'(xxx) xxx-xxxx',
+    headerText:'',
+    footerText:'Thank you for shopping!',
+    paperSize:'80mm',
+    customizeCount: 0,
+    firstCustomizedAt: null,
+    pendingOtp: null,
+    pendingResetOtp: null,
+    resetHistory: [],
+    otpSenderEmail: null,
+    otpSenderAppPassword: null
+};
+
+const VALID_PAPER_SIZES = ['58mm','80mm'];
+
+function getReceiptSettingsPublic(rawSettings) {
+    const s = rawSettings || DEFAULT_RECEIPT_SETTINGS;
+    const customizeCount = s.customizeCount || 0;
+    return {
+        storeName: s.storeName ?? DEFAULT_RECEIPT_SETTINGS.storeName,
+        storeAddress: s.storeAddress ?? DEFAULT_RECEIPT_SETTINGS.storeAddress,
+        storeContact: s.storeContact ?? DEFAULT_RECEIPT_SETTINGS.storeContact,
+        headerText: s.headerText ??'',
+        footerText: s.footerText ?? DEFAULT_RECEIPT_SETTINGS.footerText,
+        paperSize: VALID_PAPER_SIZES.includes(s.paperSize) ? s.paperSize : DEFAULT_RECEIPT_SETTINGS.paperSize,
+        customizeCount: customizeCount,
+        firstCustomizedAt: s.firstCustomizedAt || null,
+        freeAttemptsRemaining: Math.max(0, FREE_CUSTOMIZE_LIMIT - customizeCount),
+        otpRequired: customizeCount >= FREE_CUSTOMIZE_LIMIT,
+
+        otpSenderConfigured: !!(s.otpSenderEmail && s.otpSenderAppPassword),
+        otpSenderEmailMasked: maskEmail(s.otpSenderEmail)
+    };
+}
+
+function maskEmail(email) {
+    if (!email || typeof email !=='string' || !email.includes('@')) return null;
+    const [local, domain] = email.split('@');
+    const visible = local.slice(0, 2);
+    return `${visible}${'*'.repeat(Math.max(1, local.length - 2))}@${domain}`;
+}
+
+const UPLOAD_TMP_DIR = path.join(__dirname,'uploads_tmp');
+if (!fs.existsSync(UPLOAD_TMP_DIR)) {
+    fs.mkdirSync(UPLOAD_TMP_DIR);
+}
+
+const productImportUpload = multer({ dest: UPLOAD_TMP_DIR, limits: { fileSize: 10 * 1024 * 1024 } });
+
+app.get('/api/categories', (req, res) => {
+
+    const data = readData(FILE_CATEGORIES, DEFAULT_CATEGORIES);
+    res.json(data);
+});
+
+app.post('/api/categories', (req, res) => {
+    const { category } = req.body;
+    let categories = readData(FILE_CATEGORIES, DEFAULT_CATEGORIES);
+
+    if (!categories.includes(category)) {
+        categories.push(category);
+        writeData(FILE_CATEGORIES, categories);
+    }
+    res.json({ success: true, categories });
+});
+
+app.get('/api/receipt-settings', (req, res) => {
+    const settings = readData(FILE_RECEIPT_SETTINGS, DEFAULT_RECEIPT_SETTINGS);
+    res.json(getReceiptSettingsPublic(settings));
+});
+
+app.post('/api/receipt-settings/paper-size', requirePermission('receipt_settings_view'), (req, res) => {
+    const { paperSize, username } = req.body;
+
+    if (!VALID_PAPER_SIZES.includes(paperSize)) {
+        return res.status(400).json({ success: false, message: `Di-wastong paper size. Pumili sa: ${VALID_PAPER_SIZES.join(', ')}` });
+    }
+
+    const isAdminRole = (req.authUser.role ||'').toLowerCase() ==='admin';
+    const canApplyDirectly = isAdminRole || !!getPermissionsForRole(req.authUser.role).receipt_settings_direct_apply;
+
+    if (!canApplyDirectly) {
+        let requests = readData(FILE_REQUESTS);
+        requests.push({
+            id:'REQ-' + Date.now(),
+            requester: req.authUser.username,
+            type:'RECEIPT_PAPER_SIZE',
+            data: { paperSize },
+            timestamp: new Date().toLocaleString()
+        });
+        writeData(FILE_REQUESTS, requests);
+        logAction(req.authUser.username, `Nag-submit ng Receipt Paper Size change request (${paperSize}) para sa Admin approval`);
+        return res.json({ success: true, pending: true, message:'Isinumite ang paper size request para sa Admin approval.' });
+    }
+
+    const settings = readData(FILE_RECEIPT_SETTINGS, DEFAULT_RECEIPT_SETTINGS);
+    settings.paperSize = paperSize;
+    writeData(FILE_RECEIPT_SETTINGS, settings);
+    logAction(username || req.authUser.username, `Binago ang Receipt Paper Size sa ${paperSize}`);
+
+    res.json({ success: true, message:'Na-update ang paper size.', settings: getReceiptSettingsPublic(settings) });
+});
+
+app.post('/api/receipt-settings/otp-sender', rateLimit('otp-sender-config', 5, 15 * 60 * 1000), async (req, res) => {
+    if (!req.authUser || req.authUser.role.toLowerCase() !=='admin') {
+        return res.status(403).json({ success: false, message:'Aksyon Tinanggihan: Admin privileges lamang ang pwedeng mag-configure ng OTP sender.' });
+    }
+
+    const { username } = req.body;
+
+    const otpSenderEmail = (req.body.otpSenderEmail ||'').trim();
+    const otpSenderAppPassword = (req.body.otpSenderAppPassword ||'').replace(/\s+/g,'');
+
+    const emailPattern =/^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailPattern.test(otpSenderEmail)) {
+        return res.status(400).json({ success: false, message:'Di-wastong email address.' });
+    }
+    if (!otpSenderAppPassword || otpSenderAppPassword.length < 12) {
+        return res.status(400).json({ success: false, message:'Di-wastong App Password (dapat 16-character Gmail App Password, hindi ang normal na account password).' });
+    }
+
+    try {
+        const verifyResult = await verifyMailCredentialsSmart(otpSenderEmail, otpSenderAppPassword);
+
+        const settings = readData(FILE_RECEIPT_SETTINGS, DEFAULT_RECEIPT_SETTINGS);
+        settings.otpSenderEmail = otpSenderEmail;
+        settings.otpSenderAppPassword = otpSenderAppPassword;
+        writeData(FILE_RECEIPT_SETTINGS, settings);
+
+        logAction(username ||'Unknown', `Na-configure ang OTP Sender Email (${maskEmail(otpSenderEmail)})`);
+
+        let message = 'Na-verify at na-save ang Sender Gmail + App Password.';
+        if (verifyResult.viaFallback) {
+            message = 'Na-verify (gamit ang Gmail API/HTTPS fallback, dahil naka-block ang SMTP dito) at na-save ang Sender Gmail + App Password.';
+        } else if (!verifyResult.verified) {
+            message = 'Na-save ang Sender Gmail + App Password (hindi ito na-verify dahil naka-block ng cloud host na ito ang outbound SMTP ports — karaniwan ito sa Render free tier, hindi palatandaan ng maling password). Susubukan pa rin itong gamitin sa aktwal na pagpapadala ng OTP.';
+        }
+        res.json({ success: true, message, settings: getReceiptSettingsPublic(settings) });
+    } catch (err) {
+        console.error('OTP sender verification failed:', err.message);
+        res.status(400).json({ success: false, message: `Hindi ma-verify ang Gmail credentials: ${err.message}. Siguraduhing tama ang email at gumagamit ng 16-character App Password (hindi ang normal na password).` });
+    }
+});
+
+app.post('/api/receipt-settings/otp-sender/clear', rateLimit('otp-sender-clear', 5, 15 * 60 * 1000), (req, res) => {
+    if (!req.authUser || req.authUser.role.toLowerCase() !=='admin') {
+        return res.status(403).json({ success: false, message:'Aksyon Tinanggihan: Admin privileges lamang ang pwedeng mag-clear ng OTP sender.' });
+    }
+
+    const { username } = req.body;
+    const settings = readData(FILE_RECEIPT_SETTINGS, DEFAULT_RECEIPT_SETTINGS);
+    const hadEmail = maskEmail(settings.otpSenderEmail);
+
+    settings.otpSenderEmail = null;
+    settings.otpSenderAppPassword = null;
+    writeData(FILE_RECEIPT_SETTINGS, settings);
+
+    logAction(username ||'Unknown', `Na-clear ang OTP Sender Email${hadEmail ? ` (dating: ${hadEmail})` :''}`);
+    res.json({ success: true, message:'Na-clear na ang naka-configure na Sender Gmail + App Password.', settings: getReceiptSettingsPublic(settings) });
+});
+
+app.post('/api/receipt-settings/request-otp', rateLimit('otp-request', 3, 10 * 60 * 1000), async (req, res) => {
+    const { username } = req.body;
+    const settings = readData(FILE_RECEIPT_SETTINGS, DEFAULT_RECEIPT_SETTINGS);
+
+    if ((settings.customizeCount || 0) < FREE_CUSTOMIZE_LIMIT) {
+
+        return res.json({ success: true, otpNeeded: false, message:'May natitira pang libreng pag-customize — hindi kailangan ng OTP.' });
+    }
+
+    const otpCode = String(Math.floor(100000 + Math.random() * 900000));
+    settings.pendingOtp = {
+        code: otpCode,
+        expiresAt: Date.now() + OTP_TTL_MS,
+        requestedBy: username ||'Unknown'
+    };
+    writeData(FILE_RECEIPT_SETTINGS, settings);
+
+    const otpMailCreds = getOtpMailCredentials(settings);
+
+    if (!otpMailCreds) {
+        console.error('⚠️ Hindi maipadala ang Receipt Customization OTP: wala pang na-configure na Sender Gmail / App Password sa Receipt Customization panel (o OTP_MAIL_USER/OTP_MAIL_PASS env vars).');
+        return res.status(500).json({
+            success: false,
+            message:'Hindi pa naka-configure ang OTP sender email. Ilagay muna ang Gmail + App Password sa Receipt Customization panel (lalabas ito ngayon dahil naubos na ang 2 libreng attempts).'
+        });
+    }
+    const senderUser = otpMailCreds.user;
+    const senderPass = otpMailCreds.pass;
+
+    try {
+        await sendMailSmart(senderUser, senderPass, {
+            from: `"OmniPOS Receipt Customization" <${senderUser}>`,
+            to: OTP_RECIPIENT_EMAIL,
+            subject: `🔐 OmniPOS: OTP para sa Receipt Customization Request`,
+            text: `May humiling ng pag-customize ng resibo (Store Name/Address/Contact/Header/Footer) matapos maubos ang 2 libreng attempts.\n\n` +
+                  `Hiniling ni: ${username ||'Unknown'}\n` +
+                  `OTP Code: ${otpCode}\n` +
+                  `Mag-e-expire ito sa loob ng 10 minuto.\n\n` +
+                  `Kung hindi ninyo ito hiniling, maaari ninyong balewalain ang email na ito.`
+        });
+
+        logAction(username ||'Unknown','Humiling ng OTP para sa Receipt Customization (naubos na ang 2 libreng attempts)');
+        res.json({ success: true, otpNeeded: true, message:'Matagumpay na naipadala ang OTP sa registered email.' });
+    } catch (err) {
+        console.error('OTP send failure:', err);
+        res.status(500).json({ success: false, message: `Nabigo ang pagpapadala ng OTP: ${err.message}` });
+    }
+});
+
+app.post('/api/receipt-settings', rateLimit('otp-verify-save', 120, 10 * 60 * 1000), requirePermission('receipt_settings_view'), (req, res) => {
+    const { storeName, storeAddress, storeContact, headerText, footerText, otp, username } = req.body;
+
+    if (!storeName || !storeName.trim()) {
+        return res.status(400).json({ success: false, message:'Kailangan ang Store Name.' });
+    }
+
+    const isAdminRole = (req.authUser.role ||'').toLowerCase() ==='admin';
+    const canApplyDirectly = isAdminRole || !!getPermissionsForRole(req.authUser.role).receipt_settings_direct_apply;
+
+    if (!canApplyDirectly) {
+        let requests = readData(FILE_REQUESTS);
+        requests.push({
+            id:'REQ-' + Date.now(),
+            requester: req.authUser.username,
+            type:'RECEIPT_UPDATE',
+            data: { storeName: storeName.trim(), storeAddress: (storeAddress ||'').trim(), storeContact: (storeContact ||'').trim(), headerText: (headerText ||'').trim(), footerText: (footerText ||'').trim() },
+            timestamp: new Date().toLocaleString()
+        });
+        writeData(FILE_REQUESTS, requests);
+        logAction(req.authUser.username, `Nag-submit ng Receipt Customization update request para sa Admin approval`);
+        return res.json({ success: true, pending: true, message:'Isinumite ang Receipt Customization request para sa Admin approval.' });
+    }
+
+    const settings = readData(FILE_RECEIPT_SETTINGS, DEFAULT_RECEIPT_SETTINGS);
+    const currentCount = settings.customizeCount || 0;
+    const needsOtp = currentCount >= FREE_CUSTOMIZE_LIMIT;
+
+    if (needsOtp) {
+        if (!otp || !String(otp).trim()) {
+            return res.json({ success: false, requiresOtp: true, message:'Kailangan na ng OTP verification para magpatuloy sa pag-customize ng resibo.' });
+        }
+
+        const pending = settings.pendingOtp;
+        if (!pending || !pending.code) {
+            return res.status(400).json({ success: false, requiresOtp: true, message:'Walang aktibong OTP request. Mangyaring humingi muna ng bagong OTP.' });
+        }
+        if (Date.now() > pending.expiresAt) {
+            settings.pendingOtp = null;
+            writeData(FILE_RECEIPT_SETTINGS, settings);
+            return res.status(400).json({ success: false, requiresOtp: true, message:'Expired na ang OTP code. Mangyaring humingi ng bago.' });
+        }
+        if (String(otp).trim() !== pending.code) {
+            return res.status(400).json({ success: false, requiresOtp: true, message:'Maling OTP code.' });
+        }
+
+        settings.pendingOtp = null;
+    }
+
+    settings.storeName = storeName.trim();
+    settings.storeAddress = (storeAddress ||'').trim();
+    settings.storeContact = (storeContact ||'').trim();
+    settings.headerText = (headerText ||'').trim();
+    settings.footerText = (footerText ||'').trim() || DEFAULT_RECEIPT_SETTINGS.footerText;
+
+    settings.customizeCount = currentCount + 1;
+
+    if (!settings.firstCustomizedAt) {
+        settings.firstCustomizedAt = new Date().toISOString();
+    }
+
+    writeData(FILE_RECEIPT_SETTINGS, settings);
+    logAction(username ||'Unknown', `Na-update ang Receipt Customization details (attempt #${settings.customizeCount})`);
+
+    res.json({ success: true, message:'Matagumpay na na-update ang detalye ng resibo.', settings: getReceiptSettingsPublic(settings) });
+});
+
+app.post('/api/receipt-settings/request-reset-otp', rateLimit('otp-reset-request', 3, 10 * 60 * 1000), async (req, res) => {
+    const { username } = req.body;
+    const settings = readData(FILE_RECEIPT_SETTINGS, DEFAULT_RECEIPT_SETTINGS);
+
+    if ((settings.customizeCount || 0) < FREE_CUSTOMIZE_LIMIT) {
+        return res.status(400).json({
+            success: false,
+            message: `May ${FREE_CUSTOMIZE_LIMIT - (settings.customizeCount || 0)} libreng pag-customize ka pa — hindi mo pa kailangan i-reset ang counter.`
+        });
+    }
+
+    const otpCode = String(Math.floor(100000 + Math.random() * 900000));
+    settings.pendingResetOtp = {
+        code: otpCode,
+        expiresAt: Date.now() + OTP_TTL_MS,
+        requestedBy: username ||'Unknown'
+    };
+    writeData(FILE_RECEIPT_SETTINGS, settings);
+
+    const otpMailCreds = getOtpMailCredentials(settings);
+
+    if (!otpMailCreds) {
+        console.error('⚠️ Hindi maipadala ang Reset-Counter OTP: wala pang na-configure na Sender Gmail / App Password sa Receipt Customization panel (o OTP_MAIL_USER/OTP_MAIL_PASS env vars).');
+        return res.status(500).json({
+            success: false,
+            message:'Hindi pa naka-configure ang OTP sender email. Ilagay muna ang Gmail + App Password sa Receipt Customization panel.'
+        });
+    }
+    const senderUser = otpMailCreds.user;
+    const senderPass = otpMailCreds.pass;
+
+    try {
+        await sendMailSmart(senderUser, senderPass, {
+            from: `"OmniPOS Receipt Customization" <${senderUser}>`,
+            to: OTP_RECIPIENT_EMAIL,
+            subject: `🔓 OmniPOS: OTP para i-RESET ang Receipt Customization Counter`,
+            text: `May humiling na i-reset ang 2-free-attempts na counter ng Receipt Customization (para bumalik ito sa 0/2).\n\n` +
+                  `Hiniling ni: ${username ||'Unknown'}\n` +
+                  `OTP Code: ${otpCode}\n` +
+                  `Mag-e-expire ito sa loob ng 10 minuto.\n\n` +
+                  `Kung hindi ninyo ito hiniling, maaari ninyong balewalain ang email na ito.`
+        });
+
+        logAction(username ||'Unknown','Humiling ng OTP para i-reset ang Receipt Customization counter');
+        res.json({ success: true, message:'Matagumpay na naipadala ang Reset OTP sa registered email.' });
+    } catch (err) {
+        console.error('Reset OTP send failure:', err);
+        res.status(500).json({ success: false, message: `Nabigo ang pagpapadala ng OTP: ${err.message}` });
+    }
+});
+
+app.post('/api/receipt-settings/reset-counter', rateLimit('otp-reset-verify', 120, 10 * 60 * 1000), (req, res) => {
+    const { otp, username } = req.body;
+
+    if (!otp || !String(otp).trim()) {
+        return res.status(400).json({ success: false, message:'The OTP code is required.' });
+    }
+
+    const settings = readData(FILE_RECEIPT_SETTINGS, DEFAULT_RECEIPT_SETTINGS);
+    const pending = settings.pendingResetOtp;
+
+    if (!pending || !pending.code) {
+        return res.status(400).json({ success: false, message:'Walang aktibong Reset OTP request. Humingi muna ng bagong OTP.' });
+    }
+    if (Date.now() > pending.expiresAt) {
+        settings.pendingResetOtp = null;
+        writeData(FILE_RECEIPT_SETTINGS, settings);
+        return res.status(400).json({ success: false, message:'Expired na ang OTP code. Humingi ng bago.' });
+    }
+    if (String(otp).trim() !== pending.code) {
+        return res.status(400).json({ success: false, message:'Maling OTP code.' });
+    }
+
+    settings.customizeCount = 0;
+    settings.pendingResetOtp = null;
+    settings.resetHistory = Array.isArray(settings.resetHistory) ? settings.resetHistory : [];
+    settings.resetHistory.push({ resetAt: new Date().toISOString(), resetBy: username ||'Unknown' });
+
+    writeData(FILE_RECEIPT_SETTINGS, settings);
+    logAction(username ||'Unknown','Na-reset ang Receipt Customization counter (bumalik sa 2 libreng attempts)');
+
+    res.json({ success: true, message:'Na-reset ang counter — may 2 libreng pag-customize na muli.', settings: getReceiptSettingsPublic(settings) });
+});
+
+// ---------------------------------------------------------------------
+// STORE & SALES SETTINGS (tax rate, payment methods, senior/PWD discount)
+// ---------------------------------------------------------------------
+const FILE_STORE_SETTINGS = 'storeSettings';
+
+const DEFAULT_STORE_SETTINGS = {
+    currencyCode: 'PHP',
+    currencySymbol: '₱',
+    taxEnabled: false,
+    taxLabel: 'VAT',
+    taxRate: 12,
+    pricesIncludeTax: true,
+    paymentMethods: { cash: true, gcash: false, maya: false, card: false, bankTransfer: false },
+    // MODERNIZED GCASH/MAYA PAYMENTS: store owner's own QR Ph code (base64
+    // data URL, uploaded via Store & Sales Settings) — ipinapakita sa
+    // Payment modal para maka-scan agad ang customer, kagaya ng ginagawa
+    // ng mga modernong POS/retail setup ngayon (2026).
+    gcashQrImage: null,
+    mayaQrImage: null,
+    seniorPwdDiscountEnabled: false,
+    seniorPwdDiscountRate: 20,
+    loyaltyEnabled: true,
+    loyaltyEarnRate: 100,
+    loyaltyPointValue: 1,
+    updatedAt: null
+};
+
+const VALID_CURRENCY_CODES = ['PHP', 'USD', 'EUR', 'JPY', 'SGD'];
+
+// Max size ng na-i-upload na QR image bilang base64 data URL — sapat na
+// ito para sa isang QR code image pero hindi papalakihin nang sobra ang
+// storeSettings JSON file (client-side na rin ang nagre-resize/compress
+// ng image bago i-upload, tingnan ang handlePaymentQrPhotoSelect() sa
+// app.js — ito lang ang huling safety net sa server side).
+const MAX_QR_IMAGE_DATAURL_LENGTH = 400 * 1024; // ~400KB
+
+function sanitizeQrImageDataUrl(val) {
+    if (typeof val !== 'string' || !val.trim()) return null;
+    if (!/^data:image\/(png|jpeg|jpg|webp);base64,/.test(val)) return null;
+    if (val.length > MAX_QR_IMAGE_DATAURL_LENGTH) return null;
+    return val;
+}
+
+function getStoreSettingsPublic(rawSettings) {
+    const s = rawSettings || DEFAULT_STORE_SETTINGS;
+    const pm = s.paymentMethods || DEFAULT_STORE_SETTINGS.paymentMethods;
+    return {
+        currencyCode: VALID_CURRENCY_CODES.includes(s.currencyCode) ? s.currencyCode : DEFAULT_STORE_SETTINGS.currencyCode,
+        currencySymbol: s.currencySymbol || DEFAULT_STORE_SETTINGS.currencySymbol,
+        taxEnabled: !!s.taxEnabled,
+        taxLabel: s.taxLabel || DEFAULT_STORE_SETTINGS.taxLabel,
+        taxRate: Number.isFinite(s.taxRate) ? s.taxRate : DEFAULT_STORE_SETTINGS.taxRate,
+        pricesIncludeTax: s.pricesIncludeTax !== false,
+        paymentMethods: {
+            cash: pm.cash !== false,
+            gcash: !!pm.gcash,
+            maya: !!pm.maya,
+            card: !!pm.card,
+            bankTransfer: !!pm.bankTransfer
+        },
+        gcashQrImage: sanitizeQrImageDataUrl(s.gcashQrImage),
+        mayaQrImage: sanitizeQrImageDataUrl(s.mayaQrImage),
+        seniorPwdDiscountEnabled: !!s.seniorPwdDiscountEnabled,
+        seniorPwdDiscountRate: Number.isFinite(s.seniorPwdDiscountRate) ? s.seniorPwdDiscountRate : DEFAULT_STORE_SETTINGS.seniorPwdDiscountRate,
+        loyaltyEnabled: s.loyaltyEnabled !== false,
+        loyaltyEarnRate: Number.isFinite(s.loyaltyEarnRate) && s.loyaltyEarnRate > 0 ? s.loyaltyEarnRate : DEFAULT_STORE_SETTINGS.loyaltyEarnRate,
+        loyaltyPointValue: Number.isFinite(s.loyaltyPointValue) && s.loyaltyPointValue >= 0 ? s.loyaltyPointValue : DEFAULT_STORE_SETTINGS.loyaltyPointValue,
+        updatedAt: s.updatedAt || null
+    };
+}
+
+app.get('/api/store-settings', (req, res) => {
+    const settings = readData(FILE_STORE_SETTINGS, DEFAULT_STORE_SETTINGS);
+    res.json(getStoreSettingsPublic(settings));
+});
+
+app.post('/api/store-settings', requirePermission('store_settings_view'), (req, res) => {
+    const { username } = req.body;
+
+    for (const [field, label] of [['gcashQrImage', 'GCash QR'], ['mayaQrImage', 'Maya QR']]) {
+        const raw = (req.body || {})[field];
+        if (raw !== undefined && raw !== null && raw !== '' && sanitizeQrImageDataUrl(raw) === null) {
+            return res.status(400).json({
+                success: false,
+                message: `Di-wasto o masyadong malaki ang ${label} image (max ~400KB, PNG/JPEG/WebP lang). Subukang mag-upload ng mas maliit/naka-compress na larawan.`
+            });
+        }
+    }
+
+    const incoming = getStoreSettingsPublic(req.body || {});
+
+    if (!VALID_CURRENCY_CODES.includes(incoming.currencyCode)) {
+        return res.status(400).json({ success: false, message: `Di-wastong currency. Pumili sa: ${VALID_CURRENCY_CODES.join(', ')}` });
+    }
+    if (incoming.taxRate < 0 || incoming.taxRate > 100) {
+        return res.status(400).json({ success: false, message: 'Ang tax rate ay dapat nasa pagitan ng 0 at 100.' });
+    }
+    if (incoming.seniorPwdDiscountRate < 0 || incoming.seniorPwdDiscountRate > 100) {
+        return res.status(400).json({ success: false, message: 'Ang Senior/PWD discount rate ay dapat nasa pagitan ng 0 at 100.' });
+    }
+    if (incoming.loyaltyEarnRate <= 0) {
+        return res.status(400).json({ success: false, message: 'Ang Loyalty earn rate (₱ kada point) ay dapat higit sa 0.' });
+    }
+    if (incoming.loyaltyPointValue < 0) {
+        return res.status(400).json({ success: false, message: 'Ang Loyalty point value ay hindi puwedeng negative.' });
+    }
+
+    const isAdminRole = (req.authUser.role || '').toLowerCase() === 'admin';
+    const canApplyDirectly = isAdminRole || !!getPermissionsForRole(req.authUser.role).store_settings_direct_apply;
+
+    if (!canApplyDirectly) {
+        let requests = readData(FILE_REQUESTS);
+        requests.push({
+            id: 'REQ-' + Date.now(),
+            requester: req.authUser.username,
+            type: 'STORE_SETTINGS_UPDATE',
+            data: incoming,
+            timestamp: new Date().toLocaleString()
+        });
+        writeData(FILE_REQUESTS, requests);
+        logAction(req.authUser.username, 'Nag-submit ng Store & Sales Settings change request para sa Admin approval');
+        return res.json({ success: true, pending: true, message: 'Isinumite ang Store & Sales Settings request para sa Admin approval.' });
+    }
+
+    incoming.updatedAt = new Date().toISOString();
+    writeData(FILE_STORE_SETTINGS, incoming);
+    logAction(username || req.authUser.username, 'Binago ang Store & Sales Settings (tax/payment methods/discount)');
+
+    res.json({ success: true, message: 'Na-update ang Store & Sales Settings.', settings: incoming });
+});
+
+// ---------------------------------------------------------------------
+// UX / APPEARANCE SETTINGS (dark mode default, low-stock alert threshold,
+// dashboard widget visibility, scanner sound)
+// ---------------------------------------------------------------------
+const FILE_UX_SETTINGS = 'uxSettings';
+
+const DEFAULT_UX_SETTINGS = {
+    darkModeDefault: false,
+    lowStockAlertThreshold: 10,
+    scannerSound: true,
+    dashboardWidgets: { salesToday: true, lowStock: true, topProducts: true, recentTransactions: true },
+    updatedAt: null
+};
+
+function getUxSettingsPublic(rawSettings) {
+    const s = rawSettings || DEFAULT_UX_SETTINGS;
+    const w = s.dashboardWidgets || DEFAULT_UX_SETTINGS.dashboardWidgets;
+    return {
+        darkModeDefault: !!s.darkModeDefault,
+        lowStockAlertThreshold: Number.isFinite(s.lowStockAlertThreshold) ? s.lowStockAlertThreshold : DEFAULT_UX_SETTINGS.lowStockAlertThreshold,
+        scannerSound: s.scannerSound !== false,
+        dashboardWidgets: {
+            salesToday: w.salesToday !== false,
+            lowStock: w.lowStock !== false,
+            topProducts: w.topProducts !== false,
+            recentTransactions: w.recentTransactions !== false
+        },
+        updatedAt: s.updatedAt || null
+    };
+}
+
+app.get('/api/ux-settings', (req, res) => {
+    const settings = readData(FILE_UX_SETTINGS, DEFAULT_UX_SETTINGS);
+    res.json(getUxSettingsPublic(settings));
+});
+
+app.post('/api/ux-settings', requirePermission('ux_settings_view'), (req, res) => {
+    const { username } = req.body;
+    const incoming = getUxSettingsPublic(req.body || {});
+
+    if (incoming.lowStockAlertThreshold < 0) {
+        return res.status(400).json({ success: false, message: 'The low-stock threshold cannot be negative.' });
+    }
+
+    const isAdminRole = (req.authUser.role || '').toLowerCase() === 'admin';
+    const canApplyDirectly = isAdminRole || !!getPermissionsForRole(req.authUser.role).ux_settings_direct_apply;
+
+    if (!canApplyDirectly) {
+        let requests = readData(FILE_REQUESTS);
+        requests.push({
+            id: 'REQ-' + Date.now(),
+            requester: req.authUser.username,
+            type: 'UX_SETTINGS_UPDATE',
+            data: incoming,
+            timestamp: new Date().toLocaleString()
+        });
+        writeData(FILE_REQUESTS, requests);
+        logAction(req.authUser.username, 'Submitted an Appearance/UX Settings change request for Admin approval');
+        return res.json({ success: true, pending: true, message: 'The Appearance/UX Settings request has been submitted for Admin approval.' });
+    }
+
+    incoming.updatedAt = new Date().toISOString();
+    writeData(FILE_UX_SETTINGS, incoming);
+    logAction(username || req.authUser.username, 'Updated Appearance/UX Settings (dark mode/low-stock/widgets)');
+
+    res.json({ success: true, message: 'Appearance/UX Settings have been updated.', settings: incoming });
+});
+
+// ---------------------------------------------------------------------
+// ADVANCED SETTINGS (idle auto-lock, customer-facing display, sale
+// webhook for third-party integrations). Follows the same view/direct-
+// apply permission + pending-approval pattern as the other Users tabs.
+// ---------------------------------------------------------------------
+const FILE_ADVANCED_SETTINGS = 'advancedSettings';
+
+const DEFAULT_ADVANCED_SETTINGS = {
+    idleAutoLockEnabled: false,
+    idleAutoLockMinutes: 5,
+    customerDisplayEnabled: false,
+    saleWebhookEnabled: false,
+    saleWebhookUrl: '',
+    // Two-Factor Authentication (OTP via email) para sa Admin login —
+    // opsyonal, naka-OFF by default. Gumagamit ng parehong OTP
+    // sender credentials (Gmail + App Password) na naka-configure na sa
+    // Receipt Customization panel (getOtpMailCredentials()) — walang
+    // duplicate na "sender" config dito, iisa lang ang OTP mail sender
+    // sa buong system.
+    twoFactorLoginEnabled: false,
+    twoFactorRecipientEmail: '',
+    updatedAt: null
+};
+
+function getAdvancedSettingsPublic(rawSettings) {
+    const s = rawSettings || DEFAULT_ADVANCED_SETTINGS;
+    let minutes = parseInt(s.idleAutoLockMinutes, 10);
+    if (!Number.isFinite(minutes) || minutes < 1) minutes = DEFAULT_ADVANCED_SETTINGS.idleAutoLockMinutes;
+    if (minutes > 120) minutes = 120;
+    let webhookUrl = typeof s.saleWebhookUrl === 'string' ? s.saleWebhookUrl.trim() : '';
+    // Keep only http(s) URLs — anything else is stored as blank so a bad
+    // paste can't silently turn into a dead/unsafe webhook target.
+    if (webhookUrl && !/^https?:\/\//i.test(webhookUrl)) webhookUrl = '';
+
+    const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    let twoFactorRecipientEmail = typeof s.twoFactorRecipientEmail === 'string' ? s.twoFactorRecipientEmail.trim() : '';
+    if (twoFactorRecipientEmail && !emailPattern.test(twoFactorRecipientEmail)) twoFactorRecipientEmail = '';
+
+    return {
+        idleAutoLockEnabled: !!s.idleAutoLockEnabled,
+        idleAutoLockMinutes: minutes,
+        customerDisplayEnabled: !!s.customerDisplayEnabled,
+        saleWebhookEnabled: !!s.saleWebhookEnabled && !!webhookUrl,
+        saleWebhookUrl: webhookUrl,
+        // NOTE: hindi dito i-force ang otpSenderConfigured check (dynamic
+        // yan, at pwedeng magbago ang Receipt Customization OTP sender
+        // nang hiwalay) — sinusuri na lang ito sa mismong /api/auth/login
+        // bago talaga magpadala ng OTP, para laging up-to-date.
+        twoFactorLoginEnabled: !!s.twoFactorLoginEnabled && !!twoFactorRecipientEmail,
+        twoFactorRecipientEmail,
+        updatedAt: s.updatedAt || null
+    };
+}
+
+app.get('/api/advanced-settings', (req, res) => {
+    const settings = readData(FILE_ADVANCED_SETTINGS, DEFAULT_ADVANCED_SETTINGS);
+    res.json(getAdvancedSettingsPublic(settings));
+});
+
+app.post('/api/advanced-settings', requirePermission('advanced_settings_view'), (req, res) => {
+    const { username } = req.body;
+    const incoming = getAdvancedSettingsPublic(req.body || {});
+
+    if (req.body && req.body.saleWebhookEnabled && !incoming.saleWebhookUrl) {
+        return res.status(400).json({ success: false, message: 'Enter a valid http:// or https:// webhook URL to enable the Sale Webhook.' });
+    }
+    if (req.body && req.body.twoFactorLoginEnabled && !incoming.twoFactorRecipientEmail) {
+        return res.status(400).json({ success: false, message: 'Maglagay ng valid na email address para makatanggap ng Admin Login OTP bago i-enable ang Two-Factor Authentication.' });
+    }
+
+    const isAdminRole = (req.authUser.role || '').toLowerCase() === 'admin';
+    const canApplyDirectly = isAdminRole || !!getPermissionsForRole(req.authUser.role).advanced_settings_direct_apply;
+
+    if (!canApplyDirectly) {
+        let requests = readData(FILE_REQUESTS);
+        requests.push({
+            id: 'REQ-' + Date.now(),
+            requester: req.authUser.username,
+            type: 'ADVANCED_SETTINGS_UPDATE',
+            data: incoming,
+            timestamp: new Date().toLocaleString()
+        });
+        writeData(FILE_REQUESTS, requests);
+        logAction(req.authUser.username, 'Submitted an Advanced Settings change request for Admin approval');
+        return res.json({ success: true, pending: true, message: 'The Advanced Settings request has been submitted for Admin approval.' });
+    }
+
+    incoming.updatedAt = new Date().toISOString();
+    writeData(FILE_ADVANCED_SETTINGS, incoming);
+    logAction(username || req.authUser.username, 'Updated Advanced Settings (idle auto-lock/customer display/sale webhook)');
+
+    res.json({ success: true, message: 'Advanced Settings have been updated.', settings: incoming });
+});
+
+// Re-checks the CURRENT logged-in user's password — used by the Idle
+// Auto-Lock overlay to unlock without a full logout/re-login. Does not
+// accept a username from the client; always checks against the
+// already-authenticated session's own account.
+app.post('/api/verify-password', rateLimit('verify-password', 10, 5 * 60 * 1000), (req, res) => {
+    const { password } = req.body;
+    if (!password) return res.status(400).json({ success: false, message: 'Password is required.' });
+
+    let users = readData(FILE_USERS);
+    const me = users.find(u => u.username.toLowerCase() === req.authUser.username.toLowerCase());
+    if (!me) return res.status(404).json({ success: false, message: 'Account not found.' });
+
+    let isMatch = false;
+    try { isMatch = bcrypt.compareSync(password, me.password); }
+    catch (e) { isMatch = (password === me.password); }
+
+    if (!isMatch) return res.status(403).json({ success: false, message: 'Incorrect password.' });
+    res.json({ success: true });
+});
+
+const FILE_FEATURE_UNLOCKS ='featureUnlocks';
+// CONNECTIVITY MODE — manual na Online/Offline toggle na makikita ni
+// client PAGKATAPOS ng successful login (hindi ito bahagi ng anti-clone
+// gate — hindi ito nagpapahina/nag-a-alis sa checkDeviceBeforeLogin, ni
+// ginagamit para i-bypass ang unang online verification). Ang ONLY
+// epekto nito: kapag "offline" ang mode, hindi na PROACTIVE na
+// tumatawag ang OMNIPOS papunta sa RELAY (cloud backup auto-sync,
+// update-check ping, opportunistic re-verify). Kapag mismatched na
+// ang live fingerprint sa naka-DB na verifiedFingerprint (posibleng
+// clone), MANDATORY pa ring tatawag online REGARDLESS ng toggle na
+// ito — hindi ito puwedeng i-bypass ng user mismo.
+const FILE_CONNECTIVITY_MODE ='connectivityMode';
+const DEFAULT_CONNECTIVITY_MODE = { mode: 'online', changedAt: null };
+
+function getConnectivityMode() {
+    const data = readData(FILE_CONNECTIVITY_MODE, DEFAULT_CONNECTIVITY_MODE);
+    return (data && data.mode === 'offline') ? 'offline' : 'online';
+}
+
+function setConnectivityMode(mode) {
+    const normalized = mode === 'offline' ? 'offline' : 'online';
+    writeData(FILE_CONNECTIVITY_MODE, { mode: normalized, changedAt: Date.now() });
+    return normalized;
+}
+
+const DEFAULT_FEATURE_UNLOCKS = {
+    installationId: null,
+    hardwareFingerprint: null,
+    tokens: {},
+    lockedAttempts: 0,
+    // ANTI-CLONE: pagkatapos ng UNANG matagumpay na online verification sa
+    // RELAY para sa installationId na ito, dito idinidikit ang fingerprint
+    // na "verified". Kung sa susunod na pagbukas ay iba na ang live
+    // fingerprint (dahil kinopya/inilipat ang buong folder papunta sa
+    // ibang device) — hindi awtomatikong papayagan ang login, kailangan
+    // muna ulit ng online check-in sa RELAY.
+    deviceVerified: false,
+    verifiedFingerprint: null,
+    firstVerifiedAt: null,
+    lastVerifiedAt: null
+};
+
+const RELAY_PUBLIC_KEY_PEM = `-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEARoRImC1WH3GgR6yO9ZeRYmiMsDvHfytsKQ2f/lwVzfU=
+-----END PUBLIC KEY-----
+`;
+const RELAY_PUBLIC_KEY = crypto.createPublicKey(RELAY_PUBLIC_KEY_PEM);
+
+const RELAY_URL = process.env.RELAY_URL ||'http://127.0.0.1:4477';
+
+const RELAY_API_KEY = process.env.RELAY_API_KEY || null;
+if (!RELAY_API_KEY) {
+    console.warn('⚠️  Walang RELAY_API_KEY na naka-set sa .env — hindi magfa-function ang feature unlock requests hangga\'t hindi ito nalagyan.');
+}
+
+// --------------------------------------------------------------
+// relayFetch — FIX: dating walang timeout ang lahat ng fetch() papuntang
+// RELAY_URL, kaya kapag "sleeping"/unreachable ang Relay (hal. cold-start
+// ng Render free tier, o walang internet), ang bawat function na tumatawag
+// dito (login device-check, feature restore/sync, unlock requests, atbp.)
+// ay NAGHIHINTAY hanggang sa default na OS/network timeout (pwedeng ilang
+// minuto), kaya "sobrang delay"/"walang response" ang naramdaman sa app,
+// at nauubos pa ang login rate-limit quota habang naghihintay lang.
+//
+// Ito ang parehong AbortController-timeout pattern na ginamit na sa
+// public/app.js (checkRealInternetAccess) — dinadala rin dito sa
+// server-side Relay calls. 20s default: sapat pa rin para sa cold-start
+// ng Render free tier, pero hindi na "walang hanggan".
+//
+// FIX #2 (CRITICAL): idinagdag dito mismo — sa loob ng SHARED function na
+// ito, hindi paisa-isa sa bawat caller — ang mabilis na raw-IP
+// isInternetLikelyUp() gate (tingnan sa ibaba) BAGO pa man subukan ang
+// buong fetch(). Dati, ilan lang sa mga function (verify-login,
+// backup-checkin, restore-tokens, check-feature-status) ang may ganitong
+// paunang tsek; ang iba (request-unlock, confirm-unlock, request-demo,
+// atbp.) ay diretso sa 20s-timeout na relayFetch, kaya sila pa rin ang
+// "mabagal" kapag walang internet. Ngayon, dahil DITO na ilagay ang
+// check, LAHAT ng function na tumatawag sa relayFetch — kasalukuyan man
+// o susunod pang idadagdag — ay AWTOMATIKONG mabilis (~1.2s max) mag-fail
+// kapag walang internet, sa halip na 20s.
+// --------------------------------------------------------------
+async function relayFetch(url, options = {}, timeoutMs = 20000) {
+    if (!(await isInternetLikelyUp())) {
+        const err = new Error('Walang internet connection na na-detect sa device na ito.');
+        err.code = 'NO_INTERNET';
+        throw err;
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await fetch(url, { ...options, signal: controller.signal });
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// --------------------------------------------------------------
+// isInternetLikelyUp — FIX #2 (CRITICAL): ang dating paraan dito ay
+// gumagawa ng fetch() papuntang "https://www.gstatic.com/generate_204" —
+// isang HOSTNAME, kaya kailangan muna itong I-DNS-RESOLVE bago pa man
+// makagawa ng kahit anong koneksyon. Kapag "connected" pa rin ang
+// WiFi/adapter (naka-associate sa router) pero WALANG ruta papunta sa
+// totoong internet (namatay ang ISP/modem — pinakakaraniwang senaryo sa
+// tindahan), ang DNS query mismo ang NAGHIHINTAY/NAGHAHANG — minsan
+// hindi kaagad naka-a-abort ng AbortSignal ang mismong DNS resolution
+// phase depende sa Node/OS resolver, kaya kahit may 3s timeout dati,
+// nararamdaman pa ring "nag-la-lag"/"parang nag-freeze" ang BAWAT
+// function na dumadaan dito (login device-check, feature unlock, atbp.)
+// — ito mismo ang sanhi ng "mabagal pa rin ang lahat ng function" kahit
+// pagkatapos nailagay na ang mga timeout.
+//
+// AYOS: sa halip na mag-DNS-resolve, direktang kumokonekta (raw TCP,
+// walang HTTP/TLS handshake pa) sa mga KILALANG IP ADDRESS
+// (1.1.1.1 / 8.8.8.8, port 443) — WALANG DNS lookup na kailangan dito,
+// kaya HINDI na ito maaapektuhan ng DNS-related hang. Karaniwang
+// nagreresolba ito (successful o failed) sa loob ng ilang daang
+// millisecond lang, hindi na segundo.
+// --------------------------------------------------------------
+let lastConnectivityProbe = { at: 0, up: true };
+const CONNECTIVITY_PROBE_CACHE_MS = 10 * 1000;
+const CONNECTIVITY_PROBE_TIMEOUT_MS = 1200;
+
+function rawTcpProbe(host, port, timeoutMs) {
+    return new Promise((resolve) => {
+        const socket = new net.Socket();
+        let settled = false;
+        const finish = (result) => {
+            if (settled) return;
+            settled = true;
+            socket.destroy();
+            resolve(result);
+        };
+        socket.setTimeout(timeoutMs);
+        socket.once('connect', () => finish(true));
+        socket.once('timeout', () => finish(false));
+        socket.once('error', () => finish(false));
+        // .connect() dito gamit ang RAW IP bilang host — hindi ito
+        // dadaan sa DNS resolver, kaya hindi ito naaantala ng patay na
+        // DNS/internet.
+        socket.connect(port, host);
+    });
+}
+
+async function isInternetLikelyUp() {
+    const now = Date.now();
+    if (now - lastConnectivityProbe.at < CONNECTIVITY_PROBE_CACHE_MS) {
+        return lastConnectivityProbe.up;
+    }
+    // Dalawang kilalang anycast IP (Cloudflare + Google) nang sabay-sabay
+    // — kahit isa lang ang sumagot, "up" na. Karagdagang proteksyon kung
+    // sakaling naka-block/down ang isa sa kanila sa partikular na network.
+    let up;
+    try {
+        up = await Promise.race([
+            Promise.any([
+                rawTcpProbe('1.1.1.1', 443, CONNECTIVITY_PROBE_TIMEOUT_MS),
+                rawTcpProbe('8.8.8.8', 443, CONNECTIVITY_PROBE_TIMEOUT_MS)
+            ]).then(results => !!results),
+            new Promise(resolve => setTimeout(() => resolve(false), CONNECTIVITY_PROBE_TIMEOUT_MS + 200))
+        ]);
+    } catch (err) {
+        up = false;
+    }
+    lastConnectivityProbe = { at: now, up };
+    return up;
+}
+
+// --------------------------------------------------------------
+// SYSTEM UPDATE CHECK/DEPLOY — ang APP_VERSION dito ay galing sa
+// "version" field ng package.json (i.e., kada may bagong release/tag
+// papunta sa client repo, dapat ding tumaas ang value na 'to). Ang
+// RENDER_DEPLOY_HOOK_URL naman ay ang per-service na "Deploy Hook"
+// URL galing sa Render dashboard (Settings > Deploy Hook) ng SARILING
+// Render service na ito — ginagamit lang ito para i-trigger ang
+// redeploy ng code na NASA GIT REPO NA (kaya kailangang naka-sync na
+// ang repo ng kliyente sa upstream BAGO tumawag ng deploy).
+// --------------------------------------------------------------
+const APP_VERSION = require('./package.json').version || '0.0.0';
+const RENDER_DEPLOY_HOOK_URL = process.env.RENDER_DEPLOY_HOOK_URL || null;
+
+// --------------------------------------------------------------
+// isVersionNewer(candidate, current) — TAMANG "mas bago ba" na
+// version compare (hindi basta "hindi pareho"). Kailangan ito dahil
+// ang RELAY ay maaaring mag-balik ng default sentinel na "0.0.0"
+// (hal. nawala ang naka-publish na version pagkatapos ng redeploy
+// kung walang persistent disk/REDIS_URL doon) — kung "!==" lang ang
+// gagamitin, magpapalabas ito ng "May bagong update!" kahit mas MABA
+// (hindi mas bago) ang bersyong ibinalik ng RELAY.
+// --------------------------------------------------------------
+const UNPUBLISHED_VERSION_SENTINEL = '0.0.0';
+function parseVersionParts(v) {
+    return String(v || '0.0.0').trim().split('.').map((n) => parseInt(n, 10) || 0);
+}
+function isVersionNewer(candidate, current) {
+    const a = parseVersionParts(candidate);
+    const b = parseVersionParts(current);
+    const len = Math.max(a.length, b.length);
+    for (let i = 0; i < len; i++) {
+        const ai = a[i] || 0;
+        const bi = b[i] || 0;
+        if (ai > bi) return true;
+        if (ai < bi) return false;
+    }
+    return false; // eksaktong pareho ang dalawang version
+}
+
+// 'cloud_backup' ay may sariling category dahil sa likas nito: nagpapadala
+// ito ng buong database (kasama ang user accounts) papunta sa cloud
+// storage ng developer, kaya kailangan nito ng SARILI, malinaw, at
+// hiwalay na pricing/consent — HINDI dapat matabunan o maging "parang
+// libre na lang" bilang isa lang sa maraming à la carte checkbox, o
+// ma-discount papasok sa isang bundle kasama ang mga hindi kaugnay na
+// features (themes, reports, atbp.). Ginagamit ang constant na ito para
+// tuluy-tuloy na ma-exclude ang 'cloud_backup' sa mga bundle/tier at sa
+// pangkalahatang "Upgrade Options" catalog listing sa ibaba.
+const CLOUD_BACKUP_FEATURE_ID = 'cloud_backup';
+
+const FEATURE_CATALOG = {
+
+    ocean: { name:'Ocean Pro', price: 149, category:'theme', description:'Bagong color theme para sa buong dashboard.' },
+    emerald: { name:'Emerald Pro', price: 149, category:'theme', description:'Bagong color theme para sa buong dashboard.' },
+    sunset: { name:'Sunset Pro', price: 149, category:'theme', description:'Bagong color theme para sa buong dashboard.' },
+    rosegold: { name:'Rose Gold Pro', price: 149, category:'theme', description:'Bagong color theme para sa buong dashboard.' },
+    cyber: { name:'Cyber Neon Pro', price: 149, category:'theme', description:'Bagong color theme para sa buong dashboard.' },
+    noir: { name:'Coffee Noir Pro', price: 149, category:'theme', description:'Bagong color theme para sa buong dashboard.' },
+    mintfrost: { name:'Mint Frost Pro', price: 149, category:'theme', description:'Bagong color theme para sa buong dashboard.' },
+    liquidglass: { name:'Liquid Glass Pro', price: 149, category:'theme', description:'Translucent/layered na "liquid glass" theme na may frosted-glass panels at fluid animations para sa buong dashboard.' },
+    galaxyambient: { name:'Galaxy Ambient Pro', price: 149, category:'theme', description:'Ambient/frosted na dark theme na may malapad na rounded corners at floating sidebar, hango sa Samsung One UI, para sa buong dashboard.' },
+
+    purchase_orders: { name:'Purchase Orders Module', price: 999, category:'module', description:'Create and track Purchase Orders to suppliers, including reorder suggestions.' },
+    customer_crm: { name:'Customer Profiles & Loyalty', price: 799, category:'module', description:'Customer profiles, loyalty points, at purchase history bawat customer.' },
+    promo_codes: { name:'Promo Codes Module', price: 499, category:'module', description:'Gumawa ng discount/promo codes na magagamit sa checkout.' },
+    advanced_reports: { name:'Sales Analytics & Advanced Reports', price: 799, category:'module', description:'Profit margin, top/slow sellers, 7-day sales trend, at payment method breakdown.' },
+    shift_management: { name:'Multi-Cashier Shift Oversight & Z-Reading Reports', price: 699, category:'module', description:'Multi-cashier shift tracking at Z-Reading (cash count) reports.' },
+    rbac_management: { name:'Roles & Permissions (RBAC) Management', price: 999, category:'module', description:'Gumawa ng custom roles at i-configure kung anong menu ang makikita ng bawat role (Roles & Permissions matrix).' },
+
+    // May sarili itong category ('cloud-service', hindi 'module') para
+    // hindi ito ma-catch ng mga generic na filter/loop na inaakalang lahat
+    // ng 'module' ay pwedeng i-bundle/i-discount nang magkasama. Tingnan
+    // ang CLOUD_BACKUP_FEATURE_ID sa itaas.
+    [CLOUD_BACKUP_FEATURE_ID]: { name:'Cloud Backup (Postgres)', price: 1499, category:'cloud-service', description:'I-sync ang buong database — kasama na ang user accounts (walang password), unlocked features/Pro themes, at lahat ng ibang modules — papunta sa secure na cloud storage ng developer — proteksyon kung sakaling masira/mawala ang device.' },
+};
+
+const DEMO_FEATURE_ID ='__demo__';
+
+function sumFeaturePrices(featureIds) {
+    return featureIds.reduce((sum, id) => sum + ((FEATURE_CATALOG[id] && FEATURE_CATALOG[id].price) || 0), 0);
+}
+
+// Kung bumili na ang installation ng ilan sa mga feature na kasama sa isang
+// tier/bundle (hal. binili na nang à la carte ang mga Pro Themes), dapat
+// bawasan ang presyo ng bundle para sa NATITIRANG (still-locked) items —
+// pero HINDI sa pamamagitan ng flat na "bundlePrice - kabuuang nabayaran na"
+// (na-DISCOVER na ito bilang EXPLOIT: kung utay-utay/piecemeal bibilhin
+// nang à la carte ang mga MAHAL na features muna, malalapit-sa-zero ang
+// matitirang presyo ng bundle kahit mahal pa ang mga natitirang locked
+// items — parang "libre" na nabibili ang mga ito).
+//
+// Sa halip, PROPORTIONAL ang ginagamit: kinukuha muna ang RATIO ng
+// bundlePrice laban sa TOTAL na à la carte value ng lahat ng item sa tier
+// (ito ang "discount rate" ng bundle), tapos i-apply ang RATE na ito sa
+// à la carte value LANG ng mga NATITIRANG naka-lock na item. Kaya kung
+// magkano man ang combinasyon ng mga nabili na nang hiwalay, ang presyo
+// para sa natitira ay laging proporsyonal/makatarungan sa TUNAY nitong
+// halaga — hindi na maaaring "i-farm" pababa gamit ang piecemeal
+// purchases.
+function getTierPricing(tier, alreadyPurchased) {
+    const fullAlaCarteValue = sumFeaturePrices(tier.featureIds);
+    const remainingFeatureIds = tier.featureIds.filter(id => !alreadyPurchased.includes(id));
+    const remainingAlaCarteValue = sumFeaturePrices(remainingFeatureIds);
+
+    if (fullAlaCarteValue <= 0 || remainingAlaCarteValue <= 0) {
+        return { discount: fullAlaCarteValue, effectivePrice: 0 };
+    }
+
+    const bundleRate = tier.bundlePrice / fullAlaCarteValue;
+    // Math.ceil para hindi ma-round-down pabor sa customer (safe rounding).
+    const effectivePrice = Math.min(
+        tier.bundlePrice,
+        Math.max(1, Math.ceil(remainingAlaCarteValue * bundleRate))
+    );
+    const discount = Math.max(0, remainingAlaCarteValue - effectivePrice);
+    return { discount, effectivePrice };
+}
+
+const UPGRADE_TIERS = [
+    {
+        id:'basic',
+        name:'Basic Upgrade',
+        description:'Para sa mga gustong magsimula sa reporting at promos.',
+        featureIds: ['advanced_reports','promo_codes'],
+        bundlePrice: 999
+    },
+    {
+        id:'standard',
+        name:'Standard Upgrade',
+        description:'Lahat ng Basic + customer loyalty at shift oversight.',
+        featureIds: ['advanced_reports','promo_codes','customer_crm','shift_management'],
+        bundlePrice: 1999
+    },
+    {
+        id:'pro',
+        name:'Pro Upgrade (Complete)',
+        description:'LAHAT ng modules + LAHAT ng Pro Themes — walang matitira pang naka-lock. (Hiwalay ibinebenta ang Cloud Backup — tingnan ang Cloud Backup panel sa Reset & Restore.)',
+        // SADYANG hindi kasama ang 'cloud_backup' dito — hindi ito dapat
+        // ma-bundle/ma-discount kasama ng ibang features. Kung gustong
+        // kunin ng user ang Cloud Backup, kailangan nilang dumaan sa
+        // sarili nitong dedicated unlock prompt (promptUnlockFeature sa
+        // app.js) kung saan malinaw lang ang presyo at ang deskripsyon
+        // nito, hiwalay sa "Upgrade Options" tiers/à la carte modal.
+        featureIds: Object.keys(FEATURE_CATALOG).filter(id => id !== CLOUD_BACKUP_FEATURE_ID),
+        bundlePrice: 4499
+    }
+];
+
+function readFeatureUnlocks() {
+    const raw = readData(FILE_FEATURE_UNLOCKS, DEFAULT_FEATURE_UNLOCKS);
+    return {
+        installationId: raw.installationId || null,
+        hardwareFingerprint: raw.hardwareFingerprint || null,
+        tokens: (raw.tokens && typeof raw.tokens ==='object') ? { ...raw.tokens } : {},
+        lockedAttempts: typeof raw.lockedAttempts ==='number' ? raw.lockedAttempts : 0,
+        deviceVerified: !!raw.deviceVerified,
+        verifiedFingerprint: raw.verifiedFingerprint || null,
+        firstVerifiedAt: typeof raw.firstVerifiedAt ==='number' ? raw.firstVerifiedAt : null,
+        lastVerifiedAt: typeof raw.lastVerifiedAt ==='number' ? raw.lastVerifiedAt : null,
+        // ANTI-CLONE FIX (Render/cloud): dati nasa isang plain LOCAL FILE
+        // ito (~/.omnipos-device-seed) — sapat noon sa Termux/physical
+        // device dahil persistent ang $HOME. Sa Render (walang persistent
+        // disk sa free tier, gaya ng RELAY_PRIVATE_KEY_PEM na comment sa
+        // RELAY/server.js), NABURA ang file na ito sa BAWAT restart/redeploy,
+        // kaya bagong random seed = bagong fingerprint = laging
+        // "clone_suspected" kahit walang totoong pag-clone na nangyari.
+        // Ngayon kasama na ito sa parehong DB record ng installationId/
+        // verifiedFingerprint — kaya laging sabay silang nabubura o
+        // nabubuhay, hindi na sila nagkaka-desync sa restart.
+        deviceSeed: raw.deviceSeed || null,
+        // PERMIT SYSTEM: ang huling signed permit na natanggap mula sa
+        // RELAY (see verifyDevicePermit). Ito ang cryptographic proof na
+        // TALAGANG RELAY ang nag-approve, hindi lang isang lokal na flag.
+        devicePermit: raw.devicePermit || null,
+        // BUG FIX: nawawala dati ang field na ito dito — kaya kahit
+        // na-save nang tama ang relayAuthorized:true sa DB noong huling
+        // successful online verification, laging bumabalik itong
+        // `undefined` sa bawat susunod na basa, kaya laging bumabagsak
+        // ang offline fast-path check sa checkDeviceBeforeLogin() at
+        // pinipilit ang online re-verification kahit kilala/authorized
+        // na talaga ang device.
+        relayAuthorized: raw.relayAuthorized === true
+    };
+}
+
+function recordLockedAttempt() {
+    const data = readFeatureUnlocks();
+    data.lockedAttempts = (data.lockedAttempts || 0) + 1;
+    writeData(FILE_FEATURE_UNLOCKS, data);
+    return data.lockedAttempts;
+}
+
+function getAndroidProp(name) {
+    try {
+        const value = execSync(`getprop ${name}`, { encoding:'utf8', timeout: 2000, stdio: ['ignore','pipe','ignore'] }).trim();
+        return value ||'';
+    } catch (err) {
+        return'';
+    }
+}
+
+// --------------------------------------------------------------
+// DEVICE SEED — random na string na naka-imbak SA LABAS ng OMNIPOS
+// project folder (sa Termux $HOME mismo, isang antas SA ITAAS ng
+// project folder na ito). Layunin: kahit kopyahin ang buong OMNIPOS
+// folder papunta sa IBANG PISIKAL na device na MAGKAPAREHONG MODELO at
+// MAGKAPAREHONG bersyon ng Android/ROM (kung saan magiging IDENTICAL
+// ang Android build props sa dalawang device), MAIIBA PA RIN ang
+// kabuuang fingerprint — dahil ang seed na ito ay HINDI kasama kapag
+// yung project folder lang mismo ang kinopya (nasa labas ito, sa
+// $HOME).
+//
+// PAALALA: kung ang buong Termux $HOME (hindi lang ang OMNIPOS folder)
+// ang kokopyahin, masusundan din ang seed na ito — pero mas
+// deliberate/malaking hakbang na iyon kumpara sa simpleng "kopyahin ang
+// app folder", kaya sapat na proteksyon ito para sa pangkaraniwang
+// senaryo ng cloning.
+// --------------------------------------------------------------
+// ANTI-CLONE FIX: dati nasa isang LOCAL FILE (DEVICE_SEED_PATH, sa
+// $HOME) ang seed na ito. Gumana ito sa Termux/physical device dahil
+// persistent ang $HOME doon. Pero sa Render (walang persistent disk sa
+// free tier), NABUBURA ang bawat lokal na file sa tuwing mag-restart o
+// mag-redeploy ang service — kaya bagong random seed bawat pagkabukas,
+// bagong fingerprint, at laging "clone_suspected" kahit walang
+// nag-clone. Ngayon, ipinapasa na ang `data` object (ang parehong DB
+// record kung saan naka-imbak ang installationId/verifiedFingerprint)
+// dito, at itinatago ang seed BILANG BAHAGI ng record na iyon — kaya
+// laging kasabay sila ma-persist/mabura, hindi na sila nagkaka-desync.
+function getOrCreateDeviceSeed(data) {
+    if (data.deviceSeed) return data.deviceSeed;
+    data.deviceSeed = crypto.randomBytes(32).toString('hex');
+    writeData(FILE_FEATURE_UNLOCKS, data);
+    return data.deviceSeed;
+}
+
+// ANTI-CLONE FIX: sa Render (at sa ibang katulad na cloud host), BAGONG
+// container = BAGONG os.hostname()/`/etc/machine-id`/minsan pati virtual
+// MACs sa TUWING mag-restart o mag-redeploy — kahit walang binago sa code
+// (kasama na ang normal na free-tier spin-down/spin-up). Kaya kung isasama
+// pa rin natin ang mga ito sa fingerprint doon, MAGMUMUKHANG "ibang
+// pisikal na device" ang parehong Render service kada restart — laging
+// clone_suspected kahit walang totoong pag-clone. Ang RENDER env var ay
+// AUTOMATIC na itinatakda ni Render mismo (walang kailangang i-configure)
+// kaya magagamit ito para malaman kung nasa ganitong volatile na
+// environment tayo at LAKTAWAN ang mga volatile na OS-level na parts —
+// ang persisted deviceSeed na lang (naka-imbak sa DB record, hindi sa
+// container) ang gagamiting anchor doon. Sa physical device (Termux/
+// Android) o sa sariling VPS na may tunay/permanenteng OS install, hindi
+// ito apektado — stable naman doon ang hostname/machine-id kaya tuloy pa
+// rin ang paggamit sa mga iyon para sa mas matibay na anti-clone binding.
+const IS_VOLATILE_CLOUD_HOST = process.env.RENDER === 'true' || !!process.env.RENDER_SERVICE_ID;
+
+function getNonAndroidMachineParts() {
+    // ANTI-CLONE FALLBACK: kapag Android props ang wala (hal. tumatakbo
+    // sa Windows/Linux/VM na PC), kailangan pa rin ng ibang paraan para
+    // makakuha ng identifier na TALAGANG naka-tali sa PISIKAL na makina —
+    // kung hindi, ang bawat simpleng "kopya ng buong folder papunta sa
+    // ibang PC" ay hindi na-detect bilang bagong device.
+    if (IS_VOLATILE_CLOUD_HOST) {
+        // Sadyang blangko: sa Render/katulad, ang bagong hostname/machine-id
+        // kada restart ay HINDI senyales ng pag-clone — senyales lang ito
+        // ng normal na container recycling. Ang deviceSeed (idinadagdag na
+        // sa computeHardwareFingerprint sa ibaba) na lang ang gagamitin.
+        return [];
+    }
+    const parts = [];
+    try { parts.push(os.hostname()); } catch (e) {}
+    try { parts.push(os.platform()); } catch (e) {}
+    try { parts.push(os.arch()); } catch (e) {}
+    try {
+        const cpus = os.cpus();
+        if (cpus && cpus[0] && cpus[0].model) parts.push(cpus[0].model);
+    } catch (e) {}
+    try {
+        // Stable MAC addresses ng mga non-internal network interfaces —
+        // hindi ito nagbabago kahit i-reinstall ang OS o i-clone ang app.
+        const nets = os.networkInterfaces();
+        const macs = Object.values(nets || {})
+            .flat()
+            .filter(n => n && !n.internal && n.mac && n.mac !== '00:00:00:00:00:00')
+            .map(n => n.mac)
+            .sort();
+        if (macs.length) parts.push(macs.join(','));
+    } catch (e) {}
+    try {
+        // Linux machine-id: natatangi bawat OS install, hindi kasama kapag
+        // kinopya lang ang app folder (nasa /etc, hindi kasama sa clone).
+        if (fs.existsSync('/etc/machine-id')) {
+            parts.push(fs.readFileSync('/etc/machine-id', 'utf8').trim());
+        }
+    } catch (e) {}
+    return parts.filter(Boolean);
+}
+
+function computeHardwareFingerprint(data) {
+    const androidParts = [
+        getAndroidProp('ro.product.model'),
+        getAndroidProp('ro.product.device'),
+        getAndroidProp('ro.product.board'),
+        getAndroidProp('ro.build.fingerprint'),
+        getAndroidProp('ro.serialno'),
+        getAndroidProp('ro.boot.serialno'),
+    ].filter(Boolean);
+
+    // Isinasama na ang device seed sa LAHAT ng path (Android man o hindi)
+    // — ito ang nagpapatunay na MAIIBA pa rin ang fingerprint kahit
+    // magkaparehong modelo/build ang dalawang pisikal na device.
+    // ANTI-CLONE FIX: kinukuha/nililikha na ang seed mula sa DB record
+    // (`data`) sa halip na sa isang local file, para hindi ito mabura sa
+    // restart/redeploy sa Render (walang persistent disk).
+    const seed = getOrCreateDeviceSeed(data);
+
+    if (androidParts.length > 0) {
+        return crypto.createHash('sha256').update([...androidParts, seed].join('|')).digest('hex');
+    }
+
+    const machineParts = getNonAndroidMachineParts();
+    const allParts = [...machineParts, seed].filter(Boolean);
+    if (allParts.length === 0) return null;
+    return crypto.createHash('sha256').update(allParts.join('|')).digest('hex');
+}
+
+// --------------------------------------------------------------
+// ANTI-CLONE FIX: ang installationId ay dapat na STABLE at RANDOM —
+// ginagawa ito NANG ISANG BESES LANG at nakatago sa featureUnlocks data
+// (na kasama sa "identity" ng install na ito, kahit kopyahin ang buong
+// folder). HINDI na ito hinahango/kino-compute mula sa hardware
+// fingerprint — dating BUG ito: dahil derived dati ang installationId
+// sa fingerprint, kada magbago ang fingerprint (hal. kinopya papunta sa
+// ibang device), NAGBABAGO RIN ang installationId kasabay nito — kaya
+// laging "first time" / bagong ID ang nakikita ng RELAY, at hindi na
+// kailanman na-de-detect ang clone (dahil hindi na pareho ang ID na
+// sinusuri para sa fingerprint mismatch).
+//
+// Ngayon: installationId = permanenteng random UUID na sumasama sa
+// kinopyang data. hardwareFingerprint = hiwalay na LIVE signal lang,
+// ginagamit para malaman kung nagbago ang pisikal na makina PARA SA
+// PAREHONG installationId — ito mismo ang kailangan ng RELAY verify-login
+// para gumana nang tama ang "same installationId, different fingerprint
+// = clone_suspected" na lohika.
+// --------------------------------------------------------------
+function getOrCreateInstallationId(data) {
+    if (data.installationId) return data.installationId;
+    data.installationId = crypto.randomUUID();
+    writeData(FILE_FEATURE_UNLOCKS, data);
+    return data.installationId;
+}
+
+function verifyUnlockToken(token, expectedInstallationId, expectedFeatureId) {
+    if (!token || !token.payload || !token.signature) return false;
+    const { installationId, featureId, issuedAt, expiresAt } = token.payload;
+    if (installationId !== expectedInstallationId) return false;
+    if (featureId !== expectedFeatureId) return false;
+    if (typeof issuedAt !=='number') return false;
+
+    if (typeof expiresAt ==='number' && Date.now() > expiresAt) return false;
+
+    const payloadString = typeof expiresAt ==='number'
+        ? JSON.stringify({ installationId, featureId, issuedAt, expiresAt })
+        : JSON.stringify({ installationId, featureId, issuedAt });
+
+    try {
+        return crypto.verify(null, Buffer.from(payloadString), RELAY_PUBLIC_KEY, Buffer.from(token.signature,'base64'));
+    } catch (err) {
+        return false;
+    }
+}
+
+// --------------------------------------------------------------
+// verifyDevicePermit — ANTI-CLONE, PERMIT SYSTEM (offline-capable)
+// Sinusuri kung ang naka-imbak na "permit" (nakuha noong huling
+// SUCCESSFUL online verify-login sa RELAY, tingnan ang
+// checkDeviceBeforeLogin) ay TALAGANG pinirmahan ng RELAY private key
+// PARA SA eksaktong (installationId, fingerprint) na ito. Purong lokal
+// na signature check ito gamit ang RELAY_PUBLIC_KEY — WALANG internet
+// na kailangan — kaya patuloy na gagana ang OFFLINE login habang hindi
+// nagbabago ang fingerprint.
+//
+// Bakit kailangan ito bukod pa sa simpleng `deviceVerified` boolean:
+// kung kokopyahin/i-restore ang database file at direktang i-edit ang
+// row (o kung may access sa raw DB), MADALING gawing `true` ang isang
+// boolean — pero HINDI kailanman mapeke ang isang valid na signature
+// dahil wala silang private key ng RELAY. Kaya kahit ma-tamper ang
+// lokal na flag, hindi ito magiging katanggap-tanggap na "permit"
+// hangga't walang totoong signature na tumutugma.
+// --------------------------------------------------------------
+function verifyDevicePermit(permit, expectedInstallationId, expectedFingerprint) {
+    if (!permit || !permit.payload || !permit.signature) return false;
+    const { installationId, fingerprint, issuedAt } = permit.payload;
+    if (installationId !== expectedInstallationId) return false;
+    if (fingerprint !== expectedFingerprint) return false;
+    if (typeof issuedAt !== 'number') return false;
+
+    const payloadString = JSON.stringify({ installationId, fingerprint, issuedAt });
+    try {
+        return crypto.verify(null, Buffer.from(payloadString), RELAY_PUBLIC_KEY, Buffer.from(permit.signature, 'base64'));
+    } catch (err) {
+        return false;
+    }
+}
+
+// ====================================================================
+// ANTI-CLONE DEVICE VERIFICATION — kailangan bago makapag-login
+// ====================================================================
+// Layunin: pigilan ang isang taong basta nag-copy/nag-move ng BUONG app
+// folder (kasama ang data/featureUnlocks) papunta sa IBANG pisikal na
+// device mula sa pag-login nang parang walang nangyari.
+//
+// Paano gumagana:
+//   1. Sa BAWAT login attempt, kino-compute muna ang LIVE hardware
+//      fingerprint ng kasalukuyang makina (computeHardwareFingerprint()).
+//   2. Kung ito ang UNANG beses (walang naka-store na verifiedFingerprint
+//      pa dati) — o kung IBA na ang live fingerprint kumpara sa huling
+//      verified fingerprint (ibig sabihin, ibang pisikal na makina na
+//      ito ngayon, malamang kinopya/inilipat) — HINDI muna papayagan
+//      ang login hangga't hindi ito successful na na-verify ONLINE sa
+//      RELAY. Kung wala/hindi maabot ang internet/RELAY sa sitwasyong
+//      ito, tatanggihan ang login nang may malinaw na mensahe.
+//   3. Kapag successful ang online verify, naka-imbak na ang
+//      "verifiedFingerprint" — pwede nang mag-login nang OFFLINE
+//      pagkatapos, hangga't PAREHO pa rin ang fingerprint ng makina.
+//   4. Kung sa RELAY mismo ay nakita nitong ang installationId na ito
+//      ay dating naka-bind na sa IBANG fingerprint (ibig sabihin dalawang
+//      magkaibang pisikal na device ang nag-claim ng iisang
+//      installationId — senyales ng cloning), tatanggihan ng RELAY ang
+//      verification at ma-flag ito bilang "clone_suspected" sa admin
+//      panel, hangga't hindi ito ni-review/ni-reset ng developer/owner.
+async function verifyDeviceWithRelay(installationId, hardwareFingerprint, { username, storeName } = {}) {
+    if (!RELAY_API_KEY) {
+        return { ok: false, reason: 'no_api_key', message: 'Walang RELAY_API_KEY na naka-configure sa server na ito.' };
+    }
+    // FIX: bago pa man subukan ang buong relayFetch() (hanggang 20s),
+    // mabilisang tsek muna (max ~3s, cached) kung may aktwal na internet
+    // access ang device — para kahit "Online" pa rin ang manual na toggle
+    // pero talagang wala ngang koneksyon, agad na mag-fail-fast dito sa
+    // halip na maghintay pa ng buong Relay timeout.
+    if (!(await isInternetLikelyUp())) {
+        return { ok: false, reason: 'unreachable', message: 'Walang internet connection na na-detect sa device na ito.' };
+    }
+    try {
+        const relayRes = await relayFetch(`${RELAY_URL}/relay/verify-login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-relay-key': RELAY_API_KEY },
+            body: JSON.stringify({ installationId, hardwareFingerprint, username, storeName })
+        });
+        const relayData = await relayRes.json().catch(() => ({}));
+        if (!relayRes.ok || !relayData.success) {
+            return {
+                ok: false,
+                reason: relayData.cloneSuspected ? 'clone_suspected' : 'rejected',
+                message: relayData.message || 'Tinanggihan ng RELAY ang device verification.'
+            };
+        }
+        return {
+            ok: true,
+            allowed: !!relayData.allowed,
+            // Kung na-"split" ng admin ang device na ito sa RELAY (tingnan
+            // ang /relay/admin/api/devices/:id/split-clone), ibabalik dito
+            // ng RELAY ang BAGONG installationId na dapat nang gamitin ng
+            // client na ito mula ngayon.
+            reassignedInstallationId: relayData.reassignedInstallationId || null,
+            // PERMIT SYSTEM: signed proof mula sa RELAY na PARA SA
+            // (installationId, fingerprint) na ito, ito-store lokal para
+            // magamit ulit OFFLINE (verifyDevicePermit) sa susunod.
+            permit: relayData.permit || null
+        };
+    } catch (err) {
+        const message = err.name === 'AbortError'
+            ? 'Hindi maabot ang RELAY (nag-timeout habang naghihintay ng response).'
+            : `Hindi maabot ang RELAY (${err.message}).`;
+        return { ok: false, reason: 'unreachable', message };
+    }
+}
+
+// Tinatawag ito bago payagan ang login. Nagbabalik ng { allowed, message }.
+async function checkDeviceBeforeLogin({ username } = {}) {
+    const data = readFeatureUnlocks();
+    const installationId = getOrCreateInstallationId(data);
+    // PAALALA: dapat isunod ito bago i-compute ang fingerprint, dahil
+    // ang deviceSeed ay ilalikha/ilalagay dito sa `data` mismo (hindi na
+    // sa isang local file) — kailangan nating tiyakin munang naka-load
+    // ang pinaka-bagong record bago tumawag ng computeHardwareFingerprint.
+    const liveFingerprint = computeHardwareFingerprint(data);
+
+    // Kung walang paraang makakuha ng anumang fingerprint (sobrang bihira),
+    // hindi na natin ito ma-eenforce nang maayos — huwag i-block, pero
+    // i-log bilang babala.
+    if (!liveFingerprint) {
+        console.warn('⚠️ ANTI-CLONE: walang na-compute na hardware fingerprint — hindi ma-enforce ang device-binding check.');
+        return { allowed: true };
+    }
+
+    const fingerprintUnchanged = data.deviceVerified && data.verifiedFingerprint === liveFingerprint;
+
+    // PERMIT SYSTEM: hindi na sapat na basta "magkatugma" ang lokal na
+    // deviceVerified/verifiedFingerprint flags — dahil kung sakaling
+    // direktang ma-edit/ma-restore ang DB row (mismatch ng backup,
+    // atbp.), MADALING i-fake ang mga flag na iyon nang manwal. Kaya
+    // sinusuri ulit dito, PURONG LOKAL (walang internet), kung ang huling
+    // naka-imbak na permit ay TALAGANG naka-sign ng RELAY PARA SA
+    // eksaktong installationId+fingerprint na ito ngayon.
+    //
+    // BACKWARD-COMPATIBLE MIGRATION: kung WALA pang naka-imbak na permit
+    // (lumang record bago idagdag ang permit system), huwag agad i-block
+    // — payagan muna, at kukunin/ita-tago lang ang permit sa opportunistic
+    // background recheck sa ibaba. Sa susunod na login, mayroon na itong
+    // permit na masusuri.
+    const permitOk = !data.devicePermit || verifyDevicePermit(data.devicePermit, installationId, liveFingerprint);
+
+    // DEVELOPER-AUTHORIZATION GATE: hindi lang basta "kilalang device"
+    // (fingerprint match / permit valid) ang kailangan para makapag-login
+    // — kailangan ding EXPLICIT na "Allow" na ito ng developer/owner sa
+    // RELAY admin panel (allowedDevices), kahit pa unang beses pa lang
+    // itong device (walang mismatch, walang clone suspicion). Kaya kahit
+    // pumasa ang fingerprint/permit check sa itaas, hindi pa rin dapat
+    // payagan ang login hangga't hindi pa naka-set ang lokal na
+    // "relayAuthorized" flag na ito (na TANGING mula sa RELAY manggagaling,
+    // hindi ito basta pwedeng i-edit lokal at magamit — dahil kailangan
+    // pa ring pumasa ang fingerprint/permit check bago pa man dito
+    // umabot).
+    if (fingerprintUnchanged && permitOk && data.relayAuthorized === true) {
+        // Opportunistic background re-check lang (hindi hinihintay/hindi
+        // nagba-block ng login) — kung sakaling mag-flag ang RELAY na
+        // clone_suspected dahil may ibang device na gumamit na rin ng
+        // parehong installationId, o kung sakaling i-Revoke ng developer
+        // ang authorization na ito, malalaman agad sa admin panel — at
+        // dito rin ita-tago ang bagong resulta (kasama ang pagbawi ng
+        // relayAuthorized kung na-revoke) para sa susunod na login.
+        //
+        // Sinusunod nito ang manual na Online/Offline TOGGLE ng user
+        // (tingnan ang FILE_CONNECTIVITY_MODE): kapag "offline" ang
+        // pinili niya, hindi na ito PROACTIVE na tatawag sa RELAY — pero
+        // hindi ito nakakaapekto sa seguridad, dahil sa isang totoong
+        // fingerprint mismatch (posibleng clone), MANDATORY pa ring
+        // tatawag online REGARDLESS ng toggle na ito (tingnan sa baba).
+        if (getConnectivityMode() === 'online') {
+            verifyDeviceWithRelay(installationId, liveFingerprint, { username })
+                .then(r => {
+                    if (r.ok) {
+                        const latest = readFeatureUnlocks();
+                        if (r.permit) latest.devicePermit = r.permit;
+                        latest.relayAuthorized = !!r.allowed;
+                        writeData(FILE_FEATURE_UNLOCKS, latest);
+                    }
+                })
+                .catch(() => {});
+        }
+        return { allowed: true };
+    }
+
+    // Alinman sa: (a) unang beses pa lang, (b) nagbago ang fingerprint
+    // (ibig sabihin naka-move/na-clone papunta sa ibang device), o (c)
+    // hindi pa na-a-authorize ng developer (relayAuthorized !== true) —
+    // KAILANGAN ng SUCCESSFUL online verification muna sa RELAY.
+    const result = await verifyDeviceWithRelay(installationId, liveFingerprint, { username });
+
+    if (!result.ok) {
+        return {
+            allowed: false,
+            message: result.reason === 'clone_suspected'
+                ? 'This device is not recognized. Please contact your administrator.'
+                : 'Unable to verify this device right now. Please check your internet connection and try again.'
+        };
+    }
+
+    const updated = readFeatureUnlocks();
+
+    if (result.reassignedInstallationId && result.reassignedInstallationId !== installationId) {
+        // Na-"split" ng admin ang device na ito sa RELAY bilang sarili at
+        // hiwalay na installationId (dating clone_suspected). Kailangan
+        // nating i-adopt ito dito lokal — kasama ang paglinis ng mga
+        // dating tokens (naka-bind ang mga iyon sa LUMANG installationId,
+        // kaya hindi na rin sila magiging valid dito) — magsisimula itong
+        // device nang walang naka-unlock na feature hangga't hindi ito
+        // manual na inaktibo ng admin/developer para sa BAGONG ID.
+        console.log(`ℹ️ ANTI-CLONE: hiwalay na installationId ang ibinigay ng RELAY (${result.reassignedInstallationId}) — ina-adopt lokal.`);
+        updated.installationId = result.reassignedInstallationId;
+        updated.tokens = {};
+    } else {
+        updated.installationId = installationId;
+    }
+
+    // Naka-verify na ang fingerprint (kilala/hindi clone) — pero ITO PA
+    // RIN ang tunay na desisyon kung PWEDE NA ba talagang makapag-login:
+    // kailangan munang naka-Allow ng developer/owner ang installationId
+    // na ito sa RELAY admin panel (result.allowed). Ang fingerprint
+    // binding sa ibaba ay pinag-iimbak PA RIN kahit hindi pa authorized
+    // — para gumana pa rin ang anti-clone tracking simula ngayon — pero
+    // hindi ito ang nagpapahintulot ng login.
+    updated.deviceVerified = true;
+    updated.verifiedFingerprint = liveFingerprint;
+    updated.devicePermit = result.permit || null;
+    updated.relayAuthorized = !!result.allowed;
+    updated.firstVerifiedAt = updated.firstVerifiedAt || Date.now();
+    updated.lastVerifiedAt = Date.now();
+    writeData(FILE_FEATURE_UNLOCKS, updated);
+
+    if (!result.allowed) {
+        return {
+            allowed: false,
+            message: 'This device has been logged with the developer/store owner. Please wait for authorization (Allow) before it can log in. Contact the developer/store owner.'
+        };
+    }
+
+    return { allowed: true };
+}
+
+// ====================================================================
+// LIVE DEVICE-REVOCATION CHECK — para awtomatikong ma-logout LAHAT ng
+// naka-login sa isang device sa SANDALING alisin ito ng developer/owner
+// sa "allowed devices" ng RELAY, kahit walang gumawa ng bagong
+// login/logout. Dati, ang relayAuthorized ay opportunistic lang
+// na-rerecheck sa checkDeviceBeforeLogin (bago mag-login) — ibig sabihin
+// habang naka-login na ang isang cashier, hindi ito naaapektuhan agad
+// kahit alisin na siya sa allowed list; matatanggal lang siya sa
+// susunod niyang pag-login. Ngayon, may hiwalay na periodic check na
+// tumatawag sa RELAY (kapag "online" ang connectivity mode) at, sa
+// SANDALING mag-flip ang relayAuthorized papuntang false, agad
+// dinedestroy ang LAHAT ng kasalukuyang session sa device na ito —
+// walang paraan para makapagpatuloy ang isang naka-login na session sa
+// isang device na binawian na ng authorization.
+const DEVICE_REVOCATION_RECHECK_MS = 3 * 60 * 1000;
+
+let lastLiveRecheckAt = 0;
+
+async function recheckDeviceAuthorizationLive() {
+    try {
+        // Kung walang kahit isang naka-login na session, walang i-fo-force-
+        // logout — huwag nang mag-abala pa sa RELAY. Pinapanatili nito ang
+        // ORIHINAL na "minimal na network chatter" na disenyo: 0 session =
+        // 0 background call sa RELAY, eksaktong tulad ng dati.
+        if (SESSIONS.size === 0) return;
+        if (getConnectivityMode() !== 'online') return; // sinusunod ang manual na toggle ng user
+        const data = readFeatureUnlocks();
+        const installationId = getOrCreateInstallationId(data);
+        const liveFingerprint = computeHardwareFingerprint(data);
+        if (!liveFingerprint) return;
+
+        const wasAuthorized = data.relayAuthorized === true;
+        const result = await verifyDeviceWithRelay(installationId, liveFingerprint, {});
+
+        // Hindi ma-abot ang RELAY (network blip lang, halimbawa) — huwag
+        // pagbatayan ng revocation; panatilihin ang huling kilalang estado.
+        if (!result.ok && result.reason === 'unreachable') return;
+
+        const nowAuthorized = result.ok && !!result.allowed;
+
+        const latest = readFeatureUnlocks();
+        latest.relayAuthorized = nowAuthorized;
+        if (result.ok && result.permit) latest.devicePermit = result.permit;
+        writeData(FILE_FEATURE_UNLOCKS, latest);
+
+        if (wasAuthorized && !nowAuthorized) {
+            const revokedCount = SESSIONS.size;
+            SESSIONS.clear();
+            persistSessions();
+            console.log(`🚫 DEVICE REVOKED: inalis ng developer/owner ang device na ito sa allowed list ng RELAY — na-force-logout ang ${revokedCount} aktibong session.`);
+        }
+    } catch (err) {
+        console.error('⚠️ Hindi na-finish ang live device-authorization recheck:', err.message);
+    }
+}
+
+// TANDAAN: WALANG standalone setInterval/setTimeout dito — sadyang
+// tinanggal, para hindi ito palaging tumatawag sa RELAY kahit walang
+// ginagawa ang device. Sa halip, ito ay tina-trigger na lang mula sa
+// totoong API traffic (tingnan ang throttled na tawag dito sa loob ng
+// /api/* auth middleware sa itaas) — kaya kung idle ang device, 0 tawag
+// sa RELAY, eksaktong gaya ng orihinal na "one-time/opportunistic" na
+// disenyo. Kapag ginagamit naman (bawat click/transaksyon), doon lang
+// ito magre-recheck, throttled sa bawat DEVICE_REVOCATION_RECHECK_MS.
+// ====================================================================
+// Bawat successful run: (1) kinokopya/ino-overwrite ang database papunta
+// sa IISANG file sa Download/RELAY_BACKUP ng device (tingnan ang
+// mirrorBackupToDownloads() sa db.js — hindi ito dumaragdag ng bagong
+// file bawat run), tapos (2) tumatawag sa bagong RELAY endpoint
+// (/relay/backup-checkin) para ipaalam na successful ang backup na ito
+// — ito ang nagpapa-awtomatikong dagdag sa device na ito sa "Allowed
+// devices" list sa Relay admin panel (tingnan ang relay_server.js),
+// kaya hindi na kailangang bumalik pa sa admin panel para i-Allow nang
+// manual tuwing may bagong verified/regular na gumagawa ng backup.
+//
+// "Dot" status para dito (orange = naghihintay/waiting o may problema,
+// green = matagumpay na na-sync) ay in-memory lang dito
+// (relayBackupStatus), naka-expose sa /api/relay-backup/status kung
+// kakailanganin balang araw ng isang UI widget sa loob mismo ng
+// OMNIPOS — ang PANGUNAHING dot/indicator na hiningi ay nasa Relay
+// admin panel mismo (sa itaas ng "Allowed devices"), dahil doon
+// naka-consolidate ang status ng LAHAT ng device, hindi lang isa.
+const relayBackupStatus = {
+    state: 'orange', // 'orange' = waiting/may problema, 'green' = matagumpay
+    lastAttemptAt: null,
+    lastSuccessAt: null,
+    lastError: null,
+    path: null
+};
+
+async function runRelayBackupSync() {
+    if (getConnectivityMode() === 'offline') {
+        relayBackupStatus.state = 'orange';
+        relayBackupStatus.lastError = 'Naka-OFFLINE mode — sinadya munang hindi tumatawag sa RELAY.';
+        return;
+    }
+    // FIX: sinusunod din ngayon ang aktwal na internet status (hindi lang
+    // ang manual na toggle) — ito ay tumatakbo AWTOMATIKO 40s pagkatapos
+    // mag-boot ang server (at every 24h), kaya kung walang internet sa
+    // start pa lang ng system (Online pa rin ang toggle), dating
+    // naghihintay ito ng buong relayFetch timeout bago mag-fail.
+    if (!(await isInternetLikelyUp())) {
+        relayBackupStatus.state = 'orange';
+        relayBackupStatus.lastError = 'Walang internet connection na na-detect.';
+        return;
+    }
+    relayBackupStatus.lastAttemptAt = Date.now();
+
+    const mirrorResult = mirrorBackupToDownloads();
+    if (!mirrorResult.success) {
+        relayBackupStatus.state = 'orange';
+        relayBackupStatus.lastError = mirrorResult.message;
+        console.error('⚠️ RELAY_BACKUP: hindi na-mirror sa Download folder:', mirrorResult.message);
+        return;
+    }
+    relayBackupStatus.path = mirrorResult.path;
+    console.log(
+        mirrorResult.existedBefore
+            ? `🔁 RELAY_BACKUP: na-update ang existing na file sa ${mirrorResult.path} (${mirrorResult.sizeBytes} bytes)`
+            : `🆕 RELAY_BACKUP: unang beses na nagawa ang file sa ${mirrorResult.path} (${mirrorResult.sizeBytes} bytes)`
+    );
+
+    if (!RELAY_API_KEY) {
+        relayBackupStatus.state = 'orange';
+        relayBackupStatus.lastError = 'Walang RELAY_API_KEY na naka-configure — hindi ma-checkin sa relay.';
+        return;
+    }
+
+    try {
+        const data = readFeatureUnlocks();
+        const installationId = getOrCreateInstallationId(data);
+        const receiptSettings = readData(FILE_RECEIPT_SETTINGS, DEFAULT_RECEIPT_SETTINGS);
+
+        const relayRes = await relayFetch(`${RELAY_URL}/relay/backup-checkin`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-relay-key': RELAY_API_KEY },
+            body: JSON.stringify({
+                installationId,
+                storeName: (receiptSettings && receiptSettings.storeName) || null,
+                fileSizeBytes: mirrorResult.sizeBytes,
+                backupAt: Date.now()
+            })
+        });
+        const relayData = await parseRelayResponse(relayRes);
+
+        if (!relayData.success) {
+            relayBackupStatus.state = 'orange';
+            relayBackupStatus.lastError = relayData.message || 'Tinanggihan ng relay ang backup check-in.';
             return;
         }
 
-        activityLog.unshift({
-            installationId: installationId || null,
-            type,
-            details,
-            at: now,
-            firstAt: now,
-            count: 1,
-            _mergeKey: mergeKey
-        });
-        if (activityLog.length > ACTIVITY_LOG_MAX) activityLog.length = ACTIVITY_LOG_MAX;
-        saveActivityLog(activityLog);
-        return;
-    }
-
-    // Hindi mergeable (security-sensitive/one-off) — dating gawi: laging
-    // BAGONG row, para buo ang record ng bawat pagkakataon.
-    activityLog.unshift({
-        installationId: installationId || null,
-        type,
-        details,
-        at: now
-    });
-    if (activityLog.length > ACTIVITY_LOG_MAX) activityLog.length = ACTIVITY_LOG_MAX;
-    saveActivityLog(activityLog);
-}
-
-// --------------------------------------------------------------
-// BACKUP CHECK-INS — "auto backup" na tinatawag ng OMNIPOS client
-// (server.js doon, hindi ang browser) tuwing matagumpay itong
-// nag-mirror ng sarili niyang database papunta sa Download/RELAY_BACKUP
-// nito (iisang overwritten file, tingnan ang db.js/server.js ng
-// OMNIPOS). Ginagamit ito para sa DALAWANG bagay:
-//   1. Pinapakita sa admin panel kung KAILAN huling successful na-sync
-//      ang bawat device (at ang pinaka-huli sa LAHAT, para sa
-//      notification/dot sa itaas ng "Allowed devices").
-//   2. (Opsyonal, naka-toggle) AWTOMATIKONG idinaragdag ang device sa
-//      allowlist sa tuwing may matagumpay na check-in — "trust on
-//      first successful backup" na modelo, para hindi na kailangang
-//      i-Allow nang manual ang bawat bagong verified na device.
-//      I-set ang RELAY_AUTOALLOW_ON_BACKUP=false sa .env kung ayaw mo
-//      nito (manual Allow pa rin sa admin panel ang gagamitin).
-//
-// PAALALA: kapareho ng iba pang JSON stores dito, MAWAWALA ito sa
-// susunod na REDEPLOY kung walang persistent disk (Render free tier).
-// --------------------------------------------------------------
-const BACKUP_CHECKINS_PATH = path.join(__dirname, 'backup-checkins.json');
-
-async function loadBackupCheckins() {
-    const fromRedis = await redisGetJSON('backup-checkins', null);
-    if (fromRedis !== null) return fromRedis;
-    try {
-        return JSON.parse(fs.readFileSync(BACKUP_CHECKINS_PATH, 'utf8'));
+        relayBackupStatus.state = 'green';
+        relayBackupStatus.lastSuccessAt = Date.now();
+        relayBackupStatus.lastError = null;
+        console.log(`✅ RELAY_BACKUP: na-checkin sa relay (installationId: ${installationId}).`);
     } catch (err) {
-        return {};
+        relayBackupStatus.state = 'orange';
+        relayBackupStatus.lastError = err.message;
+        console.error('⚠️ RELAY_BACKUP: hindi ma-abot ang relay para sa check-in:', err.message);
     }
 }
 
-function saveBackupCheckins(obj) {
-    if (redisClient) {
-        redisSetJSON('backup-checkins', obj);
-        return;
-    }
-    try {
-        fs.writeFileSync(BACKUP_CHECKINS_PATH, JSON.stringify(obj, null, 2));
-    } catch (err) {
-        console.error('Hindi ma-save ang backup-checkins.json:', err);
-    }
+// Sinasama ito sa parehong AUTO_BACKUP_DISABLED toggle na ginagamit ng
+// runLocalDatabaseBackup — iisang switch lang (.env) para i-off/on ang
+// LAHAT ng auto-backup behavior nang sabay. Konting delay (40s) mula sa
+// startup para makasunod muna ito sa unang runLocalDatabaseBackup(30s).
+if (!AUTO_BACKUP_DISABLED) {
+    setTimeout(runRelayBackupSync, 40 * 1000);
+    setInterval(runRelayBackupSync, 24 * 60 * 60 * 1000).unref();
 }
 
-let backupCheckins = {}; // installationId -> { lastBackupAt, storeName, fileSizeBytes, checkinCount } — pupunuin sa bootstrapStores()
-
-// Default na NAKA-ON ang auto-allow-on-backup (mas kaunting manual na
-// hakbang para sa developer) — i-set ang env var na ito sa 'false' kung
-// gusto mo pa ring manual na i-Allow bawat device sa admin panel kahit
-// successful na ang backup check-in nito.
-const AUTOALLOW_ON_BACKUP = String(process.env.RELAY_AUTOALLOW_ON_BACKUP || 'true').trim().toLowerCase() !== 'false';
-
-function mostRecentBackupCheckinAt() {
-    const values = Object.values(backupCheckins).map((c) => c.lastBackupAt).filter(Boolean);
-    return values.length ? Math.max(...values) : null;
-}
+// Read-only status endpoint (opsyonal na gamitin ng future UI widget sa
+// loob ng OMNIPOS mismo) — protektado pa rin ng parehong session/token
+// middleware gaya ng ibang /api/* routes.
+app.get('/api/relay-backup/status', (req, res) => {
+    res.json({ success: true, ...relayBackupStatus });
+});
 
 // ====================================================================
-// FILE INTEGRITY MONITORING ("git status" para sa deployed client)
-// --------------------------------------------------------------------
-// LAYUNIN: malaman ng developer/owner (sa RELAY admin panel) kung may
-// na-edit o na-delete na FILE ang isang client sa loob ng sarili
-// nilang OMNIPOS install — hal. binuksan/binago ang server.js para
-// tanggalin ang isang license/anti-clone check, o binura ang isang
-// file na kasama dapat sa release. Dalawang bahagi ito:
+// FILE INTEGRITY CHECK-IN ("git status" papuntang RELAY) — pana-panahon
+// na kinukuha ang sha256 hash ng BAWAT file sa sarili nitong install
+// folder (maliban sa runtime/data na inaasahang iba-iba talaga bawat
+// device — .env, .env.key, database/, node_modules/, uploads_tmp/,
+// .git/, release/, *.log), at ipinapadala papunta sa RELAY
+// (/relay/integrity-checkin) kasama ang APP_VERSION nito. Doon
+// kino-compare ito sa baseline manifest ng version na iyon (kinuha
+// mismo mula sa eksaktong release na binuo/ipinadala para dito), at
+// nakikita sa RELAY admin panel (parang "git status") kung may na-edit
+// o na-delete na file ang client — naka-red-flag doon.
 //
-//   1. BASELINE MANIFEST — kada matagumpay na build (performBuildRelease,
-//      tingnan sa ibaba), kinukuha ang sha256 hash ng BAWAT file na
-//      talagang isinama sa release zip (mula mismo sa tmpDir bago pa
-//      i-zip — ibig sabihin eksaktong kapareho ito ng ibinigay sa
-//      customer), at itinatago bilang "baseline" PARA SA VERSION na
-//      iyon (systemVersionInfo.version ng build na iyon). Maraming
-//      version ang naka-imbak nang sabay (hindi lang "pinaka-huli"),
-//      dahil hindi laging naka-update agad ang lahat ng client.
-//   2. CLIENT CHECK-IN — ang OMNIPOS client mismo (tingnan ang bagong
-//      runRelayIntegrityCheckin() sa OMNIPOS/server.js) ay pana-panahong
-//      kinukuha rin ang sha256 hash ng bawat file sa sarili nitong
-//      install folder (gamit ang PAREHONG exclude list — .env,
-//      .env.key, database/, node_modules/, uploads_tmp/, .git/,
-//      release/, *.log — dahil normal/inaasahan lang na magkaiba ang
-//      mga ito bawat device), at ipinapadala ito dito
-//      (POST /relay/integrity-checkin) kasama ang sariling APP_VERSION
-//      nito. Dito, kino-compare ito sa naka-imbak na baseline PARA SA
-//      VERSION NA IYON — kung walang tugmang baseline (hal. sobrang
-//      luma/bago pa lang i-publish), hindi ito basta-basta finaflag.
-//
-// Resulta ng paghahambing (tatlong klase, gaya ng "git status"):
-//   - modified: nasa parehong panig, pero IBA ang hash (binago)
-//   - deleted:  nasa baseline, WALA sa client (binura)
-//   - added:    WALA sa baseline, NASA client (bagong idinagdag na file
-//               na hindi bahagi ng orihinal na release — hal. isang
-//               ipinasok na backdoor/patch file)
-// Kahit alin sa tatlo ay nagre-red-flag sa device sa admin panel.
-// ====================================================================
-
-// Exclude set na dapat MAG-TUGMA (parehong pangalan) sa ginagamit ng
-// OMNIPOS client mismo (SELF_UPDATE_PRESERVE sa OMNIPOS/server.js) at
-// sa build pipeline dito (BUILD_EXCLUDE_NAMES/EXTENSIONS sa ibaba) —
-// kung hindi tugma ang mga ito, magkakaroon ng maling positibo
-// (false "modified/deleted") na hindi naman talagang tampering, kundi
-// runtime data lang na iba-iba talaga bawat device.
-const INTEGRITY_EXCLUDE_NAMES = new Set([
+// SADYANG GAMIT ang PAREHONG exclude list (SELF_UPDATE_PRESERVE, tingnan
+// sa ibaba ng file na ito) para hindi mag-report ng maling "modified/
+// deleted" para lang sa runtime data na normal namang iba-iba bawat
+// device.
+// --------------------------------------------------------------
+const INTEGRITY_SCAN_EXCLUDE_NAMES = new Set([
     '.env', '.env.key', 'database', 'node_modules', 'uploads_tmp',
     '.git', 'release', 'cf.log', 'server.log'
 ]);
-const INTEGRITY_EXCLUDE_EXTENSIONS = new Set(['.log', '.patch']);
+const INTEGRITY_SCAN_EXCLUDE_EXTENSIONS = new Set(['.log', '.patch']);
 
-function sha256File(filePath) {
-    const hash = crypto.createHash('sha256');
-    hash.update(fs.readFileSync(filePath));
-    return hash.digest('hex');
-}
-
-// Naglalakad sa isang direktoryo (recursive) at nagbabalik ng plain
-// object { "relative/path.js": "<sha256 hex>", ... }, gamit ang
-// forward-slash PALAGI sa relative path (kahit sa Windows) para
-// tumugma ito sa parehong ginawa ng OMNIPOS client (mas madaling
-// i-compare nang direkta, walang path-separator mismatch).
-function buildFileManifest(rootDir) {
+function computeInstallDirManifest() {
     const manifest = {};
     function walk(dir, relBase) {
         let entries;
@@ -1097,3666 +2562,5153 @@ function buildFileManifest(rootDir) {
             return;
         }
         for (const entry of entries) {
-            if (INTEGRITY_EXCLUDE_NAMES.has(entry.name)) continue;
+            if (INTEGRITY_SCAN_EXCLUDE_NAMES.has(entry.name)) continue;
             const full = path.join(dir, entry.name);
             const rel = relBase ? `${relBase}/${entry.name}` : entry.name;
             if (entry.isDirectory()) {
                 walk(full, rel);
                 continue;
             }
-            if (INTEGRITY_EXCLUDE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
+            if (INTEGRITY_SCAN_EXCLUDE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
             try {
-                manifest[rel] = sha256File(full);
+                const hash = crypto.createHash('sha256');
+                hash.update(fs.readFileSync(full));
+                manifest[rel] = hash.digest('hex');
             } catch (err) {
-                // Hindi mababasa (hal. broken symlink) — laktawan na
-                // lang, hindi dapat pabagsakin ang buong build dahil dito.
+                // Hindi mababasa — laktawan na lang, hindi dapat
+                // pabagsakin ang buong check-in dahil dito.
             }
         }
     }
-    walk(rootDir, '');
+    walk(__dirname, '');
     return manifest;
 }
 
-// baseline manifests, keyed by VERSION string (hindi installationId) —
-// maraming version ang naka-imbak nang sabay dahil hindi laging
-// naka-update agad ang lahat ng client sa parehong version.
-const RELEASE_BASELINES_PATH = path.join(__dirname, 'release-baselines.json');
+// "Dot" status para dito, kaparehong pattern ng relayBackupStatus sa
+// itaas — read-only lang, kung kailangan balang araw ng isang UI widget.
+const relayIntegrityStatus = {
+    state: 'orange', // 'orange' = waiting/hindi pa nagawa, 'green' = malinis, 'red' = may naka-flag
+    lastAttemptAt: null,
+    lastSuccessAt: null,
+    lastError: null,
+    flagged: false,
+    modifiedCount: 0,
+    deletedCount: 0,
+    addedCount: 0
+};
 
-async function loadReleaseBaselines() {
-    const fromRedis = await redisGetJSON('release-baselines', null);
-    if (fromRedis !== null) return new Map(Object.entries(fromRedis));
-    try {
-        return new Map(Object.entries(JSON.parse(fs.readFileSync(RELEASE_BASELINES_PATH, 'utf8'))));
-    } catch (err) {
-        return new Map();
-    }
-}
-
-function saveReleaseBaselines(map) {
-    const obj = Object.fromEntries(map);
-    if (redisClient) {
-        redisSetJSON('release-baselines', obj);
+async function runRelayIntegrityCheckin() {
+    if (getConnectivityMode() === 'offline') {
+        relayIntegrityStatus.state = 'orange';
+        relayIntegrityStatus.lastError = 'Naka-OFFLINE mode — sinadya munang hindi tumatawag sa RELAY.';
         return;
     }
-    try {
-        fs.writeFileSync(RELEASE_BASELINES_PATH, JSON.stringify(obj, null, 2));
-    } catch (err) {
-        console.error('Hindi ma-save ang release-baselines.json:', err);
-    }
-}
-
-let releaseBaselines = new Map(); // version -> { builtAt, fileCount, files: {relPath: sha256} } — pupunuin sa bootstrapStores()
-
-// integrity status, keyed by installationId (resulta ng huling
-// check-in ng bawat device).
-const INTEGRITY_STATUS_PATH = path.join(__dirname, 'integrity-status.json');
-
-async function loadIntegrityStatus() {
-    const fromRedis = await redisGetJSON('integrity-status', null);
-    if (fromRedis !== null) return fromRedis;
-    try {
-        return JSON.parse(fs.readFileSync(INTEGRITY_STATUS_PATH, 'utf8'));
-    } catch (err) {
-        return {};
-    }
-}
-
-function saveIntegrityStatus(obj) {
-    if (redisClient) {
-        redisSetJSON('integrity-status', obj);
+    if (!(await isInternetLikelyUp())) {
+        relayIntegrityStatus.state = 'orange';
+        relayIntegrityStatus.lastError = 'Walang internet connection na na-detect.';
         return;
     }
-    try {
-        fs.writeFileSync(INTEGRITY_STATUS_PATH, JSON.stringify(obj, null, 2));
-    } catch (err) {
-        console.error('Hindi ma-save ang integrity-status.json:', err);
-    }
-}
-
-// installationId -> { checkedAt, baselineVersion, hasBaseline,
-//   flagged, modified: [...], deleted: [...], added: [...],
-//   modifiedCount, deletedCount, addedCount, clearedAt, clearedNote }
-let integrityStatus = {}; // pupunuin sa bootstrapStores()
-
-// Mga installationId na hiniling ng ADMIN (pindot sa "🔄 I-check
-// ngayon" button) na kailangang mag-check-in AGAD, hindi na maghintay
-// pa ng normal na 55s/24h schedule nito. In-memory lang ito (hindi
-// kailangang mag-persist across restart — isang beses lang gagamitin,
-// sasagutin ng client sa susunod na tawag nito sa
-// /relay/check-feature-status, na tumatakbo na kada ~30s), at
-// awtomatikong na-a-"consume"/tinatanggal pagkatapos masagot minsan.
-const pendingIntegrityChecks = new Set();
-
-// --------------------------------------------------------------
-// SYSTEM VERSION — pinapatunayan ng developer/owner dito ang
-// "pinakabagong" version ng OMNIPOS client app (hal. pagkatapos
-// mag-merge ng bagong upgrade papunta sa upstream/main). Ang bawat
-// OMNIPOS client instance (kahit saan naka-deploy — Render, Termux,
-// atbp.) ay tumatawag dito (GET /relay/latest-version) para malaman
-// kung may bagong version na available, at ipapakita ito bilang
-// "Check for Updates" sa Settings nila.
-//
-// PAALALA: gaya ng ibang stores dito, mawawala ito sa susunod na
-// REDEPLOY kung walang persistent disk/REDIS_URL — i-publish lang
-// ulit ito sa admin panel pagkatapos.
-// --------------------------------------------------------------
-const SYSTEM_VERSION_PATH = path.join(__dirname, 'system-version.json');
-const DEFAULT_SYSTEM_VERSION_INFO = { version: '0.0.0', changelog: '', publishedAt: null };
-
-async function loadSystemVersionInfo() {
-    const fromRedis = await redisGetJSON('system-version', null);
-    if (fromRedis !== null) return fromRedis;
-    try {
-        return JSON.parse(fs.readFileSync(SYSTEM_VERSION_PATH, 'utf8'));
-    } catch (err) {
-        return { ...DEFAULT_SYSTEM_VERSION_INFO };
-    }
-}
-
-function saveSystemVersionInfo(obj) {
-    if (redisClient) {
-        redisSetJSON('system-version', obj);
+    if (!RELAY_API_KEY) {
+        relayIntegrityStatus.state = 'orange';
+        relayIntegrityStatus.lastError = 'Walang RELAY_API_KEY na naka-configure — hindi ma-checkin sa relay.';
         return;
     }
+
+    relayIntegrityStatus.lastAttemptAt = Date.now();
+
     try {
-        fs.writeFileSync(SYSTEM_VERSION_PATH, JSON.stringify(obj, null, 2));
-    } catch (err) {
-        console.error('Hindi ma-save ang system-version.json:', err);
-    }
-}
+        const data = readFeatureUnlocks();
+        const installationId = getOrCreateInstallationId(data);
+        const files = computeInstallDirManifest();
 
-let systemVersionInfo = { ...DEFAULT_SYSTEM_VERSION_INFO }; // pupunuin sa bootstrapStores()
-
-// --------------------------------------------------------------
-// TARGETED RELEASES — opsyonal na PER-DEVICE override sa itaas ng
-// global na SYSTEM VERSION sa itaas. Kapag may naka-store na targeted
-// entry PARA SA isang installationId, ITO ang isasagot ng
-// /relay/latest-version PARA SA installationId na iyon lang — hindi
-// makikita ng ibang device na "may bagong update" kahit tumaas na ang
-// global version. Kung walang targeted entry, babalik sa dating gawi:
-// ang global systemVersionInfo ang sasagutin sa lahat.
-//
-// GAMIT: staged/limited rollout (hal. isang beta customer muna bago
-// i-broadcast sa lahat), o talagang isang partikular na customer/device
-// lang ang dapat makatanggap ng isang partikular na patch/build.
-//
-// PAALALA (mahalaga): ang aktwal na zip file mismo
-// (release/omnipos-client.zip, sinesserve ng /relay/release-package)
-// ay IISA lang at SHARED sa lahat ng device — ang targeting dito ay
-// TUNGKOL LANG SA "sinong nakikita ang 'may bagong update' notice."
-// Ang x-relay-key lang (shared sa lahat ng client) ang gate ng
-// /relay/release-package, HINDI installationId — kaya kung sino man
-// ang mag-trigger ng self-update, ma-a-apply pa rin sa kanila ang
-// parehong zip. Kung kailangan talagang i-block ang PAG-DOWNLOAD mismo
-// (hindi lang ang notice), kailangan pang dagdagan ang
-// /relay/release-package ng parehong installationId check — hindi pa
-// ito kasama dito.
-// --------------------------------------------------------------
-const TARGETED_RELEASES_PATH = path.join(__dirname, 'targeted-releases.json');
-
-async function loadTargetedReleases() {
-    const fromRedis = await redisGetJSON('targeted-releases', null);
-    if (fromRedis !== null) return new Map(Object.entries(fromRedis));
-    try {
-        const raw = fs.readFileSync(TARGETED_RELEASES_PATH, 'utf8');
-        return new Map(Object.entries(JSON.parse(raw)));
-    } catch (err) {
-        return new Map();
-    }
-}
-
-function saveTargetedReleases(map) {
-    if (redisClient) {
-        redisSetJSON('targeted-releases', Object.fromEntries(map));
-        return;
-    }
-    try {
-        fs.writeFileSync(TARGETED_RELEASES_PATH, JSON.stringify(Object.fromEntries(map), null, 2));
-    } catch (err) {
-        console.error('Hindi ma-save ang targeted-releases.json:', err);
-    }
-}
-
-let targetedReleases = new Map(); // installationId -> { version, changelog, publishedAt } — pupunuin sa bootstrapStores()
-
-// --------------------------------------------------------------
-// DOWNLOAD CODES — para sa "one-time online setup, offline pagkatapos"
-// na hiling: ito ang paraan para makapag-download ang isang BAGONG
-// client ng OMNIPOS package (zip) nang HINDI pinapublic ang link —
-// developer/admin lang ang gumagawa ng code (may bilang ng uses at
-// expiry), ipapadala sa kliyente (SMS/email/chat), tapos gagamitin
-// nila ito ISANG BESES (o kung ilang beses ipinapayagan) para
-// makuha ang release zip mula sa RELAY.
-//
-// Structure: code -> { label, usesRemaining, maxUses, createdAt,
-//                        expiresAt, lastUsedAt, downloadCount }
-// --------------------------------------------------------------
-const DOWNLOAD_CODES_PATH = path.join(__dirname, 'download-codes.json');
-
-async function loadDownloadCodes() {
-    const fromRedis = await redisGetJSON('download-codes', null);
-    if (fromRedis !== null) return new Map(Object.entries(fromRedis));
-    try {
-        const raw = fs.readFileSync(DOWNLOAD_CODES_PATH, 'utf8');
-        return new Map(Object.entries(JSON.parse(raw)));
-    } catch (err) {
-        return new Map();
-    }
-}
-
-function saveDownloadCodes(map) {
-    if (redisClient) {
-        redisSetJSON('download-codes', Object.fromEntries(map));
-        return;
-    }
-    try {
-        fs.writeFileSync(DOWNLOAD_CODES_PATH, JSON.stringify(Object.fromEntries(map), null, 2));
-    } catch (err) {
-        console.error('Hindi ma-save ang download-codes.json:', err);
-    }
-}
-
-let downloadCodes = new Map(); // pupunuin sa bootstrapStores()
-
-// Kung saan naka-store ang aktwal na zip na ipapadala — i-place ito ng
-// developer bawat may bagong release (tingnan ang build-release.js sa
-// OMNIPOS repo). HINDI kasama sa git ang zip mismo.
-const RELEASE_PACKAGE_PATH = path.join(__dirname, 'release', 'omnipos-client.zip');
-
-// --------------------------------------------------------------
-// BUILD HISTORY — log lang ng mga na-build/na-publish na
-// omnipos-client.zip. MAHALAGA: HINDI nito binabago ang filename ng
-// aktwal na na-build na package — laging "omnipos-client.zip" pa rin
-// ito sa RELEASE_PACKAGE_PATH (ino-overwrite lang kada build). Ang
-// history na ito ay HIWALAY na listahan lang (caption/label na inilagay
-// ng admin, ang naka-publish na version number nung oras na iyon, at
-// timestamp) — copy ng "kailan/ano" nangyari, hindi ng mismong file.
-// Pinaka-bago munang entry ang nasa unahan; pinuputol sa
-// BUILD_HISTORY_MAX_ENTRIES para hindi lumaki nang wala sa kontrol.
-// --------------------------------------------------------------
-const BUILD_HISTORY_PATH = path.join(__dirname, 'build-history.json');
-const BUILD_HISTORY_MAX_ENTRIES = 100;
-
-async function loadBuildHistory() {
-    const fromRedis = await redisGetJSON('build-history', null);
-    if (fromRedis !== null) return Array.isArray(fromRedis) ? fromRedis : [];
-    try {
-        const raw = fs.readFileSync(BUILD_HISTORY_PATH, 'utf8');
-        const parsed = JSON.parse(raw);
-        return Array.isArray(parsed) ? parsed : [];
-    } catch (err) {
-        return [];
-    }
-}
-
-function saveBuildHistory(list) {
-    if (redisClient) {
-        redisSetJSON('build-history', list);
-        return;
-    }
-    try {
-        fs.writeFileSync(BUILD_HISTORY_PATH, JSON.stringify(list, null, 2));
-    } catch (err) {
-        console.error('Hindi ma-save ang build-history.json:', err);
-    }
-}
-
-function recordBuildHistoryEntry(entry) {
-    buildHistory.unshift(entry); // pinaka-bago sa unahan
-    if (buildHistory.length > BUILD_HISTORY_MAX_ENTRIES) {
-        buildHistory.length = BUILD_HISTORY_MAX_ENTRIES;
-    }
-    saveBuildHistory(buildHistory);
-}
-
-let buildHistory = []; // pupunuin sa bootstrapStores()
-
-// --------------------------------------------------------------
-// ADMIN PANEL — /relay/admin (protektado ng sarili niyang password,
-// HIWALAY sa RELAY_API_KEY). Dito mo makikita ang listahan ng mga
-// device na kailanman humiling ng unlock, at pwede mo silang
-// paganahin/tanggalin sa allowlist nang isang click na lang.
-// --------------------------------------------------------------
-const ADMIN_KEY = process.env.RELAY_ADMIN_KEY || null;
-if (!ADMIN_KEY) {
-    console.warn('⚠️  Walang RELAY_ADMIN_KEY na naka-set — hindi magagamit ang /relay/admin panel hangga\'t hindi ito nalagyan.');
-}
-
-// Timing-safe string comparison — pumipigil sa "timing attack" kung saan
-// puwedeng hulaan ng attacker ang key nang paunti-unti (character by
-// character) batay sa kung gaano kabilis tumugon ang server sa bawat
-// maling guess. Gumagamit ng crypto.timingSafeEqual, pero pareho munang
-// pinapantayan ang haba ng dalawang string (kailangan ito ng function na
-// iyon) nang hindi nagpapakita kung alin ang mas maikli/mahaba.
-function safeCompare(a, b) {
-    if (typeof a !== 'string' || typeof b !== 'string') return false;
-    const bufA = Buffer.from(a);
-    const bufB = Buffer.from(b);
-    if (bufA.length !== bufB.length) {
-        // Ipadaan pa rin sa timingSafeEqual gamit ang parehong haba (bufA
-        // laban sa sarili nito) para hindi bumagsak agad sa maikling-circuit
-        // na maaaring gamiting "oracle" ng attacker.
-        crypto.timingSafeEqual(bufA, bufA);
-        return false;
-    }
-    return crypto.timingSafeEqual(bufA, bufB);
-}
-
-// Bantay laban sa brute-force: limitado ang bilang ng MALING admin-key
-// attempts bawat IP bago pansamantalang harangan (kahit tama na ang key
-// pagkatapos) — hindi ito nakakaapekto sa normal na 8-second auto-refresh
-// ng admin panel dahil MALING attempts lang ang binibilang, hindi lahat
-// ng request.
-const ADMIN_LOGIN_MAX_FAILURES = 10;
-const ADMIN_LOGIN_WINDOW_MS = 10 * 60 * 1000;
-const adminLoginFailures = new Map(); // ip -> [timestamps]
-
-function isAdminLoginLocked(ip) {
-    const attempts = (adminLoginFailures.get(ip) || []).filter(
-        ts => Date.now() - ts < ADMIN_LOGIN_WINDOW_MS
-    );
-    adminLoginFailures.set(ip, attempts);
-    return attempts.length >= ADMIN_LOGIN_MAX_FAILURES;
-}
-
-function recordAdminLoginFailure(ip) {
-    const attempts = adminLoginFailures.get(ip) || [];
-    attempts.push(Date.now());
-    adminLoginFailures.set(ip, attempts);
-}
-
-function requireAdminKey(req, res, next) {
-    if (isAdminLoginLocked(req.ip)) {
-        return res.status(429).json({
-            success: false,
-            message: 'Sobra na sa maling pagtatangka. Subukan ulit mamaya.'
+        const relayRes = await relayFetch(`${RELAY_URL}/relay/integrity-checkin`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-relay-key': RELAY_API_KEY },
+            body: JSON.stringify({
+                installationId,
+                version: APP_VERSION,
+                files
+            })
         });
-    }
-    const provided = req.headers['x-relay-admin-key'] || req.query.key;
-    if (!ADMIN_KEY || !safeCompare(String(provided || ''), ADMIN_KEY)) {
-        recordAdminLoginFailure(req.ip);
-        return res.status(403).json({ success: false, message: 'Invalid o walang admin key.' });
-    }
-    next();
-}
+        const relayData = await parseRelayResponse(relayRes);
 
-app.use('/relay/admin', express.static(path.join(__dirname, 'public', 'admin')));
-
-// Body: { key, durationDays? }. `durationDays`:
-//   - positibong numero -> ganoong dami ng araw bago mag-expire ang
-//     lisensyang ito (AUTO-EXPIRING, hindi lang device-based).
-//   - 0 (tahasang pinasa) -> PERMANENTE, kahit may RELAY_DEFAULT_LICENSE_DAYS.
-//   - wala/undefined -> babalik sa RELAY_DEFAULT_LICENSE_DAYS (kung meron),
-//     o permanente kung wala ring env default (backward-compatible).
-app.post('/relay/admin/api/pending-otps/approve', requireAdminKey, (req, res) => {
-    const { key, durationDays } = req.body;
-    const pending = pendingOtps.get(key);
-    if (!pending) {
-        return res.status(404).json({ success: false, message: "Wala nang aktibong request na iyan (baka na-expire na o na-claim na)." });
-    }
-    pending.approved = true;
-    if (typeof durationDays === 'number' && durationDays > 0) {
-        pending.durationDays = durationDays;
-    } else if (durationDays === 0) {
-        pending.durationDays = null; // tahasang "Permanente" na pinili ng admin
-    } else {
-        pending.durationDays = RELAY_DEFAULT_LICENSE_DAYS;
-    }
-    logActivity(pending.installationId, 'admin_approved', {
-        featureId: pending.featureId,
-        featureName: pending.featureName,
-        durationDays: pending.durationDays || null
-    });
-    res.json({ success: true, message: 'Naaprubahan. Pwede na ulit i-click ng kliyente ang unlock button nila.' });
-});
-
-// --------------------------------------------------------------
-// AUTO-CLEANUP — kada 30 segundo, tinatanggal ang kahit anong pending
-// OTP na LUMAMPAS na sa 10-minutong expiry nito nang hindi na-Allow.
-// Ganito nakakamit ang hiling na "kung hindi ko na-Run/Allow bago
-// matapos ang oras, mababaliwala at mabubura ang OTP" — hindi na
-// kailangang balikan pa ng kliyente/kliyenteng humihiling.
-// --------------------------------------------------------------
-setInterval(() => {
-    const now = Date.now();
-    for (const [key, pending] of pendingOtps.entries()) {
-        if (now > pending.expiresAt) {
-            pendingOtps.delete(key);
+        if (!relayData.success) {
+            relayIntegrityStatus.state = 'orange';
+            relayIntegrityStatus.lastError = relayData.message || 'Tinanggihan ng relay ang integrity check-in.';
+            return;
         }
+
+        relayIntegrityStatus.lastSuccessAt = Date.now();
+        relayIntegrityStatus.lastError = null;
+        relayIntegrityStatus.flagged = !!relayData.flagged;
+        relayIntegrityStatus.modifiedCount = relayData.modifiedCount || 0;
+        relayIntegrityStatus.deletedCount = relayData.deletedCount || 0;
+        relayIntegrityStatus.addedCount = relayData.addedCount || 0;
+        relayIntegrityStatus.state = relayData.flagged ? 'red' : 'green';
+        // (Sinadyang tinanggal ang console.log dito — silent, walang lumalabas
+        // sa Termux terminal. Nasa relayIntegrityStatus/API na lang ang resulta.)
+    } catch (err) {
+        relayIntegrityStatus.state = 'orange';
+        relayIntegrityStatus.lastError = err.message;
+        // (Sinadyang tinanggal ang console.error dito — silent din ang mga error.)
     }
-}, 30 * 1000);
-
-app.get('/relay/admin/api/pending-otps', requireAdminKey, (req, res) => {
-    const now = Date.now();
-    const pending = [...pendingOtps.entries()]
-        .map(([key, data]) => ({ key, ...data }))
-        .filter(entry => entry.expiresAt > now) // huwag ipakita yung na-expire na
-        .sort((a, b) => b.expiresAt - a.expiresAt);
-
-    res.json({ success: true, pendingOtps: pending });
-});
-
-// Helper: ilista lang ang mga featureId na may VALID (hindi pa expired)
-// na naka-record na token para sa isang installationId.
-function getActiveUnlockedFeatureIds(installationId) {
-    const record = issuedUnlocks[installationId] || {};
-    const now = Date.now();
-    return Object.keys(record).filter(featureId => {
-        const entry = record[featureId];
-        return !(typeof entry.expiresAt === 'number' && now > entry.expiresAt);
-    });
 }
 
-app.get('/relay/admin/api/devices', requireAdminKey, async (req, res) => {
-    // FIX: dati, `ids` ay mula lang sa seenDevices.keys() — ang isang
-    // in-memory Map na NAWAWALA tuwing mag-restart ang RELAY server
-    // (hal. git push/redeploy sa Render). Kaya kung offline/hindi pa
-    // ulit nag-request ang isang ALLOWED device mula noong huling
-    // restart, TANGGAL ITO sa listahan na ito (wala kang makikitang
-    // row para dito) — kasama na ang naka-save nitong LABEL, kahit
-    // permanente itong naka-imbak sa deviceLabels (na naka-persist).
-    // Ngayon, ID UNION ng seenDevices AT allowedDevices ang ginagamit
-    // dito, para LAGING lumabas ang bawat allowed device sa listahan
-    // — may label pa rin (mula sa persisted deviceLabels), kahit
-    // offline ito o wala pang "seen" na record sa memory ngayon.
-    const ids = [...new Set([...seenDevices.keys(), ...allowedDevices])];
-    const onlineMap = await getOnlineStatusMap(ids);
+// Konting delay (55s) mula sa startup para makasunod sa backup sync
+// (40s) at hindi magsabay sa parehong segundo — every 24h din pagkatapos.
+// Ito ang SAFETY-NET na scheduled check-in — nananatili ito kahit may
+// real-time watcher na sa ibaba (tingnan REAL-TIME INTEGRITY WATCHER),
+// para may bumubuo pa ring "clean" na check-in kahit walang file na
+// nagbago (at sakaling na-miss ng watcher ang isang event, hal. habang
+// naka-offline o bago pa nag-start ang app).
+// FIX: ginamit na ang HIWALAY na INTEGRITY_MONITOR_DISABLED (hindi na
+// AUTO_BACKUP_DISABLED) — para hindi na-o-off ito kapag DISABLE_AUTO_BACKUP
+// lang talaga ang sinadyang i-set (backup ≠ integrity monitor).
+if (!INTEGRITY_MONITOR_DISABLED) {
+    setTimeout(runRelayIntegrityCheckin, 55 * 1000);
+    setInterval(runRelayIntegrityCheckin, 24 * 60 * 60 * 1000).unref();
+}
 
-    const seen = ids.map((installationId) => {
-        const meta = seenDevices.get(installationId) || null;
-        const unlockedIds = getActiveUnlockedFeatureIds(installationId).filter(id => id !== DEMO_FEATURE_ID);
-        const activations = Object.values(issuedUnlocks[installationId] || {});
-        const lastActivationAt = activations.length ? Math.max(...activations.map(a => a.issuedAt)) : null;
-        const backupCheckin = backupCheckins[installationId] || null;
-        const fingerprintRecord = deviceFingerprints.get(installationId) || null;
-        const integrityRecord = integrityStatus[installationId] || null;
-        return {
-            installationId,
-            ...meta,
-            // Totoong "online ngayon" (heartbeat sa loob ng ONLINE_WINDOW_MS),
-            // hiwalay sa lastSeenAt na text lang (na "huling nakita X ago"
-            // kahit matagal na — lastSeenAt ay HINDI na dapat ituring na
-            // "online" nang basta-basta sa admin UI).
-            online: !!onlineMap[installationId],
-            label: deviceLabels.get(installationId) || null,
-            allowed: allowedDevices.has(installationId),
-            unlockedCount: unlockedIds.length,
-            totalCatalogCount: Object.keys(FEATURE_CATALOG).length,
-            demoActive: getActiveUnlockedFeatureIds(installationId).includes(DEMO_FEATURE_ID),
-            lastActivationAt,
-            lastBackupAt: backupCheckin ? backupCheckin.lastBackupAt : null,
-            backupCheckinCount: backupCheckin ? backupCheckin.checkinCount : 0,
-            // ANTI-CLONE: para makita agad sa listahan kung may device na
-            // naka-flag bilang posibleng clone (dalawang magkaibang
-            // pisikal na makina na nag-claim ng iisang installationId).
-            cloneFlagged: !!(fingerprintRecord && fingerprintRecord.flagged),
-            fingerprintVerifyCount: fingerprintRecord ? fingerprintRecord.verifyCount : 0,
-            // FILE INTEGRITY: red-flag view — kung may modified/deleted/
-            // added file ang huling check-in ng device na ito, at hindi
-            // pa ito na-clear/na-acknowledge ng admin.
-            integrityFlagged: !!(integrityRecord && integrityRecord.flagged && !integrityRecord.clearedAt),
-            integrityModifiedCount: integrityRecord ? integrityRecord.modifiedCount : 0,
-            integrityDeletedCount: integrityRecord ? integrityRecord.deletedCount : 0,
-            integrityAddedCount: integrityRecord ? integrityRecord.addedCount : 0,
-            integrityCheckedAt: integrityRecord ? integrityRecord.checkedAt : null,
-            // BAGONG dagdag — FIX: dati, kapag WALANG naka-publish na
-            // baseline para sa version na iniulat ng device (hal.
-            // bagong version pero hindi pa na-"Build Release" dito, o
-            // nawala ang baseline dahil sa redeploy na walang persistent
-            // disk/REDIS_URL), ang tanging paraan para malaman ito ay
-            // pumunta sa "View Changed Files" modal — pero LALABAS LANG
-            // ang button na iyon kapag integrityFlagged na (na hindi
-            // mangyayari kailanman kung walang baseline). Ibig sabihin,
-            // walang KAHIT ANONG makikita sa admin — mukhang "gumagana"
-            // pero silent lang ito. Ngayon, isinasama na dito ang
-            // hasBaseline/baselineVersion para may makita agad na
-            // babala ang admin sa MAIN LIST mismo, hindi na kailangang
-            // hintayin munang ma-flag.
-            integrityHasBaseline: integrityRecord ? !!integrityRecord.hasBaseline : null,
-            integrityBaselineVersion: integrityRecord ? integrityRecord.baselineVersion : null
-        };
-    }).sort((a, b) => (b.lastSeenAt || 0) - (a.lastSeenAt || 0)); // FIX: kung wala pang meta (hindi pa na-"seen" mula noong huling restart), walang lastSeenAt (undefined) — treat as 0 para hindi maging NaN ang sort at para bumaba na lang sila sa ibaba ng listahan sa halip na basta-basta ang pagkakasunod-sunod
-
-    res.json({
-        success: true,
-        seenDevices: seen,
-        allowedDevices: [...allowedDevices],
-        restrictionActive: true, // laging ON simula ngayon — tinanggal na ang dating "walang laman = walang restriction" na bypass
-        // Para sa notification/dot blinker sa itaas ng "Allowed devices":
-        // huling successful backup check-in mula SA KAHIT ANONG device,
-        // at kung naka-ON ang auto-allow-on-backup na behavior.
-        lastBackupSyncAt: mostRecentBackupCheckinAt(),
-        backupAutoAllowEnabled: AUTOALLOW_ON_BACKUP,
-        // Bilang ng mga device na kasalukuyang naka-flag bilang clone —
-        // para sa isang mabilis na "may reklamo ka bang tignan" na counter
-        // sa itaas ng admin panel.
-        cloneFlaggedCount: [...deviceFingerprints.values()].filter(r => r.flagged).length,
-        // Bilang ng mga device na kasalukuyang naka-red-flag dahil sa
-        // may nabago/nabura silang file (hindi pa na-clear ng admin).
-        integrityFlaggedCount: Object.values(integrityStatus).filter(r => r.flagged && !r.clearedAt).length,
-        // BAGONG dagdag — bilang ng mga device na may CHECK-IN NA pero
-        // WALANG naka-imbak na baseline para sa iniulat nilang version
-        // (hindi pa na-"Build Release"/na-publish, o nawala dahil sa
-        // redeploy na walang persistent disk/REDIS_URL). Zero flags man
-        // ang mga ito, kailangan pa ring makita ng admin dahil ang ibig
-        // sabihin talaga nito ay "HINDI pa aktwal na na-che-check" ang
-        // device, kahit successful ang tawag nito papunta dito.
-        integrityNoBaselineCount: Object.values(integrityStatus).filter(r => r.hasBaseline === false).length
-    });
-});
-
-app.post('/relay/admin/api/devices/allow', requireAdminKey, (req, res) => {
-    const { installationId } = req.body;
-    if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
-    }
-    allowedDevices.add(installationId);
-    saveAllowedDevices(allowedDevices);
-    logActivity(installationId, 'device_allowed', {});
-    res.json({ success: true, allowedDevices: [...allowedDevices] });
-});
-
+// ====================================================================
+// REAL-TIME INTEGRITY WATCHER — sa halip na hintayin ang susunod na
+// 24-oras na naka-iskedyul na check-in, dito ay DINE-DETECT AGAD
+// (event-driven, HINDI polling kada segundo) kapag may na-edit/na-
+// delete/na-add na file sa install folder gamit ang fs.watch() per
+// directory. Kapag may nangyaring pagbabago:
+//   1. DEBOUNCE (0.8s) — para sama-samang mahawakan ang maramihang
+//      sunod-sunod na save (hal. galing sa isang editor/deploy).
+//   2. THROTTLE (min 1.5s gap sa pagitan ng dalawang check-in) — proteksyon
+//      pa rin laban sa sunod-sunod na tawag, pero mas mabilis na ngayon.
+// Full manifest pa rin ang ipinapadala kada check-in (kailangan ito ng
+// RELAY para makita rin ang mga DELETED file, hindi lang MODIFIED) —
+// pero event-driven na ang trigger sa halip na "every 1 second", kaya
+// halos instant makikita sa RELAY admin panel ang pagbabago nang hindi
+// pinapabagal ang sistema. SILENT ito — walang console output na
+// lumalabas sa Termux terminal; tahimik na tumatakbo sa localhost:3000.
 // --------------------------------------------------------------
-// POST /relay/admin/api/devices/:installationId/label
-// Nagtatakda (o nagbabawas, kung blangko ang label) ng developer-given
-// na palayaw para sa isang device — gawa ito PARA MA-GAMIT KAHIT HINDI
-// PA NA-ALLOW ang device (i.e. sa "Recently Seen" list pa lang), para
-// madaling makilala/matandaan kung sinong customer ito bago mo pa
-// pindutin ang "Allow". Body: { label }.
-// --------------------------------------------------------------
-app.post('/relay/admin/api/devices/:installationId/label', requireAdminKey, (req, res) => {
-    const { installationId } = req.params;
-    const label = typeof req.body.label === 'string' ? req.body.label.trim().slice(0, 120) : '';
+let integrityWatchDebounceTimer = null;
+let integrityWatchLastRunAt = 0;
+const INTEGRITY_WATCH_DEBOUNCE_MS = 800;
+const INTEGRITY_WATCH_MIN_GAP_MS = 1500;
+const integrityWatchers = new Map(); // dir path -> fs.FSWatcher
 
-    if (label) {
-        deviceLabels.set(installationId, label);
-    } else {
-        deviceLabels.delete(installationId);
+function scheduleIntegrityCheckinFromWatcher(changedPath) {
+    if (integrityWatchDebounceTimer) clearTimeout(integrityWatchDebounceTimer);
+    integrityWatchDebounceTimer = setTimeout(() => {
+        integrityWatchDebounceTimer = null;
+        const wait = Math.max(0, INTEGRITY_WATCH_MIN_GAP_MS - (Date.now() - integrityWatchLastRunAt));
+        setTimeout(() => {
+            integrityWatchLastRunAt = Date.now();
+            runRelayIntegrityCheckin().catch(() => {});
+        }, wait);
+    }, INTEGRITY_WATCH_DEBOUNCE_MS);
+}
+
+function watchDirForIntegrity(dir) {
+    if (integrityWatchers.has(dir)) return;
+    try {
+        const watcher = fs.watch(dir, { persistent: false }, (eventType, filename) => {
+            scheduleIntegrityCheckinFromWatcher(filename ? path.join(dir, filename) : dir);
+        });
+        watcher.on('error', () => { integrityWatchers.delete(dir); });
+        integrityWatchers.set(dir, watcher);
+    } catch (err) {
+        // Hindi na-watch (hal. permission issue sa Termux/Android) —
+        // hindi dapat pabagsakin ang buong app dahil dito, mananatili
+        // na lang ang 24h na scheduled fallback sa itaas.
     }
-    saveDeviceLabels(deviceLabels);
-    logActivity(installationId, 'device_labeled', { label: label || null });
-    res.json({ success: true, label: label || null });
-});
+}
 
-app.post('/relay/admin/api/devices/revoke', requireAdminKey, (req, res) => {
-    const { installationId } = req.body;
-    if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
-    }
-    allowedDevices.delete(installationId);
-    saveAllowedDevices(allowedDevices);
-
-    // FIX: i-clear din ang naka-imbak na integrity record ng device na
-    // ito sa sandaling ma-revoke ito. Kung hindi ito ginawa, maaaring
-    // manatili sa listahan ang isang lumang "⚠️ NOT ACTUALLY CHECKED
-    // (no baseline...)" o kahit "🛠️ MODIFIED FILES" na badge para sa
-    // device na ito kahit na naalis na ito sa allowed list — mukhang
-    // may kailangan pang aksyunan ang admin (o mukhang may laman pa
-    // itong data) gayong hindi na naman ito active/allowed device.
-    if (integrityStatus[installationId]) {
-        delete integrityStatus[installationId];
-        saveIntegrityStatus(integrityStatus);
-    }
-
-    logActivity(installationId, 'device_revoked', {});
-    res.json({ success: true, allowedDevices: [...allowedDevices] });
-});
-
-// --------------------------------------------------------------
-// POST /relay/admin/api/devices/clone-reset  (ANTI-CLONE)
-// Body-based na bersyon (tugma sa parehong pattern ng /allow at /revoke
-// sa itaas, para madaling tawagin ng admin panel JS). I-clear ang
-// naka-bind na fingerprint (kasama ang flagged state) para sa isang
-// installationId — gamitin kapag na-verify na ng developer/store owner
-// na LEGIT na paglipat ito sa bagong device (hal. pinalitan ang
-// unit/telepono ng customer), o kung false-positive ang clone flag.
-// --------------------------------------------------------------
-app.post('/relay/admin/api/devices/clone-reset', requireAdminKey, (req, res) => {
-    const { installationId } = req.body;
-    if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
-    }
-    deviceFingerprints.delete(installationId);
-    saveDeviceFingerprints(deviceFingerprints);
-    logActivity(installationId, 'device_fingerprint_reset', {});
-    res.json({ success: true, message: 'Na-clear ang fingerprint binding — kailangan na namang mag-verify online sa susunod na login.' });
-});
-
-// --------------------------------------------------------------
-// POST /relay/admin/api/devices/bulk-reset  (SELECTIVE RESET)
-// Katulad ng /clone-reset, pero:
-//   1. Pwedeng MARAMI ang installationId sa isang tawag (checkbox-based
-//      selection sa admin panel).
-//   2. Bukod sa fingerprint binding, kasama na rin dito ang device
-//      LABEL, ang CLONE-SPLIT record, at ang ONLINE/heartbeat status.
-// HINDI NAAAPEKTUHAN: allowedDevices (hindi na-a-un-allow ang device —
-// nananatili itong "allowed", linis lang ang labels/fingerprint/
-// clone-split/online nito), issuedUnlocks, activityLog, backupCheckins.
-// --------------------------------------------------------------
-app.post('/relay/admin/api/devices/bulk-reset', requireAdminKey, async (req, res) => {
-    const { installationIds } = req.body;
-    if (!Array.isArray(installationIds) || installationIds.length === 0) {
-        return res.status(400).json({ success: false, message: 'Kulang o mali ang installationIds (dapat non-empty array).' });
-    }
-
-    for (const id of installationIds) {
-        deviceLabels.delete(id);
-        deviceFingerprints.delete(id);
-        cloneSplits.delete(id);
-        seenDevices.delete(id); // "recently seen" entry (self-reported storeName/username, lastSeenAt, requestCount)
-        logActivity(id, 'device_bulk_reset', {});
-    }
-    saveDeviceLabels(deviceLabels);
-    saveDeviceFingerprints(deviceFingerprints);
-    saveCloneSplits(cloneSplits);
-
-    if (redisClient) {
+function refreshIntegrityWatchers() {
+    // NOTE: fs.watch sa bawat directory nang hiwalay (hindi umaasa sa
+    // { recursive: true }, na hindi consistent kumilos sa lahat ng
+    // Linux/Android environment) — kaya paulit-ulit itong tinatawag
+    // (kada 5 min) para masaklaw din ang mga BAGONG subdirectory na
+    // nagawa pagkatapos mag-start.
+    function walk(dir) {
+        let entries;
         try {
-            const onlineKeys = installationIds.map((id) => ONLINE_KEY_PREFIX + id);
-            await redisClient.del(...onlineKeys);
+            entries = fs.readdirSync(dir, { withFileTypes: true });
         } catch (err) {
-            console.error('⚠️  Hindi na-clear ang online heartbeat keys (bulk-reset):', err.message);
+            return;
+        }
+        watchDirForIntegrity(dir);
+        for (const entry of entries) {
+            if (INTEGRITY_SCAN_EXCLUDE_NAMES.has(entry.name)) continue;
+            if (entry.isDirectory()) walk(path.join(dir, entry.name));
         }
     }
-
-    res.json({
-        success: true,
-        resetCount: installationIds.length,
-        message: `Na-reset ang ${installationIds.length} device(s): tinanggal ang label, fingerprint binding, clone-split record, at online status. Nananatili silang naka-Allow.`
-    });
-});
-
-// --------------------------------------------------------------
-// POST /relay/admin/api/devices/reset-all  (FULL RESET)
-// I-CLEAR ang LAHAT ng device-related na estado (Redis + in-memory)
-// para ibalik ang RELAY sa parang bagong-deploy — walang naka-Allow,
-// walang naka-label, walang naka-bind na fingerprint, walang
-// clone-split record, walang "seen"/online device, at (opsyonal, kung
-// wipeUnlocksToo=true sa request body) wala rin ANUMANG naka-issue nang
-// unlock/activity-log/backup-checkin.
-//
-// HINDI nito ginagalaw ang: FEATURE_CATALOG/UPGRADE_TIERS (config, hindi
-// data), system-version, targeted-releases, download-codes, build-history
-// — hindi ito "device" data, at kadalasang ayaw mo itong mabura kapag
-// nag-reset ka lang ng device list.
-//
-// Kailangan ng ?confirm=RESET sa query string (o { confirm: "RESET" } sa
-// body) bilang simpleng safety check laban sa aksidenteng pag-tawag dito.
-// --------------------------------------------------------------
-app.post('/relay/admin/api/devices/reset-all', requireAdminKey, async (req, res) => {
-    const confirm = req.query.confirm || req.body?.confirm;
-    if (confirm !== 'RESET') {
-        return res.status(400).json({
-            success: false,
-            message: 'Safety check: kailangan ng ?confirm=RESET (o "confirm":"RESET" sa JSON body) para tuluyang i-reset ang LAHAT ng device data. Hindi na ito mababawi.'
-        });
-    }
-
-    const wipeUnlocksToo = req.body?.wipeUnlocksToo === true;
-
-    // 1. Device allowlist, labels, fingerprints, clone-splits
-    allowedDevices = new Set();
-    deviceLabels = new Map();
-    deviceFingerprints = new Map();
-    cloneSplits = new Map();
-    saveAllowedDevices(allowedDevices);
-    saveDeviceLabels(deviceLabels);
-    saveDeviceFingerprints(deviceFingerprints);
-    saveCloneSplits(cloneSplits);
-
-    // 2. In-memory-only "seen devices" tracker (walang Redis key nito,
-    //    per-installation lang ang ONLINE_KEY_PREFIX heartbeat keys).
-    seenDevices.clear();
-
-    // 3. Online heartbeat keys sa Redis (omnipos-relay:online:*)
-    if (redisClient) {
-        try {
-            const onlineKeys = await redisClient.keys(ONLINE_KEY_PREFIX + '*');
-            if (onlineKeys.length > 0) {
-                await redisClient.del(...onlineKeys);
-            }
-        } catch (err) {
-            console.error('⚠️  Hindi na-clear ang online heartbeat keys:', err.message);
-        }
-    }
-
-    // 4. (Opsyonal) issued unlocks / activity log / backup check-ins —
-    //    ibig sabihin, TOTAL wipe, kasama na ang lahat ng nabenta/
-    //    na-unlock na feature history. Default: HINDI ginagalaw, dahil
-    //    naiiba ito sa "reset device list" — pero available kung talagang
-    //    gusto ng buong simula-ulit.
-    if (wipeUnlocksToo) {
-        issuedUnlocks = {};
-        activityLog = [];
-        backupCheckins = {};
-        saveIssuedUnlocks(issuedUnlocks);
-        saveActivityLog(activityLog);
-        saveBackupCheckins(backupCheckins);
-    }
-
-    res.json({
-        success: true,
-        message: wipeUnlocksToo
-            ? 'Buong reset: wala nang naka-Allow/naka-label/naka-fingerprint na device, wala nang online status, at wala nang issued unlocks/activity log/backup check-ins.'
-            : 'Na-reset ang device list: wala nang naka-Allow/naka-label/naka-fingerprint na device at wala nang online status. Hindi ginalaw ang issued unlocks/activity log/backup check-ins (pasa "wipeUnlocksToo": true kung gusto mo ring buraan iyon).'
-    });
-});
-
-// --------------------------------------------------------------
-// GET /relay/admin/api/catalog
-// Ibinabalik ang FEATURE_CATALOG + UPGRADE_TIERS mirror — ginagamit ng
-// admin panel JS para malaman ang lahat ng posibleng package/presyo
-// (kasama ang mga hindi pa na-request kailanman ng device), para sa
-// "Locked pa" list at sa mga tier bulk-activate button.
-// --------------------------------------------------------------
-app.get('/relay/admin/api/catalog', requireAdminKey, (req, res) => {
-    res.json({ success: true, catalog: FEATURE_CATALOG, tiers: UPGRADE_TIERS });
-});
-
-// --------------------------------------------------------------
-// GET /relay/admin/api/analytics
-// USAGE ANALYTICS DASHBOARD — buod ng "kalusugan" ng buong relay: ilang
-// device ang aktibo/naka-allow, ilang pending approval, ilang lisensyang
-// naka-issue (active vs all-time), tinatayang kita, pinaka-paborito na
-// features, at kung ANO-ANONG lisensya ang MALAPIT NG MAG-EXPIRE (para
-// hindi ka mahuhuli sa pag-follow-up sa customer bago pa mag-expire).
-// Kinukuwenta lahat mula sa data na NASA MEMORY/DISK NA (walang bagong
-// storage na kailangan) — mabilis, walang bagong dependency.
-// --------------------------------------------------------------
-app.get('/relay/admin/api/analytics', requireAdminKey, (req, res) => {
-    const now = Date.now();
-    const SOON_MS = 7 * 24 * 60 * 60 * 1000; // "malapit ng mag-expire" = sa loob ng 7 araw
-
-    let activeUnlocksCount = 0;
-    let allTimeUnlocksCount = 0;
-    let activeRevenue = 0;
-    let allTimeRevenue = 0;
-    let demoActiveCount = 0;
-    const featureCounts = {};
-    const expiringSoon = [];
-
-    for (const [installationId, record] of Object.entries(issuedUnlocks)) {
-        for (const [featureId, entry] of Object.entries(record)) {
-            const isExpired = typeof entry.expiresAt === 'number' && now > entry.expiresAt;
-
-            if (featureId === DEMO_FEATURE_ID) {
-                if (!isExpired) demoActiveCount++;
-                continue;
-            }
-
-            allTimeUnlocksCount++;
-            allTimeRevenue += entry.price || 0;
-
-            if (!isExpired) {
-                activeUnlocksCount++;
-                activeRevenue += entry.price || 0;
-                featureCounts[featureId] = (featureCounts[featureId] || 0) + 1;
-
-                if (typeof entry.expiresAt === 'number' && entry.expiresAt - now <= SOON_MS) {
-                    const meta = seenDevices.get(installationId);
-                    expiringSoon.push({
-                        installationId,
-                        label: deviceLabels.get(installationId) || (meta && meta.storeName) || null,
-                        featureId,
-                        featureName: entry.featureName || featureId,
-                        expiresAt: entry.expiresAt
-                    });
-                }
-            }
-        }
-    }
-    expiringSoon.sort((a, b) => a.expiresAt - b.expiresAt);
-
-    const topFeatures = Object.entries(featureCounts)
-        .map(([featureId, count]) => ({
-            featureId,
-            featureName: (FEATURE_CATALOG[featureId] && FEATURE_CATALOG[featureId].name) || featureId,
-            count
-        }))
-        .sort((a, b) => b.count - a.count)
-        .slice(0, 8);
-
-    const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
-    const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
-    const unlocksLast7d = activityLog.filter(e => e.type === 'unlock_issued' && e.at >= sevenDaysAgo).length;
-    const unlocksLast30d = activityLog.filter(e => e.type === 'unlock_issued' && e.at >= thirtyDaysAgo).length;
-
-    const pendingCount = [...pendingOtps.values()].filter(p => p.expiresAt > now).length;
-
-    res.json({
-        success: true,
-        analytics: {
-            allowedCount: allowedDevices.size,
-            seenCount: seenDevices.size,
-            pendingCount,
-            activeUnlocksCount,
-            allTimeUnlocksCount,
-            activeRevenue,
-            allTimeRevenue,
-            demoActiveCount,
-            unlocksLast7d,
-            unlocksLast30d,
-            topFeatures,
-            expiringSoon: expiringSoon.slice(0, 20)
-        }
-    });
-});
-
-// --------------------------------------------------------------
-// GET /relay/admin/api/devices/:installationId/detail
-// Ang buong detalye ng isang device: naka-unlock na, locked pa, demo
-// status, at history ng lahat ng pangyayari — ito ang pina-pakita sa
-// bagong "Device Detail" page.
-// --------------------------------------------------------------
-app.get('/relay/admin/api/devices/:installationId/detail', requireAdminKey, (req, res) => {
-    const { installationId } = req.params;
-    const meta = seenDevices.get(installationId) || null;
-    const record = issuedUnlocks[installationId] || {};
-    const now = Date.now();
-
-    const unlocked = Object.entries(record)
-        .filter(([featureId]) => featureId !== DEMO_FEATURE_ID)
-        .filter(([, entry]) => !(typeof entry.expiresAt === 'number' && now > entry.expiresAt))
-        .map(([featureId, entry]) => ({ featureId, ...entry }))
-        .sort((a, b) => b.issuedAt - a.issuedAt);
-
-    const unlockedIds = new Set(unlocked.map(u => u.featureId));
-    const locked = Object.entries(FEATURE_CATALOG)
-        .filter(([featureId]) => !unlockedIds.has(featureId))
-        .map(([featureId, info]) => ({ featureId, ...info }));
-
-    const demoEntry = record[DEMO_FEATURE_ID];
-    const demoActive = !!demoEntry && !(typeof demoEntry.expiresAt === 'number' && now > demoEntry.expiresAt);
-
-    const history = activityLog
-        .filter(entry => entry.installationId === installationId)
-        .slice(0, 100);
-
-    res.json({
-        success: true,
-        installationId,
-        meta,
-        label: deviceLabels.get(installationId) || null,
-        allowed: allowedDevices.has(installationId),
-        unlocked,
-        locked,
-        demo: { active: demoActive, expiresAt: demoEntry ? demoEntry.expiresAt : null },
-        tiers: UPGRADE_TIERS,
-        history
-    });
-});
-
-// --------------------------------------------------------------
-// POST /relay/admin/api/devices/:installationId/clear-history
-// Binubura LANG ang mga activity-log entries NG ISANG partikular na
-// device (hal. "otp_requested", "unlock_issued", "restore_checkin",
-// atbp. — ang pina-pakita sa "History" timeline ng Device Detail
-// page). LOG LANG ito, kapareho ng /build-history/clear — WALANG
-// epekto sa aktwal na estado ng device (allowed/unlocked/fingerprint/
-// label/atbp. ay nananatiling buo, hindi ito "reset" ng device).
-// Ang mga entry ng IBANG device sa activityLog ay hindi nagagalaw.
-// --------------------------------------------------------------
-app.post('/relay/admin/api/devices/:installationId/clear-history', requireAdminKey, (req, res) => {
-    const { installationId } = req.params;
-    if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
-    }
-
-    const before = activityLog.length;
-    activityLog = activityLog.filter(entry => entry.installationId !== installationId);
-    const clearedCount = before - activityLog.length;
-    saveActivityLog(activityLog);
-
-    // Itong entry mismo ang magiging bagong unang linya ng history ng
-    // device na ito — parang "audit trail" na may nagbura dito.
-    logActivity(installationId, 'device_history_cleared', { clearedCount });
-
-    res.json({ success: true, clearedCount });
-});
-
-// --------------------------------------------------------------
-// POST /relay/admin/api/devices/:installationId/activate
-// Direktang gumagawa ng signed token(s) PARA SA installationId na ito
-// — WALANG OTP kailangan. Gamit ito kung MAY REFERENCE KA NA (dati nang
-// nabayaran/na-unlock na ang package na ito, gaya ng pagkatapos ng
-// emergency hard reset ng customer) at gusto mo lang i-restore/i-issue
-// ulit agad. Body: { featureId } o { featureIds: [...] } o { tierId }.
-// Opsyonal na `note` para sa audit trail (hal. "Restore matapos ang
-// hard reset, ref: <invoice #>"). Opsyonal ding `durationDays` — kung
-// pinasa (positibong numero), MAY EXPIRY ang mga token na ito (parehong
-// petsa ng expiry para sa lahat ng na-activate dito); kung wala, gagamit
-// ito ng RELAY_DEFAULT_LICENSE_DAYS (kung meron), o permanente kung wala
-// ring env default. Ginagamit din ito para sa "Renew/Extend" ng isang
-// device — i-activate lang ulit ang parehong featureId na may bagong
-// durationDays, ma-o-overwrite nito ang dating entry (bagong expiresAt).
-// --------------------------------------------------------------
-app.post('/relay/admin/api/devices/:installationId/activate', requireAdminKey, (req, res) => {
-    const { installationId } = req.params;
-    const { featureId, featureIds, tierId, note, durationDays } = req.body;
-
-    let idsToActivate = [];
-    if (tierId) {
-        const tier = UPGRADE_TIERS.find(t => t.id === tierId);
-        if (!tier) return res.status(400).json({ success: false, message: 'Hindi kilalang tierId.' });
-        idsToActivate = tier.featureIds;
-    } else if (Array.isArray(featureIds) && featureIds.length) {
-        idsToActivate = featureIds;
-    } else if (featureId) {
-        idsToActivate = [featureId];
-    } else {
-        return res.status(400).json({ success: false, message: 'Kulang ang featureId, featureIds, o tierId.' });
-    }
-
-    const unknown = idsToActivate.filter(id => !FEATURE_CATALOG[id]);
-    if (unknown.length) {
-        return res.status(400).json({ success: false, message: `Hindi kilalang feature(s): ${unknown.join(', ')}` });
-    }
-
-    const resolvedDurationDays = (typeof durationDays === 'number' && durationDays > 0)
-        ? durationDays
-        : (durationDays === 0 ? null : RELAY_DEFAULT_LICENSE_DAYS);
-    const durationMs = (typeof resolvedDurationDays === 'number' && resolvedDurationDays > 0)
-        ? resolvedDurationDays * 24 * 60 * 60 * 1000
-        : null;
-
-    const tokens = {};
-    for (const id of idsToActivate) {
-        const token = issueSignedToken(installationId, id, durationMs);
-        tokens[id] = token;
-        recordIssuedUnlock(installationId, id, token, {
-            featureName: FEATURE_CATALOG[id].name,
-            price: FEATURE_CATALOG[id].price,
-            source: 'admin-direct',
-            note: note || null
-        });
-        logActivity(installationId, 'unlock_issued', { featureId: id, featureName: FEATURE_CATALOG[id].name, source: 'admin-direct', note: note || null, durationDays: resolvedDurationDays || null });
-    }
-
-    res.json({ success: true, message: `Na-activate ang ${idsToActivate.length} feature(s).`, tokens });
-});
-
-// --------------------------------------------------------------
-// POST /relay/admin/api/devices/:installationId/deactivate
-// Tinatanggal ang IISANG naka-unlock na feature sa installationId na
-// ito — hindi ito nag-i-issue ng bagong invalidation token, "lokal" lang
-// itong pag-alis sa panig ng RELAY: sa susunod na mag-check-in/mag-sync
-// ang OMNIPOS client, wala na itong makikitang unlock record para sa
-// feature na ito kaya babalik itong naka-lock. Hindi ito nire-refund at
-// hindi rin binabago ang billing — audit trail lang ang ginagawa nito
-// dito, ang aktwal na bayad ay hiwalay na usapin. Body: { featureId }.
-// --------------------------------------------------------------
-app.post('/relay/admin/api/devices/:installationId/deactivate', requireAdminKey, (req, res) => {
-    const { installationId } = req.params;
-    const { featureId } = req.body;
-
-    if (!featureId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang featureId.' });
-    }
-
-    const record = issuedUnlocks[installationId];
-    if (!record || !record[featureId]) {
-        return res.status(404).json({ success: false, message: 'Walang ganitong naka-unlock na feature para sa device na ito.' });
-    }
-
-    const featureName = record[featureId].featureName || (FEATURE_CATALOG[featureId] && FEATURE_CATALOG[featureId].name) || featureId;
-    delete record[featureId];
-    saveIssuedUnlocks(issuedUnlocks);
-    logActivity(installationId, 'feature_deactivated', { featureId, featureName });
-
-    res.json({ success: true, message: `Na-deactivate ang ${featureName}.` });
-});
-
-// --------------------------------------------------------------
-// POST /relay/admin/api/devices/:installationId/deactivate-all
-// "Factory reset" ng feature unlocks ng device na ito — tinatanggal
-// LAHAT (pati ang demo entry, kung meron) para bumalik ito sa default
-// state na walang naka-unlock. Gamitin ito bago ibenta o ilipat ang
-// physical na unit/device sa ibang customer, para hindi ma-carry-over
-// ang mga dating binayarang feature ng dating may-ari.
-// --------------------------------------------------------------
-app.post('/relay/admin/api/devices/:installationId/deactivate-all', requireAdminKey, (req, res) => {
-    const { installationId } = req.params;
-
-    const record = issuedUnlocks[installationId];
-    const deactivatedCount = record ? Object.keys(record).length : 0;
-    if (deactivatedCount === 0) {
-        return res.json({ success: true, message: 'Wala nang naka-unlock na feature dito.' });
-    }
-
-    delete issuedUnlocks[installationId];
-    saveIssuedUnlocks(issuedUnlocks);
-    logActivity(installationId, 'device_reset', { deactivatedCount });
-
-    res.json({ success: true, message: `Na-reset ang device — ${deactivatedCount} feature(s) na tinanggal.` });
-});
-
-// --------------------------------------------------------------
-// GET /relay/admin/api/backup
-// Buong "export" ng lahat ng data na naka-store lang sa disk ng
-// container na ito (allowed devices, issued unlocks, activity log) —
-// WALANG persistent disk ang Render free tier kaya ito ang tanging
-// paraan para hindi mawala ang lahat kapag na-redeploy (git push) o
-// na-delete ang service/domain. I-download ito paminsan-minsan (lalo
-// na pagkatapos ng bagong unlock/customer) at itago sa ligtas na lugar
-// (Google Drive, laptop, atbp.) — gamitin ang /restore para ibalik.
-// --------------------------------------------------------------
-app.get('/relay/admin/api/backup', requireAdminKey, (req, res) => {
-    res.json({
-        success: true,
-        backupVersion: 2, // v2: dinagdagan ng deviceLabels (dati v1, walang labels)
-        exportedAt: Date.now(),
-        allowedDevices: [...allowedDevices],
-        deviceLabels: Object.fromEntries(deviceLabels),
-        issuedUnlocks,
-        activityLog
-    });
-});
-
-// --------------------------------------------------------------
-// POST /relay/admin/api/restore
-// Ibinabalik ang datos mula sa isang backup file na ginawa ng
-// /relay/admin/api/backup sa itaas. PINAPALITAN (hindi dinadagdag/
-// merge) ang kasalukuyang allowed devices, issued unlocks, at activity
-// log ng laman ng backup — sinusulat din agad sa disk (JSON files) at
-// sa in-memory state, para agad itong lumabas sa admin panel. Body:
-// yung buong JSON object na nakuha mula sa /backup (o mula sa
-// na-download na backup file).
-// --------------------------------------------------------------
-app.post('/relay/admin/api/restore', requireAdminKey, (req, res) => {
-    const { allowedDevices: backupAllowed, deviceLabels: backupLabels, issuedUnlocks: backupUnlocks, activityLog: backupLog } = req.body;
-
-    if (!Array.isArray(backupAllowed) || typeof backupUnlocks !== 'object' || backupUnlocks === null || !Array.isArray(backupLog)) {
-        return res.status(400).json({ success: false, message: 'Hindi kilalang format ng backup file — siguraduhing yung na-download galing sa /backup ang ini-restore.' });
-    }
-    // `deviceLabels` ay OPTIONAL — mga LUMANG (v1) backup na ginawa bago
-    // idinagdag ang label feature ay walang field na ito. Sa ganung
-    // kaso, iiwan na lang natin ang mga kasalukuyang label (huwag
-    // burahin), sa halip na basta i-treat bilang "walang labels".
-    const hasLabels = backupLabels && typeof backupLabels === 'object' && !Array.isArray(backupLabels);
-
-    allowedDevices = new Set(backupAllowed);
-    saveAllowedDevices(allowedDevices);
-
-    if (hasLabels) {
-        deviceLabels = new Map(Object.entries(backupLabels));
-        saveDeviceLabels(deviceLabels);
-    }
-
-    issuedUnlocks = backupUnlocks;
-    saveIssuedUnlocks(issuedUnlocks);
-
-    activityLog = backupLog;
-    saveActivityLog(activityLog);
-
-    res.json({
-        success: true,
-        message: `Na-restore: ${allowedDevices.size} allowed device(s), ${deviceLabels.size} label(s)${hasLabels ? '' : ' (hindi binago — lumang backup na walang labels)'}, ${Object.keys(issuedUnlocks).length} device(s) may naka-unlock, ${activityLog.length} history entry(ies).`
-    });
-});
-
-// --------------------------------------------------------------
-// POST /relay/restore-tokens
-// Tinatawag ito ng OMNIPOS CLIENT (hindi ng browser diretso) kapag
-// nag-check-in ulit ang isang installationId na wala/kulang ang
-// featureUnlocks nito sa panig ng client (hal. matapos ang emergency
-// hard reset). Ibinabalik ang LAHAT ng dating na-isyu na (VALID pa
-// rin, hindi pa expired) na tokens para sa installationId na ito —
-// walang bagong OTP/bayad kailangan, dahil dati na itong nabayaran.
-// --------------------------------------------------------------
-app.post('/relay/restore-tokens', requireApiKey, requireAllowedDevice, rateLimit('restore-tokens', 30, 10 * 60 * 1000), (req, res) => {
-    const { installationId } = req.body;
-    if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
-    }
-
-    const record = issuedUnlocks[installationId] || {};
-    const now = Date.now();
-    const tokens = {};
-    for (const [featureId, entry] of Object.entries(record)) {
-        if (typeof entry.expiresAt === 'number' && now > entry.expiresAt) continue; // expired na demo, huwag ibalik
-        tokens[featureId] = { payload: entry.payload, signature: entry.signature };
-    }
-
-    logActivity(installationId, 'restore_checkin', { restoredCount: Object.keys(tokens).length });
-
-    res.json({ success: true, tokens });
-});
-
-// --------------------------------------------------------------
-// POST /relay/check-feature-status
-// Tinatawag ito ng OMNIPOS CLIENT tuwing pinipindot ng user ang manual
-// na "Sync sa Relay Ngayon" (Settings) — layunin: TUKUYIN kung alin sa
-// mga feature/theme na NASA LOCAL na ng client (may token na siya doon,
-// ibig sabihin dati itong na-unlock) ang HINDI NA kinikilala ng RELAY
-// ngayon, dahil:
-//   (a) na-deactivate mismo ng developer/store owner sa admin panel
-//       (tinanggal ang record sa issuedUnlocks — tingnan ang
-//       /relay/admin/api/devices/:installationId/deactivate sa itaas), o
-//   (b) nag-expire na ang time-based na lisensya nito.
-// Hindi ito nagbabalik ng bagong VALID token (/relay/restore-tokens ang
-// gagawa niyan) — ito lang ang sagot sa tanong na "totoo pa ba ito?"
-// bawat featureId na ipinasa, para agad ma-lock ng client ang mga ito
-// nang hindi na kailangang maghintay ng susunod na server restart.
-// Body: { installationId, featureIds: string[] }
-// --------------------------------------------------------------
-app.post('/relay/check-feature-status', requireApiKey, requireAllowedDevice, rateLimit('check-feature-status', 30, 10 * 60 * 1000), (req, res) => {
-    const { installationId, featureIds } = req.body;
-    if (!installationId || !Array.isArray(featureIds)) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId o featureIds.' });
-    }
-
-    const record = issuedUnlocks[installationId] || {};
-    const now = Date.now();
-    const statuses = {};
-
-    for (const featureId of featureIds) {
-        const entry = record[featureId];
-        const catalogEntry = FEATURE_CATALOG[featureId];
-        const featureName = (entry && entry.featureName) || (catalogEntry && catalogEntry.name) || featureId;
-        const category = (catalogEntry && catalogEntry.category) || 'module';
-
-        if (!entry) {
-            // Walang record dito para dito — dahil ang client lang ang
-            // tumatawag para sa mga featureId na MAY LOCAL TOKEN na ito
-            // (dati na itong na-unlock), ang kawalang ito ay nangangahulugan
-            // na na-deactivate ito mismo ng developer/store owner.
-            statuses[featureId] = { status: 'deactivated', reason: 'deactivated', featureName, category };
-            continue;
-        }
-        if (typeof entry.expiresAt === 'number' && now > entry.expiresAt) {
-            statuses[featureId] = { status: 'expired', reason: 'expired', featureName, category, expiresAt: entry.expiresAt };
-            continue;
-        }
-        statuses[featureId] = {
-            status: 'active',
-            reason: 'active',
-            featureName,
-            category,
-            expiresAt: typeof entry.expiresAt === 'number' ? entry.expiresAt : null
-        };
-    }
-
-    logActivity(installationId, 'feature_status_checked', { featureIds });
-
-    // Kung may pending na "🔄 I-check ngayon" request ang admin para sa
-    // device na ito (integrity check-now), isama ito dito bilang
-    // forceIntegrityCheck:true — dito rin ito "kina-consume"/tinatanggal
-    // (isang beses lang) para hindi na paulit-ulit i-force sa susunod
-    // pang mga check-feature-status call.
-    let forceIntegrityCheck = false;
-    if (pendingIntegrityChecks.has(installationId)) {
-        forceIntegrityCheck = true;
-        pendingIntegrityChecks.delete(installationId);
-    }
-
-    res.json({ success: true, statuses, forceIntegrityCheck });
-});
-
-// --------------------------------------------------------------
-// POST /relay/pending-integrity-check
-// BAGONG dagdag — LAYUNIN: pabilisin ang "🔄 I-check ngayon" (Check
-// Now) na pindot ng admin sa integrity monitor. Dati, ang tanging
-// paraan para maabot ng OMNIPOS client ang forceIntegrityCheck flag
-// ay ang /relay/check-feature-status, na tumatakbo lang kada ~30s
-// (RELAY_FEATURE_SYNC_INTERVAL_MS sa client) — ibig sabihin, pwedeng
-// umabot ng malapit 30 segundo bago talaga ma-trigger ang check-in
-// pagkatapos pindutin ng admin ang "Check Now".
-//
-// Ito ay ISANG MABILIS, MAGAAN na endpoint na LAMANG — isang Set
-// lookup (walang manifest, walang file hashing, walang
-// logActivity spam) — para SEPARADO itong ma-poll ng client sa MAS
-// MADALAS na pagitan (ilang segundo lang) nang hindi kinakailangang
-// baguhin ang normal na 30s na cadence ng check-feature-status
-// (na siyang humahawak pa rin ng feature lockdown/restore, hindi ito
-// pinapalitan). Kapag "may pending" (true) ang sagot dito, agad na
-// tinatawag ng client ang buong runRelayIntegrityCheckin() (kasama
-// ang buong manifest) — doon pa rin talaga nangyayari ang aktwal na
-// paghahambing sa baseline.
-// Body: { installationId }
-// --------------------------------------------------------------
-app.post('/relay/pending-integrity-check', requireApiKey, requireAllowedDevice, rateLimit('pending-integrity-check', 150, 5 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
-    const { installationId } = req.body;
-    if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
-    }
-    let pending = false;
-    if (pendingIntegrityChecks.has(installationId)) {
-        pending = true;
-        pendingIntegrityChecks.delete(installationId);
-    }
-    res.json({ success: true, pending });
-});
-
-if (!MAIL_USER || !MAIL_PASS || !RECIPIENT_EMAIL) {
-    console.error('❌ Kulang ang env vars: RELAY_MAIL_USER, RELAY_MAIL_PASS, RELAY_RECIPIENT_EMAIL. Tingnan ang .env.example.');
-    process.exit(1);
+    walk(__dirname);
 }
 
-// --------------------------------------------------------------
-// SIGNING KEY — binabasa mula sa file na ginawa ng generate-keys.js.
-// Kailangan itong pumasok bilang environment variable kung naka-deploy
-// sa Render (walang persistent disk sa free tier) — RELAY_PRIVATE_KEY_PEM.
-// Kung may sarili kang VPS na may disk, pwede ring basahin mula sa file.
-// --------------------------------------------------------------
-let privateKeyPem = process.env.RELAY_PRIVATE_KEY_PEM;
-if (!privateKeyPem) {
-    const keyPath = path.join(__dirname, 'relay-private-key.pem');
-    if (fs.existsSync(keyPath)) {
-        privateKeyPem = fs.readFileSync(keyPath, 'utf8');
-    }
+if (!INTEGRITY_MONITOR_DISABLED) {
+    setTimeout(refreshIntegrityWatchers, 10 * 1000);
+    setInterval(refreshIntegrityWatchers, 5 * 60 * 1000).unref();
 }
-if (!privateKeyPem) {
-    console.error('❌ Walang nakitang private key. Patakbuhin muna ang "npm run generate-keys", o i-set ang RELAY_PRIVATE_KEY_PEM env var.');
-    process.exit(1);
-}
-const privateKey = crypto.createPrivateKey(privateKeyPem);
 
-// --------------------------------------------------------------
-// issueSignedToken — IISANG lugar na lang para gumawa ng naka-sign na
-// unlock token, ginagamit ng LAHAT ng token-issuing routes (admin
-// activate, confirm-unlock, confirm-demo, confirm-unlock-bulk).
+// ====================================================================
+// FAST "CHECK NOW" POLL — BAGONG dagdag. Dati, ang "🔄 I-check ngayon"
+// (Check Now) na pindot ng admin sa RELAY admin panel ay hinihintay
+// lang ng client sa SUSUNOD na normal na 30s na attemptRelayFeatureSync()
+// tawag (tingnan sa ibaba) — ibig sabihin pwedeng umabot ng malapit
+// 30 segundo bago talaga ma-trigger.
 //
-// Kung binigyan ng `durationMs` (positibong numero), MAY EXPIRY ang
-// token — kasama ang `expiresAt` sa payload (AUTO-EXPIRING LICENSE,
-// hindi lang basta naka-tali sa device). Kung wala/null, permanente
-// ang token (dating behavior — walang binabagong wire format).
+// Dito, hiwalay at mas madalas (kada ilang segundo lang) tinatawag ang
+// BAGONG magaan na /relay/pending-integrity-check (isang Set lookup
+// lang sa RELAY side, walang manifest/hashing) — kapag "pending: true"
+// ang sagot, saka pa lang tatawagin ang buong runRelayIntegrityCheckin().
+// SADYANG HIWALAY ito sa attemptRelayFeatureSync() (hindi ito pinapalitan
+// o binabago ang 30s na cadence nito) — layunin lang dito ay pabilisin
+// ang "Check Now" nang hindi ginagalaw ang ibang existing na behavior
+// (feature lockdown/restore, backup sync, real-time file watcher, atbp.),
+// para walang panganib ng bagong side effect sa OMNIPOS.
 //
-// MAHALAGA: ang eksaktong key order ng payload object ({ installationId,
-// featureId, issuedAt[, expiresAt] }) ay dapat ITUGMA nang eksakto sa
-// verifyUnlockToken() sa panig ng OMNIPOS client server, dahil
-// JSON.stringify() mismo (hindi ang parsed na object) ang sini-sign at
-// ve-verify.
+// Guards (parehong ginagamit ng ibang relay call dito):
+//   - Kailangan naka-configure ang RELAY_API_KEY.
+//   - Naka-"online" ang connectivity mode (sinusunod ang manual toggle).
+//   - May internet (gamit ang parehong cached na isInternetLikelyUp() —
+//     hindi nagdadagdag ng bagong network probe kada tawag).
+//   - Skip kung may kasalukuyang tumatakbo pang integrity check-in
+//     (isInProgress na flag) — proteksyon laban sa magkatabing tawag.
 // --------------------------------------------------------------
-function issueSignedToken(installationId, featureId, durationMs) {
-    const now = Date.now();
-    const payload = (typeof durationMs === 'number' && durationMs > 0)
-        ? { installationId, featureId, issuedAt: now, expiresAt: now + durationMs }
-        : { installationId, featureId, issuedAt: now };
-    const payloadString = JSON.stringify(payload);
-    const signature = crypto.sign(null, Buffer.from(payloadString), privateKey).toString('base64');
-    return { payload, signature };
-}
+let integrityCheckNowInProgress = false;
+const INTEGRITY_CHECK_NOW_POLL_MS = Number(process.env.RELAY_INTEGRITY_CHECK_NOW_POLL_MS) || 3 * 1000; // default: 3s
 
-// --------------------------------------------------------------
-// issueDevicePermit — ANTI-CLONE, PERMIT SYSTEM
-// Kapareho ng ideya ng issueSignedToken (parehong PRIVATE KEY na
-// RELAY lang ang may hawak), pero para dito: pinapatunayan nito na
-// "TALAGANG si RELAY (ang developer) ang nag-approve na dumapo ang
-// installationId na ito sa fingerprint na ito" — hindi lang basta
-// isang lokal na boolean flag (deviceVerified=true) na naka-imbak sa
-// DB ng OMNIPOS client, na kung sakaling direktang i-edit ng isang
-// user ang database row (o i-restore mula sa kinopyang backup), MADALI
-// lang i-fake ang isang boolean pero HINDI kailanman mapeke ang
-// signature na ito dahil wala silang private key ng RELAY.
-//
-// Ito ang "permit" na sinusuri ng OMNIPOS client sa BAWAT startup/login
-// gamit lang ang RELAY_PUBLIC_KEY nito (kaya gumagana ito OFFLINE) —
-// online lang kailangan kapag kailangan ng BAGONG permit (unang beses,
-// o nagbago ang fingerprint/hardware).
-// --------------------------------------------------------------
-function issueDevicePermit(installationId, fingerprint) {
-    const payload = { installationId, fingerprint, issuedAt: Date.now() };
-    const payloadString = JSON.stringify(payload);
-    const signature = crypto.sign(null, Buffer.from(payloadString), privateKey).toString('base64');
-    return { payload, signature };
-}
+async function pollPendingIntegrityCheckNow() {
+    if (!RELAY_API_KEY || getConnectivityMode() === 'offline') return;
+    if (integrityCheckNowInProgress) return;
+    if (!(await isInternetLikelyUp())) return;
 
-// --------------------------------------------------------------
-// STORAGE — simpleng in-memory Map lang para sa mga PENDING OTP.
-// Hindi kailangan ng persistent database dito dahil ang mga OTP ay
-// panandalian lang (10-minute TTL) — kung mag-restart ang relay
-// habang may pending OTP, kailangan na lang humingi ulit ng bago.
-// Ang "totoong" resulta (ang naka-sign na token) ay ang TANGING
-// kailangang mabuhay nang matagal, at yun ay naka-save na sa panig
-// ng CLIENT (ang bawat kliyente ang nag-iingat ng sarili nilang token).
-// --------------------------------------------------------------
-const pendingOtps = new Map(); // key: `${installationId}:${featureId}` -> { code, expiresAt, requestedBy, featureName, price }
+    try {
+        const data = readFeatureUnlocks();
+        const installationId = getOrCreateInstallationId(data);
 
-function requireApiKey(req, res, next) {
-    if (!RELAY_API_KEY) return next(); // walang na-configure na key = walang gate (hindi rekomendado, pero valid config)
-    const provided = req.headers['x-relay-key'];
-    if (!safeCompare(String(provided || ''), RELAY_API_KEY)) {
-        return res.status(403).json({ success: false, message: 'Invalid o walang API key.' });
-    }
-    next();
-}
+        const relayRes = await relayFetch(`${RELAY_URL}/relay/pending-integrity-check`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-relay-key': RELAY_API_KEY },
+            body: JSON.stringify({ installationId })
+        }, 8000); // maikling timeout — magaan lang dapat ang tawag na ito
+        const relayData = await parseRelayResponse(relayRes);
 
-// Napaka-simpleng in-memory rate limiter (per key sa Map, hindi kailangan
-// ng Redis o external store dahil isang maliit na relay lang ito).
-// `keyFn` (optional): function(req) -> extra string na idadagdag sa IP
-// para bumuo ng mas specific na bucket. Ginagamit ito sa mga OTP
-// endpoints (installationId bilang extra key) — kung hindi, DALAWANG
-// magkaibang store/device na nagkataong parehong public IP (hal.
-// parehong ISP/NAT o corporate network) ay COLLECTIVELY na-rate-limit
-// sa isa't isa, kahit magkaibang installationId sila.
-const rateBuckets = new Map();
-
-// IMPROVEMENT: dati, hindi na-clean-up ang mga entry ng rateBuckets
-// kapag naubos na ang lahat ng timestamps nito (na-filter na lahat ng
-// "recent" pero nananatili pa rin ang EMPTY array sa Map) — kaya kada
-// bagong unique key (bagong IP, bagong installationId, atbp.) ay
-// PERMANENTENG entry sa memory kahit hindi na ito ginagamit. Sa
-// mahabang uptime na may maraming iba't ibang devices/IPs, unbounded
-// growth ito. Nililinis ito paminsan-minsan (tuwing 30 min) — tinatanggal
-// ang mga key na walang laman/luma nang timestamps.
-const RATE_BUCKET_CLEANUP_INTERVAL_MS = 30 * 60 * 1000;
-const RATE_BUCKET_MAX_AGE_MS = 60 * 60 * 1000; // kahit anong window, 1 oras nang hindi ginagalaw = pwede nang tanggalin
-setInterval(() => {
-    const now = Date.now();
-    for (const [key, timestamps] of rateBuckets) {
-        const recent = timestamps.filter((ts) => now - ts < RATE_BUCKET_MAX_AGE_MS);
-        if (recent.length === 0) {
-            rateBuckets.delete(key);
-        } else if (recent.length !== timestamps.length) {
-            rateBuckets.set(key, recent);
-        }
-    }
-}, RATE_BUCKET_CLEANUP_INTERVAL_MS).unref();
-
-function rateLimit(bucketName, max, windowMs, keyFn) {
-    return (req, res, next) => {
-        let key = `${bucketName}:${req.ip}`;
-        if (typeof keyFn === 'function') {
+        if (relayData.success && relayData.pending) {
+            integrityCheckNowInProgress = true;
             try {
-                const extra = (keyFn(req) || '').toString().trim();
-                if (extra) key += `:${extra}`;
-            } catch (err) {
-                // Kung mabigo ang keyFn, bumalik na lang sa dating IP-only key.
+                await runRelayIntegrityCheckin();
+            } finally {
+                integrityCheckNowInProgress = false;
             }
         }
-        const now = Date.now();
-        const bucket = rateBuckets.get(key) || [];
-        const recent = bucket.filter(ts => now - ts < windowMs);
-        if (recent.length >= max) {
-            return res.status(429).json({ success: false, message: 'Sobra sa pinapayagang bilang ng requests. Subukan mamaya.' });
-        }
-        recent.push(now);
-        rateBuckets.set(key, recent);
-        next();
-    };
+    } catch (err) {
+        // Tahimik na palampasin — ito ay bukod-tanging isang mabilis na
+        // "meron ka bang hiling?" poll, hindi mahalaga kung minsan itong
+        // mabigo (may safety-net pa ring 55s/24h scheduled check-in at
+        // ang normal na 30s check-feature-status na daanan din nito).
+    }
 }
 
-// --------------------------------------------------------------
-// POST /relay/backup-checkin
-// Tinatawag ito ng OMNIPOS CLIENT SERVER (hindi ng browser) sa TUWING
-// matagumpay itong nakapag-mirror ng sarili niyang database papunta sa
-// Download/RELAY_BACKUP nito (iisang overwritten file). Layunin:
-//
-//   1. I-record ang "huling successful backup" ng device na ito, para
-//      makita sa admin panel (Device Detail, at ang notification/dot
-//      sa itaas ng "Allowed devices").
-//   2. Kung naka-ON ang AUTOALLOW_ON_BACKUP (default), AWTOMATIKONG
-//      idadagdag ang device na ito sa allowlist — hindi na kailangang
-//      balikan pa ang admin panel para mag-Allow nang manual sa bawat
-//      bagong device na regular nang gumagawa ng backup.
-//
-// SADYANG WALANG requireAllowedDevice dito (hindi tulad ng ibang
-// /relay/* endpoints) — kailangan itong tawagin KAHIT HINDI PA
-// naka-Allow ang device, dahil ito mismo ang paraan para maging
-// naka-Allow ito. Nananatili pa ring protektado ito ng requireApiKey
-// (shared secret) at rate limit, kaya hindi basta kahit sinong random
-// tao (na walang API key) ang makaka-trigger nito.
-// --------------------------------------------------------------
-app.post('/relay/backup-checkin', requireApiKey, rateLimit('backup-checkin', 20, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
-    const { installationId, storeName, username, fileSizeBytes, backupAt } = req.body;
-
-    if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
-    }
-
-    recordDeviceSeen(installationId, { storeName, username });
-
-    const existing = backupCheckins[installationId] || { checkinCount: 0 };
-    backupCheckins[installationId] = {
-        lastBackupAt: typeof backupAt === 'number' ? backupAt : Date.now(),
-        storeName: storeName || existing.storeName || null,
-        fileSizeBytes: typeof fileSizeBytes === 'number' ? fileSizeBytes : (existing.fileSizeBytes || null),
-        checkinCount: existing.checkinCount + 1
-    };
-    saveBackupCheckins(backupCheckins);
-
-    let newlyAllowed = false;
-    if (AUTOALLOW_ON_BACKUP && !allowedDevices.has(installationId)) {
-        allowedDevices.add(installationId);
-        saveAllowedDevices(allowedDevices);
-        newlyAllowed = true;
-        logActivity(installationId, 'device_allowed', { source: 'auto_backup_checkin' });
-    }
-
-    logActivity(installationId, 'backup_checkin', {
-        fileSizeBytes: backupCheckins[installationId].fileSizeBytes,
-        newlyAllowed
-    });
-
-    res.json({
-        success: true,
-        allowed: allowedDevices.has(installationId),
-        newlyAllowed,
-        message: newlyAllowed
-            ? 'Successful ang backup check-in — awtomatikong na-allow ang device na ito.'
-            : 'Successful ang backup check-in.'
-    });
-});
-
-// --------------------------------------------------------------
-// POST /relay/integrity-checkin  (FILE INTEGRITY MONITORING)
-// Tinatawag ito ng OMNIPOS CLIENT SERVER (pana-panahon, awtomatiko —
-// tingnan ang runRelayIntegrityCheckin() sa OMNIPOS/server.js) kasama
-// ang: installationId, version (APP_VERSION nito ngayon), at files
-// (isang { "relative/path.js": "<sha256>" } manifest ng SARILI nitong
-// install folder). Dito, kino-compare ito sa naka-imbak na baseline
-// PARA SA VERSION NA IYON (galing sa huling matagumpay na build para
-// doon) — kung wala pang baseline (hal. hindi pa naka-publish/naka-
-// build dito ang version na iyon), hindi ito ma-flag, sasabihing
-// hasBaseline:false na lang sa resulta.
-// --------------------------------------------------------------
-// LIMIT: 12/hour dati (sapat noon dahil once-a-day lang ang tawag).
-// Ngayon may real-time watcher na sa OMNIPOS client (event-driven, min
-// 30s gap sa pagitan ng checkin — tingnan ang REAL-TIME INTEGRITY
-// WATCHER sa OMNIPOS/server.js), kaya dinagdagan dito ang limit
-// (90/hour = 1 kada ~40s pinaka-mabilis) para hindi ma-throttle ang
-// mga lehitimong agad na check-in kapag may nabagong file, pero
-// nananatiling may proteksyon pa rin laban sa abuse/spam.
-// LIMIT: dati 12/hour (once-a-day lang ang tawag), tapos 90/hour (30s
-// client throttle). Ngayon 5s na ang client-side throttle (tingnan ang
-// OMNIPOS/server.js), kaya dinagdagan pa ito (300/hour = 1 kada ~12s
-// average) — sapat na headroom para sa totoong burst ng magkakasunod
-// na file event, pero may bound pa rin laban sa abuse.
-app.post('/relay/integrity-checkin', requireApiKey, requireAllowedDevice, rateLimit('integrity-checkin', 300, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
-    const { installationId, version, files } = req.body || {};
-
-    if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
-    }
-    if (!files || typeof files !== 'object' || Array.isArray(files)) {
-        return res.status(400).json({ success: false, message: 'Kulang o mali ang format ng "files" (dapat object na { relPath: sha256 }).' });
-    }
-
-    recordDeviceSeen(installationId, {});
-
-    const baselineVersion = String(version || '').trim() || null;
-    const baseline = baselineVersion ? releaseBaselines.get(baselineVersion) : null;
-
-    if (!baseline) {
-        // Walang baseline na maihahambing (bago pang i-publish/i-build
-        // ang version na ito dito, o hindi kilalang version) — itago pa
-        // rin ang huling nakita, pero HUWAG i-flag (iiwasan ang maling
-        // positibo).
-        integrityStatus[installationId] = {
-            checkedAt: Date.now(),
-            baselineVersion,
-            hasBaseline: false,
-            flagged: false,
-            modified: [],
-            deleted: [],
-            added: [],
-            modifiedCount: 0,
-            deletedCount: 0,
-            addedCount: 0,
-            clearedAt: integrityStatus[installationId] ? integrityStatus[installationId].clearedAt || null : null,
-            clearedNote: integrityStatus[installationId] ? integrityStatus[installationId].clearedNote || null : null
-        };
-        saveIntegrityStatus(integrityStatus);
-        return res.json({ success: true, hasBaseline: false, flagged: false, message: `Walang naka-imbak na baseline para sa version "${baselineVersion}" — hindi muna ito na-compare.` });
-    }
-
-    const baselineFiles = baseline.files || {};
-    const modified = [];
-    const deleted = [];
-    const added = [];
-
-    for (const [relPath, baseHash] of Object.entries(baselineFiles)) {
-        const clientHash = files[relPath];
-        if (clientHash === undefined) {
-            deleted.push(relPath);
-        } else if (clientHash !== baseHash) {
-            modified.push(relPath);
-        }
-    }
-    for (const relPath of Object.keys(files)) {
-        if (!(relPath in baselineFiles)) added.push(relPath);
-    }
-
-    modified.sort();
-    deleted.sort();
-    added.sort();
-
-    const flagged = modified.length > 0 || deleted.length > 0 || added.length > 0;
-
-    integrityStatus[installationId] = {
-        checkedAt: Date.now(),
-        baselineVersion,
-        hasBaseline: true,
-        flagged,
-        modified,
-        deleted,
-        added,
-        modifiedCount: modified.length,
-        deletedCount: deleted.length,
-        addedCount: added.length,
-        // Nananatili ang dating clearedAt/clearedNote (kung meron)
-        // hangga't hindi bago-bagong-flag ito — sa susunod na
-        // matagumpay/malinis na check-in, dito rin ito ire-reset sa
-        // ibaba (bagong "clean" state).
-        clearedAt: flagged ? (integrityStatus[installationId] ? integrityStatus[installationId].clearedAt || null : null) : null,
-        clearedNote: flagged ? (integrityStatus[installationId] ? integrityStatus[installationId].clearedNote || null : null) : null
-    };
-    saveIntegrityStatus(integrityStatus);
-
-    if (flagged) {
-        logActivity(installationId, 'integrity_alert', {
-            baselineVersion,
-            modifiedCount: modified.length,
-            deletedCount: deleted.length,
-            addedCount: added.length
-        });
-    }
-
-    res.json({
-        success: true,
-        hasBaseline: true,
-        flagged,
-        modifiedCount: modified.length,
-        deletedCount: deleted.length,
-        addedCount: added.length
-    });
-});
-
-// --------------------------------------------------------------
-// isFeatureCurrentlyUnlocked(installationId, featureId) — GROUND-TRUTH
-// na pagsusuri (kaparehong lohika ng /relay/check-feature-status sa
-// itaas) kung talagang naka-unlock ang isang feature PARA sa
-// installationId na ito NGAYON (na isinasaalang-alang ang expiry).
-// Ginagamit ito ng cloud-backup upload endpoint sa ibaba bilang
-// SERVER-SIDE gate — hindi ito basta umaasa sa sinasabi ng client.
-// --------------------------------------------------------------
-function isFeatureCurrentlyUnlocked(installationId, featureId) {
-    const entry = (issuedUnlocks[installationId] || {})[featureId];
-    if (!entry) return false;
-    if (typeof entry.expiresAt === 'number' && Date.now() > entry.expiresAt) return false;
-    return true;
+if (!INTEGRITY_MONITOR_DISABLED && RELAY_API_KEY) {
+    setTimeout(pollPendingIntegrityCheckNow, 15 * 1000);
+    setInterval(() => { pollPendingIntegrityCheckNow().catch(() => {}); }, INTEGRITY_CHECK_NOW_POLL_MS).unref();
 }
 
-// --------------------------------------------------------------
-// POST /relay/cloud-backup/upload
-// Tinatawag ito ng OMNIPOS CLIENT SERVER (manual — pinindot ng customer
-// ang "Cloud Backup" button) para i-sync ang BUONG database nito
-// (maliban sa user accounts — hinihigpitan din ito DITO, hindi lang
-// umaasa sa client) papunta sa Postgres. TINATANGGIHAN ito (402) kung
-// HINDI pa naka-unlock ang 'cloud_backup' feature para sa
-// installationId na ito — kahit anong ipadala ng client, walang
-// maisusulat sa Postgres hangga't hindi ito na-verify dito.
-//
-// UPDATE: dating buong-module ang laging tinatanggihan dito ("users",
-// "featureUnlocks") — ngayon, sadyang GUSTO NA ring i-backup ang mga
-// ito (user accounts, unlocked features/themes). Ang "users" module
-// mismo ay dapat nang dumating dito na WALANG "password" field —
-// ginagawa ito ng OMNIPOS client bago pa ito ipadala (tingnan ang
-// stripRedactedFields()/REDACTED_FIELDS_BY_MODULE sa db.js doon). Dito,
-// defense-in-depth pa rin: kahit sumingit ang isang password field sa
-// bawat record ng "users" (hal. luma/binagong client), tinatanggal pa
-// rin ito dito bago isulat sa Postgres.
-// --------------------------------------------------------------
-const CLOUD_BACKUP_REDACTED_FIELDS_BY_MODULE = { users: ['password'] };
-
-function stripCloudBackupRedactedFields(moduleName, data) {
-    const redactedFields = CLOUD_BACKUP_REDACTED_FIELDS_BY_MODULE[moduleName];
-    if (!redactedFields || !Array.isArray(data)) return data;
-    return data.map((record) => {
-        if (!record || typeof record !== 'object') return record;
-        const clone = { ...record };
-        redactedFields.forEach((field) => { delete clone[field]; });
-        return clone;
-    });
-}
-
-app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-upload', 12, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
-    const { installationId, storeName, modules, moduleNames, totalRecords } = req.body;
-
-    if (!installationId || !modules || typeof modules !== 'object') {
-        return res.status(400).json({ success: false, message: 'Kulang o mali ang installationId/modules.' });
-    }
-
-    if (!isFeatureCurrentlyUnlocked(installationId, 'cloud_backup')) {
-        logActivity(installationId, 'cloud_backup_blocked', { reason: 'feature_not_unlocked' });
-        return res.status(402).json({
-            success: false,
-            featureLocked: true,
-            featureId: 'cloud_backup',
-            featureName: FEATURE_CATALOG.cloud_backup.name,
-            price: FEATURE_CATALOG.cloud_backup.price,
-            message: 'Naka-lock pa ang Cloud Backup feature para sa installation na ito. Kailangan muna itong i-unlock bago magamit ang Cloud Backup.'
-        });
-    }
-
-    if (!pgPool) {
-        return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL) sa RELAY. Sabihin sa developer na i-set ito.' });
-    }
-
-    try {
-        const client = await pgPool.connect();
-        try {
-            await client.query('BEGIN');
-            let moduleCount = 0;
-            for (const [moduleName, rawData] of Object.entries(modules)) {
-                // Defense-in-depth: kahit ano ang ipadala ng client, hindi
-                // kailanman isusulat ang "password" field ng "users" dito.
-                const data = stripCloudBackupRedactedFields(moduleName, rawData);
-                const recordCount = Array.isArray(data) ? data.length : 0;
-                await client.query(
-                    `INSERT INTO cloud_backup_modules (installation_id, module, data, record_count, updated_at)
-                     VALUES ($1, $2, $3, $4, now())
-                     ON CONFLICT (installation_id, module) DO UPDATE SET
-                        data = excluded.data, record_count = excluded.record_count, updated_at = excluded.updated_at`,
-                    [installationId, moduleName, JSON.stringify(data), recordCount]
-                );
-                moduleCount++;
-            }
-
-            await client.query(
-                `INSERT INTO cloud_backup_meta (installation_id, store_name, total_records, module_count, last_sync_at, sync_count)
-                 VALUES ($1, $2, $3, $4, now(), 1)
-                 ON CONFLICT (installation_id) DO UPDATE SET
-                    store_name = excluded.store_name,
-                    total_records = excluded.total_records,
-                    module_count = excluded.module_count,
-                    last_sync_at = now(),
-                    sync_count = cloud_backup_meta.sync_count + 1`,
-                [installationId, storeName || null, typeof totalRecords === 'number' ? totalRecords : null, moduleCount]
-            );
-
-            await client.query('COMMIT');
-        } catch (err) {
-            await client.query('ROLLBACK');
-            throw err;
-        } finally {
-            client.release();
-        }
-
-        logActivity(installationId, 'cloud_backup_sync', { moduleCount: Object.keys(modules).length, totalRecords: totalRecords || null, storeName: storeName || null });
-
-        res.json({ success: true, message: 'Na-save sa Postgres ang cloud backup.', moduleNames: moduleNames || Object.keys(modules) });
-    } catch (err) {
-        console.error('⚠️ CLOUD_BACKUP: hindi na-save sa Postgres:', err.message);
-        res.status(500).json({ success: false, message: 'May error habang sine-save sa Postgres: ' + err.message });
-    }
+app.get('/api/relay-integrity/status', (req, res) => {
+    res.json({ success: true, ...relayIntegrityStatus });
 });
 
 // --------------------------------------------------------------
-// GET /relay/admin/api/cloud-backup — listahan ng LAHAT ng
-// installations na may cloud backup data (para sa admin panel table).
-// GET /relay/admin/api/cloud-backup/:installationId — buong laman
-// (lahat ng modules) ng cloud backup ng isang partikular na
-// installationId — ito ang "sa storage nila ito babasahin" na binanggit
-// sa instructions (developer/admin lang ang may access dito, protektado
-// ng requireAdminKey).
+// GET/POST /api/connectivity-mode
+// Ang manual na Online/Offline TOGGLE na makikita ni client sa UI
+// pagkatapos ng successful login. Basahin ang malaking paalala sa
+// FILE_CONNECTIVITY_MODE sa itaas — hindi ito bahagi ng anti-clone
+// gate, kontrolado lang nito kung PROACTIVE bang tumatawag ang app sa
+// RELAY (backup auto-sync, update-check, opportunistic re-verify).
 // --------------------------------------------------------------
-app.get('/relay/admin/api/cloud-backup', requireAdminKey, async (req, res) => {
-    if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
-    try {
-        const result = await pgPool.query('SELECT installation_id, store_name, total_records, module_count, last_sync_at, sync_count FROM cloud_backup_meta ORDER BY last_sync_at DESC NULLS LAST');
-        res.json({ success: true, backups: result.rows });
-    } catch (err) {
-        res.status(500).json({ success: false, message: err.message });
-    }
+app.get('/api/connectivity-mode', (req, res) => {
+    res.json({ success: true, mode: getConnectivityMode() });
 });
 
-app.get('/relay/admin/api/cloud-backup/:installationId', requireAdminKey, async (req, res) => {
-    if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
-    try {
-        const { installationId } = req.params;
-        const metaResult = await pgPool.query('SELECT * FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
-        const modulesResult = await pgPool.query('SELECT module, data, record_count, updated_at FROM cloud_backup_modules WHERE installation_id = $1 ORDER BY module', [installationId]);
-        if (!metaResult.rows[0]) {
-            return res.status(404).json({ success: false, message: 'Walang cloud backup na nakita para sa installationId na ito.' });
-        }
-        res.json({ success: true, meta: metaResult.rows[0], modules: modulesResult.rows });
-    } catch (err) {
-        res.status(500).json({ success: false, message: err.message });
+app.post('/api/connectivity-mode', (req, res) => {
+    const { mode } = req.body || {};
+    if (mode !== 'online' && mode !== 'offline') {
+        return res.status(400).json({ success: false, message: "Ang 'mode' ay dapat 'online' o 'offline'." });
     }
+    const previousMode = getConnectivityMode();
+    const saved = setConnectivityMode(mode);
+
+    // FIX: dati, kapag may na-edit/na-delete/na-add na file HABANG naka-
+    // OFFLINE ang connectivity mode, agad na "na-drop" lang ito nang
+    // tahimik — tumatakbo pa rin ang fs.watch() debounce (tingnan
+    // scheduleIntegrityCheckinFromWatcher/REAL-TIME INTEGRITY WATCHER
+    // sa itaas) pero agad ring nag-e-early-return ang
+    // runRelayIntegrityCheckin() dahil "offline" pa ang mode noong
+    // tumakbo ito (state='orange', walang retry na naka-schedule).
+    // Ibig sabihin: kapag nag-toggle pabalik ang user papuntang ONLINE,
+    // hinihintay pa rin dati ang SUSUNOD na 24h na scheduled check-in
+    // (o ang 3s na "Check Now" poll, na umaasa pa sa pag-click ng admin
+    // sa RELAY admin panel) bago talaga ma-detect ang mga pagbabagong
+    // iyon — hindi ito "agad" gaya ng inaasahan.
+    //
+    // Ngayon, sa mismong sandaling lumipat papuntang ONLINE (mula sa
+    // ibang mode), agad (fire-and-forget — hindi hinihintay/hindi
+    // bina-block ang response na ito) tinatawag ang buong
+    // runRelayIntegrityCheckin(), para masaklaw kaagad ang ANUMANG
+    // file na nabago/nadagdag/nabura habang naka-offline, sa halip na
+    // maghintay pa ng ilang segundo/oras bago ito ma-detect sa RELAY.
+    if (saved === 'online' && previousMode !== 'online' && !INTEGRITY_MONITOR_DISABLED) {
+        runRelayIntegrityCheckin().catch(() => {});
+    }
+
+    res.json({ success: true, mode: saved });
 });
 
-app.get('/relay/admin/api/cloud-backup/:installationId/download', requireAdminKey, async (req, res) => {
-    if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
-    try {
-        const { installationId } = req.params;
-        const modulesResult = await pgPool.query('SELECT module, data FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
-        if (modulesResult.rows.length === 0) {
-            return res.status(404).json({ success: false, message: 'Walang cloud backup na nakita para sa installationId na ito.' });
-        }
-        const payload = {};
-        modulesResult.rows.forEach((r) => { payload[r.module] = r.data; });
-        res.setHeader('Content-Disposition', `attachment; filename="cloud-backup-${installationId}.json"`);
-        res.setHeader('Content-Type', 'application/json');
-        res.send(JSON.stringify(payload, null, 2));
-    } catch (err) {
-        res.status(500).json({ success: false, message: err.message });
-    }
+// ====================================================================
+// CLOUD BACKUP (Postgres via RELAY) — MANUAL na trigger lang (button sa
+// Settings/Reset & Restore panel), hindi tulad ng RELAY_BACKUP auto-sync
+// sa itaas (na .db file mirror lang papunta sa Download folder).
+// ====================================================================
+// Ito: (1) kumukuha ng BUONG database maliban sa user accounts (tingnan
+// ang getCloudBackupPayload() sa db.js), (2) ipinapadala ito papunta sa
+// RELAY (/relay/cloud-backup/upload) kasama ang installationId nito, at
+// (3) ang RELAY mismo ang tumitingin kung UNLOCKED ba ang 'cloud_backup'
+// feature para sa installationId na ito BAGO ito talagang i-save sa
+// Postgres — kaya kahit directly tumawag ang isang client papunta sa
+// RELAY (nilagpasan ang requireFeature dito sa ibaba), hindi pa rin ito
+// talagang maisusulat sa Postgres hangga't hindi ito na-unlock doon.
+// ====================================================================
+const cloudBackupStatus = {
+    state: 'idle', // 'idle' | 'syncing' | 'success' | 'error'
+    lastAttemptAt: null,
+    lastSuccessAt: null,
+    lastError: null,
+    lastTotalRecords: null
+};
+
+app.get('/api/cloud-backup/status', (req, res) => {
+    res.json({ success: true, ...cloudBackupStatus });
 });
 
-// --------------------------------------------------------------
-// POST /relay/cloud-backup/restore  (SELF-SERVICE, tinatawag mismo ng
-// OMNIPOS CLIENT SERVER — hindi ng admin panel)
-//
-// MAHALAGANG PAALALA: ang requireApiKey ay SHARED SECRET — PAREHONG
-// key ang ginagamit ng LAHAT ng kliyente/installation (naka-bake sa
-// bawat client .env). Kaya HINDI ito sapat na proof-of-ownership —
-// kahit sinong may hawak ng leaked/nakitang installationId ng IBANG
-// tindahan ay kayang gumawa ng request papunta rito gamit lang ang
-// parehong shared key. Ang TUNAY na naghihiwalay dito ay ang
-// hardwareFingerprint check sa ibaba: dapat itong TUMUGMA sa huling
-// verified fingerprint na naka-bind sa installationId na ito (mula sa
-// /relay/verify-login flow) — ibig sabihin, dapat mismong ang PARE-
-// PAREHONG pisikal na device na huling nag-verify-login ang humihiling
-// ng restore, hindi lang basta may alam na installationId.
-//
-// Body: { installationId, hardwareFingerprint }
-// --------------------------------------------------------------
-app.post('/relay/cloud-backup/restore', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-restore', 10, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
-    const { installationId, hardwareFingerprint } = req.body;
+app.post('/api/cloud-backup/sync', requireFeature('cloud_backup'), async (req, res) => {
+    if (getConnectivityMode() === 'offline') {
+        return res.status(400).json({ success: false, message: 'Naka-OFFLINE mode ka ngayon. I-tap muna ang Online toggle para makapag-backup sa cloud.' });
+    }
+    cloudBackupStatus.state = 'syncing';
+    cloudBackupStatus.lastAttemptAt = Date.now();
 
-    if (!installationId || !hardwareFingerprint) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId o hardwareFingerprint.' });
-    }
-
-    if (!isFeatureCurrentlyUnlocked(installationId, 'cloud_backup')) {
-        logActivity(installationId, 'cloud_backup_restore_blocked', { reason: 'feature_not_unlocked' });
-        return res.status(402).json({
-            success: false,
-            featureLocked: true,
-            featureId: 'cloud_backup',
-            featureName: FEATURE_CATALOG.cloud_backup.name,
-            price: FEATURE_CATALOG.cloud_backup.price,
-            message: 'Naka-lock pa ang Cloud Backup feature para sa installation na ito.'
-        });
-    }
-
-    // --- Proof-of-ownership check (HINDI lang basta yung shared API key) ---
-    const fpRecord = deviceFingerprints.get(installationId);
-    if (!fpRecord) {
-        logActivity(installationId, 'cloud_backup_restore_blocked', { reason: 'no_verified_fingerprint' });
-        return res.status(403).json({
-            success: false,
-            message: 'Wala pang na-verify na device fingerprint para sa installation na ito. Mag-login muna online (verify-login) bago mag-restore.'
-        });
-    }
-    if (fpRecord.flagged) {
-        logActivity(installationId, 'cloud_backup_restore_blocked', { reason: 'clone_flagged' });
-        return res.status(403).json({
-            success: false,
-            cloneSuspected: true,
-            message: 'Naka-flag ang device na ito bilang posibleng clone/duplicate. Kontakin ang developer/store owner para i-review at i-reset bago payagan ang restore.'
-        });
-    }
-    if (fpRecord.fingerprint !== hardwareFingerprint) {
-        logActivity(installationId, 'cloud_backup_restore_blocked', { reason: 'fingerprint_mismatch' });
-        return res.status(403).json({
-            success: false,
-            message: 'Hindi tumutugma ang device na ito sa huling na-verify na device para sa installation na ito. Kontakin ang developer/store owner kung totoong ikaw ang may-ari nito.'
-        });
-    }
-
-    if (!pgPool) {
-        return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
+    if (!RELAY_API_KEY) {
+        cloudBackupStatus.state = 'error';
+        cloudBackupStatus.lastError = 'Walang RELAY_API_KEY na naka-configure sa .env.';
+        return res.status(500).json({ success: false, message: cloudBackupStatus.lastError });
     }
 
     try {
-        const metaResult = await pgPool.query('SELECT * FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
-        if (!metaResult.rows[0]) {
-            return res.status(404).json({ success: false, message: 'Walang cloud backup na nakita para sa installation na ito.' });
-        }
-        const modulesResult = await pgPool.query('SELECT module, data, record_count FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
+        const featureData = readFeatureUnlocks();
+        const installationId = getOrCreateInstallationId(featureData);
+        const receiptSettings = readData(FILE_RECEIPT_SETTINGS, DEFAULT_RECEIPT_SETTINGS);
+        const backupPayload = getCloudBackupPayload();
 
-        const modules = {};
-        modulesResult.rows.forEach((r) => { modules[r.module] = r.data; });
-
-        logActivity(installationId, 'cloud_backup_restored', {
-            moduleCount: modulesResult.rows.length,
-            lastSyncAt: metaResult.rows[0].last_sync_at
+        const relayRes = await relayFetch(`${RELAY_URL}/relay/cloud-backup/upload`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-relay-key': RELAY_API_KEY },
+            body: JSON.stringify({
+                installationId,
+                storeName: (receiptSettings && receiptSettings.storeName) || null,
+                modules: backupPayload.modules,
+                moduleNames: backupPayload.moduleNames,
+                totalRecords: backupPayload.totalRecords,
+                generatedAt: backupPayload.generatedAt
+            })
         });
+        const relayData = await parseRelayResponse(relayRes);
+
+        if (relayRes.status === 402 || relayData.featureLocked) {
+            cloudBackupStatus.state = 'error';
+            cloudBackupStatus.lastError = relayData.message || 'Naka-lock pa ang Cloud Backup feature.';
+            return res.status(402).json(relayData);
+        }
+
+        if (!relayData.success) {
+            cloudBackupStatus.state = 'error';
+            cloudBackupStatus.lastError = relayData.message || 'Tinanggihan ng RELAY ang cloud backup upload.';
+            return res.status(502).json({ success: false, message: cloudBackupStatus.lastError });
+        }
+
+        cloudBackupStatus.state = 'success';
+        cloudBackupStatus.lastSuccessAt = Date.now();
+        cloudBackupStatus.lastError = null;
+        cloudBackupStatus.lastTotalRecords = backupPayload.totalRecords;
+
+        logAction((req.authUser && req.authUser.username) || 'Unknown', `Cloud Backup: matagumpay na na-sync ang buong database (kasama ang user accounts [walang password], unlocked features/themes) papunta sa Postgres (${backupPayload.totalRecords} records, ${backupPayload.moduleNames.length} modules).`);
 
         res.json({
             success: true,
-            message: 'Nakuha ang cloud backup para sa installation na ito.',
-            meta: {
-                storeName: metaResult.rows[0].store_name,
-                totalRecords: metaResult.rows[0].total_records,
-                moduleCount: metaResult.rows[0].module_count,
-                lastSyncAt: metaResult.rows[0].last_sync_at
-            },
-            modules,
-            // Alam ng client kung aling fields ang hindi kasama (redacted)
-            // dito, para malinaw sa kanya na kailangan pa ring i-reset ang
-            // password ng mga na-restore na user account.
-            redactedFieldsByModule: CLOUD_BACKUP_REDACTED_FIELDS_BY_MODULE
+            message: 'Matagumpay na na-sync ang database papunta sa cloud (Postgres).',
+            totalRecords: backupPayload.totalRecords,
+            moduleNames: backupPayload.moduleNames,
+            excludedModules: backupPayload.excludedModules
         });
     } catch (err) {
-        console.error('⚠️ CLOUD_BACKUP: hindi na-kuha mula sa Postgres:', err.message);
-        res.status(500).json({ success: false, message: 'May error habang kinukuha mula sa Postgres: ' + err.message });
+        cloudBackupStatus.state = 'error';
+        cloudBackupStatus.lastError = err.message;
+        console.error('⚠️ CLOUD_BACKUP: hindi na-abot ang relay para sa upload:', err.message);
+        res.status(502).json({ success: false, message: 'Hindi ma-abot ang RELAY para sa cloud backup upload.' });
     }
 });
 
-// --------------------------------------------------------------
-// POST /relay/verify-login  (ANTI-CLONE)
-// Tinatawag ito ng OMNIPOS CLIENT SERVER bago pumayag ng login sa
-// isang cashier/admin — (a) sa UNANG beses na kailanman gagawin ito
-// sa isang installationId, o (b) sa tuwing nakita ng OMNIPOS client na
-// nagbago na ang live hardware fingerprint nito kumpara sa huling
-// naka-imbak na "verified" fingerprint (senyales ng pag-clone/paglipat
-// sa ibang pisikal na device).
+// ====================================================================
+// CLOUD BACKUP — SELF-SERVICE RESTORE (Postgres via RELAY)
+// ====================================================================
+// Tinatawag ito ng "Restore from Cloud" button sa Reset & Restore
+// panel. Kailangan ng Admin password (gaya ng /api/restore-backup)
+// dahil mapanganib na aksyon ito — papatayin ang kasalukuyang laman ng
+// bawat na-restore na module.
 //
-// Lohika:
-//   - Kung bagong installationId (hindi pa dating naka-verify) —
-//     itinatago ang fingerprint na ito bilang "binding" nito, at
-//     pinapayagan.
-//   - Kung dating naka-verify na PAREHONG fingerprint — pinapayagan.
-//   - Kung dating naka-verify na sa IBANG fingerprint — ma-flag bilang
-//     clone_suspected, TATANGGIHAN, hangga't hindi ito ni-reset ng
-//     developer/admin sa admin panel (clear ang binding, tapos
-//     papayagan uli sa susunod na verify).
-// SADYANG WALANG requireAllowedDevice dito (tulad ng backup-checkin) —
-// kailangan itong tumakbo KAHIT HINDI PA naka-Allow ang device, dahil
-// paraan din ito para makapasok sa unahan bago pa man mag-request ng
-// unlock. Protektado pa rin ito ng requireApiKey at rate limit.
-// --------------------------------------------------------------
-app.post('/relay/verify-login', requireApiKey, rateLimit('verify-login', 30, 10 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
-    const { installationId, hardwareFingerprint, storeName, username } = req.body;
+// MAHALAGANG PALIWANAG (users module): tinanggal ang "password" field
+// bago umakyat ang "users" module papunta sa cloud (tingnan ang
+// stripRedactedFields() sa db.js). Kaya kapag bumaba ito papunta rito,
+// WALANG password ang bawat record. Kung direktang isusulat ito,
+// mawawalan ng magagamit na password ang lahat ng account — hindi
+// makaka-login ang kahit sino. Para maiwasan ito:
+//   - Kung may kaparehong username sa KASALUKUYANG (bago pa i-restore)
+//     listahan ng users, ipapasok ang KASALUKUYANG password hash nito
+//     sa na-restore na record (ibig sabihin, hindi nagbabago ang
+//     password ng mga existing account).
+//   - Kung WALANG kaparehong username (bagong account mula sa backup,
+//     hal. na-delete na sa kasalukuyan pero narestore mula sa cloud),
+//     bibigyan ito ng RANDOM na temporary password at ida-DISABLE
+//     (kung sino man ang gustong gumamit nito, kailangan munang i-reset
+//     ng Admin ang password sa User Management).
+// ====================================================================
+function mergeRestoredUsers(restoredUsers) {
+    const currentUsers = readData(FILE_USERS, []);
+    const currentByUsername = new Map(
+        currentUsers.map(u => [String(u.username || '').toLowerCase(), u])
+    );
+    const accountsNeedingPasswordReset = [];
 
-    if (!installationId || !hardwareFingerprint) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId o hardwareFingerprint.' });
-    }
-
-    recordDeviceSeen(installationId, { storeName, username });
-
-    const existing = deviceFingerprints.get(installationId);
-
-    if (!existing) {
-        // Unang beses — itinatali ang fingerprint na ito sa installationId.
-        deviceFingerprints.set(installationId, {
-            fingerprint: hardwareFingerprint,
-            firstVerifiedAt: Date.now(),
-            lastVerifiedAt: Date.now(),
-            verifyCount: 1,
-            flagged: false
-        });
-        saveDeviceFingerprints(deviceFingerprints);
-        logActivity(installationId, 'device_first_verified', { storeName: storeName || null, username: username || null });
-        return res.json({
-            success: true,
-            allowed: allowedDevices.has(installationId),
-            firstTime: true,
-            permit: issueDevicePermit(installationId, hardwareFingerprint),
-            message: 'Unang beses na na-verify online ang device na ito.'
-        });
-    }
-
-    // Bago suriin ang flagged/mismatch state: baka dati nang "split" ng
-    // admin ang EKSAKTONG fingerprint na ito papunta sa sarili nitong
-    // bagong installationId (tingnan ang /split-clone admin endpoint) —
-    // ibig sabihin sinadya na, hiwalay na dapat itong device mula ngayon,
-    // kahit naka-flag pa rin ang ORIGINAL na installationId. Kung ganoon,
-    // huwag nang i-block — sabihin lang sa client na dapat lumipat na
-    // ito sa bagong ID mula ngayon.
-    const splitEntry = cloneSplits.get(cloneSplitKey(installationId, hardwareFingerprint));
-    if (splitEntry && splitEntry.newInstallationId) {
-        const newId = splitEntry.newInstallationId;
-        const splitFp = deviceFingerprints.get(newId);
-        if (splitFp) {
-            splitFp.lastVerifiedAt = Date.now();
-            splitFp.verifyCount = (splitFp.verifyCount || 0) + 1;
-            saveDeviceFingerprints(deviceFingerprints);
+    const merged = restoredUsers.map(record => {
+        const clone = { ...record };
+        const key = String(clone.username || '').toLowerCase();
+        const existing = currentByUsername.get(key);
+        if (existing && existing.password) {
+            clone.password = existing.password; // panatilihin ang KASALUKUYANG password
+        } else {
+            // Walang kaparehong existing account — walang ligtas na password
+            // na maipapasok, kaya random temporary password na lang, at
+            // i-flag para malaman ng Admin na kailangan itong i-reset.
+            clone.password = bcrypt.hashSync(crypto.randomBytes(16).toString('hex'), 10);
+            accountsNeedingPasswordReset.push(clone.username);
         }
-        recordDeviceSeen(newId, { storeName, username });
-        logActivity(newId, 'device_reverified_after_split', { splitFromInstallationId: installationId });
-        return res.json({
+        return clone;
+    });
+
+    return { merged, accountsNeedingPasswordReset };
+}
+
+app.post('/api/cloud-backup/restore', requireFeature('cloud_backup'), rateLimit('cloud-backup-restore', 5, 15 * 60 * 1000), async (req, res) => {
+    const { username, password } = req.body;
+
+    // Parehong admin-auth pattern gaya ng /api/restore-backup — kailangan
+    // ng Admin password dahil overwrite ito ng kasalukuyang data.
+    const currentUsers = readData(FILE_USERS, []);
+    const currentAdmin = currentUsers.find(u => u.username && username && u.username.toLowerCase() === username.toLowerCase() && u.role && u.role.toLowerCase() === 'admin');
+    if (!currentAdmin || !bcrypt.compareSync(password || '', currentAdmin.password)) {
+        return res.status(403).json({ success: false, code: 'WRONG_ADMIN_PASSWORD', message: 'Maling Admin password. Hindi pinahintulutan ang pag-restore.' });
+    }
+
+    if (getConnectivityMode() === 'offline') {
+        return res.status(400).json({ success: false, message: 'Naka-OFFLINE mode ka ngayon. I-tap muna ang Online toggle para makapag-restore mula sa cloud.' });
+    }
+    if (!RELAY_API_KEY) {
+        return res.status(500).json({ success: false, message: 'Walang RELAY_API_KEY na naka-configure sa .env.' });
+    }
+
+    try {
+        const featureData = readFeatureUnlocks();
+        const installationId = getOrCreateInstallationId(featureData);
+        const hardwareFingerprint = computeHardwareFingerprint(featureData);
+
+        const relayRes = await relayFetch(`${RELAY_URL}/relay/cloud-backup/restore`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-relay-key': RELAY_API_KEY },
+            body: JSON.stringify({ installationId, hardwareFingerprint })
+        });
+        const relayData = await parseRelayResponse(relayRes);
+
+        if (relayRes.status === 402 || relayData.featureLocked) {
+            return res.status(402).json(relayData);
+        }
+        if (!relayData.success) {
+            return res.status(relayRes.status || 502).json({ success: false, message: relayData.message || 'Tinanggihan ng RELAY ang cloud backup restore.' });
+        }
+
+        const modules = relayData.modules || {};
+        let restoredCount = 0;
+        const accountsNeedingPasswordReset = [];
+
+        for (const [moduleName, data] of Object.entries(modules)) {
+            if (moduleName === 'users' && Array.isArray(data)) {
+                const { merged, accountsNeedingPasswordReset: needReset } = mergeRestoredUsers(data);
+                writeData(moduleName, merged);
+                accountsNeedingPasswordReset.push(...needReset);
+                restoredCount++;
+            } else if (Array.isArray(data) || (data && typeof data === 'object')) {
+                writeData(moduleName, data);
+                restoredCount++;
+            }
+        }
+
+        logAction(username, `Nag-restore mula sa Cloud Backup (${restoredCount} modules, ${Object.keys(modules).length} kabuuan na-download mula sa RELAY).`);
+
+        res.json({
             success: true,
-            allowed: allowedDevices.has(newId),
-            firstTime: false,
-            reassignedInstallationId: newId,
-            permit: issueDevicePermit(newId, hardwareFingerprint),
-            message: 'Na-verify — ang device na ito ay hiwalay na (na-split mula sa isang naunang na-flag na clone). Ida-adopt ng client ang bagong installationId mula ngayon.'
+            message: `Matagumpay na na-restore ang ${restoredCount} module(s) mula sa Cloud Backup.`,
+            restoredCount,
+            moduleNames: Object.keys(modules),
+            accountsNeedingPasswordReset // ipaalam sa UI kung sinong accounts kailangang i-reset ang password
         });
-    }
-
-    if (existing.flagged) {
-        // Naka-flag na dati — kailangan munang i-clear ng admin sa panel
-        // bago ito payagan ulit, kahit pareho na ulit ang fingerprint.
-        return res.status(403).json({
-            success: false,
-            cloneSuspected: true,
-            message: 'Naka-flag ang device na ito bilang posibleng clone/duplicate. Kontakin ang developer/store owner para i-review at i-reset.'
-        });
-    }
-
-    if (existing.fingerprint !== hardwareFingerprint) {
-        // Parehong installationId pero IBANG fingerprint — malamang
-        // kinopya/inilipat ang buong data folder papunta sa ibang device.
-        existing.flagged = true;
-        existing.flaggedFingerprint = hardwareFingerprint;
-        existing.flaggedAt = Date.now();
-        saveDeviceFingerprints(deviceFingerprints);
-        logActivity(installationId, 'clone_suspected', {
-            storeName: storeName || null,
-            username: username || null,
-            originalFingerprint: existing.fingerprint,
-            newFingerprint: hardwareFingerprint
-        });
-        return res.status(403).json({
-            success: false,
-            cloneSuspected: true,
-            message: 'Ibang pisikal na device ang gumagamit ng installationId na ito kumpara sa dating na-verify. Na-flag ang device — kailangan ng manual na review ng developer/store owner bago ito payagan ulit.'
-        });
-    }
-
-    existing.lastVerifiedAt = Date.now();
-    existing.verifyCount = (existing.verifyCount || 0) + 1;
-    saveDeviceFingerprints(deviceFingerprints);
-    logActivity(installationId, 'device_reverified', {});
-
-    res.json({
-        success: true,
-        allowed: allowedDevices.has(installationId),
-        firstTime: false,
-        permit: issueDevicePermit(installationId, hardwareFingerprint),
-        message: 'Verified.'
-    });
-});
-
-// --------------------------------------------------------------
-// GET /relay/admin/api/devices/:installationId/fingerprint
-// Para makita ng admin panel kung naka-flag ba bilang clone ang isang
-// device, at para bigyan ng option na i-reset ang binding.
-// --------------------------------------------------------------
-app.get('/relay/admin/api/devices/:installationId/fingerprint', requireAdminKey, (req, res) => {
-    const { installationId } = req.params;
-    const record = deviceFingerprints.get(installationId) || null;
-    res.json({ success: true, record });
-});
-
-// --------------------------------------------------------------
-// POST /relay/admin/api/devices/:installationId/fingerprint/reset
-// I-clear ang naka-bind na fingerprint (at ang flagged state) para sa
-// isang installationId — gamitin ito kapag na-verify na ng
-// developer/store owner na LEGIT na paglipat ito sa bagong device
-// (hal. pinalitan ang unit/telepono ng customer), o kung false-positive
-// ang naunang clone flag.
-// --------------------------------------------------------------
-app.post('/relay/admin/api/devices/:installationId/fingerprint/reset', requireAdminKey, (req, res) => {
-    const { installationId } = req.params;
-    deviceFingerprints.delete(installationId);
-    saveDeviceFingerprints(deviceFingerprints);
-    logActivity(installationId, 'device_fingerprint_reset', {});
-    res.json({ success: true, message: 'Na-clear ang fingerprint binding — kailangan na namang mag-verify online sa susunod na login.' });
-});
-
-// --------------------------------------------------------------
-// GET /relay/admin/api/devices/:installationId/integrity  (FILE INTEGRITY)
-// Detalyadong resulta ng huling integrity check-in ng isang device —
-// listahan ng modified/deleted/added files, parang "git status" na
-// view sa admin panel.
-// --------------------------------------------------------------
-app.get('/relay/admin/api/devices/:installationId/integrity', requireAdminKey, (req, res) => {
-    const { installationId } = req.params;
-    const record = integrityStatus[installationId] || null;
-    res.json({ success: true, record });
-});
-
-// --------------------------------------------------------------
-// POST /relay/admin/api/devices/:installationId/integrity/clear
-// I-a-acknowledge/i-clear ang red flag ng isang device (hal. na-review
-// na ng developer ang mga binagong file at LEGIT na pala ito — hal.
-// sarili nilang customization). HINDI nito binabago ang baseline —
-// sa susunod na check-in, kung parehong "modified" pa rin ang file na
-// iyon, ma-flag ulit ito (sinasadya: hindi ito "puwede ka nang
-// magbago paulit-ulit", isang beses lang na acknowledge ng KASALUKUYAN
-// na state).
-// --------------------------------------------------------------
-app.post('/relay/admin/api/devices/:installationId/integrity/clear', requireAdminKey, (req, res) => {
-    const { installationId } = req.params;
-    const { note } = req.body || {};
-    const record = integrityStatus[installationId];
-    if (!record) {
-        return res.status(404).json({ success: false, message: 'Walang naitalang integrity check-in para sa device na ito.' });
-    }
-    record.clearedAt = Date.now();
-    record.clearedNote = String(note || '').trim() || null;
-    integrityStatus[installationId] = record;
-    saveIntegrityStatus(integrityStatus);
-    logActivity(installationId, 'integrity_alert_cleared', { note: record.clearedNote });
-    res.json({ success: true, message: 'Na-clear ang integrity flag.' });
-});
-
-// --------------------------------------------------------------
-// POST /relay/admin/api/devices/:installationId/integrity/check-now
-// "🔄 I-check ngayon" — hindi direktang tumatawag ang RELAY papunta sa
-// device (walang ganoong push channel sa architecture na ito, laging
-// ang client ang nagsisimula ng connection). Sa halip, dito lang
-// itinatakda ang isang pending flag; ang OMNIPOS client ang bibisita
-// dito (sa loob ng existing na attemptRelayFeatureSync() nito, na
-// tumatakbo na kada ~30s), makikita ang flag, at doon lang mismo agad
-// tatakbo ang integrity check-in nito — kaya ilang segundo hanggang
-// ~30s (hindi instant) ang praktikal na abot ng button na ito, hindi
-// dahil sa delay dito kundi dahil sa polling interval ng client.
-// --------------------------------------------------------------
-app.post('/relay/admin/api/devices/:installationId/integrity/check-now', requireAdminKey, (req, res) => {
-    const { installationId } = req.params;
-    pendingIntegrityChecks.add(installationId);
-    logActivity(installationId, 'integrity_check_requested', {});
-    res.json({ success: true, message: 'Hihintayin ang susunod na online check-in ng device na ito (karaniwan ay ilang segundo hanggang ~30s).' });
-});
-
-// --------------------------------------------------------------
-// POST /relay/admin/api/devices/:installationId/split-clone  (ANTI-CLONE)
-// Gamitin ito kapag TALAGANG dalawang HIWALAY na device ang gusto mong
-// PATULOY na paganahin nang sabay — hal. luma mong tester unit AT yung
-// unit na ibinenta mo sa customer, base sa parehong lumang data folder.
-// Sa halip na i-share ng dalawa ang IISANG installationId (na parang
-// "musical chairs" — isa lang sa kanila ang puwedeng maging "allowed"
-// nang sabay), ginagawan ito ng SARILI at BAGONG installationId + sarili
-// nitong fingerprint binding — kaya independent na sila mula ngayon.
-//
-// Lohika:
-//   1. Kunin ang naka-flag na record ng ORIGINAL installationId
-//      (dapat mayroon itong flaggedFingerprint mula sa isang mismatch).
-//   2. Gumawa ng BAGONG installationId (random UUID).
-//   3. I-bind ang flaggedFingerprint sa BAGONG installationId (sarili
-//      na nitong deviceFingerprints entry).
-//   4. I-unflag ang ORIGINAL — babalik ito sa dati nitong fingerprint,
-//      parang walang nangyari, walang kailangang hiwalay na "reset".
-//   5. Itago sa cloneSplits kung aling fingerprint ang naka-bind na sa
-//      bagong ID — para sa susunod na verify-login mula sa clone device,
-//      awtomatiko na itong ma-reassign (tingnan ang /relay/verify-login).
-//   6. Kung ALLOWED na ang ORIGINAL, gagawin ding ALLOWED ang bagong ID
-//      (dahil legit namang ginagamit na ito bago pa man i-split) — pero
-//      WALANG kasamang mga naka-unlock na feature — sinasadyang blangko
-//      ito, dapat manual na i-activate ng admin kung ano lang ang
-//      totoong binayaran ng bagong may-ari (tingnan ang /activate at
-//      /deactivate endpoints).
-// --------------------------------------------------------------
-app.post('/relay/admin/api/devices/:installationId/split-clone', requireAdminKey, (req, res) => {
-    const { installationId } = req.params;
-    const record = deviceFingerprints.get(installationId);
-
-    if (!record || !record.flagged || !record.flaggedFingerprint) {
-        return res.status(400).json({
-            success: false,
-            message: 'Walang naka-flag na clone fingerprint ang installationId na ito — wala nang i-sa-split.'
-        });
-    }
-
-    const flaggedFingerprint = record.flaggedFingerprint;
-    const newInstallationId = crypto.randomUUID();
-
-    // 2-3. Bagong installationId, sariling fingerprint binding.
-    deviceFingerprints.set(newInstallationId, {
-        fingerprint: flaggedFingerprint,
-        firstVerifiedAt: Date.now(),
-        lastVerifiedAt: Date.now(),
-        verifyCount: 1,
-        flagged: false
-    });
-
-    // 4. I-unflag ang ORIGINAL, ibalik sa dati nitong (unflagged) na estado.
-    record.flagged = false;
-    delete record.flaggedFingerprint;
-    delete record.flaggedAt;
-    saveDeviceFingerprints(deviceFingerprints);
-
-    // 5. Itala ang split mapping.
-    cloneSplits.set(cloneSplitKey(installationId, flaggedFingerprint), {
-        newInstallationId,
-        splitAt: Date.now()
-    });
-    saveCloneSplits(cloneSplits);
-
-    // 6. Kung allowed ang orig, gawin ding allowed ang bago (walang features).
-    if (allowedDevices.has(installationId)) {
-        allowedDevices.add(newInstallationId);
-        saveAllowedDevices(allowedDevices);
-    }
-
-    // I-carry over ang label (may markang "hiwalay/split") para malinaw sa listahan.
-    const originalLabel = deviceLabels.get(installationId);
-    if (originalLabel) {
-        deviceLabels.set(newInstallationId, `${originalLabel} (hiwalay/split)`);
-        saveDeviceLabels(deviceLabels);
-    }
-
-    logActivity(installationId, 'clone_split_from', { newInstallationId });
-    logActivity(newInstallationId, 'clone_split_created', { splitFromInstallationId: installationId });
-
-    res.json({
-        success: true,
-        newInstallationId,
-        allowed: allowedDevices.has(newInstallationId),
-        message: `Nagawa na ang hiwalay na installationId (${newInstallationId}). Awtomatiko itong ia-adopt ng clone device sa susunod nitong pag-verify. Huwag kalimutang i-activate manually ang mga totoong binayaran nitong features.`
-    });
-});
-
-// --------------------------------------------------------------
-// POST /relay/request-unlock
-// Tinatawag ito ng CLIENT server (hindi diretso ng browser ng cashier)
-// tuwing may humihiling mag-unlock ng isang Pro theme.
-// --------------------------------------------------------------
-app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit('request-unlock', 5, 10 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
-    const { installationId, featureId, featureName, price, username, storeName, photo } = req.body;
-
-    if (!installationId || !featureId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId o featureId.' });
-    }
-
-    const otpCode = String(Math.floor(100000 + Math.random() * 900000));
-    const key = `${installationId}:${featureId}`;
-    pendingOtps.set(key, {
-        code: otpCode,
-        expiresAt: Date.now() + OTP_TTL_MS,
-        requestedBy: username || 'Unknown',
-        storeName: storeName || null,
-        photo: photo || null,
-        approved: false,
-        otpVerified: false,
-        installationId,
-        featureId,
-        featureName: featureName || featureId,
-        price: price || null
-    });
-
-    try {
-        // Ground-truth mula sa SARILING FEATURE_CATALOG ng relay — hindi
-        // basta client-supplied na featureName/price ang isasalig, dahil
-        // ang mga iyon ay galing lang sa request body (pwedeng palitan).
-        // Kung hindi tugma, tahasang i-flag sa email para alertuhan ang
-        // admin bago pa mag-Approve.
-        const catalogEntry = FEATURE_CATALOG[featureId] || null;
-        const priceMismatch = catalogEntry && typeof price === 'number' && price !== catalogEntry.price;
-        const nameMismatch = catalogEntry && featureName && featureName !== catalogEntry.name;
-
-        await notifyUnlockRequest({
-            subject: `🎨 Unlock Request — ${featureName || featureId}${price ? ` (₱${price})` : ''}`,
-            text: `May humiling na i-unlock ang isang Pro theme.\n\n` +
-                  `Store: ${storeName || 'Hindi tiyak'}\n` +
-                  `Installation ID: ${installationId}\n` +
-                  `Feature: ${featureName || featureId}\n` +
-                  (price ? `Presyo (sinabi ng client): ₱${price}\n` : '') +
-                  (catalogEntry ? `Presyo ayon sa price list namin: ₱${catalogEntry.price} (${catalogEntry.name})\n` : `⚠️ Hindi nakita sa price list namin ang featureId na "${featureId}" — mag-ingat.\n`) +
-                  ((priceMismatch || nameMismatch) ? `⚠️⚠️ MAY DISKREPANSIYA sa presyo/pangalan — hindi tugma sa opisyal na price list. HUWAG mag-Approve hangga't hindi ito na-verify.\n` : '') +
-                  `Hiniling ni: ${username || 'Unknown'}\n` +
-                  `OTP Code: ${otpCode}\n` +
-                  `Mag-e-expire ito sa loob ng 10 minuto.\n\n` +
-                  `I-verify muna ang bayad bago ibigay ang OTP na ito sa kliyente.`
-        });
-
-        logActivity(installationId, 'otp_requested', { featureId, featureName: featureName || featureId });
-        res.json({ success: true, message: 'Naipadala ang OTP request.' });
     } catch (err) {
-        console.error('Relay mail send failure:', err);
-        pendingOtps.delete(key);
-        res.status(500).json({ success: false, message: `Nabigo ang pagpapadala ng OTP: ${err.message}` });
+        console.error('⚠️ CLOUD_BACKUP: hindi na-abot ang relay para sa restore:', err.message);
+        res.status(502).json({ success: false, message: 'Hindi ma-abot ang RELAY para sa cloud backup restore.' });
     }
 });
 
-// --------------------------------------------------------------
-// POST /relay/confirm-unlock
-// Kapag TAMA ang OTP, gagawa ito ng isang SIGNED TOKEN gamit ang
-// private key. Ang token na ito ang ibabalik sa client — ito na ang
-// magiging "resibo" ng pagka-unlock, at maaaring i-verify kahit
-// offline (walang internet) gamit lang ang public key.
-// --------------------------------------------------------------
-// --------------------------------------------------------------
-// APPROVAL GATE — bago ito, kapag TAMA na ang OTP, agad na nabibigyan
-// ng signed token ang kliyente. Ngayon, dagdag pang kondisyon: kailangan
-// mo (ang may-ari, sa admin panel) na pindutin ang "Allow/Run" button
-// BAGO talaga maisyu ang token — kahit pa tama na ang OTP na inilagay
-// ng kliyente. Ito ay para masigurado mong nakabayad na talaga sila
-// bago mo bigyan ng access, hindi lang basta tamang OTP.
-// --------------------------------------------------------------
-function checkApprovalGate(pending) {
-    if (!pending.approved) {
-        pending.otpVerified = true;
-        pending.otpVerifiedAt = Date.now();
-        return false;
-    }
-    return true;
+function isDemoActive() {
+    const data = readFeatureUnlocks();
+    const installationId = getOrCreateInstallationId(data);
+    const token = data.tokens[DEMO_FEATURE_ID];
+    if (!token) return false;
+    return verifyUnlockToken(token, installationId, DEMO_FEATURE_ID);
 }
 
-app.post('/relay/confirm-unlock', requireApiKey, requireAllowedDevice, rateLimit('confirm-unlock', 120, 10 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
-    const { installationId, featureId, otp } = req.body;
-
-    if (!installationId || !featureId || !otp) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId, featureId, o otp.' });
-    }
-
-    const key = `${installationId}:${featureId}`;
-    const pending = pendingOtps.get(key);
-
-    if (!pending) {
-        return res.status(400).json({ success: false, message: 'Walang aktibong unlock request para dito. Humingi muna ng OTP.' });
-    }
-    if (Date.now() > pending.expiresAt) {
-        pendingOtps.delete(key);
-        return res.status(400).json({ success: false, message: 'Expired na ang OTP code. Humingi ng bago.' });
-    }
-    if (!safeCompare(String(otp).trim(), pending.code)) {
-        return res.status(400).json({ success: false, message: 'Maling OTP code.' });
-    }
-
-    if (!checkApprovalGate(pending)) {
-        return res.json({
-            success: false,
-            pending: true,
-            message: `Tama ang code para sa ${pending.featureName}! Naghihintay na lang ng approval mula sa may-ari. Pakisubukan ulit paglipas ng ilang segundo.`
-        });
-    }
-
-    // Tama ang OTP — gumawa ng naka-sign na token. Ang payload ay
-    // nagta-tali ng token na ito SA SPESIPIKONG installationId+featureId,
-    // kaya hindi ito magagamit sa ibang installation o ibang theme. Kung
-    // may durationDays na naitakda ng admin sa Approve, MAY EXPIRY ito
-    // (auto-expiring license) — kung wala, permanente (dating behavior).
-    const durationMs = typeof pending.durationDays === 'number' && pending.durationDays > 0
-        ? pending.durationDays * 24 * 60 * 60 * 1000
-        : null;
-    const token = issueSignedToken(installationId, featureId, durationMs);
-
-    recordIssuedUnlock(installationId, featureId, token, {
-        featureName: pending.featureName,
-        price: pending.price,
-        source: 'otp'
-    });
-    logActivity(installationId, 'unlock_issued', { featureId, featureName: pending.featureName, source: 'otp' });
-
-    pendingOtps.delete(key);
-
-    res.json({
-        success: true,
-        message: `Na-unlock ang ${pending.featureName}!`,
-        token
-    });
-});
-
-// --------------------------------------------------------------
-// DEMO MODE — pansamantalang bubuksan ang LAHAT ng features (walang
-// paywall) para sa isang installation, pero:
-//   1) kailangan pa ring humingi/mag-verify ng OTP (parang unlock din,
-//      kaya kontrolado pa rin ng developer kung sino/ilang beses ito
-//      maibibigay), at
-//   2) may EXPIRY na naka-bake sa mismong signed token (RELAY_DEMO_
-//      DURATION_HOURS, default 24 oras) — kaya kahit i-save ng
-//      kliyente ang token, mag-e-expire pa rin ito nang mag-isa sa
-//      panig ng client server nang hindi na kailangang mag-check pa
-//      ulit dito sa relay.
-// --------------------------------------------------------------
-const DEMO_FEATURE_ID = '__demo__';
-// Fallback/default lang ito ngayon — ang aktwal na tagal ng bawat demo ay
-// PINIPILI NA NG ADMIN kada request (per-request, admin-configurable) sa
-// Approve step sa admin panel, katulad ng ibang time-limited na
-// features/subscriptions. Ginagamit lang ito kapag walang tahasang
-// durationDays na naitakda (tingnan ang /relay/confirm-demo).
-const DEMO_DURATION_MS = (Number(process.env.RELAY_DEMO_DURATION_HOURS) || 24) * 60 * 60 * 1000;
-
-function formatDemoDurationLabel(durationMs) {
-    const hours = durationMs / 3600000;
-    if (hours < 48) {
-        const rounded = Math.round(hours * 10) / 10;
-        return `${rounded} oras`;
-    }
-    const days = Math.round((hours / 24) * 10) / 10;
-    return `${days} araw`;
+function getDemoExpiry() {
+    const data = readFeatureUnlocks();
+    const token = data.tokens[DEMO_FEATURE_ID];
+    if (!token || !token.payload) return null;
+    return typeof token.payload.expiresAt ==='number' ? token.payload.expiresAt : null;
 }
 
-app.post('/relay/request-demo', requireApiKey, requireAllowedDevice, rateLimit('request-demo', 5, 10 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
-    const { installationId, username, storeName, photo } = req.body;
+function getPurchasedFeatureIds() {
+    const data = readFeatureUnlocks();
+    const installationId = getOrCreateInstallationId(data);
+    return Object.keys(data.tokens)
+        .filter(featureId => featureId !== DEMO_FEATURE_ID)
+        .filter(featureId => verifyUnlockToken(data.tokens[featureId], installationId, featureId));
+}
 
-    if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+function getUnlockedFeatureIds() {
+    const purchased = getPurchasedFeatureIds();
+
+    if (isDemoActive()) {
+        return Array.from(new Set([...Object.keys(FEATURE_CATALOG), ...purchased]));
     }
+    return purchased;
+}
 
-    const otpCode = String(Math.floor(100000 + Math.random() * 900000));
-    const key = `${installationId}:${DEMO_FEATURE_ID}`;
-    pendingOtps.set(key, {
-        code: otpCode,
-        expiresAt: Date.now() + OTP_TTL_MS,
-        requestedBy: username || 'Unknown',
-        storeName: storeName || null,
-        photo: photo || null,
-        approved: false,
-        otpVerified: false,
-        installationId,
-        featureId: DEMO_FEATURE_ID,
-        featureName: 'Full Demo Mode',
-        price: null
-    });
+// 'cloud_backup' ay SINASADYANG hindi kasama sa "Pro / fully unlocked"
+// na konsepto — tingnan ang paliwanag sa itaas ng CLOUD_BACKUP_FEATURE_ID
+// (malapit sa FEATURE_CATALOG) kung bakit ito hiwalay pinapresyuhan/
+// ibinebenta sa upgrade options.
+function isFullyProUnlocked() {
+    const purchased = getPurchasedFeatureIds();
+    const allIds = Object.keys(FEATURE_CATALOG).filter(id => id !== CLOUD_BACKUP_FEATURE_ID);
+    return allIds.length > 0 && allIds.every(id => purchased.includes(id));
+}
 
-    try {
-        await notifyUnlockRequest({
-            subject: `🕒 Demo Mode Request — ${storeName || 'Hindi tiyak'}`,
-            text: `May humiling ng FULL DEMO MODE (lahat ng features, pansamantala lang).\n\n` +
-                  `Store: ${storeName || 'Hindi tiyak'}\n` +
-                  `Installation ID: ${installationId}\n` +
-                  `Hiniling ni: ${username || 'Unknown'}\n` +
-                  `OTP Code: ${otpCode}\n` +
-                  `Mag-e-expire ang OTP code na ito sa loob ng 10 minuto.\n\n` +
-                  `Pipiliin mo ang tagal ng demo (hal. ${formatDemoDurationLabel(DEMO_DURATION_MS)} bilang default) sa Admin Panel kapag Ina-Allow/Approve mo ito.\n` +
-                  `Ibigay lang ito kung gusto mo talagang bigyan sila ng full trial.`
-        });
-
-        logActivity(installationId, 'otp_requested', { featureId: DEMO_FEATURE_ID, featureName: 'Full Demo Mode' });
-        res.json({ success: true, message: 'Naipadala ang demo OTP request.' });
-    } catch (err) {
-        console.error('Relay mail send failure (demo):', err);
-        pendingOtps.delete(key);
-        res.status(500).json({ success: false, message: `Nabigo ang pagpapadala ng OTP: ${err.message}` });
-    }
-});
-
-app.post('/relay/confirm-demo', requireApiKey, requireAllowedDevice, rateLimit('confirm-demo', 120, 10 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
-    const { installationId, otp } = req.body;
-
-    if (!installationId || !otp) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId o otp.' });
-    }
-
-    const key = `${installationId}:${DEMO_FEATURE_ID}`;
-    const pending = pendingOtps.get(key);
-
-    if (!pending) {
-        return res.status(400).json({ success: false, message: 'Walang aktibong demo request para dito. Humingi muna ng OTP.' });
-    }
-    if (Date.now() > pending.expiresAt) {
-        pendingOtps.delete(key);
-        return res.status(400).json({ success: false, message: 'Expired na ang OTP code. Humingi ng bago.' });
-    }
-    if (!safeCompare(String(otp).trim(), pending.code)) {
-        return res.status(400).json({ success: false, message: 'Maling OTP code.' });
-    }
-
-    if (!checkApprovalGate(pending)) {
-        return res.json({
+function requireFeature(featureId) {
+    return (req, res, next) => {
+        const unlockedIds = getUnlockedFeatureIds();
+        if (unlockedIds.includes(featureId)) return next();
+        const feature = FEATURE_CATALOG[featureId];
+        const attemptCount = recordLockedAttempt();
+        return res.status(402).json({
             success: false,
-            pending: true,
-            message: 'Tama ang code para sa Demo Mode! Naghihintay na lang ng approval mula sa may-ari. Pakisubukan ulit paglipas ng ilang segundo.'
+            featureLocked: true,
+            featureId,
+            featureName: feature ? feature.name : featureId,
+            price: feature ? feature.price : null,
+            description: feature ? feature.description : null,
+
+            // 'cloud_backup' ay laging dapat gamitin ang SARILI/dedicated
+            // niyang single-feature na unlock prompt (malinaw na presyo +
+            // buong description bago mag-request), HINDI ang paminsan-
+            // minsang bundled "Upgrade Options" tiers modal — dahil
+            // ibang klase ang consent na kailangan dito (nagpapadala ito
+            // ng buong database, kasama ang user accounts, papunta sa
+            // cloud storage ng developer). Kaya laging false ang
+            // showUpgradeTiers para dito, anuman ang attemptCount.
+            showUpgradeTiers: featureId === CLOUD_BACKUP_FEATURE_ID
+                ? false
+                : (attemptCount > 0 && attemptCount % 2 === 0),
+            message: `"${feature ? feature.name : featureId}" is a premium feature and is currently locked. Please unlock it (additional purchase required) to continue.`
         });
-    }
-
-    // Ang TAGAL ng Demo Mode ay PINIPILI NA NGAYON NG ADMIN sa mismong
-    // Approve step (parang ibang time-limited na feature/subscription),
-    // gamit ang parehong pending.durationDays na ginagamit na ng
-    // /relay/confirm-unlock — ang admin panel (approveOtp) ay may
-    // hiwalay na oras-based na duration picker para dito (tingnan ang
-    // promptForDemoDuration() sa public/admin/index.html). Kung sa
-    // kadahilanan man ay walang natukoy na durationDays (hal. direktang
-    // API call na nag-skip sa admin panel), babalik sa dating
-    // DEMO_DURATION_MS default (RELAY_DEMO_DURATION_HOURS) — hindi
-    // kailanman "walang expiry" nang hindi tahasang pinili ng admin.
-    const durationMs = typeof pending.durationDays === 'number' && pending.durationDays > 0
-        ? Math.round(pending.durationDays * 24 * 60 * 60 * 1000)
-        : (pending.durationDays === null ? null : DEMO_DURATION_MS);
-    const token = issueSignedToken(installationId, DEMO_FEATURE_ID, durationMs);
-
-    recordIssuedUnlock(installationId, DEMO_FEATURE_ID, token, {
-        featureName: 'Full Demo Mode',
-        price: null,
-        source: 'otp'
-    });
-    logActivity(installationId, 'unlock_issued', {
-        featureId: DEMO_FEATURE_ID,
-        featureName: 'Full Demo Mode',
-        source: 'otp',
-        durationDays: pending.durationDays ?? null
-    });
-
-    pendingOtps.delete(key);
-
-    res.json({
-        success: true,
-        message: durationMs
-            ? `Buksan na ang Demo Mode sa loob ng ${formatDemoDurationLabel(durationMs)}!`
-            : 'Buksan na ang Demo Mode — walang expiry (tahasang pinili ng admin).',
-        token
-    });
-});
-
-// --------------------------------------------------------------
-// POST /relay/end-demo — SELF-SERVICE, client-facing (requireApiKey lang,
-// HINDI requireAdminKey) na endpoint na tinatawag ng OMNIPOS mismo
-// (POST /api/features/end-demo sa server.js nito) sa sandaling manual na
-// tinapos ng admin ng tindahan ang Demo Mode nito nang maaga.
-//
-// BAKIT KAILANGAN ITO: dati, ang "End Demo" sa OMNIPOS ay LOKAL lang —
-// tinatanggal lang nito ang demo token sa sarili nitong featureUnlocks.json,
-// pero HINDI naaalis ang record dito sa RELAY (issuedUnlocks). Kaya kung
-// may NATITIRA pang oras ang demo bago talaga ito mag-expire (hal. RELAY_
-// DEMO_DURATION_HOURS pa rin sa hinaharap), at nag-hard-reset o nag-restore
-// mula sa RELAY ang device (tingnan ang /relay/restore-check-in), maaari
-// pa ring "bumalik" ang parehong demo session — ibinabalik lang kasi ng
-// restore ang LAHAT ng entries na naka-record dito na hindi pa expired.
-//
-// Kaya sa endpoint na ito, tinatanggal na rin DIRETSO dito sa RELAY ang
-// issued demo entry ng installationId na ito (DEMO_FEATURE_ID lang — hindi
-// ito ginagamit para mag-alis ng kahit anong BINAYARANG feature), kaya
-// TULUYAN na itong hindi na maibabalik pa kahit anong restore/check-in pa
-// ang mangyari — kailangan na ng bagong OTP request kung gugustuhin pang
-// muling buksan ang demo sa hinaharap.
-// --------------------------------------------------------------
-app.post('/relay/end-demo', requireApiKey, requireAllowedDevice, rateLimit('end-demo', 20, 10 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
-    const { installationId } = req.body;
-
-    if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
-    }
-
-    const record = issuedUnlocks[installationId];
-    if (!record || !record[DEMO_FEATURE_ID]) {
-        return res.json({ success: true, alreadyInactive: true, message: 'Wala namang naka-record na aktibong Demo Mode dito sa RELAY para sa device na ito.' });
-    }
-
-    delete record[DEMO_FEATURE_ID];
-    saveIssuedUnlocks(issuedUnlocks);
-    logActivity(installationId, 'demo_ended_early', {
-        featureId: DEMO_FEATURE_ID,
-        featureName: 'Full Demo Mode',
-        reason: 'client_self_service'
-    });
-
-    res.json({ success: true, message: 'Tuluyan nang tinapos ang Demo Mode dito sa RELAY — hindi na ito maibabalik kahit pa may natitirang oras dati.' });
-});
-
-// --------------------------------------------------------------
-// POST /relay/admin/api/devices/:installationId/activate-demo
-// Direktang nagbibigay ng FULL DEMO MODE (lahat ng features, pansamantala
-// lang) sa isang device — WALANG OTP kailangan, at HINDI na kailangang
-// maghintay na ang customer/kliyente mismo ang humingi muna
-// (/relay/request-demo) bago ito ma-Allow/Approve. Gamitin ito kung
-// PROAKTIBO mong gustong bigyan ng trial ang isang device (hal. bagong
-// prospect, demo booth, o follow-up sa naka-Locked pang tindahan) —
-// katulad ng "May reference ka na? i-activate agad" na admin-direct na
-// flow ng ibang FEATURE_CATALOG entries sa /activate sa itaas, pero para
-// dito sa DEMO_FEATURE_ID (na sinasadyang HINDI kasama sa FEATURE_CATALOG
-// kaya hindi dumadaan sa parehong route). Parehong duration convention
-// ang ginamit dito gaya ng promptForDemoDuration() sa admin panel
-// (fractional na bilang ng araw — 0.25 = 6 oras, 0 = tahasang permanente,
-// wala/undefined = babalik sa DEMO_DURATION_MS default).
-// Body: { durationDays }
-// --------------------------------------------------------------
-app.post('/relay/admin/api/devices/:installationId/activate-demo', requireAdminKey, (req, res) => {
-    const { installationId } = req.params;
-    const { durationDays } = req.body;
-
-    const durationMs = typeof durationDays === 'number' && durationDays > 0
-        ? Math.round(durationDays * 24 * 60 * 60 * 1000)
-        : (durationDays === 0 ? null : DEMO_DURATION_MS);
-
-    const token = issueSignedToken(installationId, DEMO_FEATURE_ID, durationMs);
-
-    recordIssuedUnlock(installationId, DEMO_FEATURE_ID, token, {
-        featureName: 'Full Demo Mode',
-        price: null,
-        source: 'admin-direct'
-    });
-    logActivity(installationId, 'unlock_issued', {
-        featureId: DEMO_FEATURE_ID,
-        featureName: 'Full Demo Mode',
-        source: 'admin-direct',
-        durationDays: typeof durationDays === 'number' ? durationDays : null
-    });
-
-    res.json({
-        success: true,
-        message: durationMs
-            ? `Na-activate ang Demo Mode sa loob ng ${formatDemoDurationLabel(durationMs)}.`
-            : 'Na-activate ang Demo Mode — walang expiry (tahasang pinili ng admin).',
-        token
-    });
-});
-
-// --------------------------------------------------------------
-// BULK/BUNDLE UNLOCK — parang /relay/request-unlock + /relay/confirm-
-// unlock sa itaas, pero ISANG OTP na lang ang ginagawa para sa
-// MARAMING featureIds nang sabay (isang tier o custom na à la carte
-// selection mula sa upgrade modal). Sa /confirm-unlock-bulk, GUMAGAWA
-// pa rin ng HIWALAY na signed token PER featureId (parehong eksaktong
-// format ng single-feature token) — kaya walang epekto ito sa
-// verifyUnlockToken() sa panig ng client, pang-convenience lang ito sa
-// itaas ng parehong mekanismo.
-// --------------------------------------------------------------
-app.post('/relay/request-unlock-bulk', requireApiKey, requireAllowedDevice, rateLimit('request-unlock-bulk', 5, 10 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
-    const { installationId, featureIds, featureNames, totalPrice, username, storeName, photo } = req.body;
-
-    if (!installationId || !Array.isArray(featureIds) || featureIds.length === 0) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId o featureIds.' });
-    }
-
-    const otpCode = String(Math.floor(100000 + Math.random() * 900000));
-    const key = `${installationId}:__bulk__:${featureIds.slice().sort().join(',')}`;
-    pendingOtps.set(key, {
-        code: otpCode,
-        expiresAt: Date.now() + OTP_TTL_MS,
-        requestedBy: username || 'Unknown',
-        storeName: storeName || null,
-        photo: photo || null,
-        approved: false,
-        otpVerified: false,
-        installationId,
-        featureIds,
-        featureNames: featureNames || featureIds,
-        price: totalPrice || null
-    });
-
-    try {
-        // Ground-truth mula sa SARILING FEATURE_CATALOG ng relay — hindi
-        // basta client-supplied na totalPrice ang isasalig. Hindi natin
-        // dine-duplicate dito ang proportional bundle-discount math (nasa
-        // OMNIPOS client server lang iyon), pero ipinapakita ang à la
-        // carte sum bilang reference kasama ng anumang unknown featureId,
-        // para may masangguni ang admin bago mag-Approve.
-        const unknownIds = featureIds.filter(id => !FEATURE_CATALOG[id]);
-        const alaCarteTotal = featureIds.reduce((sum, id) => sum + (FEATURE_CATALOG[id] ? FEATURE_CATALOG[id].price : 0), 0);
-
-        await notifyUnlockRequest({
-            subject: `📦 Bundle Unlock Request (${featureIds.length} items)${totalPrice ? ` — ₱${totalPrice}` : ''}`,
-            text: `May humiling na i-unlock ang isang BUNDLE ng ${featureIds.length} feature(s).\n\n` +
-                  `Store: ${storeName || 'Hindi tiyak'}\n` +
-                  `Installation ID: ${installationId}\n` +
-                  `Features: ${(featureNames || featureIds).join(', ')}\n` +
-                  (totalPrice ? `Total Presyo (sinabi ng client, posibleng may bundle discount): ₱${totalPrice}\n` : '') +
-                  `À la carte na kabuuan ayon sa price list namin (walang discount): ₱${alaCarteTotal}\n` +
-                  (unknownIds.length ? `⚠️⚠️ Hindi nakita sa price list namin ang: ${unknownIds.join(', ')} — mag-ingat, HUWAG mag-Approve hangga't hindi na-verify.\n` : '') +
-                  `Hiniling ni: ${username || 'Unknown'}\n` +
-                  `OTP Code: ${otpCode}\n` +
-                  `Mag-e-expire ito sa loob ng 10 minuto.\n\n` +
-                  `I-verify muna ang bayad bago ibigay ang OTP na ito sa kliyente.`
-        });
-
-        logActivity(installationId, 'otp_requested', { featureIds, featureNames: featureNames || featureIds });
-        res.json({ success: true, message: 'Naipadala ang bundle OTP request.' });
-    } catch (err) {
-        console.error('Relay mail send failure (bulk):', err);
-        pendingOtps.delete(key);
-        res.status(500).json({ success: false, message: `Nabigo ang pagpapadala ng OTP: ${err.message}` });
-    }
-});
-
-app.post('/relay/confirm-unlock-bulk', requireApiKey, requireAllowedDevice, rateLimit('confirm-unlock-bulk', 120, 10 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
-    const { installationId, featureIds, otp } = req.body;
-
-    if (!installationId || !Array.isArray(featureIds) || featureIds.length === 0 || !otp) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId, featureIds, o otp.' });
-    }
-
-    const key = `${installationId}:__bulk__:${featureIds.slice().sort().join(',')}`;
-    const pending = pendingOtps.get(key);
-
-    if (!pending) {
-        return res.status(400).json({ success: false, message: 'Walang aktibong bundle unlock request para dito. Humingi muna ng OTP.' });
-    }
-    if (Date.now() > pending.expiresAt) {
-        pendingOtps.delete(key);
-        return res.status(400).json({ success: false, message: 'Expired na ang OTP code. Humingi ng bago.' });
-    }
-    if (!safeCompare(String(otp).trim(), pending.code)) {
-        return res.status(400).json({ success: false, message: 'Maling OTP code.' });
-    }
-
-    if (!checkApprovalGate(pending)) {
-        return res.json({
-            success: false,
-            pending: true,
-            message: 'Tama ang code para sa bundle na ito! Naghihintay na lang ng approval mula sa may-ari. Pakisubukan ulit paglipas ng ilang segundo.'
-        });
-    }
-
-    const tokens = {};
-    const namesList = pending.featureNames || featureIds;
-    // Isang durationDays lang para sa buong bundle na ito (itinakda ng
-    // admin sa Approve) — parehong expiresAt (o wala) ang makukuha ng
-    // lahat ng featureId sa bundle.
-    const durationMs = typeof pending.durationDays === 'number' && pending.durationDays > 0
-        ? pending.durationDays * 24 * 60 * 60 * 1000
-        : null;
-    for (let i = 0; i < featureIds.length; i++) {
-        const featureId = featureIds[i];
-        const token = issueSignedToken(installationId, featureId, durationMs);
-        tokens[featureId] = token;
-
-        const featureName = namesList[i] || featureId;
-        recordIssuedUnlock(installationId, featureId, token, {
-            featureName,
-            price: FEATURE_CATALOG[featureId] ? FEATURE_CATALOG[featureId].price : null,
-            source: 'otp-bulk'
-        });
-        logActivity(installationId, 'unlock_issued', { featureId, featureName, source: 'otp-bulk' });
-    }
-
-    pendingOtps.delete(key);
-
-    res.json({ success: true, message: `Na-unlock ang ${featureIds.length} feature(s)!`, tokens });
-});
-
-// --------------------------------------------------------------
-// GET /relay/latest-version
-// Tinatawag ito ng OMNIPOS CLIENT SERVER (hindi ng browser mismo) sa
-// "Check for Updates" ng Settings nito. Basic API key lang ang
-// kailangan dito (walang requireAllowedDevice) — publicly-readable
-// info lang naman ito (bersyon + changelog), hindi kailangang naka-
-// Allow muna ang device para lang malaman kung may bagong update.
-// --------------------------------------------------------------
-app.get('/relay/latest-version', requireApiKey, rateLimit('latest-version', 60, 10 * 60 * 1000), (req, res) => {
-    // TARGETED RELEASES: kung nagpasa ng ?installationId=... ang client
-    // (bagong bersyon ng OMNIPOS client — tingnan ang /api/system
-    // /update-check doon) AT may targeted entry PARA DITO, ito ang
-    // isasagot sa halip na ang global systemVersionInfo — kaya ibang
-    // device lang (kahit hindi target) ang makakakita ng "may bagong
-    // update" na notice.
-    const installationId = String(req.query.installationId || '').trim();
-    const targeted = installationId ? targetedReleases.get(installationId) : null;
-    const info = targeted || systemVersionInfo;
-    res.json({
-        success: true,
-        latestVersion: info.version || '0.0.0',
-        changelog: info.changelog || '',
-        publishedAt: info.publishedAt || null,
-        targeted: !!targeted
-    });
-});
-
-// --------------------------------------------------------------
-// POST /relay/admin/api/system/publish-version
-// Ito ang tinatawag ng developer/owner (manual, hal. gamit ang curl o
-// isang admin panel form) tuwing may na-merge/na-deploy na bagong
-// upgrade papunta sa mga client repo. Dito lang dapat isulat ang
-// bagong version — HINDI ito awtomatikong nade-derive mula sa git,
-// dahil sadyang hiwalay ang RELAY (developer-hosted lang) sa git repo
-// ng bawat kliyente.
-// --------------------------------------------------------------
-// --------------------------------------------------------------
-// GET /relay/release-package
-// BAGO: para sa self-update ng isang KLIYENTENG NAKA-INSTALL NA
-// (may sarili nang RELAY_API_KEY) — kaiba ito sa /relay/download/:code
-// (na para sa UNANG pag-download bago pa man ma-install ang client).
-// Ito ang tinatawag ng OMNIPOS instance mismo (POST /api/system/deploy
-// -update sa panig nito, sa "self-update mode" kapag walang Render
-// deploy hook na naka-configure, hal. Termux) para kunin ang
-// pinaka-bagong omnipos-client.zip at i-apply ito nang lokal.
-// Gate lang ito ng x-relay-key (parehong pattern ng /relay/latest
-// -version) — hindi kailangan ng requireAllowedDevice dahil parehong
-// developer-issued secret naman ang RELAY_API_KEY sa lahat ng
-// kliyente, at ang release package mismo ay hindi naman
-// client-specific na datos.
-// --------------------------------------------------------------
-app.get('/relay/release-package', requireApiKey, rateLimit('release-package', 10, 60 * 60 * 1000), (req, res) => {
-    if (!fs.existsSync(RELEASE_PACKAGE_PATH)) {
-        return res.status(503).json({ success: false, message: 'Walang naka-publish na release package sa RELAY pa.' });
-    }
-    logActivity(null, 'release_package_self_update_fetch', { ip: req.ip });
-    res.download(RELEASE_PACKAGE_PATH, 'omnipos-client.zip');
-});
-
-app.post('/relay/admin/api/system/publish-version', requireAdminKey, (req, res) => {
-    const { version, changelog, installationId } = req.body || {};
-    const trimmedVersion = String(version || '').trim();
-    if (!trimmedVersion) {
-        return res.status(400).json({ success: false, message: 'Kailangan ang "version" (hal. "1.3.0").' });
-    }
-    const entry = {
-        version: trimmedVersion,
-        changelog: String(changelog || '').trim(),
-        publishedAt: Date.now()
     };
-    // TARGETED PUBLISH: kung may binigay na installationId, dito lang
-    // ito ita-tago (targetedReleases) — HINDI apektado ang global
-    // systemVersionInfo, kaya ang ibang device lang ang walang
-    // makikitang bagong update.
-    const targetId = String(installationId || '').trim();
-    if (targetId) {
-        targetedReleases.set(targetId, entry);
-        saveTargetedReleases(targetedReleases);
-        return res.json({ success: true, targeted: true, installationId: targetId, release: entry });
-    }
-    systemVersionInfo = entry;
-    saveSystemVersionInfo(systemVersionInfo);
-    res.json({ success: true, targeted: false, systemVersionInfo });
-});
+}
 
-app.get('/relay/admin/api/system/version', requireAdminKey, (req, res) => {
-    res.json({ success: true, systemVersionInfo });
-});
-
-// --------------------------------------------------------------
-// POST /relay/admin/api/build-release
-// AWTOMATIKONG gumagawa ng bagong omnipos-client.zip DIREKTA SA RELAY
-// (Render) mismo — WALANG kailangang Termux o kahit anong lokal na
-// machine. Ito ang sagot sa "hindi ba pwede sa RELAY nalang gawin
-// online yun para ipapasa nalang ang zip sa client":
-//
-//   1. Git-clone ang OMNIPOS repo mo (kailangang naka-push na muna ang
-//      pinaka-bagong bersyon dito — gamit mo lang ang normal na
-//      "git push" na dati mong gawi).
-//   2. Tanggalin ang mga bagay na HINDI dapat isama (.git, .env,
-//      database/, node_modules, logs, patches).
-//   3. Gumawa ng BAGONG client .env (RELAY_URL, RELAY_API_KEY, PORT)
-//      at ilagay ITO sa loob ng tmpDir bago mag-zip — kaya kapag
-//      dina-download na ng bagong kliyente ang zip (sa pamamagitan
-//      ng /relay/download/:code), READY NA AGAD ITO — hindi na
-//      kailangang gumawa/mag-upload pa ng sariling .env ang kliyente.
-//   4. I-zip gamit ang "archiver" (purong Node.js — walang external
-//      zip CLI/Termux na kailangan).
-//   5. I-save bilang release/omnipos-client.zip — ito na ang
-//      awtomatikong maiipasa sa /relay/download/:code mula ngayon.
-//
-// Body: { repoUrl?, ref?, relayUrl?, relayApiKey?, port? }
-//   - repoUrl/ref: kung wala, gagamit ng OMNIPOS_REPO_URL env var
-//     (dapat naka-set sa Render dashboard). Kung PRIVATE ang repo,
-//     isama ang access token DIREKTA sa URL, hal.:
-//       https://<TOKEN>@github.com/iyong-username/OMNIPOS.git
-//   - relayUrl: URL na ilalagay sa RELAY_URL ng client .env. Kung
-//     wala, gagamit ng RELAY_PUBLIC_URL env var kung naka-set, kung
-//     wala rin ay awtomatikong kukunin mula sa kasalukuyang request
-//     (req.protocol + req.get('host')).
-//   - relayApiKey: kung wala, gagamit ng RELAY_API_KEY na naka-set na
-//     dito mismo sa RELAY .env (ito rin ang parehong key na
-//     ginagamit ng lahat ng kliyente).
-//   - port: default 3000 kung wala.
-// --------------------------------------------------------------
-// BUG FIX: idinagdag ang 'uploads_tmp' — dating wala ito dito kahit
-// kasama na ito sa EXCLUDE set ng OMNIPOS/build-release.js (lokal na
-// build script). Hindi tugma ang dalawa: kung sakaling ma-commit ang
-// uploads_tmp/ (temp uploaded files — resibo/proof-of-payment photos)
-// sa git repo, ma-i-ship ito sa customer release zip dahil hindi ito
-// na-filter dati ng remote build endpoint na ito.
-const BUILD_EXCLUDE_NAMES = new Set(['.git', 'node_modules', 'database', 'release', 'uploads_tmp']);
-const BUILD_EXCLUDE_EXTENSIONS = new Set(['.log', '.patch']);
-
-function removeExcludedRecursive(dir) {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        const fullPath = path.join(dir, entry.name);
-        if (entry.name === '.env' || BUILD_EXCLUDE_NAMES.has(entry.name)) {
-            fs.rmSync(fullPath, { recursive: true, force: true });
-            continue;
+function checkShiftManagementUnlocked() {
+    const unlockedIds = getUnlockedFeatureIds();
+    if (unlockedIds.includes('shift_management')) return { unlocked: true };
+    const feature = FEATURE_CATALOG['shift_management'];
+    const attemptCount = recordLockedAttempt();
+    return {
+        unlocked: false,
+        body: {
+            success: false,
+            featureLocked: true,
+            featureId:'shift_management',
+            featureName: feature ? feature.name :'shift_management',
+            price: feature ? feature.price : null,
+            showUpgradeTiers: attemptCount > 0 && attemptCount % 2 === 0,
+            message: `"${feature ? feature.name :'shift_management'}" is a premium feature and is currently locked. Please unlock it (additional purchase required) to continue.`
         }
-        if (entry.isFile() && BUILD_EXCLUDE_EXTENSIONS.has(path.extname(entry.name))) {
-            fs.rmSync(fullPath, { force: true });
-            continue;
-        }
-        if (entry.isDirectory()) removeExcludedRecursive(fullPath);
+    };
+}
+
+// --------------------------------------------------------------
+// AUTO-RESTORE FROM RELAY — supports the "emergency hard reset" case
+// (Users > Reset/Restore > System Hard Reset). featureUnlocks.tokens gets
+// wiped on hard reset, BUT the installationId (derived from the hardware
+// fingerprint) STAYS the same — so when this server checks in with
+// RELAY again using the SAME installationId, RELAY can hand back the
+// tokens it previously issued (no new OTP/payment required).
+//
+// This is called: (1) ONCE on server start (best-effort, not required
+// for the app to start), and (2) on-demand via the
+// /api/features/restore-check endpoint (the manual "Sync with Relay Now"
+// button in Settings, for when the user doesn't want to restart the
+// server).
+// --------------------------------------------------------------
+async function attemptRelayRestore() {
+    if (!RELAY_API_KEY) return { attempted: false, restoredCount: 0, restoredFeatureIds: [] };
+    // FIX: dating tumatawag pa rin ito sa RELAY kahit naka-Offline mode
+    // ang user (sinusunod na ng ibang Relay functions ang toggle na ito,
+    // pero hindi ito). Dahil tumatakbo ito every 30s (attemptRelayFeatureSync)
+    // regardless, ito yung pinagmulan ng paulit-ulit na "Could not reach
+    // Relay for auto-restore check" habang naka-Offline mode talaga.
+    if (getConnectivityMode() === 'offline') {
+        return { attempted: false, restoredCount: 0, restoredFeatureIds: [] };
     }
-}
+    // FIX: sinusunod din ngayon ang AKTWAL na internet status (hindi lang
+    // ang manual na toggle) — kung "Online" pa rin ang toggle pero
+    // talagang wala ngang internet ngayon, huwag nang subukan ang buong
+    // relayFetch (20s) — mag-skip agad, tulad ng offline mode.
+    if (!(await isInternetLikelyUp())) {
+        return { attempted: false, restoredCount: 0, restoredFeatureIds: [] };
+    }
 
-// --------------------------------------------------------------
-// OBFUSCATION NG RELEASE PACKAGE (gagana lang sa loob ng tmpDir —
-// HINDI kailanman ginagalaw ang orihinal na OMNIPOS git repo/main
-// branch mo. Isa lang itong "papel" ng temporary na cloned copy na
-// buburahin din pagkatapos i-zip.)
-//
-// Parehong config ito sa build-release.js na hiwalay na binigay para
-// sa OMNIPOS repo mismo (para consistent ang behavior/quality), pero
-// dito ito tinatawag AWTOMATIKO bawat build-release DITO SA RELAY —
-// kaya hindi na kailangan pang mano-manong tumakbo ng `npm run
-// build:release` sa panig mo bago mag-deploy.
-//
-// SYNC FIX: dating hindi kasama dito ang 'mailer.js' at
-// 'verify-gmail-connection.js' — dalawang BAGONG first-party server
-// file (isolated Gmail SMTP + OAuth/API fallback module, at ang
-// standalone CLI verification tool nito, ayon sa hiling na "nakahiwalay
-// ang gmail connection Verification nito at kasama sa package") na
-// naidagdag na sa OMNIPOS/build-release.js's SERVER_TARGETS pero HINDI
-// pa dati dito. Bunga: kapag ang remote/progress-bar na build DITO SA
-// RELAY ang ginamit (sa halip na `npm run build:release` nang lokal),
-// hindi na-o-obfuscate/naisasama ang dalawang file na iyon sa
-// resulting omnipos-client.zip — hindi tugma ang dalawang listahan
-// kahit sinasabi ng komentong ito na "dapat laging magkasabay". Ngayon,
-// pareho na sila.
-// --------------------------------------------------------------
-const RELEASE_SERVER_TARGETS = new Set([
-    'server.js',
-    'db.js',
-    'migrate-to-sqlite.js',
-    '_fix_project.js',
-    'mailer.js',
-    'verify-gmail-connection.js',
-]);
-// NOTE: public/service-worker.js ay SADYANG HINDI kasama dito. Service
-// workers ay may mas mahigpit na execution context kaysa normal na page
-// scripts, at ang selfDefending/controlFlowFlattening output ng
-// javascript-obfuscator ay may known compatibility issues doon
-// (tamper-check code na umaasa sa Function.prototype.toString()
-// self-comparisons). Dagdag pa rito, ang string-array shuffling ay
-// gumagawa ng byte-different na output KADA BUILD — at ang browser ay
-// gumagawa ng byte-for-byte diff ng service-worker.js para malaman kung
-// kailangan mag-install ng bagong SW version, kaya laging nagiging
-// forced update cycle ang bawat redeploy. Ito ang ugat ng PWA
-// install/offline breakage. Maliit lang ang service-worker.js at wala
-// namang business logic na kailangang itago, kaya verbatim/plain na
-// lang ito kokopyahin (parehong fix gaya ng nasa build-release.js sa
-// OMNIPOS repo mismo — dapat laging magkasabay ang dalawang listahan).
-const RELEASE_CLIENT_TARGETS = new Set([
-    path.join('public', 'app.js'),
-    path.join('public', 'bt-printer.js'),
-    path.join('public', 'faq-engine.js'),
-    path.join('public', 'faq-knowledge.js'),
-]);
-const RELEASE_ENV_LOADER_FILENAME = 'env-loader.js';
-const RELEASE_ENV_KEY_FILENAME = '.env.key';
+    const data = readFeatureUnlocks();
+    const installationId = getOrCreateInstallationId(data);
 
-// public/index.html — dito ilalagay ang comment-stripping AT
-// pag-obfuscate ng anumang inline <script> na laman nito (hiwalay
-// sa mga hiwalay na .js file na SERVER/CLIENT_TARGETS).
-const RELEASE_HTML_TARGETS = new Set([
-    path.join('public', 'index.html'),
-]);
+    try {
+        const relayRes = await relayFetch(`${RELAY_URL}/relay/restore-tokens`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-relay-key': RELAY_API_KEY },
+            body: JSON.stringify({ installationId })
+        });
+        const relayData = await parseRelayResponse(relayRes);
 
-// Third-party CSS na dapat HUWAG galawin — kasama ang mga license/
-// attribution header comment nito (hal. "/*! Font Awesome Free ...
-// License ...") na kinakailangan panatilihin ayon sa lisensya nila.
-const THIRD_PARTY_CSS = new Set([
-    path.join('public', 'fontawesome.min.css'),
-    path.join('public', 'css', 'all.css'),
-    path.join('public', 'css', 'all.min.css'),
-    path.join('public', 'css', 'brands.css'),
-    path.join('public', 'css', 'brands.min.css'),
-    path.join('public', 'css', 'fontawesome.css'),
-    path.join('public', 'css', 'fontawesome.min.css'),
-    path.join('public', 'css', 'regular.css'),
-    path.join('public', 'css', 'regular.min.css'),
-    path.join('public', 'css', 'solid.css'),
-    path.join('public', 'css', 'solid.min.css'),
-    path.join('public', 'css', 'svg-with-js.css'),
-    path.join('public', 'css', 'svg-with-js.min.css'),
-    path.join('public', 'css', 'v4-font-face.css'),
-    path.join('public', 'css', 'v4-font-face.min.css'),
-    path.join('public', 'css', 'v4-shims.css'),
-    path.join('public', 'css', 'v4-shims.min.css'),
-    path.join('public', 'css', 'v5-font-face.css'),
-    path.join('public', 'css', 'v5-font-face.min.css'),
-]);
+        if (!relayData.success || !relayData.tokens) {
+            return { attempted: true, restoredCount: 0, restoredFeatureIds: [] };
+        }
 
-const releaseServerObfOptions = {
-    compact: true,
-    target: 'node',
-    controlFlowFlattening: true,
-    controlFlowFlatteningThreshold: 0.4,
-    deadCodeInjection: true,
-    deadCodeInjectionThreshold: 0.15,
-    debugProtection: false,
-    disableConsoleOutput: false,
-    identifierNamesGenerator: 'hexadecimal',
-    numbersToExpressions: true,
-    renameGlobals: false,
-    selfDefending: true,
-    simplify: true,
-    splitStrings: true,
-    splitStringsChunkLength: 12,
-    stringArray: true,
-    stringArrayEncoding: ['base64'],
-    stringArrayThreshold: 0.75,
-    transformObjectKeys: true,
-    unicodeEscapeSequence: false,
-};
-const releaseClientObfOptions = {
-    ...releaseServerObfOptions,
-    target: 'browser',
-    controlFlowFlatteningThreshold: 0.3,
-    deadCodeInjectionThreshold: 0.1,
-};
-
-// PERFORMANCE FIX: control-flow flattening and dead-code injection cost
-// grow much faster than linearly with file size. server.js and
-// public/app.js are each several hundred KB, and running them through
-// the same thresholds as small files is the main reason build-release
-// used to take a very long time (and, on a CPU-constrained host like a
-// Render free instance, block the process long enough to look "stuck").
-// Files at or above this size get scaled-down thresholds instead —
-// still fully obfuscated (renaming, string array encoding, dead code,
-// self-defending all stay on), just without the worst-case blow-up.
-const LARGE_FILE_BYTES = 100 * 1024; // 100KB
-const largeServerObfOptions = {
-    ...releaseServerObfOptions,
-    controlFlowFlatteningThreshold: 0.1,
-    deadCodeInjectionThreshold: 0.04,
-};
-const largeClientObfOptions = {
-    ...releaseClientObfOptions,
-    controlFlowFlatteningThreshold: 0.08,
-    deadCodeInjectionThreshold: 0.03,
-};
-
-function pickReleaseObfOptions(fullPath, isClient) {
-    const isLarge = fs.statSync(fullPath).size >= LARGE_FILE_BYTES;
-    if (isClient) return isLarge ? largeClientObfOptions : releaseClientObfOptions;
-    return isLarge ? largeServerObfOptions : releaseServerObfOptions;
-}
-
-function obfuscateFileInPlace(fullPath, options) {
-    const code = fs.readFileSync(fullPath, 'utf8');
-    const result = JavaScriptObfuscator.obfuscate(code, options);
-    fs.writeFileSync(fullPath, result.getObfuscatedCode(), 'utf8');
-}
-
-// Yields control back to the event loop. Used between obfuscation
-// passes so a long build doesn't fully block RELAY from answering other
-// requests (health checks, status polling, other terminals' API calls)
-// for its entire duration.
-function yieldToEventLoop() {
-    return new Promise((resolve) => setImmediate(resolve));
-}
-
-// Tinatanggal ang lahat ng <!-- ... --> na comment sa isang HTML file.
-function stripHtmlComments(html) {
-    return html.replace(/<!--[\s\S]*?-->/g, '');
-}
-
-// Tinatanggal ang lahat ng /* ... */ na comment sa isang CSS file.
-function stripCssComments(css) {
-    return css.replace(/\/\*[\s\S]*?\*\//g, '');
-}
-
-// Hinahanap at ino-obfuscate ang laman ng anumang INLINE <script> (walang
-// src="...") sa isang HTML file — dito rin daanan ang comments/logic na
-// direktang nakasulat sa index.html mismo, hindi lang sa hiwalay na .js
-// files. Ang mga <script src="..."> (external references) ay HINDI
-// hinahawakan dito.
-function obfuscateHtmlInlineScripts(html, options) {
-    return html.replace(/<script(\s[^>]*)?>([\s\S]*?)<\/script>/gi, (match, attrs, content) => {
-        const attrStr = attrs || '';
-        if (/\bsrc\s*=/i.test(attrStr)) return match; // external script, walang inline content
-        const trimmed = content.trim();
-        if (!trimmed) return match; // walang laman
-        const obfuscated = JavaScriptObfuscator.obfuscate(content, options).getObfuscatedCode();
-        return `<script${attrStr}>${obfuscated}</script>`;
-    });
-}
-
-// Collects every file that needs obfuscating/stripping first (cheap,
-// synchronous directory walk), then processes that flat list with an
-// event-loop yield between each entry. Splitting "plan" from "execute"
-// like this is what lets us yield between files below.
-function planReleaseTree(tmpDir) {
-    const items = [];
-
-    function walk(dir, baseRel) {
-        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-            const rel = path.join(baseRel, entry.name);
-            const full = path.join(dir, entry.name);
-            if (entry.isDirectory()) {
-                walk(full, rel);
+        let restoredCount = 0;
+        const restoredFeatureIds = [];
+        for (const [featureId, token] of Object.entries(relayData.tokens)) {
+            // Skip anything already recorded in data.tokens (e.g. if it
+            // wasn't actually reset, the restore has no effect on it).
+            if (data.tokens[featureId] && verifyUnlockToken(data.tokens[featureId], installationId, featureId)) {
                 continue;
             }
-            // env-loader.js is already handled by encryptClientEnvAndPatchLoader().
-            if (rel === RELEASE_ENV_LOADER_FILENAME) continue;
+            if (!verifyUnlockToken(token, installationId, featureId)) continue; // safety: still verify the signature
+            data.tokens[featureId] = token;
+            restoredCount++;
+            restoredFeatureIds.push(featureId);
+        }
 
-            if (RELEASE_SERVER_TARGETS.has(rel)) {
-                items.push({ type: 'server', full });
-            } else if (RELEASE_CLIENT_TARGETS.has(rel)) {
-                items.push({ type: 'client', full });
-            } else if (RELEASE_HTML_TARGETS.has(rel)) {
-                items.push({ type: 'html', full });
-            } else if (rel.toLowerCase().endsWith('.css') && !THIRD_PARTY_CSS.has(rel)) {
-                items.push({ type: 'css', full });
+        if (restoredCount > 0) {
+            writeData(FILE_FEATURE_UNLOCKS, data);
+            logAction('System', `Automatically restored ${restoredCount} feature(s) from Relay (post-reset check-in).`);
+        }
+
+        return { attempted: true, restoredCount, restoredFeatureIds };
+    } catch (err) {
+        console.warn('⚠️  Could not reach Relay for auto-restore check:', err.message);
+        return { attempted: true, restoredCount: 0, restoredFeatureIds: [], error: err.message };
+    }
+}
+
+// Best-effort na tawag sa pag-start ng server — hindi nire-require na
+// matagumpay ito bago tuloy-tuloy ang app (offline-friendly).
+setTimeout(() => {
+    attemptRelayRestore().catch(() => {});
+}, 3000);
+
+// --------------------------------------------------------------
+// AUTO-LOCKDOWN FROM RELAY — part of the same manual "Sync with Relay
+// Now" button, but the REVERSE of attemptRelayRestore() above: instead
+// of ADDING back a previously unlocked feature, this DETERMINES which
+// feature/theme that is currently LOCAL (we have a token for it here,
+// meaning it was previously unlocked) is NO LONGER recognized by Relay
+// right now — because it was deactivated by the developer/store owner
+// in the admin panel, or its time-based license has expired.
+//
+// Why this needs to be checked separately from the local
+// verifyUnlockToken(): an unlocked token here is a self-contained,
+// signed proof (works even offline) — once it's deactivated on Relay,
+// the local copy doesn't automatically become invalid, since its
+// signature is still valid and it hasn't expired yet. It has to be
+// EXPLICITLY checked against Relay (the only "source of truth" for
+// whether an unlock is still genuine) to know whether it should be
+// removed/locked here on the client as well.
+// --------------------------------------------------------------
+async function attemptRelayFeatureSync() {
+    const restoreResult = await attemptRelayRestore();
+    const restoredFeatureIds = restoreResult.restoredFeatureIds || [];
+
+    if (!RELAY_API_KEY || getConnectivityMode() === 'offline' || !(await isInternetLikelyUp())) {
+        return { attempted: restoreResult.attempted, restoredCount: restoreResult.restoredCount || 0, restoredFeatureIds, removedFeatures: [] };
+    }
+
+    // Re-read the latest contents of the file (attemptRelayRestore()
+    // above may have added to it).
+    const latestData = readFeatureUnlocks();
+    const installationId = getOrCreateInstallationId(latestData);
+    const localFeatureIds = Object.keys(latestData.tokens);
+
+    const removedFeatures = [];
+
+    try {
+        const relayRes = await relayFetch(`${RELAY_URL}/relay/check-feature-status`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-relay-key': RELAY_API_KEY },
+            // Ipinapasa pa rin ang call na ito kahit walang laman ang
+            // localFeatureIds (dating skinip nang buo dati) — dahil dito
+            // rin dumadaan ang "🔄 I-check ngayon" (forceIntegrityCheck)
+            // na pindot ng admin sa integrity monitor, na dapat maabot
+            // ng device kahit wala pa itong kahit isang naka-unlock na
+            // feature.
+            body: JSON.stringify({ installationId, featureIds: localFeatureIds })
+        });
+        const relayData = await parseRelayResponse(relayRes);
+
+        if (relayData.success && relayData.forceIntegrityCheck) {
+            // Hindi na hinihintay ang katapusan nito (fire-and-forget) —
+            // ang layunin lang dito ay i-trigger AGAD ang integrity
+            // check-in sa halip na hintayin pa ang normal na 55s/24h
+            // schedule; ang resulta ay makikita pa rin sa admin panel sa
+            // pamamagitan ng normal na /relay/integrity-checkin flow.
+            runRelayIntegrityCheckin().catch(() => {});
+        }
+
+        if (relayData.success && relayData.statuses && typeof relayData.statuses === 'object') {
+            for (const [featureId, info] of Object.entries(relayData.statuses)) {
+                if (!info || info.status === 'active') continue;
+                if (!latestData.tokens[featureId]) continue;
+
+                delete latestData.tokens[featureId];
+                removedFeatures.push({
+                    featureId,
+                    featureName: info.featureName || (FEATURE_CATALOG[featureId] && FEATURE_CATALOG[featureId].name) || featureId,
+                    category: info.category || (FEATURE_CATALOG[featureId] && FEATURE_CATALOG[featureId].category) || 'module',
+                    reason: info.reason === 'expired' ? 'expired' : 'deactivated'
+                });
+            }
+
+            if (removedFeatures.length > 0) {
+                writeData(FILE_FEATURE_UNLOCKS, latestData);
+                const summary = removedFeatures.map(r => `${r.featureName} (${r.reason})`).join(', ');
+                logAction('System', `Automatically locked ${removedFeatures.length} feature(s) after detecting they are no longer active on Relay (manual sync): ${summary}.`);
+            }
+        }
+    } catch (err) {
+        console.warn('⚠️  Could not reach Relay for the feature status check:', err.message);
+    }
+
+    return { attempted: true, restoredCount: restoreResult.restoredCount || 0, restoredFeatureIds, removedFeatures };
+}
+
+// --------------------------------------------------------------
+// AUTO-SYNC INTERVAL (bagong dagdag) — dati, ang attemptRelayFeatureSync()
+// sa itaas ay tumatakbo lang kapag: (1) pag-start ng server (restore-only,
+// hindi pa lockdown check), o (2) pag-pindot ng user sa manual na
+// "Sync with Relay Now" button. Ibig sabihin, kung may binago ang
+// developer/store owner sa Relay admin panel (nag-deactivate ng feature,
+// nag-expire ang isang license, o nag-restore), HINDI ito agad
+// mapapansin ng OMNIPOS client hangga't hindi ito manually na-sync.
+//
+// Ngayon, tumatakbo na rin ito nang AWTOMATIKO paulit-ulit habang buhay/
+// online ang OMNIPOS server, para halos real-time (ilang segundo lang ang
+// delay) ang pag-react ng OMNIPOS sa anumang pagbabago sa Relay — hindi
+// na kailangang hintayin pa ang manual sync. Kapag offline naman ang
+// OMNIPOS (walang internet), tahimik lang itong nabibigo bawat tawag
+// (naka-try/catch na sa loob mismo ng attemptRelayFeatureSync /
+// attemptRelayRestore), kaya ligtas itong paulit-ulit na tinatawag.
+// --------------------------------------------------------------
+const RELAY_FEATURE_SYNC_INTERVAL_MS = Number(process.env.RELAY_FEATURE_SYNC_INTERVAL_MS) || 30 * 1000; // default: 30s
+if (RELAY_API_KEY) {
+    // Konting delay (10s) mula sa startup para makasunod muna sa unang
+    // best-effort na attemptRelayRestore() sa itaas (3s mark).
+    setTimeout(() => { attemptRelayFeatureSync().catch(() => {}); }, 10 * 1000);
+    setInterval(() => { attemptRelayFeatureSync().catch(() => {}); }, RELAY_FEATURE_SYNC_INTERVAL_MS).unref();
+}
+
+app.post('/api/features/restore-check', rateLimit('feature-restore-check', 10, 10 * 60 * 1000), async (req, res) => {
+    const result = await attemptRelayFeatureSync();
+
+    // Split what actually came back from Relay into the demo session vs.
+    // genuinely purchased features, so the client can show the correct
+    // prompt instead of a generic "feature(s) restored" message.
+    const restoredFeatureIds = result.restoredFeatureIds || [];
+    const demoRestored = restoredFeatureIds.includes(DEMO_FEATURE_ID);
+    const purchasedRestoredCount = restoredFeatureIds.filter(id => id !== DEMO_FEATURE_ID).length;
+
+    const messageParts = [];
+    if (purchasedRestoredCount > 0) {
+        messageParts.push(`Restored ${purchasedRestoredCount} previously purchased feature(s).`);
+    }
+    if (demoRestored) {
+        messageParts.push('Restored an active Demo Mode session for this device.');
+    }
+    if (result.removedFeatures.length > 0) {
+        messageParts.push(`Locked ${result.removedFeatures.length} feature(s) that are no longer active on Relay (deactivated or expired).`);
+    }
+    if (messageParts.length === 0) {
+        messageParts.push('Nothing newly restored — no configurations or previously unlocked features detected for this device.');
+    }
+
+    res.json({
+        success: true,
+        restoredCount: result.restoredCount,
+        restoredFeatureIds,
+        demoRestored,
+        purchasedRestoredCount,
+        removedFeatures: result.removedFeatures,
+        message: messageParts.join(' '),
+        unlockedFeatureIds: getUnlockedFeatureIds()
+    });
+});
+
+app.get('/api/features/status', (req, res) => {
+    res.json({
+        success: true,
+        unlockedFeatureIds: getUnlockedFeatureIds(),
+
+        purchasedFeatureIds: getPurchasedFeatureIds(),
+        fullyPurchased: isFullyProUnlocked()
+    });
+});
+
+async function parseRelayResponse(relayRes) {
+    const rawText = await relayRes.text();
+    let parsed;
+    try {
+        parsed = rawText ? JSON.parse(rawText) : {};
+    } catch (err) {
+        throw new Error(
+            `the relay returned an unexpected non-JSON response (HTTP ${relayRes.status}). ` +
+            `This usually means the relay service isn't running, RELAY_URL is misconfigured, ` +
+            `or the relay crashed and returned an error page instead of JSON.`
+        );
+    }
+    if (!relayRes.ok && parsed.success === undefined) {
+        throw new Error(parsed.message || `the relay responded with HTTP ${relayRes.status}.`);
+    }
+    return parsed;
+}
+
+// --------------------------------------------------------------
+// Kapag tinanggihan ng Relay ang request dahil hindi pa naka-Allow ang
+// device (unang beses palang gumawa ng request ang device na ito), HINDI
+// natin ito dapat ituring na basta "error" — inaasahang pangyayari ito
+// habang naghihintay pa lang ng authorization mula sa developer/store
+// owner (nakikita na ito sa Relay admin panel bilang bagong "Recently
+// Seen" device, madali na lang i-Allow doon). Kaya't gumagawa tayo ng
+// hiwalay/mas magandang response shape (`pendingAuthorization: true`)
+// para maipakita ng OMNIPOS client ang isang "wait for authorization"
+// na prompt sa halip na error dialog.
+function relayRejectionResponse(res, relayData, fallbackMessage) {
+    if (relayData && relayData.deviceNotAllowed) {
+        return res.status(403).json({
+            success: false,
+            pendingAuthorization: true,
+            message: 'Naipadala na ang device na ito papuntang developer/store owner para sa authorization. Wala pang access ang device na ito — maghintay lang na ma-\"Allow\" ka sa Relay admin panel, at awtomatiko na itong susubukan ulit.'
+        });
+    }
+    return res.status(502).json({ success: false, message: (relayData && relayData.message) || fallbackMessage });
+}
+
+app.post('/api/features/request-unlock', requirePermission('relay_unlock_request'), rateLimit('feature-unlock-request', 3, 10 * 60 * 1000), async (req, res) => {
+    const { featureId, username, photo } = req.body;
+    const feature = FEATURE_CATALOG[featureId];
+
+    if (!feature) {
+        return res.status(400).json({ success: false, message:'Unknown feature.' });
+    }
+    if (!RELAY_API_KEY) {
+        return res.status(500).json({ success: false, message:'RELAY_API_KEY is not configured on this server. Please contact the developer.' });
+    }
+
+    const data = readFeatureUnlocks();
+    const installationId = getOrCreateInstallationId(data);
+
+    if (data.tokens[featureId] && verifyUnlockToken(data.tokens[featureId], installationId, featureId)) {
+        return res.json({ success: true, alreadyUnlocked: true, message: `Naka-unlock na ang ${feature.name}.` });
+    }
+
+    try {
+        const receiptSettings = readData(FILE_RECEIPT_SETTINGS, DEFAULT_RECEIPT_SETTINGS);
+        const relayRes = await relayFetch(`${RELAY_URL}/relay/request-unlock`, {
+            method:'POST',
+            headers: {'Content-Type':'application/json','x-relay-key': RELAY_API_KEY },
+            body: JSON.stringify({
+                installationId,
+                featureId,
+                featureName: feature.name,
+                price: feature.price,
+                username: username ||'Unknown',
+                storeName: (receiptSettings && receiptSettings.storeName) || null,
+                photo: photo || null
+            })
+        });
+        const relayData = await parseRelayResponse(relayRes);
+
+        if (!relayData.success) {
+            return relayRejectionResponse(res, relayData, 'The unlock relay declined the request.');
+        }
+
+        logAction(username ||'Unknown', `Humiling ng OTP para i-unlock ang ${feature.name}`);
+        res.json({ success: true, message:'The unlock request has been sent. Please wait for the confirmation code from the developer/owner.' });
+    } catch (err) {
+        console.error('Hindi ma-abot ang Unlock Relay:', err);
+        res.status(502).json({ success: false, message: `Could not reach the unlock relay: ${err.message}. Please verify RELAY_URL and your internet connection.` });
+    }
+});
+
+app.post('/api/features/confirm-unlock', rateLimit('feature-unlock-confirm', 120, 10 * 60 * 1000), async (req, res) => {
+    const { featureId, otp, username } = req.body;
+    const feature = FEATURE_CATALOG[featureId];
+
+    if (!feature) {
+        return res.status(400).json({ success: false, message:'Unknown feature.' });
+    }
+    if (!otp || !String(otp).trim()) {
+        return res.status(400).json({ success: false, message:'The OTP code is required.' });
+    }
+    if (!RELAY_API_KEY) {
+        return res.status(500).json({ success: false, message:'RELAY_API_KEY is not configured on this server. Please contact the developer.' });
+    }
+
+    const data = readFeatureUnlocks();
+    const installationId = getOrCreateInstallationId(data);
+
+    try {
+        const relayRes = await relayFetch(`${RELAY_URL}/relay/confirm-unlock`, {
+            method:'POST',
+            headers: {'Content-Type':'application/json','x-relay-key': RELAY_API_KEY },
+            body: JSON.stringify({ installationId, featureId, otp: String(otp).trim() })
+        });
+        const relayData = await parseRelayResponse(relayRes);
+
+        if (relayData.pending) {
+            return res.status(202).json({ success: false, pending: true, message: relayData.message || 'Tama ang code — naghihintay ng approval ng may-ari.' });
+        }
+
+        if (!relayData.success) {
+            return res.status(400).json({ success: false, message: relayData.message ||'Failed to verify the code.' });
+        }
+
+        if (!verifyUnlockToken(relayData.token, installationId, featureId)) {
+            console.error('⚠️ Natanggap ang isang token mula sa relay pero HINDI valid ang signature nito. Posibleng may problema sa RELAY_PUBLIC_KEY_PEM o kompromisado ang koneksyon.');
+            return res.status(500).json({ success: false, message:'Hindi valid ang signature ng token na natanggap. Kontakin ang developer.' });
+        }
+
+        data.tokens[featureId] = relayData.token;
+        writeData(FILE_FEATURE_UNLOCKS, data);
+        logAction(username ||'Unknown', `Na-unlock ang feature: ${feature.name}`);
+
+        res.json({ success: true, message: `${feature.name} has been unlocked!`, unlockedFeatureIds: getUnlockedFeatureIds() });
+    } catch (err) {
+        console.error('Hindi ma-abot ang Unlock Relay:', err);
+        res.status(502).json({ success: false, message: `Could not reach the unlock relay: ${err.message}. Please verify RELAY_URL and your internet connection.` });
+    }
+});
+
+app.post('/api/features/request-demo', requirePermission('relay_unlock_request'), rateLimit('feature-demo-request', 3, 10 * 60 * 1000), async (req, res) => {
+    const { username, photo } = req.body;
+
+    if (!RELAY_API_KEY) {
+        return res.status(500).json({ success: false, message:'RELAY_API_KEY is not configured on this server. Please contact the developer.' });
+    }
+
+    const data = readFeatureUnlocks();
+    const installationId = getOrCreateInstallationId(data);
+
+    if (isDemoActive()) {
+        return res.json({ success: true, alreadyActive: true, message:'Aktibo na ang Demo Mode.', demoExpiresAt: getDemoExpiry() });
+    }
+
+    try {
+        const receiptSettings = readData(FILE_RECEIPT_SETTINGS, DEFAULT_RECEIPT_SETTINGS);
+        const relayRes = await relayFetch(`${RELAY_URL}/relay/request-demo`, {
+            method:'POST',
+            headers: {'Content-Type':'application/json','x-relay-key': RELAY_API_KEY },
+            body: JSON.stringify({
+                installationId,
+                username: username ||'Unknown',
+                storeName: (receiptSettings && receiptSettings.storeName) || null,
+                photo: photo || null
+            })
+        });
+        const relayData = await parseRelayResponse(relayRes);
+
+        if (!relayData.success) {
+            return relayRejectionResponse(res, relayData, 'The unlock relay declined the request.');
+        }
+
+        logAction(username ||'Unknown','Humiling ng OTP para sa Demo Mode');
+        res.json({ success: true, message:'The demo request has been sent. Please wait for the confirmation code from the developer/owner.' });
+    } catch (err) {
+        console.error('Hindi ma-abot ang Unlock Relay (demo):', err);
+        res.status(502).json({ success: false, message: `Could not reach the unlock relay: ${err.message}. Please verify RELAY_URL and your internet connection.` });
+    }
+});
+
+app.post('/api/features/confirm-demo', rateLimit('feature-demo-confirm', 120, 10 * 60 * 1000), async (req, res) => {
+    const { otp, username } = req.body;
+
+    if (!otp || !String(otp).trim()) {
+        return res.status(400).json({ success: false, message:'The OTP code is required.' });
+    }
+    if (!RELAY_API_KEY) {
+        return res.status(500).json({ success: false, message:'RELAY_API_KEY is not configured on this server. Please contact the developer.' });
+    }
+
+    const data = readFeatureUnlocks();
+    const installationId = getOrCreateInstallationId(data);
+
+    try {
+        const relayRes = await relayFetch(`${RELAY_URL}/relay/confirm-demo`, {
+            method:'POST',
+            headers: {'Content-Type':'application/json','x-relay-key': RELAY_API_KEY },
+            body: JSON.stringify({ installationId, otp: String(otp).trim() })
+        });
+        const relayData = await parseRelayResponse(relayRes);
+
+        if (relayData.pending) {
+            return res.status(202).json({ success: false, pending: true, message: relayData.message || 'Tama ang code — naghihintay ng approval ng may-ari.' });
+        }
+
+        if (!relayData.success) {
+            return res.status(400).json({ success: false, message: relayData.message ||'Failed to verify the code.' });
+        }
+
+        if (!verifyUnlockToken(relayData.token, installationId, DEMO_FEATURE_ID)) {
+            console.error('⚠️ Natanggap ang isang demo token mula sa relay pero HINDI valid ang signature/expiry nito.');
+            return res.status(500).json({ success: false, message:'Hindi valid ang signature ng token na natanggap. Kontakin ang developer.' });
+        }
+
+        data.tokens[DEMO_FEATURE_ID] = relayData.token;
+        writeData(FILE_FEATURE_UNLOCKS, data);
+        logAction(username ||'Unknown','Na-activate ang Demo Mode');
+
+        res.json({
+            success: true,
+            message:'Demo Mode has been activated!',
+            demoExpiresAt: getDemoExpiry(),
+            unlockedFeatureIds: getUnlockedFeatureIds()
+        });
+    } catch (err) {
+        console.error('Hindi ma-abot ang Unlock Relay (demo confirm):', err);
+        res.status(502).json({ success: false, message: `Could not reach the unlock relay: ${err.message}. Please verify RELAY_URL and your internet connection.` });
+    }
+});
+
+app.get('/api/features/demo-status', (req, res) => {
+    const active = isDemoActive();
+    res.json({
+        success: true,
+        demoActive: active,
+        demoExpiresAt: active ? getDemoExpiry() : null,
+        fullyPurchased: isFullyProUnlocked()
+    });
+});
+
+app.post('/api/features/end-demo', async (req, res) => {
+    if (!req.authUser || req.authUser.role.toLowerCase() !=='admin') {
+        return res.status(403).json({ success: false, message:'Aksyon Tinanggihan: Admin privileges lamang ang pwedeng magtapos ng Demo Mode nang maaga.' });
+    }
+    const data = readFeatureUnlocks();
+    if (!data.tokens[DEMO_FEATURE_ID]) {
+        return res.json({ success: true, alreadyInactive: true, message:'Wala namang aktibong Demo Mode.' });
+    }
+    delete data.tokens[DEMO_FEATURE_ID];
+    writeData(FILE_FEATURE_UNLOCKS, data);
+    logAction(req.authUser.username,'Manual na tinapos ang Demo Mode bago pa man mag-expire.');
+
+    // Sabihin din sa RELAY na tapos na ang demo na ito — kung LOKAL lang
+    // ito (sa featureUnlocks.json ng OMNIPOS na ito) ang tatanggalin, may
+    // NATITIRA pa ring record ng issued demo sa RELAY (issuedUnlocks)
+    // hanggang sa mismong expiry nito. Kung mag-hard-reset o mag-restore
+    // mula sa RELAY ang device bago mag-expire ang orihinal na demo,
+    // maaaring "bumalik" pa ito kahit tinapos na ito nang maaga dito.
+    // Kaya tinatawagan ang /relay/end-demo (self-service, hindi
+    // admin-key) para TULUYANG matanggal ang demo entry sa RELAY mismo —
+    // hindi na ito maibabalik pa kahit anong restore/check-in pa mangyari.
+    // Hindi ito dapat harangin ang response papunta sa user kahit mabigo
+    // ang RELAY call (offline man ang device, o down ang RELAY) — lokal
+    // na tapos na ang demo, at "best-effort" lang ang RELAY-side cleanup.
+    if (RELAY_API_KEY) {
+        try {
+            const installationId = getOrCreateInstallationId(data);
+            const relayRes = await relayFetch(`${RELAY_URL}/relay/end-demo`, {
+                method:'POST',
+                headers: {'Content-Type':'application/json','x-relay-key': RELAY_API_KEY },
+                body: JSON.stringify({ installationId })
+            });
+            const relayData = await relayRes.json().catch(() => null);
+            if (!relayRes.ok || !relayData || !relayData.success) {
+                console.warn('⚠️ END_DEMO: hindi na-confirm ng RELAY ang pagtatapos ng demo (lokal na tapos na ito pero maaaring "bumalik" pa mula sa RELAY sa susunod na restore):', relayData && relayData.message);
+            }
+        } catch (e) {
+            console.warn('⚠️ END_DEMO: hindi na-abot ang RELAY para tuluyang tapusin ang demo doon:', e.message);
+        }
+    }
+
+    res.json({
+        success: true,
+        message:'Demo Mode has been closed.',
+        unlockedFeatureIds: getUnlockedFeatureIds(),
+        fullyPurchased: isFullyProUnlocked()
+    });
+});
+
+app.get('/api/features/upgrade-catalog', (req, res) => {
+    const alreadyPurchased = getPurchasedFeatureIds();
+    // 'cloud_backup' ay laging tinatanggal dito — hindi ito dapat lumabas
+    // bilang isa pang à la carte checkbox sa pangkalahatang "Upgrade
+    // Options" modal. Ang presyo/pag-unlock nito ay dapat laging dumaan
+    // sa sarili nitong dedicated prompt (tingnan ang requireFeature() at
+    // ang showUpgradeTiers override para sa CLOUD_BACKUP_FEATURE_ID sa
+    // itaas ng file na ito).
+    const features = Object.keys(FEATURE_CATALOG)
+        .filter(id => id !== CLOUD_BACKUP_FEATURE_ID)
+        .map(id => ({ id, ...FEATURE_CATALOG[id] }));
+    const tiers = UPGRADE_TIERS.map(tier => {
+        const { discount, effectivePrice } = getTierPricing(tier, alreadyPurchased);
+        const remainingFeatureIds = tier.featureIds.filter(id => !alreadyPurchased.includes(id));
+        return {
+            id: tier.id,
+            name: tier.name,
+            description: tier.description,
+            featureIds: tier.featureIds,
+            alaCartePrice: sumFeaturePrices(remainingFeatureIds),
+            bundlePrice: tier.bundlePrice,
+            bundleSavings: discount,
+            effectiveBundlePrice: effectivePrice
+        };
+    });
+    res.json({ success: true, features, tiers });
+});
+
+app.post('/api/features/request-unlock-bulk', requirePermission('relay_unlock_request'), rateLimit('feature-unlock-bulk-request', 3, 10 * 60 * 1000), async (req, res) => {
+    const { featureIds, tierId, username, photo } = req.body;
+
+    if (!Array.isArray(featureIds) || featureIds.length === 0) {
+        return res.status(400).json({ success: false, message:'featureIds must be a non-empty array.' });
+    }
+    const unknown = featureIds.filter(id => !FEATURE_CATALOG[id]);
+    if (unknown.length) {
+        return res.status(400).json({ success: false, message: `Unknown feature(s): ${unknown.join(', ')}` });
+    }
+    // Server-side enforcement (hindi lang UI-level): kahit ma-craft man
+    // ng client ang request nito nang direkta, hindi dapat makadaan ang
+    // 'cloud_backup' sa bulk/bundle na landas. Kailangan itong i-request
+    // nang mag-isa sa pamamagitan ng /api/features/request-unlock (tingnan
+    // ang promptUnlockFeature() sa app.js).
+    if (featureIds.includes(CLOUD_BACKUP_FEATURE_ID)) {
+        return res.status(400).json({ success: false, message:'Ang Cloud Backup ay hiwalay na pinoproseso — gamitin ang sarili nitong "Get Cloud Backup" na prompt, hindi ang bundle/tier na unlock.' });
+    }
+    if (!RELAY_API_KEY) {
+        return res.status(500).json({ success: false, message:'RELAY_API_KEY is not configured on this server. Please contact the developer.' });
+    }
+
+    const data = readFeatureUnlocks();
+    const installationId = getOrCreateInstallationId(data);
+
+    const alreadyPurchased = getPurchasedFeatureIds();
+    const stillLocked = featureIds.filter(id => !alreadyPurchased.includes(id));
+    if (stillLocked.length === 0) {
+        return res.json({ success: true, alreadyUnlocked: true, message:'Naka-unlock na ang lahat ng napili.' });
+    }
+
+    // Kung pumili ang client ng isang PACKAGE/TIER (hindi à la carte), gamitin
+    // ang PROPORTIONAL na presyo ng tier para sa mga natitirang naka-lock na
+    // item (tingnan ang getTierPricing() sa itaas) — huwag basta i-sum ang
+    // mga à la carte na presyo, dahil doon nanggagaling ang dating bug kung
+    // saan hindi tugma ang presyong lumalabas sa OTP email sa presyong
+    // nakita ng client sa Upgrade modal. Ang discounted na presyo ay VALID
+    // lang kung eksaktong tumutugma ang (still-locked) na featureIds sa
+    // (still-locked) na featureIds ng tier na sinasabing pinili — kung hindi
+    // tugma (i.e. pinalitan/dinagdagan ng request ang listahan), bumalik sa
+    // à la carte sum bilang ligtas na default.
+    let totalPrice = sumFeaturePrices(stillLocked);
+    if (tierId) {
+        const tier = UPGRADE_TIERS.find(t => t.id === tierId);
+        if (tier) {
+            const tierStillLocked = tier.featureIds.filter(id => !alreadyPurchased.includes(id));
+            const sameSet = tierStillLocked.length === stillLocked.length &&
+                tierStillLocked.every(id => stillLocked.includes(id));
+            if (sameSet) {
+                totalPrice = getTierPricing(tier, alreadyPurchased).effectivePrice;
             }
         }
     }
 
-    walk(tmpDir, '');
+    try {
+        const receiptSettings = readData(FILE_RECEIPT_SETTINGS, DEFAULT_RECEIPT_SETTINGS);
+        const relayRes = await relayFetch(`${RELAY_URL}/relay/request-unlock-bulk`, {
+            method:'POST',
+            headers: {'Content-Type':'application/json','x-relay-key': RELAY_API_KEY },
+            body: JSON.stringify({
+                installationId,
+                featureIds: stillLocked,
+                featureNames: stillLocked.map(id => FEATURE_CATALOG[id].name),
+                totalPrice,
+                username: username ||'Unknown',
+                storeName: (receiptSettings && receiptSettings.storeName) || null,
+                photo: photo || null
+            })
+        });
+        const relayData = await parseRelayResponse(relayRes);
+
+        if (!relayData.success) {
+            return relayRejectionResponse(res, relayData, 'The unlock relay declined the request.');
+        }
+
+        logAction(username ||'Unknown', `Humiling ng OTP para i-unlock ang ${stillLocked.length} feature(s) (₱${totalPrice})`);
+        res.json({ success: true, message:'The bundle unlock request has been sent. Please wait for the confirmation code.', totalPrice, featureIds: stillLocked });
+    } catch (err) {
+        console.error('Hindi ma-abot ang Unlock Relay (bulk):', err);
+        res.status(502).json({ success: false, message: `Could not reach the unlock relay: ${err.message}. Please verify RELAY_URL and your internet connection.` });
+    }
+});
+
+app.post('/api/features/confirm-unlock-bulk', rateLimit('feature-unlock-bulk-confirm', 120, 10 * 60 * 1000), async (req, res) => {
+    const { featureIds, otp, username } = req.body;
+
+    if (!Array.isArray(featureIds) || featureIds.length === 0) {
+        return res.status(400).json({ success: false, message:'featureIds must be a non-empty array.' });
+    }
+    if (!otp || !String(otp).trim()) {
+        return res.status(400).json({ success: false, message:'The OTP code is required.' });
+    }
+    if (!RELAY_API_KEY) {
+        return res.status(500).json({ success: false, message:'RELAY_API_KEY is not configured on this server. Please contact the developer.' });
+    }
+
+    const data = readFeatureUnlocks();
+    const installationId = getOrCreateInstallationId(data);
+
+    try {
+        const relayRes = await relayFetch(`${RELAY_URL}/relay/confirm-unlock-bulk`, {
+            method:'POST',
+            headers: {'Content-Type':'application/json','x-relay-key': RELAY_API_KEY },
+            body: JSON.stringify({ installationId, featureIds, otp: String(otp).trim() })
+        });
+        const relayData = await parseRelayResponse(relayRes);
+
+        if (relayData.pending) {
+            return res.status(202).json({ success: false, pending: true, message: relayData.message || 'Tama ang code — naghihintay ng approval ng may-ari.' });
+        }
+
+        if (!relayData.success) {
+            return res.status(400).json({ success: false, message: relayData.message ||'Failed to verify the code.' });
+        }
+
+        const tokens = relayData.tokens || {};
+        for (const featureId of featureIds) {
+            const token = tokens[featureId];
+            if (!token || !verifyUnlockToken(token, installationId, featureId)) {
+                console.error(`⚠️ Invalid/missing token mula sa relay para sa ${featureId} (bulk confirm).`);
+                return res.status(500).json({ success: false, message: `Hindi valid ang token na natanggap para sa ${featureId}. Kontakin ang developer.` });
+            }
+        }
+        featureIds.forEach(featureId => { data.tokens[featureId] = tokens[featureId]; });
+        writeData(FILE_FEATURE_UNLOCKS, data);
+        logAction(username ||'Unknown', `Na-unlock ang ${featureIds.length} feature(s) via bundle`);
+
+        res.json({ success: true, message:'Bundle unlocked!', unlockedFeatureIds: getUnlockedFeatureIds() });
+    } catch (err) {
+        console.error('Hindi ma-abot ang Unlock Relay (bulk confirm):', err);
+        res.status(502).json({ success: false, message: `Could not reach the unlock relay: ${err.message}. Please verify RELAY_URL and your internet connection.` });
+    }
+});
+
+app.get('/api/themes/status', (req, res) => {
+    const unlockedFeatureIds = getUnlockedFeatureIds();
+    const unlockedThemeIds = unlockedFeatureIds.filter(id => FEATURE_CATALOG[id] && FEATURE_CATALOG[id].category ==='theme');
+    res.json({ success: true, unlockedThemeIds });
+});
+
+app.post('/api/themes/request-unlock', requirePermission('relay_unlock_request'), rateLimit('theme-unlock-request', 3, 10 * 60 * 1000), async (req, res) => {
+    const { themeId, username, photo } = req.body;
+    const theme = FEATURE_CATALOG[themeId];
+
+    if (!theme || theme.category !=='theme') {
+        return res.status(400).json({ success: false, message:'Unknown Pro theme.' });
+    }
+    if (!RELAY_API_KEY) {
+        return res.status(500).json({ success: false, message:'RELAY_API_KEY is not configured on this server. Please contact the developer.' });
+    }
+
+    const data = readFeatureUnlocks();
+    const installationId = getOrCreateInstallationId(data);
+
+    if (data.tokens[themeId] && verifyUnlockToken(data.tokens[themeId], installationId, themeId)) {
+        return res.json({ success: true, alreadyUnlocked: true, message: `Naka-unlock na ang ${theme.name}.` });
+    }
+
+    try {
+        const receiptSettings = readData(FILE_RECEIPT_SETTINGS, DEFAULT_RECEIPT_SETTINGS);
+        const relayRes = await relayFetch(`${RELAY_URL}/relay/request-unlock`, {
+            method:'POST',
+            headers: {'Content-Type':'application/json','x-relay-key': RELAY_API_KEY },
+            body: JSON.stringify({
+                installationId,
+                featureId: themeId,
+                featureName: theme.name,
+                price: theme.price,
+                username: username ||'Unknown',
+                storeName: (receiptSettings && receiptSettings.storeName) || null,
+                photo: photo || null
+            })
+        });
+        const relayData = await parseRelayResponse(relayRes);
+
+        if (!relayData.success) {
+            return relayRejectionResponse(res, relayData, 'The unlock relay declined the request.');
+        }
+
+        logAction(username ||'Unknown', `Humiling ng OTP para i-unlock ang ${theme.name}`);
+        res.json({ success: true, message:'The unlock request has been sent. Please wait for the confirmation code from the developer/owner.' });
+    } catch (err) {
+        console.error('Hindi ma-abot ang Unlock Relay:', err);
+        res.status(502).json({ success: false, message: `Could not reach the unlock relay: ${err.message}. Please verify RELAY_URL and your internet connection.` });
+    }
+});
+
+app.post('/api/themes/confirm-unlock', rateLimit('theme-unlock-confirm', 120, 10 * 60 * 1000), async (req, res) => {
+    const { themeId, otp, username } = req.body;
+    const theme = FEATURE_CATALOG[themeId];
+    if (!theme || theme.category !=='theme') {
+        return res.status(400).json({ success: false, message:'Unknown Pro theme.' });
+    }
+    if (!otp || !String(otp).trim()) {
+        return res.status(400).json({ success: false, message:'The OTP code is required.' });
+    }
+    if (!RELAY_API_KEY) {
+        return res.status(500).json({ success: false, message:'RELAY_API_KEY is not configured on this server. Please contact the developer.' });
+    }
+
+    const data = readFeatureUnlocks();
+    const installationId = getOrCreateInstallationId(data);
+
+    try {
+        const relayRes = await relayFetch(`${RELAY_URL}/relay/confirm-unlock`, {
+            method:'POST',
+            headers: {'Content-Type':'application/json','x-relay-key': RELAY_API_KEY },
+            body: JSON.stringify({ installationId, featureId: themeId, otp: String(otp).trim() })
+        });
+        const relayData = await parseRelayResponse(relayRes);
+
+        if (relayData.pending) {
+            return res.status(202).json({ success: false, pending: true, message: relayData.message || 'Tama ang code — naghihintay ng approval ng may-ari.' });
+        }
+
+        if (!relayData.success) {
+            return res.status(400).json({ success: false, message: relayData.message ||'Failed to verify the code.' });
+        }
+        if (!verifyUnlockToken(relayData.token, installationId, themeId)) {
+            console.error('⚠️ Natanggap ang isang token mula sa relay pero HINDI valid ang signature nito.');
+            return res.status(500).json({ success: false, message:'Hindi valid ang signature ng token na natanggap. Kontakin ang developer.' });
+        }
+
+        data.tokens[themeId] = relayData.token;
+        writeData(FILE_FEATURE_UNLOCKS, data);
+        logAction(username ||'Unknown', `Na-unlock ang Pro theme: ${theme.name}`);
+
+        const unlockedThemeIds = getUnlockedFeatureIds().filter(id => FEATURE_CATALOG[id] && FEATURE_CATALOG[id].category ==='theme');
+        res.json({ success: true, message: `${theme.name} has been unlocked!`, unlockedThemeIds });
+    } catch (err) {
+        console.error('Hindi ma-abot ang Unlock Relay:', err);
+        res.status(502).json({ success: false, message: `Could not reach the unlock relay: ${err.message}. Please verify RELAY_URL and your internet connection.` });
+    }
+});
+
+function getPHTime() {
+    return new Date().toLocaleString("sv-SE", { timeZone:"Asia/Manila" });
+}
+
+const defaultUsers = [
+    { username:'admin', password:'admin', role:'Admin', created:'2026-07-07 04:32:09' },
+    { username:'cashier1', password:'cashier123', role:'Cashier', created:'2026-07-07 18:30:20' },
+    { username:'staff', password:'staff123', role:'Staff', created:'2026-07-07 16:34:41' }
+];
+
+// Tinutukoy dito ang petsa ng expiry RELATIVE sa mismong sandali ng
+// unang pag-launch ng bagong client (hindi naka-hardcode na absolute
+// date) — para kahit kailan pa i-extract/i-deploy ito ng bagong
+// kliyente, laging "makatotohanan" (hindi agad EXPIRED) ang mga sample
+// na petsa, at para makita rin nila agad ang "Expiring Soon" na feature
+// sa dashboard gamit ang Fresh Milk (default: 5 araw na lang bago
+// mag-expire, loob ng 0–7 araw na saklaw ng "Expiring Soon" sa UI).
+function daysFromNow(days) {
+    const d = new Date();
+    d.setDate(d.getDate() + days);
+    return d.toISOString().split('T')[0]; // YYYY-MM-DD — tugma sa <input type="date">
+}
+
+const defaultProducts = [
+    { code:'PRDT20250001', name:'Bottled Water 500ml', category:'Beverages', price: 25.00, stock: 8, cost: 15.00, supplier:'Absolute Distribution', expiryDate: daysFromNow(180), lowStockThreshold: 5 },
+    { code:'PRDT20250002', name:'Coca-Cola 1L', category:'Beverages', price: 55.00, stock: 9, cost: 42.00, supplier:'Coca-Cola Beverages Philippines, Inc.', expiryDate: daysFromNow(150), lowStockThreshold: 5 },
+    { code:'PRDT20250003', name:'Fresh Milk 1L', category:'Dairy', price: 85.00, stock: 10, cost: 65.00, supplier:'Local Dairy Supplier', expiryDate: daysFromNow(5), lowStockThreshold: 4 },
+    { code:'PRDT20250004', name:'Nova Multigrain', category:'Snacks', price: 30.00, stock: 10, cost: 22.00, supplier:'Universal Robina Corporation', expiryDate: daysFromNow(90), lowStockThreshold: 5 },
+    { code:'PRDT20250005', name:'Piattos Cheese', category:'Snacks', price: 35.00, stock: 10, cost: 26.00, supplier:'Universal Robina Corporation', expiryDate: daysFromNow(90), lowStockThreshold: 5 }
+];
+
+if (readData(FILE_USERS).length === 0) {
+    const secureDefaultUsers = defaultUsers.map(u => ({
+        ...u,
+        password: bcrypt.hashSync(u.password, 10)
+    }));
+    writeData(FILE_USERS, secureDefaultUsers);
+}
+if (readData(FILE_PRODUCTS).length === 0) writeData(FILE_PRODUCTS, defaultProducts);
+
+function verifyAdmin(req, res, next) {
+
+    const { username, adminPassword } = req.body;
+
+    if (!username) {
+        return res.status(400).json({ success: false, message:'May kulang na impormasyon (Username required).' });
+    }
+
+    const users = readData(FILE_USERS);
+    const activeUser = users.find(u => u.username.toLowerCase() === username.toLowerCase());
+
+    if (!activeUser || activeUser.role.toLowerCase() !=='admin') {
+        return res.status(403).json({
+            success: false,
+            message:'Akses Denied: Ang account na ito ay walang sapat na pribilehiyo bilang Admin!'
+        });
+    }
+
+    if (!adminPassword) {
+        return res.status(400).json({ success: false, message:'Kailangan ng Admin password para sa aksyong ito.' });
+    }
+
+    let isPasswordCorrect = false;
+    try {
+        isPasswordCorrect = bcrypt.compareSync(adminPassword, activeUser.password);
+    } catch (e) {
+        isPasswordCorrect = (adminPassword === activeUser.password);
+    }
+
+    if (!isPasswordCorrect) {
+
+        return res.status(403).json({ success: false, code:'WRONG_ADMIN_PASSWORD', message:'Maling Admin Password. Hindi pinahintulutan ang aksyong ito.' });
+    }
+
+    next();
+}
+
+app.get('/api/roles', (req, res) => {
+    res.json({ success: true, roles: getRoles(), menuRegistry: MENU_REGISTRY });
+});
+
+app.post('/api/roles', requireFeature('rbac_management'), verifyAdmin, (req, res) => {
+    const { roleName, permissions } = req.body;
+    if (!roleName || typeof roleName !=='string' || !roleName.trim()) {
+        return res.status(400).json({ success: false, message:'Kailangan ng pangalan ng role.' });
+    }
+    const name = roleName.trim();
+    if (name.toLowerCase() ==='admin') {
+        return res.status(403).json({ success: false, message:'Nakareserba ang pangalang "Admin" bilang huling super-admin ng system.' });
+    }
+    if (!permissions || typeof permissions !=='object') {
+        return res.status(400).json({ success: false, message:'Kulang ang permissions data.' });
+    }
+
+    let roles = getRoles();
+
+    const normalizedPerms = {};
+    MENU_REGISTRY.forEach(m => { normalizedPerms[m.key] = !!permissions[m.key]; });
+
+    const existingIdx = roles.findIndex(r => r.name.toLowerCase() === name.toLowerCase());
+    if (existingIdx !== -1) {
+        if (roles[existingIdx].protected) {
+            return res.status(403).json({ success: false, message: `Hindi maaaring baguhin ang "${roles[existingIdx].name}" role.` });
+        }
+        roles[existingIdx].permissions = normalizedPerms;
+    } else {
+        roles.push({ name, protected: false, permissions: normalizedPerms });
+    }
+    writeData(FILE_ROLES, roles);
+    logAction(req.authUser.username, `Na-update ang permissions ng role: ${name}`);
+    res.json({ success: true, roles });
+});
+
+app.post('/api/roles/reorder', requireFeature('rbac_management'), verifyAdmin, (req, res) => {
+    const { orderedRoleNames } = req.body;
+    if (!Array.isArray(orderedRoleNames) || !orderedRoleNames.length) {
+        return res.status(400).json({ success: false, message:'Kailangan ng listahan ng roles sa bagong pagkakasunod-sunod.' });
+    }
+
+    let roles = getRoles();
+
+    const currentNamesLower = roles.map(r => r.name.toLowerCase()).sort();
+    const requestedNamesLower = orderedRoleNames.map(n => (n ||'').toLowerCase()).sort();
+    const sameSet = currentNamesLower.length === requestedNamesLower.length &&
+        currentNamesLower.every((n, i) => n === requestedNamesLower[i]);
+
+    if (!sameSet) {
+        return res.status(400).json({ success: false, message:'Hindi tugma ang listahan ng roles — baka may role na nadagdag/nabura habang nagre-reorder.' });
+    }
+
+    const roleByLowerName = new Map(roles.map(r => [r.name.toLowerCase(), r]));
+    const reordered = orderedRoleNames.map(n => roleByLowerName.get(n.toLowerCase()));
+
+    writeData(FILE_ROLES, reordered);
+    logAction(req.body.username ||'Unknown', `Binago ang pagkakasunod-sunod ng Role columns sa Permission Matrix: ${orderedRoleNames.join(' → ')}`);
+    res.json({ success: true, roles: reordered });
+});
+
+app.post('/api/roles/delete', requireFeature('rbac_management'), verifyAdmin, (req, res) => {
+    const { roleName } = req.body;
+    let roles = getRoles();
+    const role = roles.find(r => r.name.toLowerCase() === (roleName ||'').toLowerCase());
+    if (!role) return res.status(404).json({ success: false, message:'Role not found.' });
+    if (role.protected) return res.status(403).json({ success: false, message:'Hindi maaaring burahin ang Admin role.' });
+
+    const users = readData(FILE_USERS);
+    const inUse = users.some(u => u.role.toLowerCase() === role.name.toLowerCase());
+    if (inUse) {
+        return res.status(409).json({ success: false, message: `May mga user pa na naka-assign sa role na "${role.name}". I-reassign muna sila bago ito burahin.` });
+    }
+
+    roles = roles.filter(r => r.name.toLowerCase() !== role.name.toLowerCase());
+    writeData(FILE_ROLES, roles);
+    logAction(req.authUser.username, `Binura ang role: ${role.name}`);
+    res.json({ success: true, roles });
+});
+
+const LOGIN_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
+
+// ====================================================================
+// TWO-FACTOR AUTHENTICATION (2FA) — OTP via email, Admin login lamang
+// ====================================================================
+// Kapag naka-ON ang "twoFactorLoginEnabled" sa Advanced Settings, ang mga
+// account na may role na "Admin" ay dadaan muna sa isang OTP step bago
+// tuluyang makapasok, matapos tumugma ang username/password. In-memory
+// lang ang pending challenges (parang WEBAUTHN_LOGIN_CHALLENGES sa ibaba)
+// — hindi na kailangang i-persist ito sa DB dahil maikli lang ang buhay
+// nito (OTP_TTL_MS = 10 minuto) at isang beses lang gagamitin.
+const LOGIN_OTP_TTL_MS = 10 * 60 * 1000;
+const LOGIN_OTP_CHALLENGES = new Map(); // loginToken -> { username, role, code, expiresAt, userAgent, ip }
+
+setInterval(() => {
+    const now = Date.now();
+    for (const [k, v] of LOGIN_OTP_CHALLENGES.entries()) if (now > v.expiresAt) LOGIN_OTP_CHALLENGES.delete(k);
+}, 60 * 1000).unref();
+
+function generateLoginToken() {
+    return 'LOGIN-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+}
+
+app.post('/api/auth/login', async (req, res) => {
+    const { username, password } = req.body;
+
+    if (!username || !password) {
+        return res.status(400).json({
+            success: false,
+            message:'Please enter your username and password.'
+        });
+    }
+
+    // Tingnan lang muna kung na-lock na (walang binabago) — para sumagot
+    // agad kung sobra na talaga ang attempts.
+    if (!checkLoginRateLimit(req, res, 5, 30, LOGIN_RATE_LIMIT_WINDOW_MS)) {
+        return; // 429 na ang naipadala na ni checkLoginRateLimit
+    }
+
+    // ANTI-CLONE GATE: kailangan munang maka-verify online sa RELAY (unang
+    // beses, o kapag nagbago ang hardware fingerprint) bago tuluyang
+    // suriin ang username/password.
+    //
+    // FIX: HINDI na natin nire-record dito ang attempt (tingnan sa ibaba)
+    // — kung ito ay bumagsak dahil lang timeout/unreachable ang Relay
+    // (hal. cold-start ng Render, walang internet), hindi ito dapat
+    // kumonsumo ng quota, dahil hindi pa nga natin nasusuri ang
+    // username/password.
+    const deviceCheck = await checkDeviceBeforeLogin({ username });
+    if (!deviceCheck.allowed) {
+        return res.status(403).json({
+            success: false,
+            deviceBlocked: true,
+            message: deviceCheck.message
+        });
+    }
+
+    // Pumasa na sa device-check — dito lang natin ire-record ang attempt,
+    // dahil dito na talaga tayo susuri ng totoong username/password.
+    recordLoginAttempt(req, LOGIN_RATE_LIMIT_WINDOW_MS);
+
+    let users = readData(FILE_USERS);
+
+    let userIndex = users.findIndex(u => u.username.trim().toLowerCase() === username.trim().toLowerCase());
+
+    if (userIndex !== -1) {
+        const user = users[userIndex];
+        let isMatch = false;
+        let needsUpgrade = false;
+
+        try {
+
+            isMatch = bcrypt.compareSync(password, user.password);
+        } catch (error) {
+
+            isMatch = (password === user.password);
+            if (isMatch) needsUpgrade = true;
+        }
+
+        if (isMatch) {
+
+            if (needsUpgrade) {
+                user.password = bcrypt.hashSync(password, 10);
+                writeData(FILE_USERS, users);
+            }
+
+            // 2FA GATE: kung naka-enable ang Two-Factor Authentication sa
+            // Advanced Settings AT "Admin" ang role ng account na ito,
+            // huwag munang bigyan ng session token — magpadala muna ng
+            // OTP sa naka-configure na recipient email, at hintayin ang
+            // /api/auth/login/verify-otp bago tuluyang mag-issue ng token.
+            const advSettingsForLogin = getAdvancedSettingsPublic(readData(FILE_ADVANCED_SETTINGS, DEFAULT_ADVANCED_SETTINGS));
+            const isAdminRole = (user.role || '').toLowerCase() === 'admin';
+
+            if (advSettingsForLogin.twoFactorLoginEnabled && isAdminRole) {
+                const otpMailCreds = getOtpMailCredentials();
+                if (!otpMailCreds) {
+                    // Walang OTP sender na naka-configure (Receipt Customization
+                    // panel) — huwag i-block ang Admin sa sarili nilang system,
+                    // sa halip ay tuluyan na lang paloginin at i-warn na lang.
+                    console.warn('⚠️ Naka-enable ang 2FA Admin Login pero walang naka-configure na OTP sender email — nag-proceed nang walang OTP.');
+                } else {
+                    const otpCode = String(Math.floor(100000 + Math.random() * 900000));
+                    const loginToken = generateLoginToken();
+                    LOGIN_OTP_CHALLENGES.set(loginToken, {
+                        username: user.username,
+                        role: user.role,
+                        code: otpCode,
+                        expiresAt: Date.now() + LOGIN_OTP_TTL_MS,
+                        userAgent: req.headers['user-agent'],
+                        ip: getClientIp(req)
+                    });
+
+                    try {
+                        await sendMailSmart(otpMailCreds.user, otpMailCreds.pass, {
+                            from: `"OmniPOS Security" <${otpMailCreds.user}>`,
+                            to: advSettingsForLogin.twoFactorRecipientEmail,
+                            subject: `🔐 OmniPOS: Admin Login OTP (${user.username})`,
+                            text: `May sumusubok mag-login sa OmniPOS Admin account "${user.username}".\n\n` +
+                                  `OTP Code: ${otpCode}\n` +
+                                  `Mag-e-expire ito sa loob ng 10 minuto.\n\n` +
+                                  `Kung hindi ninyo ito hiniling, huwag ibigay ang code na ito at i-check ang inyong password.`
+                        });
+                    } catch (mailErr) {
+                        console.error('2FA login OTP send failure:', mailErr.message);
+                        return res.status(500).json({ success: false, message: `Nabigo ang pagpapadala ng 2FA OTP: ${mailErr.message}` });
+                    }
+
+                    return res.json({
+                        success: true,
+                        requiresOtp: true,
+                        loginToken,
+                        message: `Naipadala ang 6-digit na OTP sa naka-configure na email. Ilagay ito para makumpleto ang login.`
+                    });
+                }
+            }
+
+            logAction(user.username, `Logged into the system`);
+
+            const token = createSession(user.username, user.role, req.headers['user-agent'], getClientIp(req));
+
+            const permissions = getPermissionsForRole(user.role);
+            return res.json({ success: true, user: { username: user.username, role: user.role, avatar: user.avatar || null }, token, permissions, menuRegistry: MENU_REGISTRY });
+        }
+    }
+
+    res.status(401).json({ success: false, message:'Incorrect username or password.' });
+});
+
+// Ikalawang hakbang ng 2FA login: i-verify ang OTP code na ipinadala sa
+// email, at kapag tama, saka lang mag-iissue ng totoong session token.
+app.post('/api/auth/login/verify-otp', rateLimit('login-verify-otp', 8, 10 * 60 * 1000), (req, res) => {
+    const { loginToken, otp } = req.body;
+
+    if (!loginToken || !otp) {
+        return res.status(400).json({ success: false, message: 'Kailangan ang loginToken at OTP code.' });
+    }
+
+    const pending = LOGIN_OTP_CHALLENGES.get(loginToken);
+    if (!pending) {
+        return res.status(400).json({ success: false, code: 'OTP_EXPIRED', message: 'Expired na o walang aktibong login OTP request. Mag-login ulit para makahingi ng bagong OTP.' });
+    }
+    if (Date.now() > pending.expiresAt) {
+        LOGIN_OTP_CHALLENGES.delete(loginToken);
+        return res.status(400).json({ success: false, code: 'OTP_EXPIRED', message: 'Expired na ang OTP code. Mag-login ulit para makahingi ng bago.' });
+    }
+    if (String(otp).trim() !== pending.code) {
+        return res.status(403).json({ success: false, code: 'WRONG_OTP', message: 'Maling OTP code.' });
+    }
+
+    LOGIN_OTP_CHALLENGES.delete(loginToken);
+
+    const users = readData(FILE_USERS);
+    const user = users.find(u => u.username.toLowerCase() === pending.username.toLowerCase());
+    if (!user) {
+        return res.status(404).json({ success: false, message: 'Hindi na umiiral ang account na ito.' });
+    }
+
+    logAction(user.username, `Logged into the system (2FA-verified)`);
+
+    const token = createSession(user.username, user.role, pending.userAgent, pending.ip);
+    const permissions = getPermissionsForRole(user.role);
+
+    res.json({ success: true, user: { username: user.username, role: user.role, avatar: user.avatar || null }, token, permissions, menuRegistry: MENU_REGISTRY });
+});
+
+// ====================================================================
+// FINGERPRINT / BIOMETRIC LOGIN (WebAuthn — platform authenticator)
+// ====================================================================
+// MAHALAGA: HINDI ito nagbabasa/naka-imbak ng anumang aktwal na
+// fingerprint scan. Ang biometric scan mismo (fingerprint/Face ID) ay
+// ginagawa at pinananatili ng OS ng mobile phone — dito lang tayo
+// naka-imbak ng isang PUBLIC KEY na ni-release ng phone matapos
+// matagumpay na ma-verify ang may-ari nito (parang "digital na
+// susi" na naka-lock sa loob ng device, hindi ang fingerprint mismo).
+//
+// Dahil ang navigator.credentials API ay kailangan ng "secure context"
+// (HTTPS, o eksaktong "localhost"), gagana lang ang feature na ito
+// kapag ang OmniPOS ay binuksan mismo sa parehong telepono na
+// pinaghohostan nito (http://localhost:3000) o sa cloud (HTTPS/Render).
+// Kaya nga "sa mobile device lang" makikita ang setting — tama ito.
+//
+// Dalawang flow:
+//   1. REGISTRATION (habang naka-login na) — nagpapa-enroll ng
+//      fingerprint bilang alternatibong paraan ng pag-login SA DEVICE
+//      NA ITO. /register-options -> /register-verify
+//   2. LOGIN (bago pa naka-login) — /login-options -> /login-verify
+// ====================================================================
+
+const WEBAUTHN_CHALLENGE_TTL_MS = 2 * 60 * 1000;
+const WEBAUTHN_REGISTER_CHALLENGES = new Map(); // username(lowercase) -> { challenge, expiresAt }
+const WEBAUTHN_LOGIN_CHALLENGES = new Map();    // challenge -> { username, expiresAt }
+
+setInterval(() => {
+    const now = Date.now();
+    for (const [k, v] of WEBAUTHN_REGISTER_CHALLENGES.entries()) if (now > v.expiresAt) WEBAUTHN_REGISTER_CHALLENGES.delete(k);
+    for (const [k, v] of WEBAUTHN_LOGIN_CHALLENGES.entries()) if (now > v.expiresAt) WEBAUTHN_LOGIN_CHALLENGES.delete(k);
+}, 60 * 1000).unref();
+
+function webauthnRpId(req) {
+    return req.hostname;
+}
+function webauthnExpectedOrigin(req) {
+    return `${req.protocol}://${req.get('host')}`;
+}
+
+// ---- 1a. Register options: bubuo ng challenge para sa PAG-ENROLL ----
+//
+// ROOT CAUSE FIX ("hindi gumana ang fingerprint registration sa fresh
+// release build / laging may nade-detect na 'naka-rehistro na'"):
+// Dati, ang WebAuthn `user.id` (userHandle) ay DETERMINISTIC — direktang
+// hinango sa base64url(username) (hal. "admin"). Labag ito sa WebAuthn
+// spec (ang user.id ay dapat RANDOM/opaque, HINDI dapat derivable mula
+// sa PII gaya ng username), at nagdudulot ng totoong bug dito: dahil
+// PAREHONG-PAREHO ang default na username ("admin") sa BAWAT bagong
+// customer install, at kadalasang PAREHO rin ang rpId habang nagte-test
+// (hal. parehong localhost, parehong staging/demo domain, parehong
+// telepono ang ginagamit sa pag-demo), ang (rpId, userHandle) pair ay
+// NAGIGING PARE-PAREHO sa MARAMING magkaibang "fresh" na package/install
+// — kaya ang platform authenticator MISMO (ang OS-level passkey manager
+// ng telepono — Android Credential Manager/iOS Keychain), hindi ang
+// server na ito, ang nag-aakalang MAY NAKA-REHISTRO NA itong resident
+// credential dito, kahit walang laman/fresh ang bagong database ng
+// install. Ito ang dahilan kung bakit "laging may nade-detect na
+// naka-rehistro na" kahit fresh ang bawat release build.
+//
+// FIX: gumagawa/gumagamit na tayo ng RANDOM, OPAQUE, PER-ACCOUNT na
+// userHandle (32 random bytes) na naka-imbak sa DB record mismo ng user
+// (`webauthnUserHandle`), sa halip na hinango sa username — kaya laging
+// natatangi ito kahit parehong-pareho ang username/domain sa maraming
+// install. Ginagawa lang ito minsan bawat account (lazy, on first
+// register-options call) at nagpapatuloy pagkatapos, kaya hindi
+// nagbabago ang binding ng mga credential na na-enroll na dati.
+app.post('/api/auth/webauthn/register-options', (req, res) => {
+    const username = req.authUser.username;
+    const users = readData(FILE_USERS);
+    const userIndex = users.findIndex(u => u.username.toLowerCase() === username.toLowerCase());
+    if (userIndex === -1) return res.status(404).json({ success: false, message:'Hindi mahanap ang account.' });
+    const user = users[userIndex];
+
+    const challenge = webauthn.randomChallenge();
+    WEBAUTHN_REGISTER_CHALLENGES.set(username.toLowerCase(), { challenge, expiresAt: Date.now() + WEBAUTHN_CHALLENGE_TTL_MS });
+
+    const existingCredentials = (user.webauthnCredentials || []).map(c => ({ id: c.id, type:'public-key' }));
+
+    if (!user.webauthnUserHandle) {
+        user.webauthnUserHandle = crypto.randomBytes(32).toString('base64url');
+        writeData(FILE_USERS, users);
+    }
+
+    res.json({
+        success: true,
+        options: {
+            challenge,
+            rp: { name:'OmniPOS', id: webauthnRpId(req) },
+            user: {
+                id: user.webauthnUserHandle,
+                name: user.username,
+                displayName: user.username
+            },
+            pubKeyCredParams: [
+                { alg: -7, type:'public-key' },   // ES256
+                { alg: -257, type:'public-key' }  // RS256
+            ],
+            authenticatorSelection: {
+                authenticatorAttachment:'platform',
+                // 'required' (hindi 'preferred'): dapat DISCOVERABLE ang
+                // credential (naka-imbak ang buong reference sa loob mismo
+                // ng authenticator/phone) — ito ang nagpapagana ng
+                // USERNAMELESS login sa ibaba: kayang makilala ng OS kung
+                // sino ang naka-enroll na account BASE LANG SA FINGERPRINT,
+                // hindi na kailangang i-type muna ang username.
+                residentKey:'required',
+                userVerification:'required'
+            },
+            attestation:'none',
+            timeout: 60000,
+            excludeCredentials: existingCredentials
+        }
+    });
+});
+
+// ---- 1b. Register verify: i-che-check ang WebAuthn credential na
+//          ibinalik ng browser (navigator.credentials.create()) at
+//          ise-save ang PUBLIC KEY lamang sa account ng user. ----
+app.post('/api/auth/webauthn/register-verify', (req, res) => {
+    try {
+        const username = req.authUser.username;
+        const { credentialId, clientDataJSON, attestationObject, deviceLabel } = req.body || {};
+        if (!credentialId || !clientDataJSON || !attestationObject) {
+            return res.status(400).json({ success: false, message:'Missing data from the authenticator.' });
+        }
+
+        const stored = WEBAUTHN_REGISTER_CHALLENGES.get(username.toLowerCase());
+        if (!stored || Date.now() > stored.expiresAt) {
+            return res.status(400).json({ success: false, message:'Nag-expire na ang enrollment request. Subukan muli.' });
+        }
+
+        const clientData = JSON.parse(Buffer.from(clientDataJSON,'base64url').toString('utf8'));
+        if (clientData.type !== 'webauthn.create') {
+            return res.status(400).json({ success: false, message:'Invalid WebAuthn response type.' });
+        }
+        if (clientData.challenge !== stored.challenge) {
+            return res.status(400).json({ success: false, message:'Hindi tugma ang challenge (posibleng expired o replayed na request).' });
+        }
+        if (clientData.origin !== webauthnExpectedOrigin(req)) {
+            return res.status(400).json({ success: false, message:'The WebAuthn response origin does not match.' });
+        }
+
+        const attestationBuf = Buffer.from(attestationObject,'base64url');
+        const { value: attObj } = webauthn.decodeCbor(attestationBuf, 0);
+        const authDataBuf = Buffer.from(attObj.get('authData'));
+        const parsed = webauthn.parseAuthenticatorData(authDataBuf);
+
+        const expectedRpIdHash = webauthn.sha256(Buffer.from(webauthnRpId(req),'utf8'));
+        if (Buffer.compare(parsed.rpIdHash, expectedRpIdHash) !== 0) {
+            return res.status(400).json({ success: false, message:'The credential RP ID (site) does not match.' });
+        }
+        if (!parsed.flags.userPresent || !parsed.flags.userVerified) {
+            return res.status(400).json({ success: false, message:'Hindi kumpirmadong biometric verification (kailangan tunay na fingerprint/Face ID, hindi lang pag-tap).' });
+        }
+        if (!parsed.credentialPublicKey) {
+            return res.status(400).json({ success: false, message:'Walang natanggap na public key mula sa authenticator.' });
+        }
+
+        const { keyObject } = webauthn.coseKeyToPublicKeyObject(parsed.credentialPublicKey);
+        const publicKeyJwk = keyObject.export({ format:'jwk' });
+        const credIdB64 = Buffer.from(parsed.credentialId).toString('base64url');
+
+        const users = readData(FILE_USERS);
+        // Siguraduhing hindi na dating naka-rehistro kahit saang account ang
+        // eksaktong credential ID na ito (dapat kaisa-isa).
+        const alreadyUsed = users.some(u => (u.webauthnCredentials || []).some(c => c.id === credIdB64));
+        if (alreadyUsed) {
+            return res.status(409).json({ success: false, message:'Naka-rehistro na ang fingerprint na ito.' });
+        }
+
+        const userIndex = users.findIndex(u => u.username.toLowerCase() === username.toLowerCase());
+        if (userIndex === -1) return res.status(404).json({ success: false, message:'Hindi mahanap ang account.' });
+
+        if (!Array.isArray(users[userIndex].webauthnCredentials)) users[userIndex].webauthnCredentials = [];
+        users[userIndex].webauthnCredentials.push({
+            id: credIdB64,
+            publicKeyJwk,
+            counter: parsed.counter,
+            deviceLabel: (deviceLabel || parseDeviceInfo(req.headers['user-agent']).label || 'Mobile device').slice(0, 80),
+            createdAt: new Date().toLocaleString('en-US', { timeZone:'Asia/Manila' })
+        });
+        writeData(FILE_USERS, users);
+        WEBAUTHN_REGISTER_CHALLENGES.delete(username.toLowerCase());
+
+        logAction(username,`Nag-enable ng Fingerprint/Biometric Login (${users[userIndex].webauthnCredentials.at(-1).deviceLabel})`);
+        res.json({ success: true, message:'Na-enable ang Fingerprint Login sa device na ito.' });
+    } catch (err) {
+        console.error('webauthn register-verify error:', err);
+        res.status(400).json({ success: false, message:'Hindi ma-verify ang fingerprint enrollment. Subukan muli.' });
+    }
+});
+
+// ---- 1c. List / remove enrolled biometric credentials ----
+app.get('/api/auth/webauthn/credentials', (req, res) => {
+    const users = readData(FILE_USERS);
+    const user = users.find(u => u.username.toLowerCase() === req.authUser.username.toLowerCase());
+    const creds = ((user && user.webauthnCredentials) || []).map(c => ({ id: c.id, deviceLabel: c.deviceLabel, createdAt: c.createdAt }));
+    res.json({ success: true, credentials: creds });
+});
+
+app.delete('/api/auth/webauthn/credentials/:id', (req, res) => {
+    const users = readData(FILE_USERS);
+    const userIndex = users.findIndex(u => u.username.toLowerCase() === req.authUser.username.toLowerCase());
+    if (userIndex === -1) return res.status(404).json({ success: false, message:'Hindi mahanap ang account.' });
+
+    const before = (users[userIndex].webauthnCredentials || []).length;
+    users[userIndex].webauthnCredentials = (users[userIndex].webauthnCredentials || []).filter(c => c.id !== req.params.id);
+    if (users[userIndex].webauthnCredentials.length === before) {
+        return res.status(404).json({ success: false, message:'Hindi mahanap ang fingerprint credential na iyon.' });
+    }
+    writeData(FILE_USERS, users);
+    logAction(req.authUser.username,'Inalis ang isang Fingerprint/Biometric Login credential');
+    res.json({ success: true, message:'Naalis na ang fingerprint credential.' });
+});
+
+// ---- 2a. Login options: bubuo ng challenge para makapag-LOGIN gamit
+//          ang fingerprint (bago pa man magkaroon ng session). Kung
+//          walang ibinigay na username, USERNAMELESS mode ito — ang
+//          OS/browser mismo ng phone ang magpapakita ng listahan ng
+//          naka-enroll na account dito (o direktang gagamitin kung
+//          iisa lang), batay sa NAKA-SAVE na resident credential sa
+//          device — hindi na kailangang i-type ang username. ----
+app.post('/api/auth/webauthn/login-options', rateLimit('webauthn-login-options', 20, 10 * 60 * 1000), (req, res) => {
+    const username = ((req.body && req.body.username) || '').toString().trim();
+    const challenge = webauthn.randomChallenge();
+
+    if (!username) {
+        // USERNAMELESS: hindi natin alam kung sino pa lang ito — ang
+        // credentialId/userHandle na ibabalik ng authenticator mismo
+        // (pagkatapos ng fingerprint scan) ang siyang gagamitin sa
+        // /login-verify para tukuyin kung sinong account ito.
+        WEBAUTHN_LOGIN_CHALLENGES.set(challenge, { username: null, expiresAt: Date.now() + WEBAUTHN_CHALLENGE_TTL_MS });
+        return res.json({
+            success: true,
+            challenge,
+            rpId: webauthnRpId(req),
+            userVerification:'required',
+            timeout: 60000,
+            allowCredentials: [] // sadyang blangko — nagpapagana ng discoverable/usernameless picker sa OS
+        });
+    }
+
+    const users = readData(FILE_USERS);
+    const user = users.find(u => u.username.toLowerCase() === username.toLowerCase());
+    const credentials = (user && user.webauthnCredentials) || [];
+    if (!user || credentials.length === 0) {
+        return res.status(404).json({ success: false, message:'Fingerprint Login is not enabled for this account/device.' });
+    }
+
+    WEBAUTHN_LOGIN_CHALLENGES.set(challenge, { username: user.username, expiresAt: Date.now() + WEBAUTHN_CHALLENGE_TTL_MS });
+
+    res.json({
+        success: true,
+        challenge,
+        rpId: webauthnRpId(req),
+        userVerification:'required',
+        timeout: 60000,
+        allowCredentials: credentials.map(c => ({ id: c.id, type:'public-key' }))
+    });
+});
+
+// ---- 2b. Login verify: i-che-check ang assertion (navigator.credentials.get())
+//          gamit ang naka-imbak na public key, tapos gagawa ng session
+//          — pareho ang resulta sa /api/auth/login kapag successful.
+//          Kung USERNAMELESS (walang naka-bind na username sa
+//          challenge), ang credentialId/userHandle na dala ng assertion
+//          ang gagamitin para tukuyin kung sinong account ito. ----
+app.post('/api/auth/webauthn/login-verify', async (req, res) => {
+    const { credentialId, clientDataJSON, authenticatorData, signature, userHandle } = req.body || {};
+    if (!credentialId || !clientDataJSON || !authenticatorData || !signature) {
+        return res.status(400).json({ success: false, message:'Missing data from the authenticator.' });
+    }
+
+    let clientData;
+    try {
+        clientData = JSON.parse(Buffer.from(clientDataJSON,'base64url').toString('utf8'));
+    } catch {
+        return res.status(400).json({ success: false, message:'Corrupted WebAuthn response.' });
+    }
+
+    const stored = WEBAUTHN_LOGIN_CHALLENGES.get(clientData.challenge);
+    if (!stored || Date.now() > stored.expiresAt) {
+        return res.status(400).json({ success: false, message:'The login request has expired. Please try again.' });
+    }
+
+    // Tukuyin kung sinong account ito BAGO pa man tumakbo ang rate-limit/
+    // device-check gates (kailangan nila ng username). Kung USERNAMELESS
+    // (walang naka-bind na username mula sa /login-options), hahanapin
+    // ang may-ari base lang sa credentialId na dala ng authenticator
+    // mismo — ito mismo ang "hindi na kailangang i-type ang username"
+    // na bahagi ng feature.
+    const users = readData(FILE_USERS);
+    let userIndex = -1;
+    let credIndex = -1;
+
+    if (stored.username) {
+        userIndex = users.findIndex(u => u.username.toLowerCase() === stored.username.toLowerCase());
+        if (userIndex !== -1) {
+            credIndex = (users[userIndex].webauthnCredentials || []).findIndex(c => c.id === credentialId);
+        }
+    } else {
+        for (let i = 0; i < users.length; i++) {
+            const idx = (users[i].webauthnCredentials || []).findIndex(c => c.id === credentialId);
+            if (idx !== -1) { userIndex = i; credIndex = idx; break; }
+        }
+    }
+
+    if (userIndex === -1 || credIndex === -1) {
+        return res.status(401).json({ success: false, message:'This fingerprint is no longer registered. Please re-enroll it in Profile settings.' });
+    }
+
+    const username = users[userIndex].username;
+
+    // Sanity check lang (hindi kritikal): kung may userHandle na dala ang
+    // assertion, dapat tumutugma ito sa random/opaque na webauthnUserHandle
+    // na naka-imbak sa DB record ng account na ito (itinakda noong
+    // pag-enroll — see /register-options). HINDI na ito hinahango mula sa
+    // username (dating bug — tingnan ang komento sa /register-options).
+    // BACKWARD-COMPAT: kung walang naka-imbak na webauthnUserHandle ang
+    // account (naka-enroll ito BAGO ang fix na ito), laktawan na lang ang
+    // sanity check na ito — ang credentialId lookup + signature
+    // verification sa ibaba na ang sapat/mapagkakatiwalaang pagkakakilanlan,
+    // kaya hindi na kailangang pilitin ang legacy account na mag-re-enroll.
+    if (userHandle) {
+        const expectedHandle = users[userIndex].webauthnUserHandle;
+        if (expectedHandle && userHandle !== expectedHandle) {
+            return res.status(401).json({ success: false, message:'This fingerprint does not match the account.' });
+        }
+    }
+
+    // Parehong anti-brute-force at anti-clone gates gaya ng /api/auth/login,
+    // para hindi maging bypass ang fingerprint login sa mga proteksyong iyon.
+    req.body.username = username;
+    if (!checkLoginRateLimit(req, res, 5, 30, LOGIN_RATE_LIMIT_WINDOW_MS)) return;
+
+    const deviceCheck = await checkDeviceBeforeLogin({ username });
+    if (!deviceCheck.allowed) {
+        return res.status(403).json({ success: false, deviceBlocked: true, message: deviceCheck.message });
+    }
+    recordLoginAttempt(req, LOGIN_RATE_LIMIT_WINDOW_MS);
+
+    try {
+        if (clientData.type !== 'webauthn.get') {
+            return res.status(400).json({ success: false, message:'Invalid WebAuthn response type.' });
+        }
+        if (clientData.origin !== webauthnExpectedOrigin(req)) {
+            return res.status(400).json({ success: false, message:'The WebAuthn response origin does not match.' });
+        }
+
+        const cred = users[userIndex].webauthnCredentials[credIndex];
+        const authDataBuf = Buffer.from(authenticatorData,'base64url');
+        const parsed = webauthn.parseAuthenticatorData(authDataBuf);
+
+        const expectedRpIdHash = webauthn.sha256(Buffer.from(webauthnRpId(req),'utf8'));
+        if (Buffer.compare(parsed.rpIdHash, expectedRpIdHash) !== 0) {
+            return res.status(401).json({ success: false, message:'The credential RP ID (site) does not match.' });
+        }
+        if (!parsed.flags.userPresent || !parsed.flags.userVerified) {
+            return res.status(401).json({ success: false, message:'Biometric verification was not confirmed.' });
+        }
+
+        const clientDataHash = webauthn.sha256(Buffer.from(clientDataJSON,'base64url'));
+        const signedData = Buffer.concat([authDataBuf, clientDataHash]);
+        const keyObject = crypto.createPublicKey({ key: cred.publicKeyJwk, format:'jwk' });
+        const sigOk = webauthn.verifySignature(keyObject, signedData, Buffer.from(signature,'base64url'));
+        if (!sigOk) {
+            return res.status(401).json({ success: false, message:'Unable to verify the fingerprint signature.' });
+        }
+
+        // Anti-clone/anti-replay counter check — kung parehong may
+        // counter support ang authenticator (hindi laging 0), dapat
+        // laging TUMATAAS ang bagong counter kaysa sa huling na-save.
+        if (!(parsed.counter === 0 && cred.counter === 0) && parsed.counter <= cred.counter) {
+            return res.status(401).json({ success: false, message:'Suspicious repeated fingerprint signature (possible cloned authenticator). Please log in with your password.' });
+        }
+        cred.counter = parsed.counter;
+        writeData(FILE_USERS, users);
+        WEBAUTHN_LOGIN_CHALLENGES.delete(clientData.challenge);
+
+        const user = users[userIndex];
+        logAction(user.username,`Naka-login gamit ang Fingerprint/Biometric Login (${cred.deviceLabel || 'device'})`);
+
+        const token = createSession(user.username, user.role, req.headers['user-agent'], getClientIp(req));
+        const permissions = getPermissionsForRole(user.role);
+        return res.json({ success: true, user: { username: user.username, role: user.role, avatar: user.avatar || null }, token, permissions, menuRegistry: MENU_REGISTRY });
+    } catch (err) {
+        console.error('webauthn login-verify error:', err);
+        return res.status(400).json({ success: false, message:'Unable to verify Fingerprint Login. Please try again or use your password.' });
+    }
+});
+
+app.post('/api/auth/logout', (req, res) => {
+    if (req.authToken) {
+        destroySession(req.authToken);
+    }
+    res.json({ success: true, message:'Logged out.' });
+});
+
+app.get('/api/auth/active-sessions', (req, res) => {
+    const now = Date.now();
+
+    const allUsers = readData(FILE_USERS);
+
+    const requesterRole = req.authUser && req.authUser.role;
+    const canSeeSensitiveDetails = (requesterRole ||'').toLowerCase() ==='admin' || !!getPermissionsForRole(requesterRole).users;
+
+    const latestSessionByUsername = new Map();
+    Array.from(SESSIONS.values())
+        .filter(s => now <= s.expiresAt)
+        .forEach(s => {
+            const existing = latestSessionByUsername.get(s.username);
+            if (!existing || (s.loginAt || 0) > (existing.loginAt || 0)) {
+                latestSessionByUsername.set(s.username, s);
+            }
+        });
+
+    const sessions = Array.from(latestSessionByUsername.values())
+        .map(s => {
+            const userRecord = allUsers.find(u => u.username === s.username);
+            return {
+                username: s.username,
+                role: s.role,
+                avatar: (userRecord && userRecord.avatar) || null,
+                loginAt: s.loginAt || null,
+                minutesActive: s.loginAt ? Math.max(0, Math.floor((now - s.loginAt) / 60000)) : null,
+                isCurrentSession: req.authToken ? SESSIONS.get(req.authToken) === s : false,
+
+                // Device/IP ay sensitibong impormasyon — itinatago sa mga
+                // walang 'users' management access (o hindi Admin), pero
+                // hindi natin binablock ang buong widget dahil ginagamit
+                // ito ng lahat ng role bilang simpleng "who's online" view.
+                device: canSeeSensitiveDetails ? (s.device || parseDeviceInfo('')) : null,
+                ip: canSeeSensitiveDetails ? (s.ip ||'unknown') : null,
+                sameWifi: canSeeSensitiveDetails ? isSameLanAsServer(s.ip) : false
+            };
+        })
+        .sort((a, b) => (a.loginAt || 0) - (b.loginAt || 0));
+
+    res.json({ success: true, activeUsers: sessions, count: sessions.length });
+});
+
+// SECURITY FIX: tinanggal ang function body ng dating '/api/products/checkout'.
+// Legacy/unused na endpoint ito (hindi na tinatawag ng frontend/public/app.js)
+// na diretsong nagbabawas ng stock BATAY LANG SA SINABI NG CLIENT — walang
+// pag-verify ng presyo, walang paglikha ng aktwal na transaction/resibo, at
+// walang audit log. Kung natira ito nang gumagana, may paraan ang isang
+// Cashier (o kahit sino na naka-login) na direktang tumawag dito (hal. sa
+// Postman/devtools) para "ayusin"/ibaba ang stock ng isang item — halimbawa
+// pagkatapos nilang kunin/ibigay ang paninda nang hindi ito na-ring sa
+// checkout — nang hindi ito lumalabas sa Transactions o Logs. Iniwan ang
+// route pero pinatay ang function nito (410 Gone) sa halip na basta alisin,
+// para malinaw ang dahilan kung sakaling may lumang client pa ring tatawag
+// dito, at para may makuhang forensic trail kung sino ang sumusubok pa rin.
+app.post('/api/products/checkout', requirePermission('terminal'), (req, res) => {
+    try {
+        logAction(req.authUser && req.authUser.username, `Blocked call to removed endpoint /api/products/checkout (security fix — direct stock manipulation na walang transaction record). Payload: ${JSON.stringify(req.body || {}).slice(0, 300)}`);
+    } catch (e) {
+        console.error('Failed to log blocked /api/products/checkout attempt:', e);
+    }
+    res.status(410).json({
+        success: false,
+        code:'ENDPOINT_REMOVED',
+        message:'Tinanggal na ang endpoint na ito dahil sa security review — pwede itong dating gamitin para baguhin ang stock nang walang naitatalang benta at walang audit trail. Gamitin ang /api/transactions para sa checkout/sale.'
+    });
+});
+
+app.get('/api/products', (req, res) => {
+    // ADAPTIVE POLLING SUPPORT: idinagdag itong header (hindi sinira ang
+    // dating plain-array na response body, dahil sa client, in-array pa
+    // rin ang inaasahan dito) para malaman ng client (Terminal/Inventory
+    // silent stock-poll) kung ilan ang kasalukuyang aktibong session
+    // (terminal) — walang dagdag na network call, "piggyback" lang sa
+    // response na ito na palagi namang tinatawag.
+    res.set('X-Active-Terminals', String(SESSIONS.size));
+    res.json(readData(FILE_PRODUCTS));
+});
+
+app.get('/api/products/export', requireFeature('advanced_reports'), (req, res) => {
+    try {
+        const products = readData(FILE_PRODUCTS);
+        const escapeCsv = (val) => {
+            const s = (val === undefined || val === null) ?'' : val.toString();
+            return/[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
+        };
+        const headers = ['Code','Product Name','Category','Price','Stock','Supplier','Expiry Date','Low Stock Threshold','Cost Price'];
+        const lines = [headers.join(',')];
+        products.forEach(p => {
+            lines.push([
+                escapeCsv(p.code), escapeCsv(p.name), escapeCsv(p.category),
+                escapeCsv(p.price), escapeCsv(p.stock), escapeCsv(p.supplier),
+                escapeCsv(p.expiryDate), escapeCsv(p.lowStockThreshold), escapeCsv(p.cost)
+            ].join(','));
+        });
+        const csvContent ='\uFEFF' + lines.join('\r\n');
+
+        res.setHeader('Content-Type','text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="inventory_export_${Date.now()}.csv"`);
+        res.send(csvContent);
+    } catch (err) {
+        console.error('Export error:', err);
+        res.status(500).json({ success: false, message:'Hindi ma-export ang inventory.' });
+    }
+});
+
+app.get('/api/products/template', async (req, res) => {
+    try {
+        const categories = readData(FILE_CATEGORIES, DEFAULT_CATEGORIES);
+        const workbook = new ExcelJS.Workbook();
+        workbook.creator ='OmniPOS System';
+
+        const catSheet = workbook.addWorksheet('CategoriesList');
+        categories.forEach((cat, i) => {
+            catSheet.getCell(`A${i + 1}`).value = cat;
+        });
+        catSheet.state ='veryHidden';
+
+        const sheet = workbook.addWorksheet('New Products');
+        sheet.columns = [
+            { header:'Code', key:'code', width: 22 },
+            { header:'Product Name', key:'name', width: 32 },
+            { header:'Category', key:'category', width: 24 },
+            { header:'Price', key:'price', width: 14 },
+            { header:'Stock', key:'stock', width: 12 },
+            { header:'Supplier', key:'supplier', width: 24 },
+            { header:'Expiry Date', key:'expiry', width: 16 },
+            { header:'Low Stock Threshold', key:'threshold', width: 18 },
+            { header:'Cost Price', key:'cost', width: 14 }
+        ];
+        const headerRow = sheet.getRow(1);
+        headerRow.eachCell(cell => {
+            cell.font = { bold: true, color: { argb:'FFFFFFFF' } };
+            cell.fill = { type:'pattern', pattern:'solid', fgColor: { argb:'FF2563EB' } };
+            cell.alignment = { vertical:'middle', horizontal:'center' };
+        });
+
+        const catRange = `CategoriesList!$A$1:$A$${Math.max(categories.length, 1)}`;
+        for (let row = 2; row <= 501; row++) {
+            sheet.getCell(`C${row}`).dataValidation = {
+                type:'list',
+                allowBlank: true,
+                formulae: [catRange],
+                showErrorMessage: false,
+                promptTitle:'Category',
+                prompt:'Pumili sa dropdown, o mag-type ng bagong pangalan ng category para awtomatikong madagdag ito sa system.'
+            };
+            sheet.getCell(`D${row}`).numFmt ='#,##0.00';
+            sheet.getCell(`E${row}`).numFmt ='#,##0';
+        }
+
+        const infoSheet = workbook.addWorksheet('Paano Gamitin');
+        infoSheet.getColumn(1).width = 95;
+        const instructions = [
+'PAANO GAMITIN ANG TEMPLATE NA ITO:',
+'',
+'1. Pumunta sa sheet na "New Products".',
+'2. Punan ang bawat hilera: Code, Product Name, Category, Price, Stock.',
+'3. Sa column na "Category" (column C), pindutin ang dropdown arrow para pumili ng existing category.',
+'4. Kung gusto mag-add ng BAGONG category, i-type lang ito diretso sa cell — awtomatiko itong madadagdag sa system pagka-import.',
+'5. Huwag baguhin ang mga pangalan sa Row 1 (headers) at huwag magdagdag ng bagong column.',
+'6. Isave ang file (.xlsx), pagkatapos i-upload gamit ang "Import Excel/CSV" button sa Product Inventory page.',
+'7. Ang mga Product Code na dati nang ginagamit ay ise-skip habang nag-i-import — MALIBAN kung pinili mong "Update Existing" bago mag-upload.',
+'8. Optional na columns: Supplier, Expiry Date (YYYY-MM-DD), Low Stock Threshold, at Cost Price — pwedeng iwanang blangko.',
+'9. Sa "Update Existing" mode, ang mga blangkong cell ay HINDI nagbabago sa laman ng existing product — mananatili ang dati nitong value.'
+        ];
+        instructions.forEach((line, i) => { infoSheet.getCell(`A${i + 1}`).value = line; });
+        infoSheet.getCell('A1').font = { bold: true, size: 13 };
+
+        res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition','attachment; filename="product_import_template.xlsx"');
+        await workbook.xlsx.write(res);
+        res.end();
+    } catch (err) {
+        console.error('Template generation error:', err);
+        res.status(500).json({ success: false, message:'Hindi magawa ang Excel template.' });
+    }
+});
+
+function parseCsvLine(line) {
+    const result = [];
+    let cur ='';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (inQuotes) {
+            if (ch ==='"') {
+                if (line[i + 1] ==='"') {
+                    cur +='"';
+                    i++;
+                } else {
+                    inQuotes = false;
+                }
+            } else {
+                cur += ch;
+            }
+        } else {
+            if (ch ==='"') {
+                inQuotes = true;
+            } else if (ch ===',') {
+                result.push(cur);
+                cur ='';
+            } else {
+                cur += ch;
+            }
+        }
+    }
+    result.push(cur);
+    return result;
+}
+
+function parseMoney(raw) {
+    const s = (raw ||'').toString().trim();
+    if (s ==='') return NaN;
+    const cleaned = s.replace(/^(₱|PHP)\s*/i,'').replace(/,/g,'');
+    if (!/^\d+(\.\d+)?$/.test(cleaned)) return NaN;
+    return parseFloat(cleaned);
+}
+
+function parseWholeNumber(raw) {
+    const s = (raw ||'').toString().trim().replace(/,/g,'');
+    if (!/^\d+$/.test(s)) return NaN;
+    return parseInt(s, 10);
+}
+
+app.post('/api/products/import', rateLimit('product-import', 20, 10 * 60 * 1000), productImportUpload.single('file'), async (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ success: false, message:'Walang na-attach na file.' });
+    }
+
+    const cleanupTmpFile = () => fs.unlink(req.file.path, () => {});
+
+    const { username } = req.body;
+    const users = readData(FILE_USERS);
+    const activeUser = users.find(u => u.username.toLowerCase() === (username ||'').toLowerCase());
+    if (!activeUser || activeUser.role.toLowerCase() !=='admin') {
+        cleanupTmpFile();
+        return res.status(403).json({ success: false, message:'Admin lang ang pwedeng mag-import ng products.' });
+    }
+
+    try {
+        const ext = path.extname(req.file.originalname).toLowerCase();
+        let rows = [];
+
+        if (ext ==='.csv') {
+            let content = fs.readFileSync(req.file.path,'utf8');
+            content = content.replace(/^\uFEFF/,'');
+            const lines = content.split(/\r?\n/).filter(l => l.trim() !=='');
+            if (lines.length > 1) {
+                const headers = parseCsvLine(lines[0]).map(h => h.trim().toLowerCase());
+                for (let i = 1; i < lines.length; i++) {
+                    const cols = parseCsvLine(lines[i]);
+                    const obj = {};
+                    headers.forEach((h, idx) => { obj[h] = (cols[idx] ||'').trim(); });
+                    rows.push(obj);
+                }
+            }
+        } else {
+            const workbook = new ExcelJS.Workbook();
+            await workbook.xlsx.readFile(req.file.path);
+            const sheet = workbook.getWorksheet('New Products') || workbook.worksheets[0];
+            const headerValues = (sheet.getRow(1).values || []).map(v => (v ||'').toString().trim().toLowerCase());
+
+            sheet.eachRow((row, rowNumber) => {
+                if (rowNumber === 1) return;
+                const rowValues = row.values;
+                const obj = {};
+                headerValues.forEach((h, idx) => {
+                    if (!h) return;
+                    const cellVal = rowValues[idx];
+                    obj[h] = (cellVal !== undefined && cellVal !== null) ? cellVal.toString().trim() :'';
+                });
+                if (Object.values(obj).some(v => v !=='')) rows.push(obj);
+            });
+        }
+
+        const mode = (req.body.mode ||'skip').toLowerCase() ==='update' ?'update' :'skip';
+
+        let products = readData(FILE_PRODUCTS);
+        let categories = readData(FILE_CATEGORIES, DEFAULT_CATEGORIES);
+        const codeIndex = new Map(products.map((p, i) => [p.code.trim().toLowerCase(), i]));
+        const newCategoriesFound = new Set();
+        let added = 0, updated = 0, skipped = 0;
+        const errors = [];
+
+        rows.forEach((r, idx) => {
+            const rowNum = idx + 2;
+            const code = (r.code ||'').toString().trim();
+            const name = (r['product name'] || r.name ||'').toString().trim();
+            const categoryRaw = (r.category ||'').toString().trim();
+            const supplier = (r.supplier ||'').toString().trim();
+            const expiry = (r['expiry date'] || r.expiry || r.expirydate ||'').toString().trim();
+            const thresholdRaw = (r['low stock threshold'] || r.threshold || r.lowstockthreshold ||'').toString().trim();
+            const costRaw = (r['cost price'] || r.cost || r.costprice ||'').toString().trim();
+
+            const priceRaw = (r.price ||'').toString().trim();
+            const stockRaw = (r.stock ||'').toString().trim();
+            const price = parseMoney(priceRaw);
+            const stock = parseWholeNumber(stockRaw);
+            const existingIdx = codeIndex.get(code.toLowerCase());
+
+            if (!code || !name) {
+                errors.push(`Row ${rowNum}: Kulang ang Code o Product Name — na-skip.`);
+                skipped++;
+                return;
+            }
+
+            if (existingIdx !== undefined) {
+                if (mode !=='update') {
+                    errors.push(`Row ${rowNum}: Ginagamit na ang Code "${code}" — na-skip.`);
+                    skipped++;
+                    return;
+                }
+
+                if (priceRaw !=='' && isNaN(price)) {
+                    errors.push(`Row ${rowNum}: Hindi valid ang Price para sa Code "${code}" — hindi na-update ang price.`);
+                } else if (priceRaw !=='') {
+                    products[existingIdx].price = price;
+                }
+                if (stockRaw !=='' && isNaN(stock)) {
+                    errors.push(`Row ${rowNum}: Hindi valid ang Stock para sa Code "${code}" — hindi na-update ang stock.`);
+                } else if (stockRaw !=='') {
+                    products[existingIdx].stock = stock;
+                }
+                if (name) products[existingIdx].name = name;
+                if (categoryRaw) products[existingIdx].category = categoryRaw;
+                if (supplier) products[existingIdx].supplier = supplier;
+                if (expiry) products[existingIdx].expiryDate = expiry;
+                if (thresholdRaw !=='') {
+                    const th = parseWholeNumber(thresholdRaw);
+                    if (!isNaN(th)) products[existingIdx].lowStockThreshold = th;
+                }
+                if (costRaw !=='') {
+                    const costVal = parseMoney(costRaw);
+                    if (!isNaN(costVal)) products[existingIdx].cost = costVal;
+                }
+                if (categoryRaw && !categories.includes(categoryRaw)) {
+                    categories.push(categoryRaw);
+                    newCategoriesFound.add(categoryRaw);
+                }
+                updated++;
+                return;
+            }
+
+            const category = categoryRaw ||'Others';
+            if (isNaN(price) || isNaN(stock)) {
+                errors.push(`Row ${rowNum}: Hindi valid ang Price o Stock — na-skip.`);
+                skipped++;
+                return;
+            }
+
+            const newProduct = { code, name, category, price, stock };
+            if (supplier) newProduct.supplier = supplier;
+            if (expiry) newProduct.expiryDate = expiry;
+            if (thresholdRaw !=='') {
+                const th = parseWholeNumber(thresholdRaw);
+                if (!isNaN(th)) newProduct.lowStockThreshold = th;
+            }
+            if (costRaw !=='') {
+                const costVal = parseMoney(costRaw);
+                if (!isNaN(costVal)) newProduct.cost = costVal;
+            }
+
+            products.push(newProduct);
+            codeIndex.set(code.toLowerCase(), products.length - 1);
+
+            if (!categories.includes(category)) {
+                categories.push(category);
+                newCategoriesFound.add(category);
+            }
+            added++;
+        });
+
+        writeData(FILE_PRODUCTS, products);
+        writeData(FILE_CATEGORIES, categories);
+        logAction(username, `Bulk-imported products via Excel/CSV: ${added} added, ${updated} updated, ${skipped} skipped.`);
+        cleanupTmpFile();
+
+        res.json({
+            success: true,
+            added,
+            updated,
+            skipped,
+            errors,
+            newCategories: [...newCategoriesFound],
+            categories,
+            products
+        });
+    } catch (err) {
+        console.error('Import error:', err);
+        cleanupTmpFile();
+        res.status(500).json({ success: false, message:'Hindi mabasa ang file. Siguraduhing wastong .xlsx o .csv format ang ginamit (gamitin ang Download Template button).' });
+    }
+});
+
+app.post('/api/products', (req, res) => {
+    const { product } = req.body;
+    const username = req.authUser.username;
+    let products = readData(FILE_PRODUCTS);
+
+    const codeExists = products.some(p => p.code.trim().toLowerCase() === product.code.trim().toLowerCase());
+    if (codeExists) {
+        return res.status(400).json({ success: false, message: `❌ Ang Product Code [${product.code}] ay ginagamit na!` });
+    }
+
+    const isAdminRole = (req.authUser.role ||'').toLowerCase() ==='admin';
+    const canApplyDirectly = isAdminRole || !!getPermissionsForRole(req.authUser.role).products_direct_apply;
+
+    if (canApplyDirectly) {
+        products.push(product);
+        writeData(FILE_PRODUCTS, products);
+        logAction(username, `Added new product: ${product.name}`);
+        return res.json({ success: true, message:'Product added successfully' });
+    } else {
+            let requests = readData(FILE_REQUESTS);
+    requests.push({
+        id:'REQ-' + Date.now(),
+        requester: username,
+        type:'ADD',
+        data: product,
+        timestamp: new Date().toLocaleString()
+    });
+    writeData(FILE_REQUESTS, requests);
+    return res.json({ success: true, message:'Request sent to Admin for approval.'
+                    });
+}
+
+});
+
+// SECURITY FIX: tinanggal ang function body ng dating '/api/products/deduct'.
+// Ito ang PINAKA-MALALANG bug — walang requirePermission(...) kaya KAHIT
+// ANONG naka-login na role (kahit pinaka-mababa) ay pwedeng tumawag dito
+// direkta, walang pag-verify ng presyo, walang paglikha ng transaction
+// record, at walang logAction (walang audit trail). Legacy/unused na rin
+// ito sa frontend (public/app.js). Katulad ng '/api/products/checkout',
+// iniwan ang route pero pinatay ang function nito (410 Gone) at nilagyan
+// ng logging kung sino man ang susubok pa ring tumawag dito.
+app.post('/api/products/deduct', (req, res) => {
+    try {
+        logAction(req.authUser && req.authUser.username, `Blocked call to removed endpoint /api/products/deduct (security fix — walang permission check dati, direct stock manipulation na walang transaction record). Payload: ${JSON.stringify(req.body || {}).slice(0, 300)}`);
+    } catch (e) {
+        console.error('Failed to log blocked /api/products/deduct attempt:', e);
+    }
+    res.status(410).json({
+        success: false,
+        code:'ENDPOINT_REMOVED',
+        message:'Tinanggal na ang endpoint na ito dahil sa security review — pwede itong dating gamitin ng kahit sinong naka-login para baguhin ang stock nang walang permission check at walang audit trail. Gamitin ang /api/transactions para sa checkout/sale.'
+    });
+});
+
+app.put('/api/products/:code', (req, res) => {
+    const { code } = req.params;
+    const { updatedData } = req.body;
+    const username = req.authUser.username;
+    let products = readData(FILE_PRODUCTS);
+
+    const isAdminRole = (req.authUser.role ||'').toLowerCase() ==='admin';
+    const canApplyDirectly = isAdminRole || !!getPermissionsForRole(req.authUser.role).products_direct_apply;
+
+    if (canApplyDirectly) {
+        products = products.map(p => p.code.trim().toLowerCase() === code.trim().toLowerCase() ? { ...p, ...updatedData } : p);
+        writeData(FILE_PRODUCTS, products);
+        logAction(username, `Updated product code: ${code}`);
+        return res.json({ success: true, message:'Product updated successfully' });
+    } else {
+        let requests = readData(FILE_REQUESTS);
+        requests.push({ id: Date.now(), type:'UPDATE', targetCode: code, requester: username, data: updatedData, timestamp: new Date().toLocaleString() });
+        writeData(FILE_REQUESTS, requests);
+        logAction(username, `Submitted an UPDATE request for code: ${code}`);
+        return res.json({ success: true, message:'Update request submitted for Admin approval' });
+    }
+});
+
+app.delete('/api/products/:code', (req, res) => {
+    const { code } = req.params;
+    const username = req.authUser.username;
+    let products = readData(FILE_PRODUCTS);
+
+    const isAdminRole = (req.authUser.role ||'').toLowerCase() ==='admin';
+    const canApplyDirectly = isAdminRole || !!getPermissionsForRole(req.authUser.role).products_direct_apply;
+
+    if (canApplyDirectly) {
+        products = products.filter(p => p.code.trim().toLowerCase() !== code.trim().toLowerCase());
+        writeData(FILE_PRODUCTS, products);
+        logAction(username, `Deleted product code: ${code}`);
+        return res.json({ success: true, message:'Product deleted successfully' });
+    } else {
+        let requests = readData(FILE_REQUESTS);
+        requests.push({ id: Date.now(), type:'DELETE', targetCode: code, requester: username, timestamp: new Date().toLocaleString() });
+        writeData(FILE_REQUESTS, requests);
+        logAction(username, `Submitted a DELETE request for code: ${code}`);
+        return res.json({ success: true, message:'Delete request submitted for Admin approval' });
+    }
+});
+
+app.get('/api/requests', requirePermission('pending_requests'), (req, res) => {
+    res.json(readData(FILE_REQUESTS));
+});
+
+app.post('/api/requests/:id/resolve', rateLimit('admin-resolve-request', 15, 10 * 60 * 1000), verifyAdmin, (req, res) => {
+    const { id } = req.params;
+    const { action, username } = req.body;
+
+    let requests = readData(FILE_REQUESTS);
+    const reqIndex = requests.findIndex(r => r.id.toString() === id.toString());
+
+    if (reqIndex === -1) {
+        return res.status(404).json({ success: false, message:'Request Reference ID Not Found.' });
+    }
+
+    const targetReq = requests[reqIndex];
+    const normalizedAction = action ? action.toLowerCase() :'';
+
+    if (normalizedAction ==='approve' || normalizedAction ==='approved') {
+        if (targetReq.type ==='PROFILE_UPDATE') {
+
+            const result = applyProfileChanges(targetReq.targetUser, targetReq.data || {});
+            if (!result.ok) {
+                return res.status(400).json({ success: false, message: `Hindi ma-apply ang Edit Profile request: ${result.error}` });
+            }
+            logAction(username, result.renamedFrom
+                ? `APPROVED Edit Profile request para kay "${targetReq.targetUser}" — pinalitan ang username sa "${result.user.username}"`
+                : `APPROVED Edit Profile request para kay "${targetReq.targetUser}"`);
+        } else if (targetReq.type ==='RECEIPT_UPDATE') {
+            const settings = readData(FILE_RECEIPT_SETTINGS, DEFAULT_RECEIPT_SETTINGS);
+            const d = targetReq.data || {};
+            settings.storeName = (d.storeName ||'').trim() || settings.storeName;
+            settings.storeAddress = (d.storeAddress ||'').trim();
+            settings.storeContact = (d.storeContact ||'').trim();
+            settings.headerText = (d.headerText ||'').trim();
+            settings.footerText = (d.footerText ||'').trim() || DEFAULT_RECEIPT_SETTINGS.footerText;
+            settings.customizeCount = (settings.customizeCount || 0) + 1;
+            if (!settings.firstCustomizedAt) settings.firstCustomizedAt = new Date().toISOString();
+            writeData(FILE_RECEIPT_SETTINGS, settings);
+            logAction(username, `APPROVED Receipt Customization request mula kay "${targetReq.requester}"`);
+        } else if (targetReq.type ==='RECEIPT_PAPER_SIZE') {
+            const settings = readData(FILE_RECEIPT_SETTINGS, DEFAULT_RECEIPT_SETTINGS);
+            const paperSize = targetReq.data && targetReq.data.paperSize;
+            if (VALID_PAPER_SIZES.includes(paperSize)) {
+                settings.paperSize = paperSize;
+                writeData(FILE_RECEIPT_SETTINGS, settings);
+                logAction(username, `APPROVED Receipt Paper Size request (${paperSize}) mula kay "${targetReq.requester}"`);
+            }
+        } else {
+            let products = readData(FILE_PRODUCTS);
+
+            if (targetReq.type ==='ADD') {
+                products.push(targetReq.data);
+                logAction(username, `APPROVED ADD Request for product: ${targetReq.data?.name}`);
+            }
+            else if (targetReq.type ==='UPDATE') {
+                products = products.map(p => p.code.trim().toLowerCase() === targetReq.targetCode.trim().toLowerCase() ? { ...p, ...targetReq.data } : p);
+                logAction(username, `APPROVED UPDATE Request for code: ${targetReq.targetCode}`);
+            }
+            else if (targetReq.type ==='DELETE') {
+                products = products.filter(p => p.code.trim().toLowerCase() !== targetReq.targetCode.trim().toLowerCase());
+                logAction(username, `APPROVED DELETE Request for code: ${targetReq.targetCode}`);
+            }
+            else if (targetReq.type ==='RESTOCK') {
+                const qtyToAdd = parseInt(targetReq.data?.qtyToAdd) || 0;
+                products = products.map(p => {
+                    if (p.code.trim().toLowerCase() === targetReq.targetCode.trim().toLowerCase()) {
+                        return { ...p, stock: (parseInt(p.stock) || 0) + qtyToAdd };
+                    }
+                    return p;
+                });
+                logAction(username, `APPROVED RESTOCK Request for code: ${targetReq.targetCode} (+${qtyToAdd})`);
+            }
+
+            writeData(FILE_PRODUCTS, products);
+        }
+    } else {
+        if (targetReq.type ==='PROFILE_UPDATE') {
+            logAction(username, `REJECTED Edit Profile request para kay "${targetReq.targetUser}"`);
+        } else {
+            logAction(username, `REJECTED ${targetReq.type} request for item ID/Code: ${targetReq.targetCode || targetReq.data?.code}`);
+        }
+    }
+
+    requests = requests.filter(r => r.id.toString() !== id.toString());
+    writeData(FILE_REQUESTS, requests);
+
+    res.json({ success: true, message: `Request processed and removed successfully.` });
+});
+
+app.post('/api/transactions', requirePermission('terminal'), async (req, res) => {
+    const { transaction, username } = req.body;
+
+    if (!transaction || typeof transaction !== 'object' || !Array.isArray(transaction.items) || transaction.items.length === 0) {
+        return res.status(400).json({ success: false, message: 'Walang laman o hindi valid ang transaction items.' });
+    }
+
+    transaction.cashier = req.authUser.username;
+
+    let transactions = readData(FILE_TRANSACTIONS);
+    let products = readData(FILE_PRODUCTS);
+    let customers = readData(FILE_CUSTOMERS, []);
+
+    const storeSettings = getStoreSettingsPublic(readData(FILE_STORE_SETTINGS, DEFAULT_STORE_SETTINGS));
+
+    // Payment method validation — tinatanggihan ang benta kung gumagamit
+    // ng payment method na hindi naka-enable sa Store & Sales Settings
+    // (hal. na-disable na ang GCash pero pinilit pa rin gamitin sa
+    // client). Sinusuri pareho ang single-method at split-payment flow.
+    const enabledMethodKeys = Object.entries(storeSettings.paymentMethods)
+        .filter(([, enabled]) => enabled)
+        .map(([key]) => key.toLowerCase());
+    const methodAliasMap = { cash:'cash', gcash:'gcash', maya:'maya', paymaya:'maya', card:'card', banktransfer:'banktransfer', bank_transfer:'banktransfer' };
+    function isMethodEnabled(rawMethod) {
+        const norm = String(rawMethod || 'cash').toLowerCase().replace(/[\s_-]/g, '');
+        const key = methodAliasMap[norm] || norm;
+        return enabledMethodKeys.includes(key);
+    }
+    const paymentMethodsUsed = Array.isArray(transaction.payments) && transaction.payments.length > 0
+        ? transaction.payments.map(p => p.method)
+        : [transaction.method || transaction.payment_method || 'cash'];
+    const disabledMethodUsed = paymentMethodsUsed.find(m => !isMethodEnabled(m));
+    if (disabledMethodUsed) {
+        return res.status(400).json({
+            success: false,
+            message: `Ang payment method na "${disabledMethodUsed}" ay hindi naka-enable sa Store & Sales Settings. Puntahan ang Users > Store & Sales para i-enable.`
+        });
+    }
+
+    // MODERNIZED GCASH/MAYA: kagaya ng ginagawa ng mga aktwal na e-wallet
+    // acceptance ngayon, kailangan ng reference/transaction number para sa
+    // bawat GCash/Maya na bayad — ito ang gagamitin sa reconciliation
+    // laban sa aktwal na GCash/Maya business app/statement ng tindahan.
+    // Sinusuri dito (server-side), hindi lang sa client, kaya hindi ito
+    // maiiwasan sa pamamagitan ng direktang API call.
+    const eWalletMethods = new Set(['gcash', 'maya', 'paymaya']);
+    function normalizeMethodKey(rawMethod) {
+        return String(rawMethod || '').toLowerCase().replace(/[\s_-]/g, '');
+    }
+    if (Array.isArray(transaction.payments) && transaction.payments.length > 0) {
+        const missingRef = transaction.payments.find(p =>
+            eWalletMethods.has(normalizeMethodKey(p.method)) && !String(p.reference || '').trim());
+        if (missingRef) {
+            return res.status(400).json({
+                success: false,
+                message: `Kailangan ang reference/transaction number para sa ${missingRef.method} na bayad.`
+            });
+        }
+    } else {
+        const singleMethod = normalizeMethodKey(transaction.method || transaction.payment_method);
+        if (eWalletMethods.has(singleMethod) && !String(transaction.paymentReference || '').trim()) {
+            return res.status(400).json({
+                success: false,
+                message: `Kailangan ang reference/transaction number para sa ${transaction.method || transaction.payment_method} na bayad.`
+            });
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // SECURITY FIX: dati, ang quantity/price/discount/total ng transaction
+    // ay basta TINITIWALAAN mula sa client (kayang i-manipulate sa
+    // devtools/direct API call para sa negative-quantity "stock
+    // injection", o price/total tampering — "skimming" fraud). Ngayon,
+    // bawat item ay:
+    //   1. kinukumpirma laban sa TALAGANG naitalang produkto sa database
+    //      (code muna, name bilang fallback) — tinatanggihan ang buong
+    //      transaksyon kung may item na hindi nahanap.
+    //   2. kailangang POSITIVE INTEGER ang quantity (hindi puwedeng zero,
+    //      negative, o decimal — dati'y walang validation dito, kaya
+    //      kayang gamitin para MAGDAGDAG ng stock gamit ang negative
+    //      quantity).
+    //   3. ang presyo (`item.price`) ay PINIPWERSA na tumugma sa presyo
+    //      ng produkto sa database — hindi na ang presyo na ipinasa ng
+    //      client ang ginagamit. Ang legit na discount workflows (per-
+    //      item discount, Senior/PWD 20%, promo code, manual discount)
+    //      ay sinusuportahan pa rin, pero kinukwenta/kinukumpirma ULIT
+    //      dito, hindi basta tinitiwalaan.
+    // Ang FINAL na `transaction.total` ay laging kinukwenta ULIT sa
+    // server base sa totoong presyo ng produkto + validated discounts.
+    // ------------------------------------------------------------------
+    const resolvedItems = [];
+    const stockIssues = [];
+    const rejectedItems = [];
+
+    for (const item of (transaction.items || [])) {
+        let prod = products.find(p => p.code === item.code);
+        if (!prod) prod = products.find(p => p.name === item.name);
+
+        if (!prod) {
+            rejectedItems.push(item && (item.code || item.name) || '(unknown item)');
+            continue;
+        }
+
+        const qty = parseInt(item.quantity, 10);
+        if (!Number.isInteger(qty) || qty <= 0 || String(item.quantity).trim() === '') {
+            rejectedItems.push(`${prod.name} (invalid quantity: ${item.quantity})`);
+            continue;
+        }
+
+        const catalogPrice = parseFloat(prod.price) || 0;
+        const lineSubtotal = Math.round(catalogPrice * qty * 100) / 100;
+        const itemDiscount = Math.min(Math.max(0, parseFloat(item.itemDiscount) || 0), lineSubtotal);
+
+        const availableStock = parseInt(prod.stock) || 0;
+        if (qty > availableStock) {
+            stockIssues.push(`${prod.name} (natitira: ${availableStock}, hiniling: ${qty})`);
+        }
+
+        resolvedItems.push({
+            code: prod.code,
+            name: prod.name,
+            price: catalogPrice,
+            quantity: qty,
+            itemDiscount,
+            cost: parseFloat(prod.cost) || 0
+        });
+    }
+
+    if (rejectedItems.length > 0) {
+        return res.status(400).json({
+            success: false,
+            message: `Hindi ma-proseso ang benta — invalid o hindi nahanap ang item(s): ${rejectedItems.join(', ')}.`
+        });
+    }
+    if (stockIssues.length > 0) {
+        return res.status(409).json({
+            success: false,
+            outOfStock: true,
+            message: `Hindi ma-proceed ang benta — naubos/kulang na ang stock: ${stockIssues.join(', ')}. Malamang na-benta na ito sa ibang terminal/device. I-refresh ang product list.`
+        });
+    }
+
+    const grossSubtotal = Math.round(resolvedItems.reduce((sum, it) => sum + (it.price * it.quantity), 0) * 100) / 100;
+    const itemDiscountTotal = Math.round(resolvedItems.reduce((sum, it) => sum + it.itemDiscount, 0) * 100) / 100;
+    const netAfterItemDiscounts = Math.max(0, Math.round((grossSubtotal - itemDiscountTotal) * 100) / 100);
+
+    // Cart-level discount: kinukwenta/kinukumpirma ULIT ayon sa
+    // discountType — hindi basta ang halagang ipinasa ng client (maliban
+    // sa MANUAL, na sadyang discretion ng cashier, pero clamped pa rin
+    // para hindi lumagpas sa net subtotal).
+    let cartDiscount = 0;
+    const discountType = transaction.discountType || 'NONE';
+
+    if (discountType === 'SENIOR_PWD') {
+        if (!transaction.seniorPwdId || !String(transaction.seniorPwdId).trim()) {
+            return res.status(400).json({ success: false, message: 'Kailangan ng Senior/PWD ID Number para sa discount na ito.' });
+        }
+        if (!storeSettings.seniorPwdDiscountEnabled) {
+            return res.status(400).json({ success: false, message: 'Naka-disable ang Senior/PWD Discount. Puntahan ang Users > Store & Sales para i-enable.' });
+        }
+        const seniorPwdRate = Math.min(Math.max(0, storeSettings.seniorPwdDiscountRate), 100) / 100;
+        cartDiscount = Math.round(netAfterItemDiscounts * seniorPwdRate * 100) / 100;
+    } else if (discountType === 'PROMO') {
+        const promoCode = String(transaction.promoCode || '').toUpperCase();
+        const promos = readData(FILE_PROMOCODES, []);
+        const promo = promos.find(p => p.code === promoCode);
+        if (!promo || !promo.active || (promo.expiresAt && new Date(promo.expiresAt).getTime() < Date.now())) {
+            return res.status(400).json({ success: false, message: 'Hindi valid o na-expire na ang promo code na ito.' });
+        }
+        if (promo.minSpend && netAfterItemDiscounts < promo.minSpend) {
+            return res.status(400).json({ success: false, message: `Kailangan ng minimum na ₱${promo.minSpend.toFixed(2)} para magamit ang promo na ito.` });
+        }
+        const promoDiscount = promo.type === 'percent' ? (netAfterItemDiscounts * promo.value / 100) : promo.value;
+        cartDiscount = Math.round(Math.min(Math.max(promoDiscount, 0), netAfterItemDiscounts) * 100) / 100;
+    } else if (discountType === 'MANUAL') {
+        cartDiscount = Math.round(Math.min(Math.max(0, parseFloat(transaction.discount) || 0), netAfterItemDiscounts) * 100) / 100;
+    } else if (discountType === 'LOYALTY') {
+        // Loyalty points redemption — hindi basta tinitiwalaan ang bilang
+        // ng points o ang halaga ng discount na ipinasa ng client. Ang
+        // TALAGANG points balance ng customer sa database ang batayan,
+        // at ang pinal na redeemed count ay ino-overwrite dito
+        // (transaction.loyaltyPointsRedeemed) para ito rin ang magiging
+        // basehan pagbawas ng points sa customer record sa ibaba.
+        if (!storeSettings.loyaltyEnabled) {
+            return res.status(400).json({ success: false, message: 'Naka-disable ang Loyalty Points redemption. Puntahan ang Users > Store & Sales para i-enable.' });
+        }
+        if (!transaction.customerId) {
+            return res.status(400).json({ success: false, message: 'Pumili muna ng customer para makagamit ng loyalty points.' });
+        }
+        const redeemingCustomer = customers.find(c => c.id === transaction.customerId);
+        if (!redeemingCustomer) {
+            return res.status(400).json({ success: false, message: 'Customer not found.' });
+        }
+        const requestedPoints = Math.max(0, parseInt(transaction.loyaltyPointsRedeemed) || 0);
+        const availablePoints = Math.max(0, redeemingCustomer.points || 0);
+        const pointValue = Math.max(0, parseFloat(storeSettings.loyaltyPointValue) || 0);
+        let pointsToRedeem = Math.min(requestedPoints, availablePoints);
+        cartDiscount = Math.round(Math.min(pointsToRedeem * pointValue, netAfterItemDiscounts) * 100) / 100;
+        // Kung na-cap ang discount dahil sa net subtotal, ibalik din ang
+        // redeemed points sa proporsyonal na halaga (hindi dapat mas
+        // marami ang points na babawasin kaysa sa aktwal na na-apply na discount).
+        pointsToRedeem = pointValue > 0 ? Math.floor(cartDiscount / pointValue) : 0;
+        cartDiscount = Math.round(pointsToRedeem * pointValue * 100) / 100;
+        if (pointsToRedeem <= 0) {
+            return res.status(400).json({ success: false, message: 'Walang sapat na loyalty points para gamitin.' });
+        }
+        transaction.loyaltyPointsRedeemed = pointsToRedeem;
+
+        // --------------------------------------------------------------
+        // SECURITY: bago pahintulutan ang aktwal na redemption, kailangan
+        // ng isa sa dalawa:
+        //   1) VALID na na-scan na Loyalty Card/QR ng customer mismo
+        //      (`transaction.loyaltyCardToken`) — awtomatikong authorized
+        //      dahil ang paghawak lang ng tamang card/QR ang nagpapatunay
+        //      na ito, o
+        //   2) Isang `transaction.loyaltyAuthPassword` na tumutugma sa
+        //      Admin o sa account na may `loyalty_redeem_own_password`
+        //      permission — para sa MANUAL na redemption (walang scan).
+        // Kagaya ito ng ginagawang pattern sa Manual Discount / Void /
+        // Shift Close sa ibaba.
+        // --------------------------------------------------------------
+        const cardToken = transaction.loyaltyCardToken;
+        if (cardToken) {
+            const cardCheck = verifyLoyaltyCardToken(redeemingCustomer, cardToken);
+            if (!cardCheck.valid) {
+                return res.status(403).json({ success: false, code:'LOYALTY_CARD_INVALID', message: cardCheck.message });
+            }
+            transaction.loyaltyAuthorizedBy = 'Customer Loyalty Card/QR Scan';
+            transaction._loyaltyCardRotate = cardCheck.mode ==='rotating';
+        } else {
+            const loyaltyAuthPassword = transaction.loyaltyAuthPassword;
+            if (!loyaltyAuthPassword) {
+                return res.status(400).json({
+                    success: false,
+                    code:'LOYALTY_AUTH_REQUIRED',
+                    message:'I-scan ang Loyalty Card/QR ng customer, o maglagay ng Admin/Supervisor password para sa manual na pag-redeem.'
+                });
+            }
+            const loyaltyAuthUsers = readData(FILE_USERS);
+            const loyaltyAuthResult = await findLoyaltyRedeemAuthorizer(loyaltyAuthUsers, loyaltyAuthPassword);
+            if (!loyaltyAuthResult) {
+                return res.status(403).json({ success: false, code:'WRONG_ADMIN_PASSWORD', message:'Incorrect password. Loyalty points redemption was not authorized.' });
+            }
+            transaction.loyaltyAuthorizedBy = loyaltyAuthResult.isAdmin
+                ? `${loyaltyAuthResult.user.username} (Admin, manual)`
+                : `${loyaltyAuthResult.user.username} (RBAC, manual)`;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // SECURITY FIX: previously, manual discounts (item-level
+    // `itemDiscount` and cart-level `discountType: MANUAL`) were simply
+    // accepted from whoever was logged into the terminal (even a
+    // Cashier) — no password or approval was required, unlike
+    // void/shift-close. This was the easiest "sweethearting" fraud
+    // vector: lower the price in the system while still charging the
+    // customer full price, then pocket the difference. Now, whenever
+    // there's a manual discount (item or cart) GREATER THAN ZERO, a
+    // `transaction.discountAuthPassword` is required that matches the
+    // Admin or an account with the `manual_discount_own_password`
+    // permission — checked against ALL accounts (same as void), since
+    // it's usually a Supervisor typing their own password, not the
+    // Cashier logged into the terminal.
+    // ------------------------------------------------------------------
+    const manualDiscountTotal = Math.round((itemDiscountTotal + (discountType ==='MANUAL' ? cartDiscount : 0)) * 100) / 100;
+    let discountAuthorizedBy = null;
+
+    if (manualDiscountTotal > 0) {
+        const discountAuthPassword = transaction.discountAuthPassword;
+        if (!discountAuthPassword) {
+            return res.status(400).json({
+                success: false,
+                code:'DISCOUNT_AUTH_REQUIRED',
+                message:'An Admin/Supervisor password is required to authorize this manual discount.'
+            });
+        }
+        const authUsers = readData(FILE_USERS);
+        const discountAuthResult = await findManualDiscountAuthorizer(authUsers, discountAuthPassword);
+        if (!discountAuthResult) {
+            return res.status(403).json({
+                success: false,
+                code:'WRONG_ADMIN_PASSWORD',
+                message:'Incorrect password. Manual discount was not authorized.'
+            });
+        }
+        discountAuthorizedBy = discountAuthResult.isAdmin
+            ? `${discountAuthResult.user.username} (Admin)`
+            : `${discountAuthResult.user.username} (RBAC)`;
+    }
+
+    const verifiedTotal = Math.max(0, Math.round((netAfterItemDiscounts - cartDiscount) * 100) / 100);
+
+    // Tax computation (base sa Store & Sales Settings). Kapag "prices
+    // include tax" ang setup, HINDI na dinadagdag ang tax sa total —
+    // in-eextract lang ito para sa reporting (ang presyo mismo ng produkto
+    // ay itinuturing na tax-inclusive na). Kapag hindi kasama ang tax sa
+    // presyo, idinadagdag ito sa verifiedTotal para makuha ang GRAND total
+    // na dapat bayaran.
+    let taxAmount = 0;
+    const taxRatePct = Math.min(Math.max(0, storeSettings.taxRate), 100);
+    if (storeSettings.taxEnabled && taxRatePct > 0) {
+        if (storeSettings.pricesIncludeTax) {
+            taxAmount = Math.round((verifiedTotal - (verifiedTotal / (1 + taxRatePct / 100))) * 100) / 100;
+        } else {
+            taxAmount = Math.round(verifiedTotal * (taxRatePct / 100) * 100) / 100;
+        }
+    }
+    const grandTotal = (storeSettings.taxEnabled && !storeSettings.pricesIncludeTax)
+        ? Math.round((verifiedTotal + taxAmount) * 100) / 100
+        : verifiedTotal;
+
+    // Kumpirmahin na ang binayad (single payment o split payments) ay
+    // sapat para sa VERIFIED total (kasama na ang tax kung applicable) —
+    // dati'y hindi ito kinukumpirma laban sa recomputed na halaga.
+    const tendered = Array.isArray(transaction.payments) && transaction.payments.length > 0
+        ? transaction.payments.reduce((s, p) => s + (parseFloat(p.amount) || 0), 0)
+        : (parseFloat(transaction.received ?? transaction.amount_paid) || 0);
+
+    if (Math.round(tendered * 100) / 100 < grandTotal - 0.01) {
+        return res.status(400).json({
+            success: false,
+            message: `Hindi tama ang binayad — kulang ito (₱${tendered.toFixed(2)}) kumpara sa tamang total (₱${grandTotal.toFixed(2)}).`
+        });
+    }
+
+    // I-overwrite ang mga field na pinagmumulan ng fraud gamit ang
+    // SERVER-VERIFIED na values — hindi na ito galing direkta sa client.
+    transaction.items = resolvedItems;
+    transaction.discount = cartDiscount;
+    transaction.subtotalBeforeTax = verifiedTotal;
+    transaction.taxRate = storeSettings.taxEnabled ? taxRatePct : 0;
+    transaction.taxAmount = taxAmount;
+    transaction.taxInclusive = !!storeSettings.pricesIncludeTax;
+    transaction.total = grandTotal;
+    transaction.change = Math.round((tendered - grandTotal) * 100) / 100;
+    transaction.discountAuthorizedBy = discountAuthorizedBy;
+    delete transaction.discountAuthPassword;
+    // Sensitive: hindi dapat i-persist ang plaintext password/raw card
+    // token sa saved transaction record — na-verify na ito sa itaas,
+    // ang `loyaltyAuthorizedBy` label na lang ang kailangan sa audit trail.
+    delete transaction.loyaltyAuthPassword;
+    delete transaction.loyaltyCardToken;
+
+    transaction.items.forEach(item => {
+        const prod = products.find(p => p.code === item.code);
+        if (prod) {
+            prod.stock = Math.max(0, prod.stock - item.quantity);
+        }
+    });
+
+    let newLoyaltyCardToken = null;
+    if (transaction.customerId) {
+        const cust = customers.find(c => c.id === transaction.customerId);
+        if (cust) {
+            // Ang `redeem` dito ay galing na sa server-validated
+            // `transaction.loyaltyPointsRedeemed` (na-overwrite sa itaas sa
+            // LOYALTY discount branch, hindi mula sa raw client input),
+            // kaya siguradong hindi ito lalagpas sa totoong points balance.
+            const redeem = discountType === 'LOYALTY' ? Math.max(0, parseInt(transaction.loyaltyPointsRedeemed) || 0) : 0;
+            if (redeem > 0) {
+                cust.points = Math.max(0, (cust.points || 0) - redeem);
+
+                // ANTI-REPLAY: kung 'rotating' ang mode ng card/QR na ginamit
+                // sa redemption na ito, awtomatikong bumubuo ng BAGONG
+                // secret/QR ngayon din — ang dating QR (kahit may litrato o
+                // screenshot nito ang sinuman) ay wala nang silbi simula
+                // ngayon. Ibabalik ang bagong token sa response para
+                // maipakita/ma-refresh agad sa customer.
+                if (transaction._loyaltyCardRotate && cust.loyaltyCard && !cust.loyaltyCard.revoked) {
+                    const rotated = issueLoyaltyCard(cust, 'rotating', transaction.loyaltyAuthorizedBy || 'system');
+                    newLoyaltyCardToken = rotated.token;
+                }
+            } else {
+                transaction.loyaltyPointsRedeemed = 0;
+            }
+            delete transaction._loyaltyCardRotate;
+
+            const earnRate = storeSettings.loyaltyEnabled ? (parseFloat(storeSettings.loyaltyEarnRate) || 100) : 0;
+            const earned = earnRate > 0 ? Math.floor((parseFloat(transaction.total) || 0) / earnRate) : 0;
+            cust.points = (cust.points || 0) + earned;
+            cust.totalSpent = Math.round(((cust.totalSpent || 0) + (parseFloat(transaction.total) || 0)) * 100) / 100;
+            cust.visits = (cust.visits || 0) + 1;
+            cust.lastVisit = new Date().toISOString();
+
+            transaction.customerName = cust.name;
+            transaction.customerEmail = cust.email ||'';
+            transaction.loyaltyPointsEarned = earned;
+            transaction.loyaltyPointsBalance = cust.points;
+
+            writeData(FILE_CUSTOMERS, customers);
+        }
+    }
+
+    transactions.unshift(transaction);
+    writeData(FILE_TRANSACTIONS, transactions);
+    writeData(FILE_PRODUCTS, products);
+
+    logAction(username, `Processed sale transaction: ${transaction.id}`
+        + (discountAuthorizedBy ? ` (Manual discount ₱${manualDiscountTotal.toFixed(2)} authorized by: ${discountAuthorizedBy})` : '')
+        + (transaction.loyaltyAuthorizedBy ? ` (Loyalty redemption authorized by: ${transaction.loyaltyAuthorizedBy})` : ''));
+
+    // Advanced Settings: Sale Webhook — fire-and-forget POST to the
+    // configured integration URL (Zapier/Make/accounting/etc.). Never
+    // blocks or fails the sale itself if the webhook is slow/down.
+    try {
+        const advSettings = getAdvancedSettingsPublic(readData(FILE_ADVANCED_SETTINGS, DEFAULT_ADVANCED_SETTINGS));
+        if (advSettings.saleWebhookEnabled && advSettings.saleWebhookUrl && typeof fetch === 'function') {
+            fetch(advSettings.saleWebhookUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    event: 'sale.completed',
+                    transactionId: transaction.id,
+                    total: transaction.total,
+                    cashier: transaction.cashier,
+                    itemCount: (transaction.items || []).length,
+                    timestamp: transaction.isoDate || new Date().toISOString()
+                })
+            }).catch(err => console.error('Sale webhook delivery failed:', err.message));
+        }
+    } catch (webhookErr) {
+        console.error('Sale webhook error:', webhookErr.message);
+    }
+
+    // `newLoyaltyCardToken` ay ipapakita/ipi-print LAMANG sa sandaling ito
+    // (kagaya ng pag-issue) — hindi ito naka-imbak kahit saan bilang
+    // plaintext, at hindi rin bahagi ng saved transaction record.
+    res.json({ success: true, currentTransaction: transaction, newLoyaltyCardToken });
+
+});
+
+app.get('/api/cart/:username', (req, res) => {
+    const username = req.params.username;
+
+    const isOwner = req.authUser.username.toLowerCase() === username.toLowerCase();
+    const isAdmin = req.authUser.role.toLowerCase() ==='admin';
+    if (!isOwner && !isAdmin) {
+        return res.status(403).json({ success: false, message:'Akses Denied: Hindi mo pwedeng tingnan ang cart ng ibang user.' });
+    }
+
+    const cartsData = readData(FILE_CARTS, {});
+
+    res.json({ success: true, cart: cartsData[username] || [] });
+});
+
+app.post('/api/cart', (req, res) => {
+    const { username, cart } = req.body;
+    if (!username) {
+        return res.status(400).json({ success: false, message:'Missing username' });
+    }
+
+    const cartsData = readData(FILE_CARTS, {});
+
+    cartsData[username] = cart;
+
+    writeData(FILE_CARTS, cartsData);
+    res.json({ success: true, message:'Cart saved to database successfully.' });
+});
+
+app.get('/api/transactions', (req, res) => {
+    const { requester } = req.query;
+    const allTransactions = readData(FILE_TRANSACTIONS);
+
+    if (!requester) {
+        return res.json(allTransactions);
+    }
+
+    const users = readData(FILE_USERS);
+    const activeUser = users.find(u => u.username.toLowerCase() === requester.toLowerCase());
+
+    const activeRole = activeUser && activeUser.role;
+    const isAdminRole = (activeRole ||'').toLowerCase() ==='admin';
+    const canViewAll = isAdminRole || !!getPermissionsForRole(activeRole).transactions_view_all;
+    if (canViewAll) {
+        return res.json(allTransactions);
+    }
+
+    const ownTransactions = allTransactions.filter(
+        tx => (tx.cashier ||'').toLowerCase() === requester.toLowerCase()
+    );
+    res.json(ownTransactions);
+});
+
+app.post('/api/transactions/:transactionId/email-receipt', rateLimit('email-receipt', 20, 15 * 60 * 1000), async (req, res) => {
+    const { transactionId } = req.params;
+    const { toEmail, transaction: clientTx, receiptImage } = req.body;
+
+    const emailPattern =/^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!toEmail || !emailPattern.test(toEmail)) {
+        return res.status(400).json({ success: false, message:'Di-wastong email address.' });
+    }
+
+    const transactions = readData(FILE_TRANSACTIONS, []);
+    const tx = transactions.find(t => t.id === transactionId) || clientTx;
+    if (!tx) {
+        return res.status(404).json({ success: false, message:'Hindi mahanap ang transaction record na ito.' });
+    }
+
+    const settings = readData(FILE_RECEIPT_SETTINGS, DEFAULT_RECEIPT_SETTINGS);
+    const mailCreds = getOtpMailCredentials(settings);
+    if (!mailCreds) {
+        return res.status(400).json({
+            success: false,
+            message:'Wala pang naka-configure na Sender Gmail. I-setup muna ito sa Users > Receipt Customization > OTP Sender Email.'
+        });
+    }
+
+    try {
+        const itemLines = (tx.items || []).map(i => {
+            const itemDiscount = Math.max(0, parseFloat(i.itemDiscount) || 0);
+            const lineTotal = ((parseFloat(i.price) || 0) * (parseInt(i.quantity) || 0)) - itemDiscount;
+            return `  ${i.name} x${i.quantity} .......... ₱${lineTotal.toFixed(2)}`;
+        }).join('\n');
+
+        const paymentLine = (tx.payments && Array.isArray(tx.payments) && tx.payments.length > 1)
+            ? tx.payments.map(p => `${p.method} ₱${parseFloat(p.amount).toFixed(2)}`).join(' + ')
+            : (tx.method || tx.payment_method ||'CASH');
+
+        const storeName = settings.storeName ||'OmniPOS';
+        const textBody = `${storeName}\n${settings.storeAddress ||''}\n\nReceipt: ${tx.id}\nDate: ${tx.timestamp ||''}\nCashier: ${tx.cashier ||''}\n\n${itemLines}\n\nTOTAL: ₱${parseFloat(tx.total || 0).toFixed(2)}\nPayment (${paymentLine})\n\n${settings.footerText ||'Thank you for shopping!'}`;
+
+        const mailOptions = {
+            from: `"${storeName}" <${mailCreds.user}>`,
+            to: toEmail,
+            subject: `Receipt ${tx.id} - ${storeName}`,
+            text: textBody
+        };
+
+        if (typeof receiptImage ==='string' && receiptImage.startsWith('data:image/')) {
+            try {
+                const match = receiptImage.match(/^data:image\/(png|jpeg|jpg);base64,(.+)$/);
+                if (match) {
+                    const ext = match[1] ==='jpg' ?'jpeg' : match[1];
+                    const base64Data = match[2];
+
+                    if (base64Data.length < 2_800_000) {
+                        mailOptions.attachments = [{
+                            filename: `receipt-${tx.id}.${ext ==='jpeg' ?'jpg' :'png'}`,
+                            content: base64Data,
+                            encoding:'base64'
+                        }];
+                    }
+                }
+            } catch (imgErr) {
+                console.warn('Hindi na-attach ang receipt image:', imgErr.message);
+            }
+        }
+
+        await sendMailSmart(mailCreds.user, mailCreds.pass, mailOptions);
+
+        logAction(req.authUser ? req.authUser.username :'Unknown', `Naipadala ang resibo ${tx.id} sa email (${maskEmail(toEmail)})`);
+        res.json({ success: true, message:'Naipadala ang resibo.' });
+    } catch (err) {
+        console.error('Email receipt failed:', err.message);
+        res.status(500).json({ success: false, message: `Hindi naipadala ang resibo: ${err.message}` });
+    }
+});
+
+app.get('/api/logs', requirePermission('logs'), (req, res) => {
+    try {
+        const logs = readData(FILE_USERLOGS, []);
+        res.json({ success: true, data: logs });
+    } catch (error) {
+        console.error("Error reading logs:", error);
+        res.status(500).json({ success: false, message:'Hindi makuha ang system logs.' });
+    }
+});
+
+app.get('/api/users', requirePermission('users'), (req, res) => {
+    const users = readData(FILE_USERS);
+
+    const safeUsers = users.map(({ password, webauthnCredentials, ...rest }) => rest);
+    res.json(safeUsers);
+});
+
+app.get('/api/users/self', (req, res) => {
+    const users = readData(FILE_USERS);
+    const me = users.find(u => u.username.toLowerCase() === req.authUser.username.toLowerCase());
+    if (!me) return res.status(404).json({ success: false, message:'Account not found.' });
+    res.json({ success: true, username: me.username, role: me.role, avatar: me.avatar || null, created: me.created || null });
+});
+
+function applyProfileChanges(currentUsername, { avatar, username: newUsernameRaw }) {
+    let users = readData(FILE_USERS);
+    const userIndex = users.findIndex(u => u.username.toLowerCase() === currentUsername.toLowerCase());
+    if (userIndex === -1) {
+        return { ok: false, error:'Account not found.' };
+    }
+
+    const newUsername = typeof newUsernameRaw ==='string' ? newUsernameRaw.trim() :'';
+    const isRenaming = newUsername && newUsername.toLowerCase() !== currentUsername.toLowerCase();
+
+    if (isRenaming) {
+        if (!/^[a-zA-Z0-9_.\-]{3,32}$/.test(newUsername)) {
+            return { ok: false, error:'Invalid na username. 3-32 characters lang, walang space (pwede lang letra, numero, "_", "." at "-").' };
+        }
+        const taken = users.some((u, i) => i !== userIndex && u.username.toLowerCase() === newUsername.toLowerCase());
+        if (taken) {
+            return { ok: false, error:'Kinuha na ng ibang account ang username na iyan.' };
+        }
+    }
+
+    if (typeof avatar !=='undefined') {
+        users[userIndex].avatar = avatar || null;
+    }
+    const finalUsername = isRenaming ? newUsername : users[userIndex].username;
+    if (isRenaming) {
+        users[userIndex].username = finalUsername;
+    }
+    writeData(FILE_USERS, users);
+
+    if (isRenaming) {
+        renameUsernameEverywhere(currentUsername, finalUsername);
+    }
+
+    return { ok: true, user: users[userIndex], renamedFrom: isRenaming ? currentUsername : null };
+}
+
+app.put('/api/users/self/profile', rateLimit('self-edit-profile', 15, 10 * 60 * 1000), (req, res) => {
+    const { avatar, username: newUsername } = req.body;
+    const actingUsername = req.authUser.username;
+    const isAdminRole = (req.authUser.role ||'').toLowerCase() ==='admin';
+    const canApplyDirectly = isAdminRole || !!getPermissionsForRole(req.authUser.role).edit_user_profile;
+
+    if (canApplyDirectly) {
+        const result = applyProfileChanges(actingUsername, { avatar, username: newUsername });
+        if (!result.ok) {
+            return res.status(400).json({ success: false, message: result.error });
+        }
+        if (result.renamedFrom) {
+            logAction(result.user.username, `Changed own username from "${result.renamedFrom}" to "${result.user.username}"`);
+        } else {
+            logAction(actingUsername, `Updated own profile (Edit Profile widget)`);
+        }
+        return res.json({
+            success: true,
+            pending: false,
+            message:'Na-update na ang profile mo.',
+            username: result.user.username,
+            avatar: result.user.avatar || null,
+            usernameChanged: !!result.renamedFrom
+        });
+    }
+
+    const trimmedNewUsername = typeof newUsername ==='string' ? newUsername.trim() :'';
+    if (trimmedNewUsername && trimmedNewUsername.toLowerCase() !== actingUsername.toLowerCase()) {
+        if (!/^[a-zA-Z0-9_.\-]{3,32}$/.test(trimmedNewUsername)) {
+            return res.status(400).json({ success: false, message:'Invalid na username. 3-32 characters lang, walang space (pwede lang letra, numero, "_", "." at "-").' });
+        }
+        const users = readData(FILE_USERS);
+        const taken = users.some(u => u.username.toLowerCase() === trimmedNewUsername.toLowerCase());
+        if (taken) {
+            return res.status(400).json({ success: false, message:'Kinuha na ng ibang account ang username na iyan.' });
+        }
+    }
+
+    let requests = readData(FILE_REQUESTS);
+    requests.push({
+        id: Date.now(),
+        type:'PROFILE_UPDATE',
+        targetUser: actingUsername,
+        requester: actingUsername,
+        data: { avatar: typeof avatar ==='undefined' ? undefined : (avatar || null), username: trimmedNewUsername || undefined },
+        timestamp: new Date().toLocaleString()
+    });
+    writeData(FILE_REQUESTS, requests);
+    logAction(actingUsername, `Submitted an Edit Profile request for Admin approval`);
+    res.json({ success: true, pending: true, message:'Naisumite ang iyong Edit Profile request. Hihintayin ang pag-approve ng Admin.' });
+});
+
+app.put('/api/users/:targetUser/avatar', rateLimit('admin-set-avatar', 20, 10 * 60 * 1000), verifyAdmin, (req, res) => {
+    const { targetUser } = req.params;
+    const { avatar, username } = req.body;
+
+    let users = readData(FILE_USERS);
+    const userIndex = users.findIndex(u => u.username.toLowerCase() === targetUser.toLowerCase());
+    if (userIndex === -1) {
+        return res.status(404).json({ success: false, message:'User account not found.' });
+    }
+
+    users[userIndex].avatar = avatar || null;
+    writeData(FILE_USERS, users);
+    logAction(username, `Updated profile picture for account: ${targetUser}`);
+    res.json({ success: true, message: `Profile picture for ${targetUser} has been updated.`, avatar: users[userIndex].avatar });
+});
+
+app.post('/api/users/self/change-password', rateLimit('self-change-pw', 8, 10 * 60 * 1000), (req, res) => {
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+        return res.status(400).json({ success: false, message:'Kailangan ang kasalukuyan at bagong password.' });
+    }
+    if (String(newPassword).length < 4) {
+        return res.status(400).json({ success: false, message:'Masyadong maikli ang bagong password.' });
+    }
+
+    let users = readData(FILE_USERS);
+    const userIndex = users.findIndex(u => u.username.toLowerCase() === req.authUser.username.toLowerCase());
+    if (userIndex === -1) {
+        return res.status(404).json({ success: false, message:'Account not found.' });
+    }
+
+    const me = users[userIndex];
+    let isMatch = false;
+    try {
+        isMatch = bcrypt.compareSync(currentPassword, me.password);
+    } catch (e) {
+        isMatch = (currentPassword === me.password);
+    }
+    if (!isMatch) {
+        return res.status(403).json({ success: false, code:'WRONG_CURRENT_PASSWORD', message:'Mali ang kasalukuyang password.' });
+    }
+
+    users[userIndex].password = bcrypt.hashSync(newPassword, 10);
+    writeData(FILE_USERS, users);
+    logAction(me.username, `Changed own account password`);
+    res.json({ success: true, message:'Na-update na ang password mo.' });
+});
+
+app.post('/api/users', rateLimit('admin-add-user', 8, 10 * 60 * 1000), verifyAdmin, (req, res) => {
+    const { user, username } = req.body;
+
+    let users = readData(FILE_USERS);
+    if (users.some(u => u.username.toLowerCase() === user.username.toLowerCase())) {
+        return res.status(400).json({ success: false, message:'Username is already taken.' });
+    }
+
+    user.password = bcrypt.hashSync(user.password, 10);
+    user.created = new Date().toISOString().replace('T',' ').substring(0, 19);
+    users.push(user);
+    writeData(FILE_USERS, users);
+    logAction(username, `Created new POS account: ${user.username}`);
+    res.json({ success: true, message:'User created successfully.' });
+});
+
+app.put('/api/users/:targetUser/reset-password', rateLimit('admin-reset-pw', 8, 10 * 60 * 1000), verifyAdmin, (req, res) => {
+    const { targetUser } = req.params;
+    const { newPassword, username } = req.body;
+
+    let users = readData(FILE_USERS);
+    const userIndex = users.findIndex(u => u.username.toLowerCase() === targetUser.toLowerCase());
+
+    if (userIndex === -1) {
+        return res.status(404).json({ success: false, message:'User account not found.' });
+    }
+
+    users[userIndex].password = bcrypt.hashSync(newPassword, 10);
+    writeData(FILE_USERS, users);
+
+    logAction(username, `Force reset password for account: ${targetUser}`);
+    res.json({ success: true, message: `Password for ${targetUser} has been updated successfully.` });
+});
+
+app.post('/api/users/delete-account', rateLimit('admin-delete-user', 8, 10 * 60 * 1000), verifyAdmin, (req, res) => {
+    const { targetUser, username } = req.body;
+
+    if (!targetUser) {
+        return res.status(400).json({ success: false, message:'Kulang ang target user na buburahin.' });
+    }
+
+    if (targetUser.toLowerCase() === username.toLowerCase()) {
+        return res.status(400).json({ success: false, message:'Bawal mong burahin ang sarili mong account habang naka-login!' });
+    }
+
+    let users = readData(FILE_USERS);
+    const filteredUsers = users.filter(u => u.username.toLowerCase() !== targetUser.toLowerCase());
+
+    if (users.length === filteredUsers.length) {
+        return res.status(404).json({ success: false, message:'Account to delete not found.' });
+    }
+
+    writeData(FILE_USERS, filteredUsers);
+
+    for (const [token, session] of SESSIONS.entries()) {
+        if (session.username.toLowerCase() === targetUser.toLowerCase()) {
+            SESSIONS.delete(token);
+        }
+    }
+    persistSessions();
+
+    logAction(username, `Deleted user account: ${targetUser}`);
+    res.json({ success: true, message: `Account ${targetUser} has been completely removed.` });
+});
+
+function logAction(username, action) {
+    let logs = readData(FILE_USERLOGS);
+    logs.unshift({
+        id: Date.now(),
+        username: username,
+        action: action,
+        timestamp: new Date().toLocaleString('en-US', { timeZone:'Asia/Manila' })
+    });
+    writeData(FILE_USERLOGS, logs);
+}
+
+function logVoidAction(username, transactionId, voidedAmount, authMethodLabel) {
+    let logs = readData(FILE_USERLOGS);
+    logs.unshift({
+        id: Date.now(),
+        username: username,
+        action: `VOIDED Transaction ID: ${transactionId} (${authMethodLabel})`,
+        timestamp: new Date().toLocaleString('en-US', { timeZone:'Asia/Manila' }),
+        voidedAmount: Math.round((parseFloat(voidedAmount) || 0) * 100) / 100,
+        voidedTransactionId: transactionId
+    });
+    writeData(FILE_USERLOGS, logs);
+}
+
+function logRefundAction(username, transactionId, refundAmount, itemsLabel, reason, authMethodLabel) {
+    let logs = readData(FILE_USERLOGS);
+    logs.unshift({
+        id: Date.now(),
+        username: username,
+        action: `REFUNDED ₱${refundAmount.toFixed(2)} sa Transaction ID: ${transactionId} — Items: ${itemsLabel}. Dahilan: ${reason || '(walang isinulat)'} (${authMethodLabel})`,
+        timestamp: new Date().toLocaleString('en-US', { timeZone:'Asia/Manila' }),
+        refundedAmount: Math.round((parseFloat(refundAmount) || 0) * 100) / 100,
+        refundedTransactionId: transactionId
+    });
+    writeData(FILE_USERLOGS, logs);
+}
+
+// --------------------------------------------------------------
+// GET /api/system/update-check
+// Tinatawag ito ng "Check for Updates" button sa Settings. Tumatawag
+// ito papunta sa RELAY (developer-hosted, tingnan ang /relay/latest-version)
+// para malaman kung may bagong na-publish na version, tapos ikino-
+// compare ito sa sariling APP_VERSION (mula sa package.json) ng
+// INSTANCE na ito. Admin-only — hindi na kailangang ipakita ito sa
+// mga cashier/staff.
+// --------------------------------------------------------------
+// --------------------------------------------------------------
+// BACKUP STATUS — para sa isang warning banner sa Admin Dashboard kapag
+// paulit-ulit nang nabibigo ang scheduled local database backup (hal.
+// puno na ang storage, walang write permission). Dating tahimik lang
+// ito nabibigo sa likod (console.error na lang) — ngayon, kahit hindi
+// titingnan ng Admin ang server logs, may makikita silang alerto sa UI.
+// Admin-only — hindi na kailangang ipakita ito sa mga cashier/staff.
+// --------------------------------------------------------------
+app.get('/api/system/backup-status', (req, res) => {
+    if (!req.authUser || req.authUser.role.toLowerCase() !=='admin') {
+        return res.status(403).json({ success: false, message:'Admin privileges lamang ang makakakita ng backup status.' });
+    }
+    const status = getBackupStatus();
+    res.json({ success: true, status });
+});
+
+app.get('/api/system/update-check', rateLimit('system-update-check', 10, 10 * 60 * 1000), async (req, res) => {
+    if (!req.authUser || req.authUser.role.toLowerCase() !=='admin') {
+        return res.status(403).json({ success: false, message:'Admin privileges lamang ang makakagamit ng Check for Updates.' });
+    }
+    if (!RELAY_API_KEY) {
+        return res.status(400).json({ success: false, message:'Walang RELAY_API_KEY na naka-configure sa server na ito.' });
+    }
+    if (getConnectivityMode() === 'offline') {
+        return res.status(400).json({ success: false, message: 'Naka-OFFLINE mode ka ngayon. I-switch muna sa Online para makapag-check ng updates.' });
+    }
+    try {
+        // Ipinapasa ang sariling installationId dito para masuri ng
+        // RELAY kung may TARGETED release na naka-set PARA SA DEVICE
+        // NA ITO lang (tingnan ang targetedReleases sa RELAY server.js)
+        // — kung wala, babalik lang ito sa dating gawi (global version).
+        const installationId = getOrCreateInstallationId(readFeatureUnlocks());
+        const relayRes = await relayFetch(`${RELAY_URL}/relay/latest-version?installationId=${encodeURIComponent(installationId)}`, {
+            headers: {'x-relay-key': RELAY_API_KEY }
+        });
+        const relayData = await parseRelayResponse(relayRes);
+        if (!relayData.success) {
+            return res.status(502).json({ success: false, message: relayData.message ||'Tinanggihan ng RELAY ang version check.' });
+        }
+        const publishedVersion = String(relayData.latestVersion || UNPUBLISHED_VERSION_SENTINEL).trim();
+        // Kung sentinel/unpublished ang laman ng RELAY (walang na-publish
+        // pa, o nawala ito dahil sa redeploy na walang persistent storage),
+        // huwag itong ituring na "bagong update" kahit hindi pareho sa
+        // APP_VERSION. Kailangan din talagang MAS BAGO (hindi basta
+        // "iba") bago i-flag bilang available.
+        const updateAvailable = publishedVersion !== UNPUBLISHED_VERSION_SENTINEL
+            && isVersionNewer(publishedVersion, APP_VERSION);
+        res.json({
+            success: true,
+            currentVersion: APP_VERSION,
+            latestVersion: publishedVersion,
+            changelog: relayData.changelog ||'',
+            updateAvailable
+        });
+    } catch (err) {
+        res.status(502).json({ success: false, message: `Hindi ma-check ang RELAY para sa bagong version: ${err.message}` });
+    }
+});
+
+// --------------------------------------------------------------
+// POST /api/system/deploy-update
+// Ito ang "Check & Deploy Update" button. Dalawang paraan, depende sa
+// environment ng instance na ito:
+//
+//   1. RENDER MODE (dating gawi): kung naka-configure ang
+//      RENDER_DEPLOY_HOOK_URL env var, i-POST lang papunta rito — ito
+//      ang nagre-redeploy sa Render mula sa ANUMANG NASA REPO NA (dapat
+//      naka-sync/git-merge na muna mula sa upstream bago gamitin ito).
+//
+//   2. SELF-UPDATE MODE (bago — para sa Termux/lokal na kliyente na
+//      WALANG Render, kung saan hindi gumagana ang deploy hook dahil
+//      walang Render service talaga): direktang kinukuha ang bagong
+//      release package MISMO mula sa RELAY (GET /relay/release
+//      -package), ie-extract ito sa isang HIWALAY na staging folder
+//      muna, saka lang ikino-copy paibabaw sa install folder — HINDI
+//      kasama ang .env at database/ (ligtas ang mga ito) — tapos
+//      awtomatikong nire-restart ang sariling Node process.
+// --------------------------------------------------------------
+app.post('/api/system/deploy-update', rateLimit('system-deploy-update', 3, 30 * 60 * 1000), async (req, res) => {
+    if (!req.authUser || req.authUser.role.toLowerCase() !=='admin') {
+        return res.status(403).json({ success: false, message:'Admin privileges lamang ang makakapag-trigger ng deploy.' });
+    }
+
+    if (RENDER_DEPLOY_HOOK_URL) {
+        try {
+            const hookRes = await fetch(RENDER_DEPLOY_HOOK_URL, { method:'POST' });
+            if (!hookRes.ok) {
+                return res.status(502).json({ success: false, message: `Tinanggihan ng Render ang deploy hook (HTTP ${hookRes.status}).` });
+            }
+            logAction(req.authUser.username ||'Unknown','Nag-trigger ng System Update Deploy sa Render.');
+            return res.json({ success: true, message:'Na-trigger na ang bagong deploy sa Render. Aabutin ito ng ilang minuto — mag-a-auto-refresh ang system pagkatapos.' });
+        } catch (err) {
+            return res.status(502).json({ success: false, message: `Hindi ma-abot ang Render deploy hook: ${err.message}` });
+        }
+    }
+
+    // Walang RENDER_DEPLOY_HOOK_URL na naka-configure — ibig sabihin
+    // hindi ito naka-deploy sa Render (hal. Termux). Gamitin ang
+    // self-update mode sa halip.
+    return runSelfUpdateFromRelay(req, res);
+});
+
+// --------------------------------------------------------------
+// SELF-UPDATE MODE (Termux-friendly, walang Render deploy hook)
+// --------------------------------------------------------------
+const SELF_UPDATE_PRESERVE = new Set([
+   '.env','.env.key','database','node_modules','uploads_tmp','.git','release',
+   'cf.log','server.log'
+]);
+
+function copyRecursivePreserving(srcDir, destDir, preserveNames) {
+    for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
+        if (preserveNames.has(entry.name)) continue; // huwag galawin — panatilihing buo
+        const srcPath = path.join(srcDir, entry.name);
+        const destPath = path.join(destDir, entry.name);
+        if (entry.isDirectory()) {
+            fs.mkdirSync(destPath, { recursive: true });
+            copyRecursivePreserving(srcPath, destPath, new Set());
+        } else {
+            fs.mkdirSync(path.dirname(destPath), { recursive: true });
+            fs.copyFileSync(srcPath, destPath);
+        }
+    }
+}
+
+// --------------------------------------------------------------
+// PAALALA (Termux): dati, dito mismo nag-so-spawn ng sarili niyang
+// "detached" child process si Node para i-restart ang sarili. Hindi
+// ito maaasahan sa Termux/Android — kapag na-minimize o na-close ng
+// customer ang Termux app, pinapatay ng Android ang BUONG session
+// (kasama na ang mga "detached" child), kaya paulit-ulit na
+// nade-deactivate ang server at kailangan pa ring i-run manually.
+//
+// Sa halip, dapat pinapatakbo na ang OMNIPOS via "start.sh" (isang
+// supervisor loop na paulit-ulit na nagpapatakbo ng "node server.js").
+// Dito, sapat na lang na lumabas (exit) ang kasalukuyang Node process
+// — ang start.sh loop mismo (hindi si Node) ang bahalang mag-restart
+// nito kaagad, kahit anong dahilan ng pagkawala (self-update, crash,
+// atbp.), habang bukas pa ang Termux session.
+// --------------------------------------------------------------
+function scheduleSelfRestart(installRoot) {
+    // Maikling delay lang — para may sapat na oras ang HTTP response
+    // sa itaas na maka-abot muna sa client/browser bago pa lumabas
+    // ang kasalukuyang process.
+    setTimeout(() => process.exit(0), 500);
+}
+
+async function runSelfUpdateFromRelay(req, res) {
+    if (!RELAY_API_KEY) {
+        return res.status(400).json({ success: false, message:'Walang RELAY_API_KEY na naka-configure — kailangan ito para makakuha ng release package mula sa RELAY.' });
+    }
+    if (getConnectivityMode() === 'offline') {
+        return res.status(400).json({ success: false, message:'Naka-OFFLINE mode ka ngayon. I-switch muna sa Online para makapag-self-update.' });
+    }
+
+    const installRoot = __dirname;
+    const tmpRoot = path.join(os.tmpdir(), `omnipos-selfupdate-${Date.now()}`);
+    const zipPath = path.join(tmpRoot,'omnipos-client.zip');
+    const extractDir = path.join(tmpRoot,'extracted');
+
+    try {
+        fs.mkdirSync(tmpRoot, { recursive: true });
+
+        // 1. i-download ang bagong release package mula sa RELAY
+        const relayRes = await relayFetch(`${RELAY_URL}/relay/release-package`, {
+            headers: {'x-relay-key': RELAY_API_KEY }
+        });
+        if (!relayRes.ok) {
+            let detail ='';
+            try { detail = (await relayRes.json()).message ||''; } catch (_e) {}
+            throw new Error(`Tinanggihan ng RELAY ang release package (HTTP ${relayRes.status}). ${detail}`.trim());
+        }
+        const arrayBuffer = await relayRes.arrayBuffer();
+        fs.writeFileSync(zipPath, Buffer.from(arrayBuffer));
+
+        // 2. i-extract sa isang HIWALAY na staging folder muna (hindi
+        // direkta sa install root) — kung sakaling masira ang download
+        // o extract, hindi pa naaapektuhan ang kasalukuyang gumaganang
+        // install.
+        fs.mkdirSync(extractDir, { recursive: true });
+        try {
+            execSync(`unzip -o "${zipPath}" -d "${extractDir}"`, { stdio:'pipe' });
+        } catch (unzipErr) {
+            throw new Error(`Hindi ma-extract ang release package. Siguraduhing naka-install ang "unzip" sa Termux ("pkg install unzip -y"). Detalye: ${unzipErr.message}`);
+        }
+
+        // 3. i-copy ang laman ng extractDir PAIBABAW sa install root,
+        // PERO LAKTAWAN ang mga bagay na dapat manatiling BUO sa
+        // kasalukuyang instance: .env (secrets/keys), database/
+        // (aktwal na datos ng tindahan), node_modules, at mga runtime
+        // log/upload folder.
+        copyRecursivePreserving(extractDir, installRoot, SELF_UPDATE_PRESERVE);
+
+        logAction(req.authUser.username ||'Unknown','Nag-self-update ng OMNIPOS mula sa RELAY release package (Termux/non-Render mode).');
+
+        res.json({
+            success: true,
+            message:'Na-download at na-apply na ang bagong update. Nag-re-restart na ang system ngayon — muling mag-lo-load ang page sa loob ng ilang segundo.'
+        });
+
+        // 4. i-restart ang sariling Node process (bagong process, exit
+        // ang luma) para maka-load na ang bagong code.
+        scheduleSelfRestart(installRoot);
+    } catch (err) {
+        console.error('❌ Self-update error:', err.message);
+        if (!res.headersSent) {
+            res.status(502).json({ success: false, message: `Hindi na-apply ang self-update: ${err.message}` });
+        }
+    } finally {
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+}
+
+app.post('/api/system/reset', rateLimit('system-reset', 3, 30 * 60 * 1000), async (req, res) => {
+
+    if (!req.authUser || req.authUser.role.toLowerCase() !=='admin') {
+        return res.status(403).json({ success: false, message:'Aksyon Tinanggihan: Admin privileges lamang ang pwedeng mag-factory reset.' });
+    }
+
+    const { additionalEmail } = req.body;
+    const secondaryEmail = (additionalEmail ||'').trim();
+
+    const receiptSettingsForReset = readData(FILE_RECEIPT_SETTINGS, DEFAULT_RECEIPT_SETTINGS);
+    const otpMailCreds = getOtpMailCredentials(receiptSettingsForReset);
+
+    if (!otpMailCreds) {
+        return res.status(400).json({
+            success: false,
+            message:'Wala pang na-verify na Google App. I-setup at i-verify muna ito sa Users > Receipt Customization > Google App Verification bago magsagawa ng System Hard Reset.'
+        });
+    }
+
+    const emailPattern =/^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!secondaryEmail || !emailPattern.test(secondaryEmail)) {
+        return res.status(400).json({
+            success: false,
+            message:'Kailangan ang isang wastong Secondary Backup Email — dito ipapadala ang backup file.'
+        });
+    }
+
+    const backupPayload = {
+        timestamp: new Date().toISOString(),
+        users: readData(FILE_USERS, []),
+        products: readData(FILE_PRODUCTS, []),
+        transactions: readData(FILE_TRANSACTIONS, []),
+        userlogs: readData(FILE_USERLOGS, []),
+        requests: readData(FILE_REQUESTS, []),
+        categories: readData(FILE_CATEGORIES, ['Beverages','Dairy','Snacks','Bakery','Grains']),
+        carts: readData(FILE_CARTS, {}),
+        receiptSettings: readData(FILE_RECEIPT_SETTINGS, DEFAULT_RECEIPT_SETTINGS),
+        customers: readData(FILE_CUSTOMERS, []),
+        shifts: readData(FILE_SHIFTS, []),
+        shiftMeta: readData(FILE_SHIFT_META, {})
+    };
+
+    try {
+        let recipients = [secondaryEmail];
+
+        const petsa_ng_ayon = new Date().toLocaleDateString('en-PH');
+        const mailOptions = {
+            from: `"OmniPOS Core System" <${otpMailCreds.user}>`,
+            to: recipients.join(', '),
+            subject: `💻 OmniPOS: Full System Reset & Synchronized Backup - ${petsa_ng_ayon}`,
+            text: `Magandang araw,\n\nAng system database ay sumailalim sa isang Hard Factory Reset.\n\nKasama sa email na ito ang naka-attach na 'omnipos_full_backup.json' na naglalaman ng lahat ng synchronized tables (kasama na ang customers at shift/Z-Reading records) bago isagawa ang pagbura.`,
+            attachments: [
+                {
+                    filename: `omnipos_full_backup_${Date.now()}.json`,
+                    content: JSON.stringify(backupPayload, null, 4),
+                    contentType:'application/json'
+                }
+            ]
+        };
+
+        await sendMailSmart(otpMailCreds.user, otpMailCreds.pass, mailOptions);
+
+        const secureDefaultUsers = defaultUsers.map(u => ({
+            ...u,
+            password: bcrypt.hashSync(u.password, 10),
+            created: getPHTime()
+        }));
+        writeData(FILE_USERS, secureDefaultUsers);
+
+        SESSIONS.clear();
+        persistSessions();
+
+        writeData(FILE_PRODUCTS, []);
+
+        writeData(FILE_TRANSACTIONS, []);
+        writeData(FILE_REQUESTS, []);
+        writeData(FILE_CARTS, {});
+
+        writeData(FILE_CUSTOMERS, []);
+        writeData(FILE_SHIFTS, []);
+        writeData(FILE_SHIFT_META, {});
+
+        const initialCategories = ['Beverages','Dairy','Snacks','Bakery','Grains'];
+        writeData(FILE_CATEGORIES, initialCategories);
+
+        // ANTI-CLONE FIX: dating pinapalitan ng DEFAULT_FEATURE_UNLOCKS
+        // (na may `installationId: null`) ang BUONG file — dahil dito,
+        // pagkatapos ng anti-clone patch (na gumawa ng persisted UUID na
+        // nakatago mismo sa file na ito, hindi na sa hardware fingerprint),
+        // kasama na ring nawiwipe ang installationId sa bawat hard reset.
+        // Resulta: gumagawa ng BAGONG installationId ang susunod na request
+        // kahit same physical device/hindi clone — kaya hindi na makikilala
+        // ng RELAY ang dating na-unlock na features nito para ma-auto-
+        // restore. AYOS: panatilihin ang identity fields (installationId,
+        // hardwareFingerprint, verifiedFingerprint, deviceVerified,
+        // firstVerifiedAt) — ang tokens/lockedAttempts/lastVerifiedAt lang
+        // ang talagang kailangang i-reset dito.
+        const preResetIdentity = readFeatureUnlocks();
+        writeData(FILE_FEATURE_UNLOCKS, {
+            ...DEFAULT_FEATURE_UNLOCKS,
+            installationId: preResetIdentity.installationId,
+            hardwareFingerprint: preResetIdentity.hardwareFingerprint,
+            verifiedFingerprint: preResetIdentity.verifiedFingerprint,
+            deviceVerified: preResetIdentity.deviceVerified,
+            firstVerifiedAt: preResetIdentity.firstVerifiedAt
+        });
+
+        writeData(FILE_USERLOGS, []);
+
+        // AUTO-RESTORE: kapag naka-configure ang RELAY_API_KEY, subukan
+        // agad na kunin muli sa RELAY ang mga dating na-unlock na feature
+        // para sa installationId na ito (nananatili ito ngayon dahil
+        // sinadyang pinreserve sa itaas — tingnan ang "ANTI-CLONE FIX"
+        // comment sa itaas). Best-effort lang — hindi ito nagpapabagsak ng
+        // reset kung offline o hindi maabot ang relay.
+        let restoredCount = 0;
+        try {
+            const restoreResult = await attemptRelayRestore();
+            restoredCount = restoreResult.restoredCount || 0;
+        } catch (err) {
+            console.warn('⚠️  Auto-restore matapos ang hard reset: hindi na-check ang Relay.', err.message);
+        }
+
+        res.json({
+            success: true,
+            message: `Ang backup ay matagumpay na naipasa sa (${recipients.length}) email address at ang system ay tuluyan nang nalinis.` +
+                (restoredCount > 0 ? ` Awtomatikong naibalik ang ${restoredCount} dating na-unlock na feature.` : ''),
+            restoredFeatureCount: restoredCount
+        });
+
+    } catch (err) {
+        console.error("Mail Reset Failure Context:", err);
+        res.status(500).json({
+            success: false,
+            message: `Hindi itinuloy ang reset dahil nabigo ang email verification. Tiyakin na TAMA ang iyong Gmail at 16-character App Password. Error: ${err.message}`
+        });
+    }
+});
+
+app.post('/api/restore-backup', rateLimit('restore-backup', 5, 15 * 60 * 1000), (req, res) => {
+    const { username, password, backupData } = req.body;
+
+    const currentUsers = readData(FILE_USERS, []);
+    if (currentUsers.length === 0) {
+        return res.status(400).json({ success: false, message:"Walang mahanap na records ng mga user sa system." });
+    }
+
+    const currentAdmin = currentUsers.find(u => u.username.toLowerCase() === username.toLowerCase() && u.role.toLowerCase() ==='admin');
+
+    if (!currentAdmin) {
+        return res.status(403).json({ success: false, message:"Aksyon Tinanggihan: Walang pribilehiyong pang-administrator." });
+    }
+
+    if (!bcrypt.compareSync(password, currentAdmin.password)) {
+
+        return res.status(403).json({ success: false, code:'WRONG_ADMIN_PASSWORD', message:"Maling Admin password. Hindi pinahintulutan ang pag-restore." });
+    }
+
+    if (!backupData || typeof backupData !=='object') {
+        return res.status(400).json({ success: false, message:"May depekto o maling format ang ipinadalang backup file." });
+    }
+
+    try {
+
+        let restoredCount = 0;
+        if (backupData.users && Array.isArray(backupData.users)) { writeData(FILE_USERS, backupData.users); restoredCount++; }
+        if (backupData.products && Array.isArray(backupData.products)) { writeData(FILE_PRODUCTS, backupData.products); restoredCount++; }
+        if (backupData.transactions && Array.isArray(backupData.transactions)) { writeData(FILE_TRANSACTIONS, backupData.transactions); restoredCount++; }
+        if (backupData.userlogs && Array.isArray(backupData.userlogs)) { writeData(FILE_USERLOGS, backupData.userlogs); restoredCount++; }
+        if (backupData.requests && Array.isArray(backupData.requests)) { writeData(FILE_REQUESTS, backupData.requests); restoredCount++; }
+        if (backupData.categories && Array.isArray(backupData.categories)) { writeData(FILE_CATEGORIES, backupData.categories); restoredCount++; }
+        if (backupData.carts && typeof backupData.carts ==='object') { writeData(FILE_CARTS, backupData.carts); restoredCount++; }
+
+        logAction(username, `Nag-restore mula sa backup file (${restoredCount} modules na-restore).`);
+        res.json({ success: true, message: `Successfully restored and fully synchronized ${restoredCount} data module(s) from your backup file!` });
+    } catch (e) {
+        res.status(500).json({ success: false, message: `An error occurred while writing the extracted data: ${e.message}` });
+    }
+});
+
+app.post('/api/transactions/:transactionId/void', rateLimit('void-transaction', 8, 10 * 60 * 1000), async (req, res) => {
+    const { transactionId } = req.params;
+    const { requester, adminPassword } = req.body;
+
+    if (!adminPassword) {
+        return res.status(400).json({ success: false, message:'Kailangan ng password para mag-void.' });
+    }
+
+    const users = readData(FILE_USERS);
+    const authResult = await findVoidAuthorizer(users, adminPassword);
+
+    if (!authResult) {
+        return res.status(403).json({
+            success: false,
+            code:'WRONG_ADMIN_PASSWORD',
+            message:'Maling password. Hindi pinahintulutan ang void.'
+        });
+    }
+
+    let transactions = readData(FILE_TRANSACTIONS);
+    let products = readData(FILE_PRODUCTS);
+
+    const txIndex = transactions.findIndex(t => t.id === transactionId);
+    if (txIndex === -1) {
+        return res.status(404).json({ success: false, message:'Hindi nahanap ang Transaksyon ID.' });
+    }
+
+    const targetTx = transactions[txIndex];
+    const voidedAmount = parseFloat(targetTx.total) || 0;
+
+    targetTx.items.forEach(item => {
+        let prod = products.find(p => p.code === item.code || p.name === item.name);
+        if (prod) {
+            prod.stock = (parseInt(prod.stock) || 0) + parseInt(item.quantity);
+        }
+    });
+
+    // Reverse any customer stats (points, total spent, visits) that were applied
+    // when this transaction was originally processed, so voiding a sale doesn't
+    // leave the customer's record permanently inflated.
+    if (targetTx.customerId) {
+        const customers = readData(FILE_CUSTOMERS, []);
+        const cust = customers.find(c => c.id === targetTx.customerId);
+        if (cust) {
+            const earned = Math.max(0, parseInt(targetTx.loyaltyPointsEarned) || 0);
+            const redeemed = Math.max(0, parseInt(targetTx.loyaltyPointsRedeemed) || 0);
+
+            // Undo the points that were earned from this sale, and give back
+            // any points the customer redeemed on it.
+            cust.points = Math.max(0, (cust.points || 0) - earned) + redeemed;
+            cust.totalSpent = Math.round((((cust.totalSpent || 0) - voidedAmount)) * 100) / 100;
+            if (cust.totalSpent < 0) cust.totalSpent = 0;
+            cust.visits = Math.max(0, (cust.visits || 0) - 1);
+
+            writeData(FILE_CUSTOMERS, customers);
+        }
+    }
+
+    transactions = transactions.filter(t => t.id !== transactionId);
+
+    writeData(FILE_TRANSACTIONS, transactions);
+    writeData(FILE_PRODUCTS, products);
+
+    logVoidAction(requester, transactionId, voidedAmount, authResult.isAdmin ?'Authorized by Admin' : `Authorized via Own Password (${authResult.user.username}, RBAC)`);
+
+    res.json({ success: true, message: `Matagumpay na na-void ang transaksyon ${transactionId} at naibalik ang mga stock!` });
+});
+
+// ====================================================================
+// REFUND (hiwalay sa Void)
+// ====================================================================
+// Pagkakaiba sa Void: hindi buburahin ang transaksyon sa records (nananatili
+// ito sa Sales Report/Transactions para tama pa rin ang audit trail), at
+// pwedeng PARTIAL lang (piling item/quantity) o FULL refund. Bawat item ay
+// may sariling "refundable balance" (orihinal na quantity minus dati nang
+// na-refund) para hindi ma-double-refund. Nagre-restock ito ng stock at
+// nag-iiwan ng record sa `refunds` table (hiwalay sa userlogs) bilang
+// dedicated audit trail — kaya makikita kung ilang beses at ano ang mga
+// na-refund sa isang transaksyon.
+app.post('/api/transactions/:transactionId/refund', rateLimit('refund-transaction', 12, 10 * 60 * 1000), async (req, res) => {
+    const { transactionId } = req.params;
+    const { requester, adminPassword, reason } = req.body;
+    const requestedItems = Array.isArray(req.body.items) ? req.body.items : null;
+
+    if (!adminPassword) {
+        return res.status(400).json({ success: false, message: 'Kailangan ng password para mag-refund.' });
+    }
+
+    const users = readData(FILE_USERS);
+    const authResult = await findRefundAuthorizer(users, adminPassword);
+
+    if (!authResult) {
+        return res.status(403).json({
+            success: false,
+            code: 'WRONG_ADMIN_PASSWORD',
+            message: 'Maling password. Hindi pinahintulutan ang refund.'
+        });
+    }
+
+    let transactions = readData(FILE_TRANSACTIONS);
+    let products = readData(FILE_PRODUCTS);
+
+    const txIndex = transactions.findIndex(t => t.id === transactionId);
+    if (txIndex === -1) {
+        return res.status(404).json({ success: false, message: 'Hindi nahanap ang Transaksyon ID.' });
+    }
+
+    const targetTx = transactions[txIndex];
+    const grandTotal = parseFloat(targetTx.total) || 0;
+    const alreadyRefunded = Math.min(grandTotal, parseFloat(targetTx.totalRefunded) || 0);
+    const refundedQtyMap = targetTx.refundedQty && typeof targetTx.refundedQty === 'object' ? { ...targetTx.refundedQty } : {};
+
+    if (alreadyRefunded >= grandTotal - 0.01) {
+        return res.status(400).json({ success: false, message: 'Naka-full refund na ang transaksyong ito — wala nang matitirang matirang halaga na pwedeng i-refund.' });
+    }
+
+    // Ang refund amount ay kinukwenta base sa "gross" halaga bawat linya
+    // (price x quantity, minus item-level discount) — pagkatapos ay
+    // pino-prorate ang buong `grandTotal` ng transaksyon (na naglalaman
+    // na ng cart-level discount at tax) ayon sa proportion ng refund sa
+    // kabuuang gross. Ito ang pinaka-praktikal/patas na paraan kahit may
+    // Senior/PWD, manual discount, o tax na naka-apply sa buong cart.
+    const lineGross = (item) => {
+        const qty = parseInt(item.quantity, 10) || 0;
+        if (qty <= 0) return 0;
+        return Math.max(0, (parseFloat(item.price) || 0) * qty - (parseFloat(item.itemDiscount) || 0));
+    };
+
+    const sumAllLinesGross = (targetTx.items || []).reduce((s, it) => s + lineGross(it), 0);
+
+    const refundLines = [];
+    const rejectedRefundItems = [];
+
+    for (const item of (targetTx.items || [])) {
+        const alreadyQty = parseInt(refundedQtyMap[item.code], 10) || 0;
+        const maxRefundableQty = Math.max(0, (parseInt(item.quantity, 10) || 0) - alreadyQty);
+
+        let qtyToRefund;
+        if (requestedItems) {
+            const requested = requestedItems.find(ri => ri.code === item.code);
+            if (!requested) continue; // hindi kasama ang item na ito sa partial refund request
+            qtyToRefund = parseInt(requested.quantity, 10) || 0;
+            if (qtyToRefund <= 0) continue;
+            if (qtyToRefund > maxRefundableQty) {
+                rejectedRefundItems.push(`${item.name} (hiniling: ${qtyToRefund}, natitirang pwedeng i-refund: ${maxRefundableQty})`);
+                continue;
+            }
+        } else {
+            // Full refund ng buong natitirang balance ng bawat item.
+            qtyToRefund = maxRefundableQty;
+            if (qtyToRefund <= 0) continue;
+        }
+
+        refundLines.push({
+            code: item.code,
+            name: item.name,
+            quantity: qtyToRefund,
+            unitPrice: parseFloat(item.price) || 0
+        });
+    }
+
+    if (rejectedRefundItems.length > 0) {
+        return res.status(400).json({
+            success: false,
+            message: `Hindi maaaring i-refund ang mga sumusunod: ${rejectedRefundItems.join('; ')}`
+        });
+    }
+
+    if (refundLines.length === 0) {
+        return res.status(400).json({ success: false, message: 'Walang napiling item na may natitirang balanseng pwedeng i-refund.' });
+    }
+
+    let sumRefundGross = 0;
+    for (const line of refundLines) {
+        const originalItem = targetTx.items.find(it => it.code === line.code);
+        const perUnitGross = originalItem.quantity > 0 ? lineGross(originalItem) / originalItem.quantity : 0;
+        sumRefundGross += perUnitGross * line.quantity;
+    }
+
+    const refundRatio = sumAllLinesGross > 0 ? Math.min(1, sumRefundGross / sumAllLinesGross) : 0;
+    let refundAmount = Math.round(grandTotal * refundRatio * 100) / 100;
+
+    // I-clamp para hindi kailanman lumagpas ang KABUUANG na-refund (kasama
+    // na ang mga naunang partial refund) sa aktwal na grand total.
+    const remainingRefundable = Math.round((grandTotal - alreadyRefunded) * 100) / 100;
+    if (refundAmount > remainingRefundable) refundAmount = remainingRefundable;
+    if (refundAmount <= 0) {
+        return res.status(400).json({ success: false, message: 'Zero ang na-compute na refund amount — walang matitirang halagang pwedeng i-refund.' });
+    }
+
+    // Restock: ibalik sa inventory ang mga na-refund na quantity.
+    refundLines.forEach(line => {
+        const prod = products.find(p => p.code === line.code);
+        if (prod) {
+            prod.stock = (parseInt(prod.stock) || 0) + line.quantity;
+        }
+        refundedQtyMap[line.code] = (parseInt(refundedQtyMap[line.code], 10) || 0) + line.quantity;
+    });
+
+    const newTotalRefunded = Math.round((alreadyRefunded + refundAmount) * 100) / 100;
+    targetTx.refundedQty = refundedQtyMap;
+    targetTx.totalRefunded = newTotalRefunded;
+    targetTx.refundStatus = newTotalRefunded >= grandTotal - 0.01 ? 'full' : 'partial';
+
+    // Proportional na pag-reverse ng customer stats (totalSpent at earned
+    // points) — kagaya ng ginagawa ng Void, pero proportional lang dito
+    // dahil pwedeng partial ang refund. Hindi na kinukuha pabalik ang mga
+    // REDEEMED points (ginamit na ito ng customer bilang discount noon).
+    if (targetTx.customerId) {
+        const customers = readData(FILE_CUSTOMERS, []);
+        const cust = customers.find(c => c.id === targetTx.customerId);
+        if (cust) {
+            const earnedOriginally = Math.max(0, parseInt(targetTx.loyaltyPointsEarned) || 0);
+            const pointsToReverse = Math.floor(earnedOriginally * refundRatio);
+            cust.points = Math.max(0, (cust.points || 0) - pointsToReverse);
+            cust.totalSpent = Math.round(((cust.totalSpent || 0) - refundAmount) * 100) / 100;
+            if (cust.totalSpent < 0) cust.totalSpent = 0;
+            writeData(FILE_CUSTOMERS, customers);
+        }
+    }
+
+    transactions[txIndex] = targetTx;
+    writeData(FILE_TRANSACTIONS, transactions);
+    writeData(FILE_PRODUCTS, products);
+
+    const refundRecord = {
+        id: 'RFD-' + Date.now(),
+        transactionId,
+        items: refundLines,
+        reason: (reason || '').trim(),
+        refundAmount,
+        refundedBy: requester || 'Unknown',
+        authorizedBy: authResult.isAdmin ? 'Admin' : `${authResult.user.username} (RBAC — refund_own_password)`,
+        isFullRefund: targetTx.refundStatus === 'full',
+        timestamp: new Date().toLocaleString('en-US', { timeZone: 'Asia/Manila' })
+    };
+    let refunds = readData(FILE_REFUNDS, []);
+    refunds.unshift(refundRecord);
+    writeData(FILE_REFUNDS, refunds);
+
+    const itemsLabel = refundLines.map(l => `${l.name} x${l.quantity}`).join(', ');
+    logRefundAction(
+        requester || 'Unknown',
+        transactionId,
+        refundAmount,
+        itemsLabel,
+        reason,
+        authResult.isAdmin ? 'Authorized by Admin' : `Authorized via Own Password (${authResult.user.username}, RBAC)`
+    );
+
+    res.json({
+        success: true,
+        message: `Matagumpay na na-refund ang ₱${refundAmount.toFixed(2)} (${itemsLabel}) at naibalik ang mga stock!`,
+        refund: refundRecord,
+        transaction: targetTx
+    });
+});
+
+// Audit trail: lahat ng refund na na-process laban sa isang partikular na
+// transaksyon (para makita sa Transaction Details kung ilang beses/ano
+// ang na-refund dito).
+app.get('/api/transactions/:transactionId/refunds', (req, res) => {
+    const { transactionId } = req.params;
+    const refunds = readData(FILE_REFUNDS, []).filter(r => r.transactionId === transactionId);
+    res.json(refunds);
+});
+
+// Refunds Report: lahat ng refund sa buong system, may parehong
+// view-all/own-only visibility rule gaya ng /api/transactions.
+app.get('/api/refunds', (req, res) => {
+    const { requester } = req.query;
+    const allRefunds = readData(FILE_REFUNDS, []);
+
+    if (!requester) return res.json(allRefunds);
+
+    const users = readData(FILE_USERS);
+    const activeUser = users.find(u => u.username.toLowerCase() === requester.toLowerCase());
+    const activeRole = activeUser && activeUser.role;
+    const isAdminRole = (activeRole || '').toLowerCase() === 'admin';
+    const canViewAll = isAdminRole || !!getPermissionsForRole(activeRole).transactions_view_all;
+    if (canViewAll) return res.json(allRefunds);
+
+    res.json(allRefunds.filter(r => (r.refundedBy || '').toLowerCase() === requester.toLowerCase()));
+});
+
+app.post('/api/auth/verify-void', rateLimit('verify-void', 8, 10 * 60 * 1000), async (req, res) => {
+    const { adminPassword, purpose } = req.body;
+
+    if (!adminPassword) {
+        return res.status(400).json({ success: false, message:'Kailangan ng password.' });
+    }
+
+    const users = readData(FILE_USERS);
+
+    // Ang endpoint na ito ay ginagamit din ng ibang bahagi ng system (hal.
+    // barcode print authorization) na hindi void-related, kaya ang
+    // "kahit kaninong qualified na account" na paghahanap ay nakalimita
+    // lamang sa mga request na explicit na nagsasabing purpose:'void'.
+    // Para dito, HINDI ito naka-base sa session/req.authUser dahil ang
+    // taong nagta-type ng password (hal. Supervisor) ay kadalasang HINDI
+    // ang naka-login sa terminal (hal. Cashier).
+    if (purpose ==='void') {
+        const authResult = await findVoidAuthorizer(users, adminPassword);
+        if (authResult) {
+            return res.json({ success: true, message:'Authorized' });
+        }
+        return res.status(403).json({ success: false, code:'WRONG_ADMIN_PASSWORD', message:'Maling password!' });
+    }
+
+    if (purpose ==='manual_discount') {
+        const authResult = await findManualDiscountAuthorizer(users, adminPassword);
+        if (authResult) {
+            return res.json({ success: true, message:'Authorized' });
+        }
+        return res.status(403).json({ success: false, code:'WRONG_ADMIN_PASSWORD', message:'Maling password!' });
+    }
+
+    if (purpose ==='refund') {
+        const authResult = await findRefundAuthorizer(users, adminPassword);
+        if (authResult) {
+            return res.json({ success: true, message:'Authorized' });
+        }
+        return res.status(403).json({ success: false, code:'WRONG_ADMIN_PASSWORD', message:'Maling password!' });
+    }
+
+    if (purpose ==='loyalty_redeem') {
+        const authResult = await findLoyaltyRedeemAuthorizer(users, adminPassword);
+        if (authResult) {
+            return res.json({ success: true, message:'Authorized' });
+        }
+        return res.status(403).json({ success: false, code:'WRONG_ADMIN_PASSWORD', message:'Maling password!' });
+    }
+
+    const adminUser = users.find(u => u.role.toLowerCase() ==='admin');
+    if (!adminUser) {
+        return res.status(404).json({ success: false, message:'Walang nahanap na Admin account sa system.' });
+    }
+
+    const isMatch = await bcrypt.compare(adminPassword, adminUser.password);
+
+    if (isMatch) {
+        return res.json({ success: true, message:'Authorized' });
+    } else {
+
+        return res.status(403).json({ success: false, code:'WRONG_ADMIN_PASSWORD', message:'Maling Admin Password!' });
+    }
+});
+
+app.post('/api/logs', (req, res) => {
+    const { user, action, authMethod, details } = req.body;
+    let formattedAction = `[${action}]`;
+
+    if (action ==="VOID_CART") {
+        formattedAction += ` Voided cart: ${details.itemsCount} items, Total: ₱${details.totalAmount.toFixed(2)} (${authMethod}).`;
+    }
+    else if (action ==="MODIFY_MATRIX_QTY") {
+        formattedAction += ` ${details.itemName}: Reduced by ${details.reducedQty}, Remaining: ${details.newQty} (${authMethod}).`;
+    }
+    else if (action ==="LOGOUT") {
+        formattedAction += ` Logged out via ${authMethod}. Reason: ${details.message}`;
+    }
+    else {
+        formattedAction += ` ${details.message ||'Executed non-standard action.'}`;
+    }
+
+    try {
+        logAction(user, formattedAction);
+        res.json({ success: true, message:'Log saved.' });
+    } catch (error) {
+        console.error("Logging error:", error);
+        res.status(500).json({ success: false, message:'Server logging failed.' });
+    }
+});
+
+function computeLowStockItems() {
+    const products = readData(FILE_PRODUCTS);
+    const purchaseOrders = readData(FILE_PURCHASE_ORDERS, []);
+    let tracking = readData(FILE_LOWSTOCK_TRACKING, {});
+    const nowIso = new Date().toISOString();
+
+    const openPoQtyByCode = {};
+    purchaseOrders.forEach(po => {
+        if (po.status ==='ordered') {
+            (po.items || []).forEach(it => {
+                const key = (it.code ||'').trim().toLowerCase();
+                openPoQtyByCode[key] = (openPoQtyByCode[key] || 0) + (parseInt(it.qty) || 0);
+            });
+        }
+    });
+
+    const uxSettingsForThreshold = readData(FILE_UX_SETTINGS, DEFAULT_UX_SETTINGS);
+    const defaultLowStockThreshold = Number.isFinite(uxSettingsForThreshold.lowStockAlertThreshold)
+        ? uxSettingsForThreshold.lowStockAlertThreshold : DEFAULT_UX_SETTINGS.lowStockAlertThreshold;
+
+    const items = products
+        .map(p => {
+            const threshold = (p.lowStockThreshold !== undefined && p.lowStockThreshold !== null && p.lowStockThreshold !=='')
+                ? parseInt(p.lowStockThreshold) : defaultLowStockThreshold;
+            const stock = parseInt(p.stock || 0);
+            const suggestedReorderQty = p.reorderQty ? parseInt(p.reorderQty) : Math.max((threshold * 2) - stock, threshold, 1);
+            const key = (p.code ||'').trim().toLowerCase();
+            return {
+                code: p.code, name: p.name, category: p.category, supplier: p.supplier ||'',
+                stock, threshold, suggestedReorderQty,
+                status: stock <= 0 ?'OUT_OF_STOCK' :'LOW_STOCK',
+                openOrderedQty: openPoQtyByCode[key] || 0,
+                _key: key
+            };
+        })
+        .filter(p => p.stock <= p.threshold);
+
+    const stillLowKeys = new Set(items.map(i => i._key));
+    let trackingChanged = false;
+    items.forEach(i => {
+        if (!tracking[i._key]) { tracking[i._key] = nowIso; trackingChanged = true; }
+    });
+    Object.keys(tracking).forEach(k => {
+        if (!stillLowKeys.has(k)) { delete tracking[k]; trackingChanged = true; }
+    });
+    if (trackingChanged) writeData(FILE_LOWSTOCK_TRACKING, tracking);
+
+    items.forEach(i => {
+        const since = tracking[i._key] ? new Date(tracking[i._key]) : new Date();
+        i.daysLow = Math.max(0, Math.floor((Date.now() - since.getTime()) / (1000 * 60 * 60 * 24)));
+        i.lowSince = tracking[i._key] || nowIso;
+        delete i._key;
+    });
+
+    items.sort((a, b) => a.stock - b.stock);
     return items;
 }
 
-async function obfuscateReleaseTree(tmpDir, onProgress) {
-    const items = planReleaseTree(tmpDir);
-    const totalItems = items.length;
-    let obfuscatedCount = 0;
-
-    for (const { type, full } of items) {
-        if (type === 'server') {
-            obfuscateFileInPlace(full, pickReleaseObfOptions(full, false));
-        } else if (type === 'client') {
-            obfuscateFileInPlace(full, pickReleaseObfOptions(full, true));
-        } else if (type === 'html') {
-            let html = fs.readFileSync(full, 'utf8');
-            // FIX: inline-script obfuscation used to run BEFORE comment
-            // stripping — so an HTML comment that merely mentioned the
-            // literal text "<script>" in its prose (e.g. a comment
-            // explaining something about script tags) would confuse the
-            // simple regex-based scanner below (obfuscateHtmlInlineScripts):
-            // it would mistake that for a real opening tag and treat
-            // everything from there up to the NEXT real </script> —
-            // including the rest of the comment text — as "JS content",
-            // then try to parse that as JavaScript (the source of the
-            // "Unexpected token" error). Stripping comments before
-            // scanning for script tags removes any comment text that
-            // could confuse the scanner.
-            html = stripHtmlComments(html);
-            html = obfuscateHtmlInlineScripts(html, pickReleaseObfOptions(full, true));
-            fs.writeFileSync(full, html, 'utf8');
-        } else if (type === 'css') {
-            const css = fs.readFileSync(full, 'utf8');
-            fs.writeFileSync(full, stripCssComments(css), 'utf8');
-        }
-        obfuscatedCount += 1;
-        if (typeof onProgress === 'function') {
-            try { onProgress(obfuscatedCount, totalItems); } catch (_) { /* huwag hayaang masira ng UI callback ang build */ }
-        }
-        // Give RELAY a chance to answer other requests (status polling,
-        // health checks, other terminals) between each file instead of
-        // holding the event loop for the whole build in one unbroken
-        // stretch.
-        await yieldToEventLoop();
-    }
-
-    return obfuscatedCount;
-}
-
-// Ini-encrypt ang client .env (AES-256-GCM) at isusulat ang key sa
-// sarili niyang ".env.key" file (KATABI ng .env) — HINDI na ito
-// ibinabake diretso sa code ng env-loader.js. FIX ito para sa
-// "device revoked after self-update" bug: dati, bawat build ay may
-// BAGONG random key na naka-embed sa loader mismo, pero self-update
-// ay PRESERVED ang .env ng client (hindi ito nagbabago) habang
-// PINAPALITAN ang env-loader.js (may BAGONG di-tugmang key) — kaya
-// laging nabibigo ang decrypt pagkatapos ng unang self-update. Ngayon,
-// preserved din ang .env.key kasabay ng .env sa self-update (tingnan
-// ang SELF_UPDATE_PRESERVE sa OMNIPOS/server.js), kaya magkatugma pa
-// rin sila kahit ilang beses pang mag-rebuild ang loader code.
-// Kung walang env-loader.js sa cloned repo (hal. hindi mo pa na-commit),
-// babalik lang ito sa dating plaintext .env — walang masisira, pero
-// mananatiling readable ang .env sa ganitong kaso.
-function encryptClientEnvAndPatchLoader(tmpDir, envContent) {
-    const loaderPath = path.join(tmpDir, RELEASE_ENV_LOADER_FILENAME);
-
-    if (!fs.existsSync(loaderPath)) {
-        fs.writeFileSync(path.join(tmpDir, '.env'), envContent);
-        return { encrypted: false };
-    }
-
-    const key = crypto.randomBytes(32);
-    const iv = crypto.randomBytes(12);
-    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
-    const encrypted = Buffer.concat([cipher.update(envContent, 'utf8'), cipher.final()]);
-    const tag = cipher.getAuthTag();
-
-    const payload = {
-        iv: iv.toString('hex'),
-        tag: tag.toString('hex'),
-        data: encrypted.toString('base64'),
-    };
-    fs.writeFileSync(path.join(tmpDir, '.env'), JSON.stringify(payload));
-    fs.writeFileSync(path.join(tmpDir, RELEASE_ENV_KEY_FILENAME), key.toString('hex'), 'utf8');
-
-    obfuscateFileInPlace(loaderPath, releaseServerObfOptions);
-
-    return { encrypted: true };
-}
-
-// ----------------------------------------------------------------
-// LIVE BUILD PROGRESS (visual %) — walang idinagdag na disk/network
-// I/O, isang plain in-memory object lang ito na ina-update sa bawat
-// hakbang ng build (clone → filter → env-encrypt → obfuscate → zip →
-// tapos). Ang frontend ay pina-poll lang ito paminsan-minsan
-// (GET, mabilis, walang ginagawang mabigat na trabaho) habang
-// naka-disable ang "I-build ang Release" button — hindi ito
-// nagpapabagal at hindi nakakaapekto sa aktwal na proseso ng build
-// mismo, isang beses lang bawat build ang tatakbo (single global
-// state ang sapat dahil isang admin session/build lang ang
-// inaasahang aktibo sa isang pagkakataon).
-// AYOS (hiling): "hatiin ang 100% base sa bilang ng sunod-sunod na
-// function/hakbang" ng build, sa halip na basta-basta lang na mga
-// percent kada hakbang. Dito, tinutukoy ang pagkakasunod-sunod ng mga
-// hakbang ng "I-build ang Release" (BUILD_STEPS): unang hakbang (clone)
-// ay bigyan ng FIXED na 10% (gaya ng eksaktong hiniling — kaagad itong
-// tumatalon sa 10% pagkatapos matapos ang clone), at ang NATITIRANG 90%
-// ay pantay-pantay na hinahati sa bilang ng mga SUMUSUNOD na hakbang
-// (filter, env, obfuscate, zip = 4 hakbang → 22.5% bawat isa). Kung sa
-// hinaharap ay may idagdag/tanggal na hakbang sa BUILD_STEPS, awtomatiko
-// na lang muling maghahati ang formula na ito — hindi na kailangang
-// i-adjust ang mga percent nang manu-mano bawat pagbabago.
-const BUILD_STEPS = ['clone', 'filter', 'env', 'obfuscate', 'zip'];
-const BUILD_FIRST_STEP_PERCENT = 10;
-const BUILD_STEP_END_PERCENT = (() => {
-    const map = {};
-    const remainingSteps = BUILD_STEPS.length - 1;
-    const perRemainingStep = remainingSteps > 0 ? (100 - BUILD_FIRST_STEP_PERCENT) / remainingSteps : 0;
-    let cumulative = 0;
-    BUILD_STEPS.forEach((step, idx) => {
-        cumulative = idx === 0 ? BUILD_FIRST_STEP_PERCENT : cumulative + perRemainingStep;
-        map[step] = Math.round(cumulative * 10) / 10; // 1 decimal na lang para malinis ang display
-    });
-    return map;
-})();
-
-function buildStepStartPercent(step) {
-    const idx = BUILD_STEPS.indexOf(step);
-    return idx <= 0 ? 0 : BUILD_STEP_END_PERCENT[BUILD_STEPS[idx - 1]];
-}
-
-let buildProgressState = {
-    buildId: null,
-    stage: 'idle',       // idle | clone | filter | env | obfuscate | zip | done | error
-    percent: 0,
-    message: '',
-    startedAt: null,
-    updatedAt: null,
-    done: true,
-    error: null
-};
-
-function setBuildProgress(patch) {
-    buildProgressState = { ...buildProgressState, ...patch, updatedAt: Date.now() };
-}
-
-// --------------------------------------------------------------
-// BUILD LOCK — pinipigilan ang DALAWANG build na tumakbo nang
-// SABAY-SABAY.
-//
-// BAKIT ITO KINAKAILANGAN NGAYON (dating hindi, pero ngayon
-// kailangan na): dati, ang git clone step ay gumagamit ng
-// `execFileSync` — isang BLOCKING call na humaharang sa buong
-// Node.js event loop. Bunga (aksidente lang, hindi sinadya):
-// SAMANTALANG naka-block ang server, HINDI TALAGA MATATANGGAP ng
-// Node ang ANUMANG ibang papasok na request — kasama na ang isa
-// pang "Build Release"/"Build & Publish" click habang may
-// tumatakbo nang build — kaya HINDI TALAGA MAGKAKAROON ng dalawang
-// magkasabay na build noon, KAHIT WALANG explicit na lock dito.
-//
-// Nang gawing ASYNCHRONOUS (`execFileAsync`) ang clone step (fix
-// para sa "nagfe-freeze ang progress bar" na isyu), NAWALA ang
-// hindi-sinasadyang proteksyon na ito — ngayon ay talagang
-// posible nang MAGSIMULA ng IKALAWANG build habang tumatakbo pa
-// ang una (hal. dalawang beses pinindot ang "Build Release" nang
-// magkalapit, o dalawang tab/session, o curl/HTTP Shortcut na
-// tumakbo kasabay ng admin panel). Dahil ang DALAWANG build ay
-// SUMUSULAT sa IISANG SHARED na path (`RELEASE_PACKAGE_PATH`),
-// kung magsabay ang dalawa, ang isa ay maaaring MAG-TRUNCATE/
-// magsimulang muli sa parehong file habang isinusulat pa rin ito
-// ng isa — resulta: SIRANG/corrupt na zip ("start of central
-// directory not found") — mismong nangyari sa report ng user.
-//
-// FIX: isang simpleng module-level lock — kung may build na
-// tumatakbo pa, tatanggihan (HTTP 409) ang bagong build request sa
-// halip na hayaang mag-overlap sila.
-// --------------------------------------------------------------
-let buildInFlight = false;
-
-app.get('/relay/admin/api/build-progress', requireAdminKey, (req, res) => {
-    res.json({ success: true, progress: buildProgressState });
+app.get('/api/products/low-stock', (req, res) => {
+    const items = computeLowStockItems();
+    res.json({ success: true, count: items.length, items });
 });
 
-// --------------------------------------------------------------
-// performBuildRelease(reqBody, req) — ang aktwal na build logic,
-// hiwalay na function para magamit ng DALAWANG route: (1) yung
-// dating '/relay/admin/api/build-release' (build lang, walang
-// publish), at (2) yung bagong '/relay/admin/api/system/publish-release'
-// (build + publish-version sa IISANG request/tawag — para hindi na
-// kailangan pang dalawahin ang curl/HTTP Shortcut sa Termux).
-// Nagba-throw ito ng Error sa sinumang caller kapag nabigo — ang
-// route handlers na ang bahalang mag-catch at mag-format ng sagot.
-// --------------------------------------------------------------
-async function performBuildRelease(reqBody, req, publishOverride) {
-    if (buildInFlight) {
-        const err = new Error('May build na kasalukuyang tumatakbo — hintayin munang matapos ito bago mag-build ulit (para hindi masira/mag-overlap ang zip package).');
-        err.statusCode = 409;
-        throw err;
-    }
-    buildInFlight = true;
-
-    const repoUrl = (reqBody && reqBody.repoUrl) || process.env.OMNIPOS_REPO_URL;
-    const ref = (reqBody && reqBody.ref) || 'main';
-    // Optional na maikling paglalarawan ng build na ito (hal. "hotfix
-    // barcode scan bug"). Puro history/log lang ang gamit nito — hindi
-    // ito nakakaapekto sa aktwal na filename ng na-build na zip.
-    const caption = String((reqBody && reqBody.caption) || '').trim();
-
-    if (!repoUrl) {
-        buildInFlight = false;
-        const err = new Error('Walang repoUrl na ibinigay at walang OMNIPOS_REPO_URL env var na naka-set.');
-        err.statusCode = 400;
-        throw err;
-    }
-
-    const tmpDir = path.join(os.tmpdir(), `omnipos-build-${Date.now()}`);
-    let tmpZipPath = null; // ide-declare dito (hindi sa loob ng try{}) para ma-access din ito ng finally{} block sa ibaba para sa cleanup
-    const buildId = crypto.randomBytes(6).toString('hex');
-    setBuildProgress({ buildId, stage: 'clone', percent: 0, message: 'Kino-clone ang repo...', startedAt: Date.now(), done: false, error: null });
-
+// ====================================================================
+// ADVANCED SALES ANALYTICS — gated ng requirePermission('reports')
+// (role-based: sino ang pwedeng makakita ng reports) AT
+// requireFeature('advanced_reports') (paywall: binili ba ng store owner
+// ang ₱799 na module). Dating client-side lang ang computation nito
+// (basta kinukuha lahat ng /api/transactions, na FREE/ungated dahil
+// ginagamit din ito ng ibang legit na views) — kaya kahit naka-hide sa
+// UI ang Sales Analytics, kaya pa ring i-compute ng kahit sino ang
+// profit/margin data sa pamamagitan lang ng DevTools. Dito na ngayon
+// ginagawa ang buong aggregation SA SERVER, kaya totoong naka-enforce
+// na ang paywall, hindi lang cosmetic/UI-level.
+app.get('/api/reports/sales-analytics', requirePermission('reports'), requireFeature('advanced_reports'), (req, res) => {
     try {
-        // ============================================================
-        // ROOT CAUSE ng "nagfe-freeze tapos bumibigla sa 100%" na
-        // report: `execFileSync` ay isang BLOCKING/SYNCHRONOUS na
-        // call — habang tumatakbo ang git clone (network-bound,
-        // kadalasan ang PINAKAMATAGAL na hakbang sa buong build),
-        // hinaharang NITO ang buong Node.js event loop (isang thread
-        // lang ito) at HINDI matutugunan ng server ang KAHIT ANONG
-        // ibang request habang naghihintay — kasama na mismo ang
-        // GET /relay/admin/api/build-progress na paulit-ulit na
-        // pino-poll ng admin browser bawat 700ms. Kaya nakikita ng
-        // admin: naka-freeze ang % (walang response ang mga poll)
-        // sa BUONG tagal ng clone, pagkatapos biglang "sumusulpot"/
-        // rumaragasa papuntang 100% — dahil sa oras na iyon, saka
-        // lang ulit nakakasagot ang server sa mga naka-pila (queued)
-        // na poll, at ang natitirang mga hakbang (filter/env/
-        // obfuscate/zip) ay karaniwang mabilis lang matapos kumpara
-        // sa clone.
-        //
-        // FIX: gamitin ang ASYNCHRONOUS na bersyon (`execFileAsync`,
-        // batay sa child_process.execFile) sa halip na ang *Sync
-        // variant — hindi ito humaharang sa event loop, kaya
-        // PATULOY pa ring nakakasagot ang server sa mga progress
-        // poll (at sa "heartbeat" interval sa ibaba) HABANG
-        // tumatakbo pa ang git clone sa likod. Dagdag pa rito, may
-        // TUNAY/server-driven na heartbeat na ngayon habang
-        // tumatakbo ang clone mismo (hindi lang basta 0% hanggang
-        // matapos) — dahan-dahang gumagalaw ang % papalapit sa 10%
-        // (asymptotic, hindi lalampas) habang tumatagal ang clone,
-        // kasama ang bilang ng segundong lumipas sa message, kaya
-        // may TALAGANG makikitang kilos ang admin bawat segundo, at
-        // hindi lang basta pinaggagagad/pinipeke ng client-side
-        // animation.
-        // ============================================================
-        const cloneStartedAt = Date.now();
-        const cloneHeartbeat = setInterval(() => {
-            const elapsedS = (Date.now() - cloneStartedAt) / 1000;
-            const heartbeatPct = Math.min(9.4, BUILD_FIRST_STEP_PERCENT * (1 - Math.exp(-elapsedS / 12)));
-            setBuildProgress({ percent: Math.round(heartbeatPct * 10) / 10, message: `Kino-clone ang repo... (${Math.round(elapsedS)}s)` });
-        }, 500);
+        const rangeParam = (req.query.range || 'all').toString();
+        const transactions = readData(FILE_TRANSACTIONS);
 
-        try {
-            // SECURITY FIX: dati, sinasalang diretso ang repoUrl/ref (galing
-            // sa admin request body) sa loob ng isang SHELL STRING (execSync
-            // gamit ang template literal) — kung may naka-embed na shell
-            // metacharacter (hal. `; rm -rf /` o `$(...)`) sa alinman sa
-            // dalawa, maaari itong mag-execute ng arbitrary command sa RELAY
-            // host. Ginagamit na ngayon ang execFileAsync (execFile, ARGUMENT
-            // ARRAY, hindi dumadaan sa shell) kaya kahit anong laman ng
-            // repoUrl/ref ay ituturing lang na LITERAL na argumento sa git,
-            // hindi bilang shell syntax.
-            await execFileAsync('git', ['clone', '--depth', '1', '--branch', ref, repoUrl, tmpDir], { stdio: 'pipe' });
-        } finally {
-            clearInterval(cloneHeartbeat);
+        const now = Date.now();
+        const RANGE_MS = { today: 24 * 60 * 60 * 1000, '7d': 7 * 24 * 60 * 60 * 1000, '30d': 30 * 24 * 60 * 60 * 1000 };
+        const cutoffMs = RANGE_MS[rangeParam] || null;
+
+        const txs = cutoffMs
+            ? transactions.filter(t => {
+                const ts = t.isoDate ? Date.parse(t.isoDate) : NaN;
+                return !isNaN(ts) && (now - ts) <= cutoffMs;
+            })
+            : transactions;
+
+        let gross = 0;
+        let totalRevenue = 0;
+        let totalCost = 0;
+        let anyCostRecorded = false;
+        const rankingMap = {};
+        const profitByProduct = {};
+        const paymentBreakdown = {};
+        const dailyTrendMap = {};
+
+        txs.forEach(t => {
+            const total = parseFloat(t.total) || 0;
+            gross += total;
+
+            const method = (t.method || t.payment_method || 'OTHER').toString().toUpperCase();
+            paymentBreakdown[method] = (paymentBreakdown[method] || 0) + total;
+
+            const dayKey = (t.isoDate ? t.isoDate.slice(0, 10) : (t.timestamp || '').slice(0, 10)) || 'unknown';
+            dailyTrendMap[dayKey] = (dailyTrendMap[dayKey] || 0) + total;
+
+            (t.items || []).forEach(i => {
+                const qty = parseInt(i.quantity) || 0;
+                rankingMap[i.name] = (rankingMap[i.name] || 0) + qty;
+
+                const itemDiscount = Math.max(0, parseFloat(i.itemDiscount) || 0);
+                const revenue = ((parseFloat(i.price) || 0) * qty) - itemDiscount;
+                const cost = (parseFloat(i.cost) || 0) * qty;
+                if (parseFloat(i.cost) > 0) anyCostRecorded = true;
+
+                totalRevenue += revenue;
+                totalCost += cost;
+
+                if (!profitByProduct[i.name]) profitByProduct[i.name] = { revenue: 0, cost: 0, qty: 0 };
+                profitByProduct[i.name].revenue += revenue;
+                profitByProduct[i.name].cost += cost;
+                profitByProduct[i.name].qty += qty;
+            });
+        });
+
+        const estimatedProfit = totalRevenue - totalCost;
+        const marginPct = totalRevenue > 0 ? (estimatedProfit / totalRevenue) * 100 : 0;
+
+        const sortedByQty = Object.keys(rankingMap).sort((a, b) => rankingMap[b] - rankingMap[a]);
+        const topProducts = sortedByQty.slice(0, 5).map(name => ({ name, qty: rankingMap[name] }));
+        const slowProducts = [...sortedByQty].reverse().slice(0, 5).map(name => ({ name, qty: rankingMap[name] }));
+
+        const profitEntries = Object.entries(profitByProduct)
+            .map(([name, d]) => ({ name, profit: Math.round((d.revenue - d.cost) * 100) / 100, qty: d.qty }))
+            .sort((a, b) => b.profit - a.profit)
+            .slice(0, 5);
+
+        // Last 7 days trend (kahit walang benta sa isang araw, kasama pa rin
+        // ito bilang ₱0 sa chart, para consistent ang bilang ng bars).
+        const dailyTrend = [];
+        for (let d = 6; d >= 0; d--) {
+            const dt = new Date(now - d * 24 * 60 * 60 * 1000);
+            const key = dt.toISOString().slice(0, 10);
+            dailyTrend.push({
+                date: key,
+                label: dt.toLocaleDateString('en-PH', { weekday: 'short' }),
+                total: Math.round((dailyTrendMap[key] || 0) * 100) / 100
+            });
         }
 
-        setBuildProgress({ stage: 'filter', percent: BUILD_STEP_END_PERCENT.clone, message: 'Tinatanggal ang mga excluded file...' });
-        removeExcludedRecursive(tmpDir);
-
-        // Gumawa ng client .env DIREKTA sa loob ng tmpDir bago mag-zip,
-        // para READY NA AGAD ang zip pagka-download ng bagong kliyente
-        // (walang kailangan pang gawin/i-upload na .env sa panig nila).
-        const relayUrl = (reqBody && reqBody.relayUrl)
-            || process.env.RELAY_PUBLIC_URL
-            || `${req.protocol}://${req.get('host')}`;
-        const relayApiKey = (reqBody && reqBody.relayApiKey) || process.env.RELAY_API_KEY;
-        const clientPort = (reqBody && reqBody.port) || 3000;
-
-        if (!relayApiKey) {
-            throw new Error('Walang RELAY_API_KEY na naka-set (ni sa request body ni sa RELAY .env) — hindi makakagawa ng client .env.');
-        }
-
-        const clientEnvContent = [
-            `RELAY_URL=${relayUrl}`,
-            `RELAY_API_KEY=${relayApiKey}`,
-            `PORT=${clientPort}`,
-            ''
-        ].join('\n');
-        setBuildProgress({ stage: 'env', percent: BUILD_STEP_END_PERCENT.filter, message: 'Ini-encrypt ang client .env...' });
-        const envResult = encryptClientEnvAndPatchLoader(tmpDir, clientEnvContent);
-
-        // Obfuscate OMNIPOS's own server-side/client-side JS here, inside
-        // tmpDir only (a staging copy) — this never touches your original
-        // git repo/main branch. Ipinapasa ang isang progress callback para
-        // ma-update ang % LIVE bawat file (ito karaniwan ang pinakamatagal
-        // na hakbang ng buong build), gamit ang existing per-file loop —
-        // walang dagdag na I/O, text-lang na update sa in-memory object.
-        setBuildProgress({ stage: 'obfuscate', percent: BUILD_STEP_END_PERCENT.env, message: 'Ino-obfuscate ang mga file...' });
-        const obfuscateStart = BUILD_STEP_END_PERCENT.env;
-        const obfuscateEnd = BUILD_STEP_END_PERCENT.obfuscate;
-        const obfuscatedCount = await obfuscateReleaseTree(tmpDir, (done, total) => {
-            const pct = total > 0 ? obfuscateStart + ((done / total) * (obfuscateEnd - obfuscateStart)) : obfuscateStart;
-            setBuildProgress({ stage: 'obfuscate', percent: Math.round(pct * 10) / 10, message: `Ino-obfuscate ang mga file... (${done}/${total})` });
+        res.json({
+            success: true,
+            range: rangeParam,
+            gross: Math.round(gross * 100) / 100,
+            transactionCount: txs.length,
+            estimatedProfit: Math.round(estimatedProfit * 100) / 100,
+            marginPct: Math.round(marginPct * 10) / 10,
+            hasCostData: anyCostRecorded,
+            topProducts,
+            slowProducts,
+            profitByProduct: profitEntries,
+            paymentBreakdown,
+            dailyTrend
         });
+    } catch (err) {
+        console.error('Sales analytics error:', err);
+        res.status(500).json({ success: false, message: 'Hindi makuha ang sales analytics data.' });
+    }
+});
 
-        setBuildProgress({ stage: 'zip', percent: BUILD_STEP_END_PERCENT.obfuscate, message: 'Ginagawa ang zip package...' });
-        const releaseDir = path.dirname(RELEASE_PACKAGE_PATH);
-        if (!fs.existsSync(releaseDir)) fs.mkdirSync(releaseDir, { recursive: true });
-
-        // ATOMIC WRITE (defense-in-depth): dati, direktang sinusulat
-        // ang zip papunta mismo sa RELEASE_PACKAGE_PATH — kung may
-        // humihiling (`res.download`) mag-download NG EKSAKTONG ORAS
-        // na iyon (halimbawa isang kliyenteng nagda-download habang
-        // may bagong build na kasabay na tumatakbo), maaari niyang
-        // makuha ang FILE NA HALF-WRITTEN pa lang (dahil sinisimulan
-        // ng `fs.createWriteStream` na i-TRUNCATE ang file sa pagbukas
-        // nito) — ito ang "zipfile corrupt / start of central
-        // directory not found" na error sa panig ng kliyente. Ngayon,
-        // sumusulat muna sa isang PANSAMANTALANG filename (naka-unique
-        // sa `buildId`), at saka lang ito ni-rename papunta sa
-        // TALAGANG RELEASE_PACKAGE_PATH pagkatapos MATAGUMPAY na
-        // ma-finalize/ma-close ang buong zip — ang `fs.renameSync` ay
-        // ATOMIC sa parehong filesystem/volume, kaya walang sandaling
-        // makikita ng sinumang bumabasa (res.download) ang isang
-        // half-written na file.
-        tmpZipPath = `${RELEASE_PACKAGE_PATH}.building-${buildId}.tmp`;
-        await new Promise((resolve, reject) => {
-            const output = fs.createWriteStream(tmpZipPath);
-            // PERFORMANCE FIX: zlib level 9 (max compression) costs
-            // significantly more CPU time than level 6 for only a small
-            // reduction in zip size — not a good trade-off on a
-            // CPU-constrained host. Level 6 is zlib's own default and a
-            // much better time/size balance for a package this size.
-            const archive = archiver('zip', { zlib: { level: 6 } });
-            output.on('close', resolve);
-            archive.on('error', reject);
-            archive.pipe(output);
-            archive.directory(tmpDir, false);
-            archive.finalize();
-        });
-        fs.renameSync(tmpZipPath, RELEASE_PACKAGE_PATH);
-
-        const stats = fs.statSync(RELEASE_PACKAGE_PATH);
-        const builtAt = Date.now();
-        logActivity(null, 'release_package_built', {
-            ref,
-            sizeBytes: stats.size,
-            obfuscatedFiles: obfuscatedCount,
-            envEncrypted: envResult.encrypted
-        });
-
-        // INTEGRITY BASELINE: kunin ang sha256 ng BAWAT file na eksaktong
-        // isinama sa release na ito (mula sa tmpDir bago pa i-zip — ito
-        // mismo ang binubuksan ng customer), at itago bilang "baseline"
-        // para sa VERSION na ipina-publish/itinatakda ng build na ito.
-        // Dito lang ito ginagawa (hindi sa /relay/admin/api/build-release
-        // route wrapper) para sabay ito laging tumatakbo kada
-        // matagumpay na build, kahit anong entry point ang tumawag dito
-        // (build-only o publish-release).
-        const baselineVersion = (publishOverride && publishOverride.version) || systemVersionInfo.version || '0.0.0';
-        const baselineFiles = buildFileManifest(tmpDir);
-        releaseBaselines.set(baselineVersion, {
-            builtAt,
-            fileCount: Object.keys(baselineFiles).length,
-            files: baselineFiles
-        });
-        saveReleaseBaselines(releaseBaselines);
-        console.log(`🔐 Integrity baseline saved para sa version ${baselineVersion} (${Object.keys(baselineFiles).length} file(s)).`);
-
-        // HISTORY ENTRY: caption (kung binigay), ang naka-publish na
-        // version number nung mismong oras ng build na ito (systemVersionInfo
-        // — HINDI kinukuha mula sa git ref dahil ang version number ay
-        // hiwalay na "opisyal" na ipinapahayag lang via publish-version) —
-        // MALIBAN kung tumawag ito mula sa publish-release (may
-        // publishOverride), kung saan ang ITINATAKDANG bagong version
-        // (at target installationId kung meron) ang gagamitin sa halip,
-        // dahil ito na mismo ang aktwal na version na kasabay ina-publish
-        // ng build na ito. Ang filename ng zip mismo ay HINDI nagbabago
-        // — palaging "omnipos-client.zip" pa rin ito.
-        recordBuildHistoryEntry({
-            id: crypto.randomBytes(6).toString('hex'),
-            caption: caption || null,
-            version: (publishOverride && publishOverride.version) || systemVersionInfo.version || '0.0.0',
-            targetInstallationId: (publishOverride && publishOverride.targetInstallationId) || null,
-            ref,
-            builtAt,
-            sizeBytes: stats.size,
-            obfuscatedFiles: obfuscatedCount,
-            envEncrypted: envResult.encrypted,
-            fileName: 'omnipos-client.zip'
-        });
-
-        setBuildProgress({ stage: 'done', percent: 100, message: 'Tapos na ang build.', done: true });
-
-        return {
-            message: envResult.encrypted
-                ? `Nagawa ang bagong release package. Na-obfuscate ang ${obfuscatedCount} file(s), naka-encrypt na ang .env.`
-                : `Nagawa ang bagong release package. Na-obfuscate ang ${obfuscatedCount} file(s). PAALALA: walang env-loader.js sa repo mo — plaintext pa rin ang .env.`,
-            sizeBytes: stats.size,
-            obfuscatedFiles: obfuscatedCount,
-            envEncrypted: envResult.encrypted,
-            builtAt
+app.get('/api/products/low-stock/export', requirePermission('reorder'), requireFeature('advanced_reports'), (req, res) => {
+    try {
+        const items = computeLowStockItems();
+        const escapeCsv = (val) => {
+            const s = (val === undefined || val === null) ?'' : val.toString();
+            return/[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
         };
-    } catch (err) {
-        console.error('❌ Build-release error:', err.message);
-        setBuildProgress({ stage: 'error', percent: buildProgressState.percent, message: err.message, done: true, error: err.message });
-        throw err;
-    } finally {
-        fs.rmSync(tmpDir, { recursive: true, force: true });
-        // linisin din ang pansamantalang zip kung may naiwan (hal.
-        // nag-error bago pa nakarating sa rename)
-        try {
-            if (tmpZipPath && fs.existsSync(tmpZipPath)) fs.rmSync(tmpZipPath, { force: true });
-        } catch (_) { /* huwag hayaang masira ng cleanup na ito ang response */ }
-        buildInFlight = false; // laging i-release ang lock, kahit magtagumpay o mabigo ang build
-    }
-}
-
-// --------------------------------------------------------------
-// POST /relay/admin/api/build-release  (route wrapper)
-// Ito pa rin ang dating "build lang, walang publish" na endpoint —
-// gumagamit lang ngayon ng shared performBuildRelease() sa itaas.
-// --------------------------------------------------------------
-app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => {
-    try {
-        const result = await performBuildRelease(req.body, req);
-        res.json({ success: true, ...result });
-    } catch (err) {
-        res.status(err.statusCode || 500).json({ success: false, message: err.statusCode ? err.message : `Hindi na-build ang release: ${err.message}` });
-    }
-});
-
-// --------------------------------------------------------------
-// POST /relay/admin/api/system/publish-release  (BAGO)
-// "Isang tawag lang" na version: pinagsasama nito ang build-release
-// (gumawa ng bagong omnipos-client.zip) AT publish-version (i-set ang
-// bagong version/changelog na titignan ng existing clients) sa IISANG
-// request — para hindi na kailangan pang dalawahing i-curl/Termux/HTTP
-// Shortcut kada bagong update. Ito ang direktang sagot sa "paano para
-// RELAY lang ang gagamitin, makikita na agad ng customer ang update."
-//
-// Body: { version (required), changelog?, repoUrl?, ref?, relayUrl?,
-//         relayApiKey?, port?, caption? }
-//
-// Pagkakasunod: (1) build muna — kung mabigo ito (hal. sirang repoUrl,
-// walang bagong commit, atbp.), HINDI na ita-tuloy ang publish-version,
-// para hindi maka-publish ng version na wala pang katumbas na zip.
-// (2) Kapag successful ang build, saka lang isasagawa ang publish.
-// --------------------------------------------------------------
-app.post('/relay/admin/api/system/publish-release', requireAdminKey, async (req, res) => {
-    const version = String((req.body && req.body.version) || '').trim();
-    if (!version) {
-        return res.status(400).json({ success: false, message: 'Kailangan ang "version" (hal. "1.3.0").' });
-    }
-    // TARGETED PUBLISH (opsyonal): kung may binigay na installationId,
-    // ang build pa rin ay tumatakbo nang normal (iisa lang naman ang
-    // zip para sa lahat), pero ang PAG-ANNOUNCE ng version/changelog na
-    // ito ay sa TARGETED store lang mapupunta — ang global
-    // systemVersionInfo ay hindi magbabago, kaya ang ibang device lang
-    // ang walang makikitang "may bagong update."
-    const targetId = String((req.body && req.body.installationId) || '').trim();
-
-    let buildResult;
-    try {
-        buildResult = await performBuildRelease(req.body, req, { version, targetInstallationId: targetId || null });
-    } catch (err) {
-        return res.status(err.statusCode || 500).json({
-            success: false,
-            stage: 'build',
-            message: `Hindi na-build ang release — HINDI isinagawa ang publish-version: ${err.message}`
+        const headers = ['Code','Product Name','Category','Supplier','Current Stock','Threshold','Suggested Reorder Qty','Status','Days Low'];
+        const lines = [headers.join(',')];
+        items.forEach(p => {
+            lines.push([
+                escapeCsv(p.code), escapeCsv(p.name), escapeCsv(p.category), escapeCsv(p.supplier),
+                escapeCsv(p.stock), escapeCsv(p.threshold), escapeCsv(p.suggestedReorderQty),
+                escapeCsv(p.status), escapeCsv(p.daysLow)
+            ].join(','));
         });
+        const csvContent ='\uFEFF' + lines.join('\r\n');
+        res.setHeader('Content-Type','text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="reorder_alerts_${Date.now()}.csv"`);
+        res.send(csvContent);
+    } catch (err) {
+        console.error('Reorder export error:', err);
+        res.status(500).json({ success: false, message:'Hindi ma-export ang reorder list.' });
+    }
+});
+
+app.post('/api/products/:code/quick-restock', requirePermission('reorder'), rateLimit('quick-restock', 60, 10 * 60 * 1000), (req, res) => {
+    const { code } = req.params;
+    const qty = parseInt(req.body.qty);
+    const username = req.authUser.username;
+    const isAdminRole = (req.authUser.role ||'').toLowerCase() ==='admin';
+    const canApplyDirectly = isAdminRole || !!getPermissionsForRole(req.authUser.role).restock_direct_apply;
+
+    if (!qty || qty <= 0) {
+        return res.status(400).json({ success: false, message:'Mangyaring maglagay ng valid na quantity.' });
     }
 
-    const changelog = String((req.body && req.body.changelog) || '').trim();
-    const entry = { version, changelog, publishedAt: Date.now() };
+    let products = readData(FILE_PRODUCTS);
+    const target = products.find(p => p.code.trim().toLowerCase() === code.trim().toLowerCase());
+    if (!target) return res.status(404).json({ success: false, message:'Product not found.' });
 
-    if (targetId) {
-        targetedReleases.set(targetId, entry);
-        saveTargetedReleases(targetedReleases);
+    if (canApplyDirectly) {
+        target.stock = (parseInt(target.stock) || 0) + qty;
+        writeData(FILE_PRODUCTS, products);
+        logAction(username, `Quick-restocked "${target.name}" (+${qty}, bagong stock: ${target.stock})`);
+        return res.json({ success: true, message: `+${qty} na-restock sa "${target.name}".`, newStock: target.stock });
     } else {
-        systemVersionInfo = entry;
-        saveSystemVersionInfo(systemVersionInfo);
+        let requests = readData(FILE_REQUESTS);
+        requests.push({ id: Date.now(), type:'RESTOCK', targetCode: code, requester: username, data: { qtyToAdd: qty, productName: target.name }, timestamp: new Date().toLocaleString() });
+        writeData(FILE_REQUESTS, requests);
+        logAction(username, `Submitted a RESTOCK request for "${target.name}" (+${qty})`);
+        return res.json({ success: true, pending: true, message:'Restock request submitted for Admin approval.' });
     }
-    logActivity(targetId || null, 'release_built_and_published', {
-        version, changelog, sizeBytes: buildResult.sizeBytes, targeted: !!targetId
+});
+
+app.get('/api/purchase-orders', requirePermission('reorder'), requireFeature('purchase_orders'), (req, res) => {
+    const orders = readData(FILE_PURCHASE_ORDERS, []).sort((a, b) => (b.createdAt ||'').localeCompare(a.createdAt ||''));
+    res.json({ success: true, orders });
+});
+
+app.post('/api/purchase-orders', requirePermission('reorder'), requireFeature('purchase_orders'), (req, res) => {
+    const { supplier, items, notes } = req.body;
+    const username = req.authUser.username;
+
+    if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ success: false, message:'Walang napiling item para sa Purchase Order.' });
+    }
+
+    const cleanItems = items
+        .map(it => ({ code: (it.code ||'').toString(), name: (it.name ||'').toString(), qty: parseInt(it.qty) || 0 }))
+        .filter(it => it.code && it.qty > 0);
+
+    if (cleanItems.length === 0) {
+        return res.status(400).json({ success: false, message:'Walang valid na item/quantity sa Purchase Order.' });
+    }
+
+    const orders = readData(FILE_PURCHASE_ORDERS, []);
+    const newPO = {
+        id: Date.now(),
+        supplier: (supplier ||'Walang Tinukoy na Supplier').toString(),
+        items: cleanItems,
+        notes: (notes ||'').toString(),
+        status:'ordered',
+        createdBy: username,
+        createdAt: new Date().toISOString(),
+    };
+    orders.push(newPO);
+    writeData(FILE_PURCHASE_ORDERS, orders);
+    logAction(username, `Gumawa ng Purchase Order #${newPO.id} para kay "${newPO.supplier}" (${cleanItems.length} item/s)`);
+    res.json({ success: true, message:'Nagawa ang Purchase Order.', po: newPO });
+});
+
+app.post('/api/purchase-orders/:id/receive', requirePermission('reorder'), requireFeature('purchase_orders'), (req, res) => {
+    const { id } = req.params;
+    const username = req.authUser.username;
+    let orders = readData(FILE_PURCHASE_ORDERS, []);
+    const po = orders.find(o => o.id.toString() === id.toString());
+    if (!po) return res.status(404).json({ success: false, message:'Purchase Order not found.' });
+    if (po.status !=='ordered') return res.status(400).json({ success: false, message: `Hindi na-a-apply — status na ito ay "${po.status}".` });
+
+    let products = readData(FILE_PRODUCTS);
+    po.items.forEach(it => {
+        const prod = products.find(p => p.code.trim().toLowerCase() === it.code.trim().toLowerCase());
+        if (prod) prod.stock = (parseInt(prod.stock) || 0) + (parseInt(it.qty) || 0);
     });
+    writeData(FILE_PRODUCTS, products);
 
-    res.json({
-        success: true,
-        message: targetId
-            ? `Nabuo ang bersyon ${version} — na-target lang ito sa installationId ${targetId}. Ibang device, hindi ito makikita.`
-            : `Nabuo at na-publish na ang bersyon ${version}. Makikita na ito ng LAHAT ng kliyente sa susunod na update-check nila.`,
-        build: buildResult,
-        targeted: !!targetId,
-        installationId: targetId || null,
-        systemVersionInfo: targetId ? undefined : systemVersionInfo,
-        targetedRelease: targetId ? entry : undefined
-    });
+    po.status ='received';
+    po.receivedBy = username;
+    po.receivedAt = new Date().toISOString();
+    writeData(FILE_PURCHASE_ORDERS, orders);
+    logAction(username, `Na-receive ang Purchase Order #${po.id} (${po.supplier}) — idinagdag sa stock ang ${po.items.length} item/s`);
+    res.json({ success: true, message:'Na-receive ang Purchase Order at na-update ang stock.', po });
 });
 
-// --------------------------------------------------------------
-// GET /relay/admin/api/system/targeted-releases
-// Listahan ng lahat ng kasalukuyang naka-target na installationId →
-// {version, changelog, publishedAt}. Para makita mo agad kung sino-sino
-// pa ang may "pending" na targeted release na hindi pa naiaapply/
-// na-clear.
-// --------------------------------------------------------------
-app.get('/relay/admin/api/system/targeted-releases', requireAdminKey, (req, res) => {
-    res.json({ success: true, targeted: Object.fromEntries(targetedReleases) });
+app.post('/api/purchase-orders/:id/cancel', requirePermission('reorder'), requireFeature('purchase_orders'), (req, res) => {
+    const { id } = req.params;
+    const username = req.authUser.username;
+    let orders = readData(FILE_PURCHASE_ORDERS, []);
+    const po = orders.find(o => o.id.toString() === id.toString());
+    if (!po) return res.status(404).json({ success: false, message:'Purchase Order not found.' });
+    if (po.status !=='ordered') return res.status(400).json({ success: false, message: `Hindi na-a-apply — status na ito ay "${po.status}".` });
+
+    po.status ='cancelled';
+    po.cancelledBy = username;
+    po.cancelledAt = new Date().toISOString();
+    writeData(FILE_PURCHASE_ORDERS, orders);
+    logAction(username, `Kinansela ang Purchase Order #${po.id} (${po.supplier})`);
+    res.json({ success: true, message:'Kinansela ang Purchase Order.', po });
 });
 
-// --------------------------------------------------------------
-// POST /relay/admin/api/system/targeted-releases/:installationId/clear
-// Tinatanggal ang targeted override ng isang partikular na
-// installationId — babalik ito sa pagtingin sa GLOBAL systemVersionInfo
-// na lang, tulad ng ibang device.
-// --------------------------------------------------------------
-app.post('/relay/admin/api/system/targeted-releases/:installationId/clear', requireAdminKey, (req, res) => {
-    const { installationId } = req.params;
-    const existed = targetedReleases.delete(installationId);
-    if (existed) saveTargetedReleases(targetedReleases);
-    res.json({ success: true, cleared: existed });
+app.get('/api/customers', requirePermission('customers'), requireFeature('customer_crm'), (req, res) => {
+    res.json(readData(FILE_CUSTOMERS, []).map(sanitizeCustomerForClient));
 });
 
-// --------------------------------------------------------------
-// GET /relay/admin/api/build-history
-// Listahan lang ng mga naitala nang build (caption, version noong
-// build, timestamp, sizeBytes, atbp.) — pinaka-bago munang entry.
-// Hindi ito ang zip mismo, log lang ito ng "kailan/ano" ang bawat
-// build na ginawa gamit ang "I-build ang Release" sa itaas.
-// --------------------------------------------------------------
-app.get('/relay/admin/api/build-history', requireAdminKey, (req, res) => {
-    res.json({ success: true, history: buildHistory });
+app.get('/api/customers/for-terminal', requirePermission('terminal'), (req, res) => {
+    const customers = readData(FILE_CUSTOMERS, []);
+    const minimal = customers.map(c => ({
+        id: c.id,
+        name: c.name,
+        phone: c.phone ||'',
+        email: c.email ||'',
+        points: c.points || 0,
+        hasLoyaltyCard: !!(c.loyaltyCard && !c.loyaltyCard.revoked)
+    }));
+    res.json(minimal);
 });
 
-// --------------------------------------------------------------
-// POST /relay/admin/api/build-history/clear
-// Binubura ang BUONG log ng build history (caption/version/petsa per
-// entry) — LOG LANG ito, hindi ito nagbubura/humihipo sa aktwal na
-// omnipos-client.zip package o sa systemVersionInfo/targeted-releases,
-// kaya ligtas itong i-clear anumang oras; parang "clear activity log"
-// lang, walang epekto sa kung ano ang makikita/ma-download ng mga
-// kliyente.
-// --------------------------------------------------------------
-app.post('/relay/admin/api/build-history/clear', requireAdminKey, (req, res) => {
-    const clearedCount = buildHistory.length;
-    buildHistory = [];
-    saveBuildHistory(buildHistory);
-    logActivity(null, 'build_history_cleared', { clearedCount });
-    res.json({ success: true, clearedCount });
+app.get('/api/customers/search', requirePermission('customers'), requireFeature('customer_crm'), (req, res) => {
+    const q = (req.query.q ||'').toLowerCase().trim();
+    const customers = readData(FILE_CUSTOMERS, []);
+    if (!q) return res.json(customers.slice(0, 25).map(sanitizeCustomerForClient));
+    const results = customers.filter(c =>
+        (c.name ||'').toLowerCase().includes(q) || (c.phone ||'').includes(q)
+    ).slice(0, 25);
+    res.json(results.map(sanitizeCustomerForClient));
 });
 
-// --------------------------------------------------------------
-// POST /relay/admin/api/download-codes/generate
-// Gumagawa ang developer/admin nito ng isang BAGONG code para sa isang
-// bagong kliyente — walang publicly-listed link, kaya kontrolado kung
-// sino-sino talaga ang nagkakaroon ng access sa release package.
-// Body: { label?, maxUses?, expiresInHours? }
-// --------------------------------------------------------------
-app.post('/relay/admin/api/download-codes/generate', requireAdminKey, (req, res) => {
-    const { label, maxUses, expiresInHours } = req.body || {};
-    const code = crypto.randomBytes(9).toString('base64url'); // ~12 chars, URL-safe
-    const now = Date.now();
-    downloadCodes.set(code, {
-        label: label || null,
-        maxUses: typeof maxUses === 'number' && maxUses > 0 ? maxUses : 1,
-        usesRemaining: typeof maxUses === 'number' && maxUses > 0 ? maxUses : 1,
-        createdAt: now,
-        expiresAt: typeof expiresInHours === 'number' && expiresInHours > 0 ? now + expiresInHours * 60 * 60 * 1000 : null,
-        lastUsedAt: null,
-        downloadCount: 0
-    });
-    saveDownloadCodes(downloadCodes);
-    logActivity(null, 'download_code_generated', { code, label: label || null });
-    res.json({
-        success: true,
-        code,
-        downloadUrl: `${req.protocol}://${req.get('host')}/relay/download/${code}`
-    });
+app.post('/api/customers', requirePermission('customers'), requireFeature('customer_crm'), (req, res) => {
+    const { name, phone, email, notes } = req.body;
+    if (!name || !name.trim()) {
+        return res.status(400).json({ success: false, message:'Kailangan ng pangalan ng customer.' });
+    }
+    const customers = readData(FILE_CUSTOMERS, []);
+    if (phone && customers.some(c => c.phone && c.phone === phone)) {
+        return res.status(400).json({ success: false, message:'May existing customer na gumagamit na ng phone number na ito.' });
+    }
+    const customer = {
+        id:'CUST-' + Date.now(),
+        name: name.trim(),
+        phone: phone ||'',
+        email: email ||'',
+        notes: notes ||'',
+        points: 0,
+        totalSpent: 0,
+        visits: 0,
+        createdAt: new Date().toISOString(),
+        lastVisit: null,
+        loyaltyCard: null
+    };
+    customers.unshift(customer);
+    writeData(FILE_CUSTOMERS, customers);
+    logAction(req.authUser.username, `Added new customer: ${customer.name}`);
+    res.json({ success: true, customer: sanitizeCustomerForClient(customer) });
 });
 
-app.get('/relay/admin/api/download-codes', requireAdminKey, (req, res) => {
-    const list = [...downloadCodes.entries()].map(([code, meta]) => ({ code, ...meta }));
-    res.json({ success: true, codes: list });
+app.put('/api/customers/:id', requirePermission('customers'), requireFeature('customer_crm'), (req, res) => {
+    const customers = readData(FILE_CUSTOMERS, []);
+    const idx = customers.findIndex(c => c.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ success: false, message:'Customer not found.' });
+    const { name, phone, email, notes } = req.body;
+    if (name !== undefined && name.trim()) customers[idx].name = name.trim();
+    if (phone !== undefined) customers[idx].phone = phone;
+    if (email !== undefined) customers[idx].email = email;
+    if (notes !== undefined) customers[idx].notes = notes;
+    writeData(FILE_CUSTOMERS, customers);
+    res.json({ success: true, customer: sanitizeCustomerForClient(customers[idx]) });
 });
 
-app.post('/relay/admin/api/download-codes/:code/revoke', requireAdminKey, (req, res) => {
-    downloadCodes.delete(req.params.code);
-    saveDownloadCodes(downloadCodes);
+app.delete('/api/customers/:id', requirePermission('customers'), requireFeature('customer_crm'), (req, res) => {
+    let customers = readData(FILE_CUSTOMERS, []);
+    if (!customers.some(c => c.id === req.params.id)) {
+        return res.status(404).json({ success: false, message:'Customer not found.' });
+    }
+    customers = customers.filter(c => c.id !== req.params.id);
+    writeData(FILE_CUSTOMERS, customers);
+    logAction(req.authUser.username, `Deleted customer ID: ${req.params.id}`);
     res.json({ success: true });
 });
 
-// --------------------------------------------------------------
-// GET /relay/download/:code
-// TINATAWAG NG BROWSER/CURL NG KLIYENTE MISMO (hindi ng OMNIPOS server)
-// — ito ang aktwal na "i-download ang mga files para sa offline usage".
-// Walang requireApiKey dito dahil hindi pa nga naka-install ang
-// OMNIPOS client sa yugtong ito — ang code mismo (random, one-time,
-// may bilang ng uses/expiry) ang proteksyon.
-// --------------------------------------------------------------
-app.get('/relay/download/:code', (req, res) => {
-    const { code } = req.params;
-    const meta = downloadCodes.get(code);
+// ------------------------------------------------------------------
+// LOYALTY CARD / QR — issue, regenerate, revoke, at terminal lookup.
+// Tingnan ang malaking paliwanag malapit sa `verifyLoyaltyCardToken`
+// (itaas ng file na ito) kung paano gumagana ang buong security model.
+// ------------------------------------------------------------------
 
-    if (!meta) {
-        return res.status(404).send('Invalid o expired na download code. Kontakin ang developer para sa bagong link.');
-    }
-    if (meta.expiresAt && Date.now() > meta.expiresAt) {
-        downloadCodes.delete(code);
-        saveDownloadCodes(downloadCodes);
-        return res.status(410).send('Expired na ang download code na ito. Kontakin ang developer para sa bagong link.');
-    }
-    if (meta.usesRemaining <= 0) {
-        return res.status(410).send('Naubos na ang bilang ng pwedeng gamitin sa code na ito. Kontakin ang developer para sa bagong link.');
-    }
-    if (!fs.existsSync(RELEASE_PACKAGE_PATH)) {
-        return res.status(503).send('Walang naka-publish na release package sa server pa. Kontakin ang developer.');
-    }
-
-    meta.usesRemaining -= 1;
-    meta.lastUsedAt = Date.now();
-    meta.downloadCount = (meta.downloadCount || 0) + 1;
-    saveDownloadCodes(downloadCodes);
-    logActivity(null, 'client_package_downloaded', { code, label: meta.label || null, ip: req.ip });
-
-    res.download(RELEASE_PACKAGE_PATH, 'omnipos-client.zip');
+// Nag-i-issue ng BAGONG card/QR (para sa bagong customer) o
+// nagre-regenerate ng existing card (hal. nawala ang dating card) —
+// AUTHORIZED PERSONNEL LAMANG (may `loyalty_card_issue` permission).
+// Ang buong raw token ay ibinabalik LAMANG dito, minsan lang — kailangan
+// itong i-print/i-display agad bilang QR para sa customer.
+app.post('/api/customers/:id/loyalty-card', requirePermission('loyalty_card_issue'), requireFeature('customer_crm'), rateLimit('loyalty-card-issue', 20, 10 * 60 * 1000), (req, res) => {
+    const customers = readData(FILE_CUSTOMERS, []);
+    const customer = customers.find(c => c.id === req.params.id);
+    if (!customer) return res.status(404).json({ success: false, message:'Customer not found.' });
+    const mode = (req.body && req.body.mode ==='static') ? 'static' : 'rotating';
+    const wasReissue = !!(customer.loyaltyCard && !customer.loyaltyCard.revoked);
+    const { token, card } = issueLoyaltyCard(customer, mode, req.authUser.username);
+    writeData(FILE_CUSTOMERS, customers);
+    logAction(req.authUser.username, `${wasReissue ? 'Regenerated' : 'Issued'} loyalty ${mode ==='static' ? 'card' : 'QR'} for customer: ${customer.name} (${customer.id})`);
+    res.json({
+        success: true,
+        message: wasReissue
+            ? 'Na-regenerate ang loyalty card/QR. Awtomatiko nang na-invalidate ang dating QR — ito na lang ang gagana.'
+            : 'Naka-issue na ang bagong loyalty card/QR.',
+        token,
+        card: { cardId: card.cardId, mode: card.mode, issuedAt: card.issuedAt }
+    });
 });
 
-app.get('/relay/health', (req, res) => res.json({ success: true, status: 'ok' }));
+// Ibinabalewala/dini-disable ang kasalukuyang card/QR ng customer nang
+// hindi agad nagbibigay ng kapalit (hal. nawala ang card, habang
+// hinihintay ang bagong isyu) — AUTHORIZED PERSONNEL LAMANG.
+app.post('/api/customers/:id/loyalty-card/revoke', requirePermission('loyalty_card_issue'), requireFeature('customer_crm'), (req, res) => {
+    const customers = readData(FILE_CUSTOMERS, []);
+    const customer = customers.find(c => c.id === req.params.id);
+    if (!customer) return res.status(404).json({ success: false, message:'Customer not found.' });
+    if (!customer.loyaltyCard) return res.status(400).json({ success: false, message:'Walang naka-issue na card/QR ang customer na ito.' });
+    customer.loyaltyCard.revoked = true;
+    writeData(FILE_CUSTOMERS, customers);
+    logAction(req.authUser.username, `Revoked loyalty card/QR of customer: ${customer.name} (${customer.id})`);
+    res.json({ success: true, message:'Na-revoke na ang loyalty card/QR na ito.' });
+});
 
-// --------------------------------------------------------------
-// BOOTSTRAP — kailangan munang ma-load ang lahat ng persisted na
-// estado (mula sa Redis kung naka-configure ang REDIS_URL, o mula sa
-// lokal na JSON files kung wala) BAGO tumanggap ng kahit anong request
-// ang server.
-// --------------------------------------------------------------
-async function bootstrapStores() {
-    [
-        allowedDevices,
-        deviceLabels,
-        deviceFingerprints,
-        cloneSplits,
-        issuedUnlocks,
-        activityLog,
-        backupCheckins,
-        systemVersionInfo,
-        targetedReleases,
-        downloadCodes,
-        buildHistory,
-        releaseBaselines,
-        integrityStatus,
-        featureCatalogOverrides
-    ] = await Promise.all([
-        loadAllowedDevices(),
-        loadDeviceLabels(),
-        loadDeviceFingerprints(),
-        loadCloneSplits(),
-        loadIssuedUnlocks(),
-        loadActivityLog(),
-        loadBackupCheckins(),
-        loadSystemVersionInfo(),
-        loadTargetedReleases(),
-        loadDownloadCodes(),
-        loadBuildHistory(),
-        loadReleaseBaselines(),
-        loadIntegrityStatus(),
-        loadFeatureCatalogOverrides()
-    ]);
-
-    // I-merge ang anumang dating naka-auto-learn na features papunta sa
-    // FEATURE_CATALOG mirror (BASE + overrides), tapos i-sync ang 'pro'
-    // tier para makasama agad ang mga ito.
-    FEATURE_CATALOG = { ...FEATURE_CATALOG_BASE, ...featureCatalogOverrides };
-    recomputeProTierFeatureIds();
-    if (Object.keys(featureCatalogOverrides).length > 0) {
-        console.log(`🆕 Na-load ang ${Object.keys(featureCatalogOverrides).length} dating auto-learned na feature(s) papunta sa catalog mirror: ${Object.keys(featureCatalogOverrides).join(', ')}.`);
+// Ginagamit ng POS terminal kapag ni-scan ang QR/card ng customer sa
+// panahon ng checkout — nire-resolve kung sinong customer ito (para
+// awtomatikong mapili sa cart) at kinukumpirma agad kung VALID ang
+// card. Ang totoong points deduction/redemption ay sa /api/transactions
+// pa rin nangyayari (gamit ang PAREHONG scanned token), dahil doon lang
+// FINAL/fully-verified ang halaga ng points na ire-redeem.
+app.post('/api/customers/lookup-by-card', requirePermission('terminal'), rateLimit('loyalty-card-scan', 60, 10 * 60 * 1000), (req, res) => {
+    const rawToken = req.body && req.body.token;
+    if (!rawToken || typeof rawToken !=='string') {
+        return res.status(400).json({ success: false, message:'Missing QR/card token.' });
     }
+    const parts = rawToken.split('.');
+    if (parts.length !== 4 || parts[0] !=='LC1') {
+        return res.status(400).json({ success: false, message:'Hindi ito valid na Loyalty Card/QR.' });
+    }
+    const customers = readData(FILE_CUSTOMERS, []);
+    const customer = customers.find(c => c.id === parts[1]);
+    if (!customer) return res.status(404).json({ success: false, message:'Walang customer na nahanap para sa card/QR na ito.' });
+    const check = verifyLoyaltyCardToken(customer, rawToken);
+    if (!check.valid) return res.status(403).json({ success: false, code:'LOYALTY_CARD_INVALID', message: check.message });
+    res.json({
+        success: true,
+        customer: { id: customer.id, name: customer.name, phone: customer.phone ||'', email: customer.email ||'', points: customer.points || 0 },
+        cardMode: check.mode
+    });
+});
 
-    console.log(
-        redisClient
-            ? `✅ Na-load mula sa Redis: ${allowedDevices.size} allowed device(s), ${Object.keys(issuedUnlocks).length} device(s) may naka-unlock.`
-            : `ℹ️  Na-load mula sa lokal na JSON files: ${allowedDevices.size} allowed device(s), ${Object.keys(issuedUnlocks).length} device(s) may naka-unlock.`
-    );
+app.get('/api/promocodes', requirePermission('products'), requireFeature('promo_codes'), (req, res) => {
+    res.json(readData(FILE_PROMOCODES, []));
+});
+
+app.post('/api/promocodes', requirePermission('products'), requireFeature('promo_codes'), (req, res) => {
+    let { code, type, value, description, expiresAt, minSpend } = req.body;
+    code = (code ||'').trim().toUpperCase();
+    if (!code) return res.status(400).json({ success: false, message:'Kailangan ng promo code.' });
+    if (!['percent','fixed'].includes(type)) return res.status(400).json({ success: false, message:'Invalid discount type (percent o fixed lang).' });
+    value = parseFloat(value);
+    if (isNaN(value) || value <= 0) return res.status(400).json({ success: false, message:'Invalid discount value.' });
+    if (type ==='percent' && value > 100) return res.status(400).json({ success: false, message:'Hindi pwedeng lumagpas sa 100% ang percent discount.' });
+
+    const promos = readData(FILE_PROMOCODES, []);
+    if (promos.some(p => p.code === code)) {
+        return res.status(400).json({ success: false, message:'Existing na ang promo code na ito.' });
+    }
+    const promo = {
+        code, type, value,
+        description: description ||'',
+        active: true,
+        expiresAt: expiresAt || null,
+        minSpend: parseFloat(minSpend) || 0,
+        createdAt: new Date().toISOString()
+    };
+    promos.unshift(promo);
+    writeData(FILE_PROMOCODES, promos);
+    logAction(req.authUser.username, `Added promo code: ${code}`);
+    res.json({ success: true, promo });
+});
+
+app.put('/api/promocodes/:code', requirePermission('products'), requireFeature('promo_codes'), (req, res) => {
+    const codeParam = req.params.code.toUpperCase();
+    const promos = readData(FILE_PROMOCODES, []);
+    const idx = promos.findIndex(p => p.code === codeParam);
+    if (idx === -1) return res.status(404).json({ success: false, message:'Promo code not found.' });
+    const { type, value, description, active, expiresAt, minSpend } = req.body;
+    if (type !== undefined) promos[idx].type = type;
+    if (value !== undefined) promos[idx].value = parseFloat(value);
+    if (description !== undefined) promos[idx].description = description;
+    if (active !== undefined) promos[idx].active = !!active;
+    if (expiresAt !== undefined) promos[idx].expiresAt = expiresAt;
+    if (minSpend !== undefined) promos[idx].minSpend = parseFloat(minSpend) || 0;
+    writeData(FILE_PROMOCODES, promos);
+    res.json({ success: true, promo: promos[idx] });
+});
+
+app.delete('/api/promocodes/:code', requirePermission('products'), requireFeature('promo_codes'), (req, res) => {
+    const codeParam = req.params.code.toUpperCase();
+    let promos = readData(FILE_PROMOCODES, []);
+    if (!promos.some(p => p.code === codeParam)) {
+        return res.status(404).json({ success: false, message:'Promo code not found.' });
+    }
+    promos = promos.filter(p => p.code !== codeParam);
+    writeData(FILE_PROMOCODES, promos);
+    logAction(req.authUser.username, `Deleted promo code: ${codeParam}`);
+    res.json({ success: true });
+});
+
+app.get('/api/promocodes/:code/validate', requireFeature('promo_codes'), (req, res) => {
+
+    const codeParam = req.params.code.toUpperCase();
+    const subtotal = parseFloat(req.query.subtotal) || 0;
+    const promos = readData(FILE_PROMOCODES, []);
+    const promo = promos.find(p => p.code === codeParam);
+    if (!promo) return res.json({ success: false, message:'Hindi valid ang promo code na ito.' });
+    if (!promo.active) return res.json({ success: false, message:'Naka-disable na ang promo code na ito.' });
+    if (promo.expiresAt && new Date(promo.expiresAt).getTime() < Date.now()) {
+        return res.json({ success: false, message:'Na-expire na ang promo code na ito.' });
+    }
+    if (promo.minSpend && subtotal < promo.minSpend) {
+        return res.json({ success: false, message: `Kailangan ng minimum na ₱${promo.minSpend.toFixed(2)} para magamit ang promo na ito.` });
+    }
+    let discountAmount = promo.type ==='percent' ? (subtotal * promo.value / 100) : promo.value;
+    discountAmount = Math.min(Math.max(discountAmount, 0), subtotal);
+    res.json({ success: true, promo, discountAmount: Math.round(discountAmount * 100) / 100 });
+});
+
+function computeShiftSummary(periodStartIso, periodEndIso, cashierFilter) {
+    const allTx = readData(FILE_TRANSACTIONS);
+    const start = new Date(periodStartIso).getTime();
+    const end = new Date(periodEndIso).getTime();
+    const cashierKey = cashierFilter ? String(cashierFilter).toLowerCase() : null;
+
+    const txs = allTx.filter(t => {
+        const ts = new Date(t.isoDate || t.timestamp || 0).getTime();
+        if (isNaN(ts) || ts <= start || ts > end) return false;
+        if (cashierKey && (t.cashier ||'').toLowerCase() !== cashierKey) return false;
+        return true;
+    });
+
+    const paymentBreakdown = {};
+    let grossSales = 0, totalDiscount = 0, netSales = 0;
+    txs.forEach(t => {
+        const disc = parseFloat(t.discount || 0) || 0;
+        const net = parseFloat(t.total || 0) || 0;
+        totalDiscount += disc;
+        netSales += net;
+        grossSales += net + disc;
+
+        if (Array.isArray(t.payments) && t.payments.length > 0) {
+            const totalTendered = t.payments.reduce((s, p) => s + (parseFloat(p.amount) || 0), 0) || 1;
+            t.payments.forEach(p => {
+                const method = (p.method ||'CASH').toUpperCase();
+                const share = Math.round((net * ((parseFloat(p.amount) || 0) / totalTendered)) * 100) / 100;
+                if (!paymentBreakdown[method]) paymentBreakdown[method] = { count: 0, total: 0 };
+                paymentBreakdown[method].total = Math.round((paymentBreakdown[method].total + share) * 100) / 100;
+            });
+
+            const primaryMethod = (t.payments[0].method ||'CASH').toUpperCase();
+            paymentBreakdown[primaryMethod].count += 1;
+        } else {
+            const method = (t.payment_method || t.method ||'CASH').toUpperCase();
+            if (!paymentBreakdown[method]) paymentBreakdown[method] = { count: 0, total: 0 };
+            paymentBreakdown[method].count += 1;
+            paymentBreakdown[method].total = Math.round((paymentBreakdown[method].total + net) * 100) / 100;
+        }
+    });
+
+    const logs = readData(FILE_USERLOGS);
+    const voidLogs = logs.filter(l => l.action && l.action.indexOf('VOIDED Transaction') === 0 && l.id > start && l.id <= end
+        && (!cashierKey || (l.username ||'').toLowerCase() === cashierKey));
+    const voidCount = voidLogs.length;
+    const voidedAmount = Math.round(voidLogs.reduce((sum, l) => sum + (parseFloat(l.voidedAmount) || 0), 0) * 100) / 100;
+
+    return {
+        periodStart: new Date(start).toISOString(),
+        periodEnd: new Date(end).toISOString(),
+        transactionCount: txs.length,
+        grossSales: Math.round(grossSales * 100) / 100,
+        totalDiscount: Math.round(totalDiscount * 100) / 100,
+        netSales: Math.round(netSales * 100) / 100,
+        paymentBreakdown,
+        voidCount,
+        voidedAmount
+    };
 }
 
-bootstrapStores()
-    .then(() => {
-        app.listen(PORT, () => {
-            console.log(`OmniPOS Unlock Relay running sa port ${PORT}`);
-        });
-    })
-    .catch((err) => {
-        console.error('❌ Hindi ma-bootstrap ang persistent storage — hindi tumakbo ang server:', err);
-        process.exit(1);
+function readShiftMetaStore() {
+    const raw = readData(FILE_SHIFT_META, {});
+    if (raw && !raw.cashiers && (raw.beginningCash !== undefined || raw.lastCloseAt !== undefined)) {
+        return { cashiers: {}, legacyLastCloseAt: raw.lastCloseAt || null };
+    }
+    if (!raw.cashiers) raw.cashiers = {};
+    return raw;
+}
+
+function writeShiftMetaStore(store) {
+    writeData(FILE_SHIFT_META, store);
+}
+
+function getCashierShiftMeta(store, username) {
+    const existingKey = Object.keys(store.cashiers).find(k => k.toLowerCase() === (username ||'').toLowerCase());
+    if (existingKey) return store.cashiers[existingKey];
+    store.cashiers[username] = { lastCloseAt: store.legacyLastCloseAt || null };
+    return store.cashiers[username];
+}
+
+app.get('/api/shift/current', (req, res) => {
+    const role = req.authUser && req.authUser.role;
+    const isAdminRole = (role ||'').toLowerCase() ==='admin';
+    const canControlOthers = isAdminRole || !!getPermissionsForRole(role).shift_close_control;
+
+    const requestedCashier = (req.query.cashier ||'').toString().trim();
+    let targetCashier = req.authUser.username;
+    if (requestedCashier && requestedCashier.toLowerCase() !== targetCashier.toLowerCase()) {
+        if (!canControlOthers) {
+            return res.status(403).json({ success: false, message:'Akses Denied: Wala kang pahintulot na tingnan/kontrolin ang shift ng ibang cashier.' });
+        }
+        targetCashier = requestedCashier;
+    }
+
+    const store = readShiftMetaStore();
+    const targetHasOpenShift = (() => {
+        const m = getCashierShiftMeta(store, targetCashier);
+        return m.beginningCash !== undefined && m.beginningCash !== null;
+    })();
+    if (!targetHasOpenShift) {
+        const gateResult = checkShiftManagementUnlocked();
+        if (!gateResult.unlocked) return res.status(402).json(gateResult.body);
+    }
+    const meta = getCashierShiftMeta(store, targetCashier);
+    const periodStart = meta.lastCloseAt || new Date(0).toISOString();
+    const summary = computeShiftSummary(periodStart, new Date().toISOString(), targetCashier);
+
+    const canViewAmounts = isAdminRole || !!getPermissionsForRole(role).shiftreport_view_amounts;
+    if (!canViewAmounts) {
+        delete summary.grossSales;
+        delete summary.totalDiscount;
+        delete summary.netSales;
+        delete summary.voidedAmount;
+        delete summary.paymentBreakdown;
+    }
+
+    res.json({
+        success: true,
+        summary,
+        cashier: targetCashier,
+        viewingOtherCashier: targetCashier.toLowerCase() !== req.authUser.username.toLowerCase(),
+        canControlOtherShifts: canControlOthers,
+        beginningCash: (meta.beginningCash !== undefined && meta.beginningCash !== null) ? meta.beginningCash : null,
+        beginningCashLocked: meta.beginningCash !== undefined && meta.beginningCash !== null,
+        beginningCashSetBy: meta.beginningCashSetBy || null
     });
+});
+
+app.get('/api/shift/open-list', (req, res) => {
+    const role = req.authUser && req.authUser.role;
+    const isAdminRole = (role ||'').toLowerCase() ==='admin';
+    const canControlOthers = isAdminRole || !!getPermissionsForRole(role).shift_close_control;
+    if (!canControlOthers) {
+        return res.status(403).json({ success: false, message:'Akses Denied: Wala kang pahintulot na kontrolin ang shift close ng ibang cashier.' });
+    }
+    const store = readShiftMetaStore();
+    const openShifts = Object.keys(store.cashiers)
+        .map(username => ({ username, meta: store.cashiers[username] }))
+        .filter(c => c.meta && c.meta.beginningCash !== undefined && c.meta.beginningCash !== null)
+        .map(c => ({
+            username: c.username,
+            beginningCash: c.meta.beginningCash,
+            beginningCashSetAt: c.meta.beginningCashSetAt || null
+        }));
+    res.json({ success: true, openShifts });
+});
+
+app.post('/api/shift/open-cash', requirePermission('terminal'), requireFeature('shift_management'), rateLimit('shift-open-cash', 20, 10 * 60 * 1000), (req, res) => {
+    const store = readShiftMetaStore();
+    const meta = getCashierShiftMeta(store, req.authUser.username);
+    if (meta.beginningCash !== undefined && meta.beginningCash !== null) {
+        return res.status(409).json({
+            success: false,
+            message:'The Beginning Cash for your current shift has already been set and locked.',
+            beginningCash: meta.beginningCash
+        });
+    }
+    const amount = parseFloat(req.body.beginningCash);
+    if (isNaN(amount) || amount < 0) {
+        return res.status(400).json({ success: false, message:'Invalid Beginning Cash amount.' });
+    }
+    meta.beginningCash = Math.round(amount * 100) / 100;
+    meta.beginningCashSetBy = req.authUser.username;
+    meta.beginningCashSetAt = new Date().toISOString();
+    writeShiftMetaStore(store);
+    logAction(req.authUser.username, `Set the Beginning Cash Float for a new shift: ₱${meta.beginningCash.toFixed(2)}`);
+    res.json({ success: true, beginningCash: meta.beginningCash });
+});
+
+app.post('/api/shift/close', rateLimit('shift-close', 20, 10 * 60 * 1000), async (req, res) => {
+    const role = req.authUser && req.authUser.role;
+    const isAdminRole = (role ||'').toLowerCase() ==='admin';
+    const canControlOthers = isAdminRole || !!getPermissionsForRole(role).shift_close_control;
+
+    // SECURITY FIX: dati'y basta ika-close agad ang shift/Z-Reading ng
+    // isang naka-login na Cashier — walang paraan para ma-verify ng
+    // Admin/Manager/Supervisor na sila mismo ang nag-approve ng
+    // pag-close (hal. bago mag-alis ng till/cash drawer). Kaya kayang
+    // gawin ng isang Cashier na kupitan ang cash count nang walang
+    // ibang tao na nakakaalam. Ngayon, kailangan muna ng Admin password,
+    // o password ng account na may `shift_close_own_password`
+    // permission (hal. Supervisor/Manager role) — pareho ang pattern
+    // dito sa ginagamit na sa Void Transaction authorization.
+    const { adminPassword } = req.body;
+    if (!adminPassword) {
+        return res.status(400).json({ success: false, message:'Kailangan ng Admin/Manager/Supervisor password para isara ang shift / Z-Reading.' });
+    }
+    const usersForShiftClose = readData(FILE_USERS);
+    const shiftCloseAuth = await findShiftCloseAuthorizer(usersForShiftClose, adminPassword);
+    if (!shiftCloseAuth) {
+        return res.status(403).json({
+            success: false,
+            code:'WRONG_ADMIN_PASSWORD',
+            message:'Maling password. Hindi pinahintulutan ang pag-close ng shift / Z-Reading.'
+        });
+    }
+
+    const requestedTarget = (req.body.targetCashier ||'').toString().trim();
+    let targetCashier = req.authUser.username;
+    let closedOnBehalf = false;
+    if (requestedTarget && requestedTarget.toLowerCase() !== targetCashier.toLowerCase()) {
+        if (!canControlOthers) {
+            return res.status(403).json({ success: false, message:'Akses Denied: Wala kang pahintulot na isara ang shift ng ibang cashier. Kailangan ng Admin/Supervisor control (shift_close_control) para dito.' });
+        }
+        targetCashier = requestedTarget;
+        closedOnBehalf = true;
+    }
+
+    const store = readShiftMetaStore();
+    const meta = getCashierShiftMeta(store, targetCashier);
+    const targetHasOpenShift = meta.beginningCash !== undefined && meta.beginningCash !== null;
+    if (!targetHasOpenShift) {
+
+        const gateResult = checkShiftManagementUnlocked();
+        if (!gateResult.unlocked) return res.status(402).json(gateResult.body);
+    }
+
+    const beginningCash = (meta.beginningCash !== undefined && meta.beginningCash !== null)
+        ? meta.beginningCash
+        : req.body.beginningCash;
+    const { endingCashCounted, notes } = req.body;
+    const periodStart = meta.lastCloseAt || new Date(0).toISOString();
+    const periodEnd = new Date().toISOString();
+    const summary = computeShiftSummary(periodStart, periodEnd, targetCashier);
+
+    const isZeroActivityClose = summary.transactionCount === 0 && summary.voidCount === 0;
+
+    // Payagan ang pag-close kahit walang transaksyon/void, BASTA may bukas
+    // na shift talaga (may naka-set na beginning cash) — kasi valid na
+    // use-case ito: papalitan lang ng bagong cashier at ipinapasa ang
+    // hindi nagalaw na beginning cash. Kung walang bukas na shift AT walang
+    // aktibidad, wala talagang dapat i-close kaya nananatiling naka-block.
+    if (isZeroActivityClose && !targetHasOpenShift) {
+        return res.json({ success: false, message: `Walang bukas na shift at walang bagong transaksyon o void para kay ${closedOnBehalf ? targetCashier :'sa iyo'}. Wala pang kailangang i-close.` });
+    }
+
+    const shifts = readData(FILE_SHIFTS, []);
+
+    const cashSales = (summary.paymentBreakdown['CASH'] && summary.paymentBreakdown['CASH'].total) || 0;
+    const beginCashNum = parseFloat(beginningCash) || 0;
+    const expectedCash = Math.round((beginCashNum + cashSales) * 100) / 100;
+    const hasCount = endingCashCounted !== undefined && endingCashCounted !=='' && endingCashCounted !== null;
+    const endCashNum = hasCount ? (parseFloat(endingCashCounted) || 0) : null;
+    const cashVariance = hasCount ? Math.round((endCashNum - expectedCash) * 100) / 100 : null;
+
+    const record = {
+        id:'Z-' + Date.now(),
+        closedBy: targetCashier,
+
+        closedOnBehalfBy: closedOnBehalf ? req.authUser.username : null,
+        beginningCash: beginCashNum,
+        endingCashCounted: endCashNum,
+        cashSales,
+        expectedCash,
+        cashVariance,
+        notes: notes ||'',
+        noSalesShift: isZeroActivityClose,
+        ...summary
+    };
+    shifts.unshift(record);
+    writeData(FILE_SHIFTS, shifts);
+
+    store.cashiers[targetCashier] = { lastCloseAt: periodEnd };
+    writeShiftMetaStore(store);
+
+    const varianceLog = cashVariance === null
+        ?''
+        : (cashVariance < 0
+            ? `, Cash SHORT ₱${Math.abs(cashVariance).toFixed(2)}`
+            : (cashVariance > 0 ? `, Cash OVER ₱${cashVariance.toFixed(2)}` :', Cash Exact'));
+    const noSalesLog = isZeroActivityClose ?' (Walang Transaksyon - Shift Handover Lang)' :'';
+    const authorizedByLog = shiftCloseAuth.isAdmin
+        ?'Authorized by Admin'
+        : `Authorized via Own Password (${shiftCloseAuth.user.username}, RBAC)`;
+    const actionLog = closedOnBehalf
+        ? `Closed shift / Z-Reading ${record.id} ng cashier '${targetCashier}' (Admin/Supervisor Control): ${summary.transactionCount} tx, Net Sales ₱${summary.netSales}${varianceLog}${noSalesLog} — ${authorizedByLog}`
+        : `Closed shift / Z-Reading ${record.id}: ${summary.transactionCount} tx, Net Sales ₱${summary.netSales}${varianceLog}${noSalesLog} — ${authorizedByLog}`;
+    logAction(req.authUser.username, actionLog);
+    res.json({ success: true, shift: record });
+});
+
+app.get('/api/shifts', requirePermission('shiftreport'), requireFeature('shift_management'), (req, res) => {
+    const allShifts = readData(FILE_SHIFTS, []);
+
+    const requester = req.authUser && req.authUser.username;
+    const activeRole = req.authUser && req.authUser.role;
+    const isAdminRole = (activeRole ||'').toLowerCase() ==='admin';
+
+    const canViewAll = isAdminRole || !!getPermissionsForRole(activeRole).shiftreport_view_all;
+    if (canViewAll) {
+        return res.json(allShifts);
+    }
+
+    const ownShifts = allShifts.filter(
+        s => (s.closedBy ||'').toLowerCase() === (requester ||'').toLowerCase()
+    );
+    res.json(ownShifts);
+});
+
+
+const isProduction = process.env.NODE_ENV ==='production';
+const HOST = isProduction ?'0.0.0.0' :'localhost';
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, HOST, () => {
+    console.log(`Server running at http://${HOST}:${PORT}`);
+    if (isProduction) {
+        console.log("MODE: Production (Public/Online Access Enabled)");
+    } else {
+        console.log("MODE: Development (Localhost Access Only)");
+    }
+});
