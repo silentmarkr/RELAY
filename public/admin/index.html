@@ -1349,6 +1349,7 @@ a:focus-visible,
           <div class="abar-label">
             <span class="name" id="publishProgressLabel">Building...</span>
             <span class="count" id="publishProgressPercent">0%</span>
+            <span class="count" id="publishProgressEta" style="color:var(--muted); font-weight:normal;"></span>
           </div>
           <div class="abar-track">
             <div class="abar-fill" id="publishProgressFill" style="width:0%; transition: width .3s ease;"></div>
@@ -1373,6 +1374,7 @@ a:focus-visible,
           <div class="abar-label">
             <span class="name" id="buildProgressLabel">Building...</span>
             <span class="count" id="buildProgressPercent">0%</span>
+            <span class="count" id="buildProgressEta" style="color:var(--muted); font-weight:normal;"></span>
           </div>
           <div class="abar-track">
             <div class="abar-fill" id="buildProgressFill" style="width:0%; transition: width .3s ease;"></div>
@@ -1963,11 +1965,28 @@ function createProgressController(ids) {
   const fill = document.getElementById(ids.fill);
   const label = document.getElementById(ids.label);
   const percentEl = document.getElementById(ids.percent);
+  const etaEl = ids.eta ? document.getElementById(ids.eta) : null;
 
   let pollInterval = null;
   let animInterval = null;
   let displayed = 0;
-  let target = { percent: 0, message: '', stage: 'idle', done: false };
+  let target = { percent: 0, message: '', stage: 'idle', done: false, etaMs: null };
+  // Sariling "local clock" para sa ETA countdown — hindi na kailangang
+  // hintayin ang susunod na 700ms poll para bumaba nang isang segundo ang
+  // ipinapakitang "time remaining"; kada tick (120ms), bumababa ito nang
+  // katumbas na oras, at ni-re-sync na lang sa totoong server value kada
+  // may bagong poll result (para hindi ito lumihis nang husto sa totoo).
+  let etaMsLocal = null;
+  let etaLastTickAt = null;
+
+  function formatEta(ms) {
+    if (ms == null || ms <= 0) return '';
+    const totalSec = Math.round(ms / 1000);
+    if (totalSec < 60) return `~${totalSec}s natitira`;
+    const min = Math.floor(totalSec / 60);
+    const sec = totalSec % 60;
+    return `~${min}m ${sec}s natitira`;
+  }
 
   function renderPercent(p) {
     if (fill) fill.style.width = p + '%';
@@ -1982,6 +2001,11 @@ function createProgressController(ids) {
         ? '#e05a5a'
         : 'linear-gradient(90deg, var(--accent-dim), var(--accent))';
     }
+    if (typeof target.etaMs === 'number') {
+      etaMsLocal = target.etaMs;
+      etaLastTickAt = Date.now();
+    }
+    if (target.done && etaEl) etaEl.innerText = '';
   }
 
   function tick() {
@@ -1994,6 +2018,17 @@ function createProgressController(ids) {
       displayed += 1;
     }
     renderPercent(displayed);
+
+    if (etaEl && !target.done) {
+      if (etaMsLocal != null && etaLastTickAt != null) {
+        const now = Date.now();
+        etaMsLocal = Math.max(0, etaMsLocal - (now - etaLastTickAt));
+        etaLastTickAt = now;
+        etaEl.innerText = formatEta(etaMsLocal);
+      } else {
+        etaEl.innerText = '';
+      }
+    }
   }
 
   function startAnim() {
@@ -2008,7 +2043,10 @@ function createProgressController(ids) {
     if (wrap) wrap.style.display = 'block';
     displayed = 0;
     renderPercent(0);
-    applyTarget({ percent: 0, message: 'Starting the build...', stage: 'idle', done: false });
+    etaMsLocal = null;
+    etaLastTickAt = null;
+    if (etaEl) etaEl.innerText = '';
+    applyTarget({ percent: 0, message: 'Starting the build...', stage: 'idle', done: false, etaMs: null });
     startAnim();
   }
 
@@ -2063,11 +2101,11 @@ function createProgressController(ids) {
 
 const buildProgressCtl = createProgressController({
   wrap: 'buildProgressWrap', fill: 'buildProgressFill',
-  label: 'buildProgressLabel', percent: 'buildProgressPercent'
+  label: 'buildProgressLabel', percent: 'buildProgressPercent', eta: 'buildProgressEta'
 });
 const publishProgressCtl = createProgressController({
   wrap: 'publishProgressWrap', fill: 'publishProgressFill',
-  label: 'publishProgressLabel', percent: 'publishProgressPercent'
+  label: 'publishProgressLabel', percent: 'publishProgressPercent', eta: 'publishProgressEta'
 });
 
 async function buildRelease() {

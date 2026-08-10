@@ -22,7 +22,7 @@ const nodemailer = require('nodemailer');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { execSync, execFileSync } = require('child_process');
+const { execSync, execFileSync, spawn } = require('child_process');
 const archiver = require('archiver');
 const Redis = require('ioredis');
 const JavaScriptObfuscator = require('javascript-obfuscator');
@@ -4196,11 +4196,58 @@ let buildProgressState = {
     startedAt: null,
     updatedAt: null,
     done: true,
-    error: null
+    error: null,
+    etaMs: null
 };
+
+// --------------------------------------------------------------
+// ETA (time remaining) ESTIMATE — hiling: gusto makita ng admin ang
+// "may time remaining" habang umuusad ang build, hindi lang bare
+// percent. In-memory lang ito (nare-reset sa bawat restart ng RELAY —
+// tama lang, cosmetic estimate lang ito, hindi kailangang i-persist),
+// isang rolling average ng huling 5 MATAGUMPAY na FULL build duration.
+// Bago pa magkaroon ng history (o pagkatapos lang ng restart), gumagamit
+// muna ng DEFAULT_ESTIMATED_BUILD_MS bilang unang tantiya.
+// --------------------------------------------------------------
+let recentBuildDurationsMs = [];
+const DEFAULT_ESTIMATED_BUILD_MS = 45 * 1000;
+
+function recordBuildDurationForEta(ms) {
+    if (typeof ms === 'number' && ms > 0) {
+        recentBuildDurationsMs.push(ms);
+        if (recentBuildDurationsMs.length > 5) recentBuildDurationsMs.shift();
+    }
+}
+
+function estimatedTotalBuildMs() {
+    if (recentBuildDurationsMs.length === 0) return DEFAULT_ESTIMATED_BUILD_MS;
+    const sum = recentBuildDurationsMs.reduce((a, b) => a + b, 0);
+    return Math.round(sum / recentBuildDurationsMs.length);
+}
+
+function estimateRemainingMs(percent, startedAt) {
+    if (!startedAt) return null;
+    const elapsed = Date.now() - startedAt;
+    const pct = Math.max(0, Math.min(100, percent || 0));
+    // Sa simula pa lang (napakababa ang percent), hindi pa maaasahan ang
+    // "elapsed * (100-pct)/pct" na formula (halos hatiin-by-zero) — gamitin
+    // muna ang rolling average ng nakaraang buo-build bilang unang tantiya.
+    if (pct < 3) return Math.max(0, estimatedTotalBuildMs() - elapsed);
+    const projectedTotal = elapsed * (100 / pct);
+    // Panatilihing makatwiran: huwag hayaang mas maikli pa sa aktwal na
+    // elapsed na, at i-blend nang bahagya sa historical average para hindi
+    // masyadong "jumpy" ang display kada tick.
+    const blended = recentBuildDurationsMs.length > 0
+        ? (projectedTotal * 0.7) + (estimatedTotalBuildMs() * 0.3)
+        : projectedTotal;
+    return Math.max(0, Math.round(blended - elapsed));
+}
 
 function setBuildProgress(patch) {
     buildProgressState = { ...buildProgressState, ...patch, updatedAt: Date.now() };
+    buildProgressState.etaMs = buildProgressState.done
+        ? 0
+        : estimateRemainingMs(buildProgressState.percent, buildProgressState.startedAt);
 }
 
 app.get('/relay/admin/api/build-progress', requireAdminKey, (req, res) => {
@@ -4236,16 +4283,50 @@ async function performBuildRelease(reqBody, req, publishOverride) {
     setBuildProgress({ buildId, stage: 'clone', percent: 0, message: 'Kino-clone ang repo...', startedAt: Date.now(), done: false, error: null });
 
     try {
-        // SECURITY FIX: dati, sinasalang diretso ang repoUrl/ref (galing
-        // sa admin request body) sa loob ng isang SHELL STRING (execSync
-        // gamit ang template literal) — kung may naka-embed na shell
-        // metacharacter (hal. `; rm -rf /` o `$(...)`) sa alinman sa
-        // dalawa, maaari itong mag-execute ng arbitrary command sa RELAY
-        // host. Ginagamit na ngayon ang execFileSync na may ARGUMENT
-        // ARRAY (hindi dumadaan sa shell), kaya kahit anong laman ng
-        // repoUrl/ref ay ituturing lang na LITERAL na argumento sa git,
-        // hindi bilang shell syntax.
-        execFileSync('git', ['clone', '--depth', '1', '--branch', ref, repoUrl, tmpDir], { stdio: 'pipe' });
+        // LIVE CLONE PROGRESS (hiling): dati, execFileSync (SYNCHRONOUS —
+        // hinaharang nito ang BUONG event loop ng RELAY habang nagkoclo-clone,
+        // kaya wala ring ibang request — kasama ang integrity-checkin ng
+        // real-time watcher ng mga OMNIPOS client — ang naseserve habang
+        // tumatagal ang clone), at walang paraan para malaman ang % habang
+        // tumatakbo ito — kaya nakikita LANG ang biglaang tumalon mula 0%
+        // papuntang 10% pagkatapos lang matapos ang buong clone.
+        //
+        // Ngayon, ginagamit ang spawn() (NON-blocking — hindi na nire-freeze
+        // ang server habang tumatagal ang clone) kasabay ng --progress flag
+        // ng git mismo, na nagpapadala ng TUNAY (hindi peke/pasadyang
+        // pagtaas) na percentage papunta sa stderr habang tumatakbo ito
+        // (hal. "Receiving objects: 45% (450/1000)"). Ino-parse dito ang
+        // mga linyang iyon at isinasalin sa loob ng saklaw ng "clone" step
+        // (0% hanggang BUILD_FIRST_STEP_PERCENT), kaya makikita ang aktwal
+        // na pag-usad bawat segundo sa halip na nakatigil/naka-freeze.
+        //
+        // WALANG epekto ito sa aktwal na resulta ng clone — parehong git
+        // clone --depth 1 --branch <ref> pa rin ito, ARGUMENT ARRAY pa rin
+        // (hindi shell string) para ligtas pa rin sa shell-injection.
+        await new Promise((resolve, reject) => {
+            const gitArgs = ['clone', '--depth', '1', '--progress', '--branch', ref, repoUrl, tmpDir];
+            const child = spawn('git', gitArgs, { stdio: ['ignore', 'ignore', 'pipe'] });
+            let stderrTail = '';
+            child.stderr.on('data', (chunk) => {
+                stderrTail = (stderrTail + chunk.toString()).slice(-4000);
+                // Git prints progress lines separated by \r (carriage return,
+                // hindi \n) habang umuusad — hatiin sa parehong dalawa para
+                // makuha ang pinakabagong linya.
+                const lines = stderrTail.split(/[\r\n]+/).filter(Boolean);
+                const lastLine = lines[lines.length - 1] || '';
+                const match = lastLine.match(/(\d{1,3})%/);
+                if (match) {
+                    const rawPct = Math.max(0, Math.min(100, Number(match[1])));
+                    const scaled = Math.round((rawPct / 100) * BUILD_FIRST_STEP_PERCENT * 10) / 10;
+                    setBuildProgress({ stage: 'clone', percent: scaled, message: `Kino-clone ang repo... (${lastLine.trim()})` });
+                }
+            });
+            child.on('error', reject);
+            child.on('close', (code) => {
+                if (code === 0) resolve();
+                else reject(new Error(`git clone exited with code ${code}`));
+            });
+        });
 
         setBuildProgress({ stage: 'filter', percent: BUILD_STEP_END_PERCENT.clone, message: 'Tinatanggal ang mga excluded file...' });
         removeExcludedRecursive(tmpDir);
@@ -4290,6 +4371,10 @@ async function performBuildRelease(reqBody, req, publishOverride) {
         const releaseDir = path.dirname(RELEASE_PACKAGE_PATH);
         if (!fs.existsSync(releaseDir)) fs.mkdirSync(releaseDir, { recursive: true });
 
+        const zipStepStart = BUILD_STEP_END_PERCENT.obfuscate;
+        // Ang natitirang % papunta sa 100 ay para lang sa zip step (huling
+        // hakbang sa BUILD_STEPS), kaya diretso na papuntang 100 dito.
+        const zipStepEnd = 100;
         await new Promise((resolve, reject) => {
             const output = fs.createWriteStream(RELEASE_PACKAGE_PATH);
             // PERFORMANCE FIX: zlib level 9 (max compression) costs
@@ -4300,6 +4385,22 @@ async function performBuildRelease(reqBody, req, publishOverride) {
             const archive = archiver('zip', { zlib: { level: 6 } });
             output.on('close', resolve);
             archive.on('error', reject);
+            // LIVE ZIP PROGRESS (hiling): ang archiver package mismo ay may
+            // sariling built-in 'progress' event (entries processed/total)
+            // habang isinusulat ang zip — dati ay hindi ito ginagamit, kaya
+            // nakatigil ang % sa buong pag-archive (walang event handler na
+            // nag-uupdate) hanggang sa "close" na lang bigla ito tumalon
+            // papuntang 100%. Ngayon, kada progress event, isinasalin ito
+            // sa loob ng saklaw ng zip step para makita ang totoong pag-usad
+            // (bilang ng na-archive na file / kabuuan) bawat segundo.
+            archive.on('progress', (data) => {
+                const total = data && data.entries && data.entries.total;
+                const processed = data && data.entries && data.entries.processed;
+                if (total) {
+                    const pct = zipStepStart + ((processed / total) * (zipStepEnd - zipStepStart));
+                    setBuildProgress({ stage: 'zip', percent: Math.round(pct * 10) / 10, message: `Ginagawa ang zip package... (${processed}/${total} file)` });
+                }
+            });
             archive.pipe(output);
             archive.directory(tmpDir, false);
             archive.finalize();
@@ -4355,6 +4456,9 @@ async function performBuildRelease(reqBody, req, publishOverride) {
             fileName: 'omnipos-client.zip'
         });
 
+        if (buildProgressState.startedAt) {
+            recordBuildDurationForEta(Date.now() - buildProgressState.startedAt);
+        }
         setBuildProgress({ stage: 'done', percent: 100, message: 'Tapos na ang build.', done: true });
 
         return {
