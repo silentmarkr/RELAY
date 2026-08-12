@@ -3867,6 +3867,155 @@ app.post('/relay/confirm-unlock-bulk', requireApiKey, requireAllowedDevice, rate
 });
 
 // --------------------------------------------------------------
+// Admin password reset (self-service, developer-approved).
+// LAYUNIN: Self-service ang pag-request, PERO ang developer/owner pa
+// rin (dito, sa RELAY) ang huling humahawak ng desisyon — kailangan
+// pareho ng (a) tamang OTP at (b) manual Approve sa admin panel bago
+// ma-issue ang reset ticket. Parang unlock flow, pero:
+//   - Ang OTP ay pumupunta sa DEVELOPER (hindi sa customer) dahil
+//     ito ay pag-reset ng Admin account mismo (walang ibang paraan
+//     para i-verify na TALAGANG ang may-ari ng store ang humihiling).
+//   - Ang na-issue na ticket ay MAIKLI lang mabuhay (5 minuto) at
+//     may `purpose:'admin-password-reset'` field para hindi ito
+//     magamit sa ibang bagay kahit paano.
+// --------------------------------------------------------------
+const ADMIN_RESET_OTP_TTL_MS = 10 * 60 * 1000; // 10 minuto, tugma sa OTP_TTL_MS
+const ADMIN_RESET_TICKET_TTL_MS = 5 * 60 * 1000; // 5 minuto lang ang reset ticket
+
+// key: installationId -> { code, expiresAt, approved, otpVerified, username, storeName, requestedAt }
+const pendingAdminResets = new Map();
+
+app.post('/relay/request-admin-reset',
+    requireApiKey,
+    requireAllowedDevice,
+    rateLimit('request-admin-reset', 3, 15 * 60 * 1000, (req) => req.body?.installationId),
+    async (req, res) => {
+        const { installationId, storeName, hintUsername } = req.body;
+
+        if (!installationId) {
+            return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+        }
+
+        const otpCode = String(Math.floor(100000 + Math.random() * 900000));
+        pendingAdminResets.set(installationId, {
+            code: otpCode,
+            expiresAt: Date.now() + ADMIN_RESET_OTP_TTL_MS,
+            approved: false,
+            otpVerified: false,
+            storeName: storeName || null,
+            hintUsername: hintUsername || null,
+            requestedAt: Date.now()
+        });
+
+        try {
+            await notifyUnlockRequest({
+                subject: `🔑 Admin Password Reset Request — ${storeName || installationId}`,
+                text: `May humiling na i-reset ang ADMIN password ng isang OMNIPOS installation.\n\n` +
+                      `Store: ${storeName || 'Hindi tiyak'}\n` +
+                      `Installation ID: ${installationId}\n` +
+                      `Posibleng account (sinabi ng client): ${hintUsername || 'Hindi tiyak'}\n` +
+                      `OTP Code: ${otpCode}\n` +
+                      `Mag-e-expire ito sa loob ng 10 minuto.\n\n` +
+                      `⚠️ TIYAKIN muna na TALAGANG ang may-ari/kilalang contact ng store na ito ang ` +
+                      `humihiling (tumawag/mag-text kung kinakailangan) BAGO mag-Approve at ibigay ang ` +
+                      `OTP na ito — ang sinumang naka-access sa terminal ang pwedeng nag-trigger nito.`
+            });
+
+            logActivity(installationId, 'admin_reset_requested', { storeName: storeName || null });
+            res.json({ success: true, message: 'Naipadala ang reset request. Kontakin ang developer para sa OTP.' });
+        } catch (err) {
+            console.error('Relay mail send failure (admin-reset):', err);
+            pendingAdminResets.delete(installationId);
+            res.status(500).json({ success: false, message: `Nabigo ang pagpapadala ng OTP: ${err.message}` });
+        }
+    }
+);
+
+// Reuses the same approval-gate idea as unlocks — pinapayagan ang
+// "tama na ang OTP pero naghihintay pa ng Approve" na estado.
+app.get('/relay/admin/api/pending-admin-resets', requireAdminKey, (req, res) => {
+    const list = [];
+    for (const [installationId, pending] of pendingAdminResets) {
+        if (Date.now() > pending.expiresAt) continue;
+        list.push({
+            installationId,
+            storeName: pending.storeName,
+            hintUsername: pending.hintUsername,
+            approved: pending.approved,
+            otpVerified: pending.otpVerified,
+            requestedAt: pending.requestedAt
+        });
+    }
+    res.json({ success: true, pending: list });
+});
+
+app.post('/relay/admin/api/pending-admin-resets/approve', requireAdminKey, (req, res) => {
+    const { installationId } = req.body;
+    const pending = pendingAdminResets.get(installationId);
+    if (!pending) {
+        return res.status(404).json({ success: false, message: 'Walang pending admin-reset request para dito.' });
+    }
+    pending.approved = true;
+    logActivity(installationId, 'admin_reset_approved', {});
+    res.json({ success: true, message: 'Naaprubahan. Puwede nang gamitin ng client ang OTP.' });
+});
+
+app.post('/relay/confirm-admin-reset',
+    requireApiKey,
+    requireAllowedDevice,
+    rateLimit('confirm-admin-reset', 30, 15 * 60 * 1000, (req) => req.body?.installationId),
+    (req, res) => {
+        const { installationId, otp } = req.body;
+
+        if (!installationId || !otp) {
+            return res.status(400).json({ success: false, message: 'Kulang ang installationId o otp.' });
+        }
+
+        const pending = pendingAdminResets.get(installationId);
+        if (!pending) {
+            return res.status(400).json({ success: false, message: 'Walang aktibong reset request. Humingi muna ng OTP.' });
+        }
+        if (Date.now() > pending.expiresAt) {
+            pendingAdminResets.delete(installationId);
+            return res.status(400).json({ success: false, message: 'Expired na ang OTP. Humingi ng bago.' });
+        }
+        if (!safeCompare(String(otp).trim(), pending.code)) {
+            return res.status(400).json({ success: false, message: 'Maling OTP code.' });
+        }
+        if (!pending.approved) {
+            pending.otpVerified = true;
+            return res.json({
+                success: false,
+                pending: true,
+                message: 'Tama ang OTP! Naghihintay pa lang ng approval mula sa developer. Subukan ulit paglipas ng ilang segundo.'
+            });
+        }
+
+        // Tama ang OTP AT naaprubahan — gumawa ng SHORT-LIVED signed
+        // ticket. `purpose` field ang nagbubukod dito sa mga
+        // feature-unlock tokens kahit parehong private key ang gamit.
+        const now = Date.now();
+        const payload = {
+            installationId,
+            purpose: 'admin-password-reset',
+            issuedAt: now,
+            expiresAt: now + ADMIN_RESET_TICKET_TTL_MS
+        };
+        const payloadString = JSON.stringify(payload);
+        const signature = crypto.sign(null, Buffer.from(payloadString), privateKey).toString('base64');
+
+        logActivity(installationId, 'admin_reset_ticket_issued', {});
+        pendingAdminResets.delete(installationId);
+
+        res.json({
+            success: true,
+            message: 'Na-verify. Puwede ka nang mag-set ng bagong Admin password.',
+            ticket: { payload, signature }
+        });
+    }
+);
+
+// --------------------------------------------------------------
 // GET /relay/latest-version
 // Tinatawag ito ng OMNIPOS CLIENT SERVER (hindi ng browser mismo) sa
 // "Check for Updates" ng Settings nito. Basic API key lang ang
