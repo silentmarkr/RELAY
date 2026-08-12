@@ -634,7 +634,14 @@ function recordDeviceSeen(installationId, meta = {}) {
 }
 
 function requireAllowedDevice(req, res, next) {
-    const { installationId, storeName, username } = req.body;
+    // FIX: dating req.body lang ang tinitignan dito — gumana lang ito
+    // para sa POST endpoints. Para sa GET /relay/branch-summary (walang
+    // JSON body sa isang GET request — hindi ito pinapayagan ng Fetch
+    // spec), kailangang tanggapin din ang installationId mula sa query
+    // string bilang fallback.
+    const installationId = (req.body && req.body.installationId) || req.query.installationId;
+    const storeName = (req.body && req.body.storeName) || undefined;
+    const username = (req.body && req.body.username) || undefined;
     recordDeviceSeen(installationId, { storeName, username }); // laging i-log, kahit tanggihan pagkatapos
     // STRICT BY DEFAULT: dati, kapag WALA pang laman ang allowedDevices
     // (bagong deploy, o pagkatapos mag-clone-reset), basta-basta
@@ -1013,6 +1020,78 @@ function saveBackupCheckins(obj) {
 }
 
 let backupCheckins = {}; // installationId -> { lastBackupAt, storeName, fileSizeBytes, checkinCount } — pupunuin sa bootstrapStores()
+
+// --------------------------------------------------------------
+// MULTI-BRANCH SUMMARY STORAGE
+// Layunin: pinapayagan ang isang merchant na may 2+ magkahiwalay na
+// OMNIPOS install (magkaibang LAN/lokasyon, hal. iba't ibang branch ng
+// parehong tindahan) na makita ang COMBINED na sales/stock snapshot ng
+// lahat ng branch nila sa isang lugar — kahit walang direktang network
+// connection ang mga branch sa isa't isa (RELAY na ang tanging bagay na
+// nakikipag-usap sa LAHAT ng OMNIPOS install, kaya ito ang natural na
+// "meeting point" para dito, hindi kailangan pa ng bagong infra).
+//
+// PAANO NAG-GGROUP: pinipili ng merchant ang sarili nilang "Business
+// Group Code" (malayang text, hal. pangalan ng negosyo) sa loob ng
+// Store & Sales Settings ng BAWAT branch device — dapat PAREHONG value
+// ang ilagay nila sa lahat ng device na gusto nilang pagsamahin. HINDI
+// ipinapadala ang hilaw/raw na code na ito papunta dito — ang OMNIPOS
+// client mismo ang kumukuha ng SHA-256 hash nito bago ipadala
+// (`branchGroupKeyHash`), kaya kahit ang RELAY (o sinumang makakabasa
+// ng request papunta rito) ay hindi malalaman ang aktwal na code, tanging
+// ang hash lang. Ito ay parang isang shared "room code" — hindi ito
+// pangangalagaan gaya ng password (walang salt/bcrypt), pero sapat na
+// ito para maiwasan ang random na pagkakataon (accidental collision) at
+// hindi basta nire-reveal ang plain code sa logs/storage ng RELAY.
+//
+// Estraktura: { [branchGroupKeyHash]: { [installationId]: { branchName,
+// summary: {...}, updatedAt } } }
+// --------------------------------------------------------------
+const BRANCH_SUMMARIES_PATH = path.join(__dirname, 'branch-summaries.json');
+
+async function loadBranchSummaries() {
+    const fromRedis = await redisGetJSON('branch-summaries', null);
+    if (fromRedis !== null) return fromRedis;
+    try {
+        return JSON.parse(fs.readFileSync(BRANCH_SUMMARIES_PATH, 'utf8'));
+    } catch (err) {
+        return {};
+    }
+}
+
+function saveBranchSummaries(obj) {
+    if (redisClient) {
+        redisSetJSON('branch-summaries', obj);
+        return;
+    }
+    try {
+        fs.writeFileSync(BRANCH_SUMMARIES_PATH, JSON.stringify(obj, null, 2));
+    } catch (err) {
+        console.error('Hindi ma-save ang branch-summaries.json:', err);
+    }
+}
+
+let branchSummaries = {}; // pupunuin sa bootstrapStores()
+
+const BRANCH_GROUP_HASH_RE = /^[a-f0-9]{64}$/; // dapat lowercase hex SHA-256 (64 chars)
+const BRANCH_NAME_MAX_LEN = 60;
+// Whitelist ng mga numeric field na tinatanggap sa loob ng "summary" —
+// kahit anong ipasa ang client na wala rito ay basta na lang tatanggalin,
+// para hindi maging bukas na channel ito para sa arbitrary data storage.
+const BRANCH_SUMMARY_NUMERIC_FIELDS = [
+    'grossSalesToday', 'netSalesToday', 'transactionCountToday',
+    'lowStockCount', 'activeShiftCount'
+];
+
+function sanitizeBranchSummaryPayload(raw) {
+    const out = {};
+    const src = (raw && typeof raw === 'object') ? raw : {};
+    for (const field of BRANCH_SUMMARY_NUMERIC_FIELDS) {
+        const n = Number(src[field]);
+        out[field] = Number.isFinite(n) ? Math.max(0, n) : 0;
+    }
+    return out;
+}
 
 // Default na NAKA-ON ang auto-allow-on-backup (mas kaunting manual na
 // hakbang para sa developer) — i-set ang env var na ito sa 'false' kung
@@ -2622,6 +2701,99 @@ app.post('/relay/integrity-checkin', requireApiKey, requireAllowedDevice, rateLi
         deletedCount: deleted.length,
         addedCount: added.length
     });
+});
+
+// --------------------------------------------------------------
+// POST /relay/branch-checkin
+// Tinatawag ito ng OMNIPOS CLIENT SERVER (pana-panahon, tingnan ang
+// runRelayBranchCheckin() sa OMNIPOS/server.js) — PERO lang kung
+// naka-configure ang isang "Business Group Code" sa Store & Sales
+// Settings ng device na iyon (kung wala, hindi ito tinatawag). Ini-
+// imbak lang dito ang PINAKA-BAGONG snapshot (overwrite, hindi
+// history/log) ng bawat installationId sa ilalim ng groupKeyHash nito.
+//
+// Kasama rin dito ang paglilinis: kung dating naka-imbak na ang
+// installationId na ito sa ILANG IBANG groupKeyHash (hal. binago ng
+// merchant ang Business Group Code), tinatanggal muna ito doon bago
+// isulat sa bago — para hindi na magpakita ang "ghost" branch entry sa
+// lumang group.
+// --------------------------------------------------------------
+app.post('/relay/branch-checkin', requireApiKey, requireAllowedDevice, rateLimit('branch-checkin', 40, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
+    const { installationId, branchGroupKeyHash, branchName, summary } = req.body || {};
+
+    if (!installationId) {
+        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+    }
+    if (!branchGroupKeyHash || !BRANCH_GROUP_HASH_RE.test(String(branchGroupKeyHash))) {
+        return res.status(400).json({ success: false, message: 'Kulang o mali ang format ng branchGroupKeyHash (dapat SHA-256 hex).' });
+    }
+
+    const cleanName = String(branchName || '').trim().slice(0, BRANCH_NAME_MAX_LEN) || 'Unnamed Branch';
+    const cleanSummary = sanitizeBranchSummaryPayload(summary);
+
+    // Alisin muna ang installationId na ito sa ANUMANG ibang group (baka
+    // nagpalit ng code ang merchant) bago isulat sa bago.
+    let changed = false;
+    for (const hash of Object.keys(branchSummaries)) {
+        if (hash === branchGroupKeyHash) continue;
+        if (branchSummaries[hash] && branchSummaries[hash][installationId]) {
+            delete branchSummaries[hash][installationId];
+            if (Object.keys(branchSummaries[hash]).length === 0) delete branchSummaries[hash];
+            changed = true;
+        }
+    }
+
+    if (!branchSummaries[branchGroupKeyHash]) branchSummaries[branchGroupKeyHash] = {};
+    branchSummaries[branchGroupKeyHash][installationId] = {
+        branchName: cleanName,
+        summary: cleanSummary,
+        updatedAt: Date.now()
+    };
+    saveBranchSummaries(branchSummaries);
+    if (changed) { /* naka-save na sa itaas kasama ng bagong entry */ }
+
+    res.json({ success: true, message: 'Branch check-in recorded.' });
+});
+
+// --------------------------------------------------------------
+// GET /relay/branch-summary?groupKeyHash=<sha256 hex>
+// Tinatawag ito ng OMNIPOS CLIENT SERVER (proxy lang — ang browser ng
+// merchant ay hindi direktang tumatawag dito) kapag binubuksan ang
+// "All Branches" na widget. Ibinabalik ang LAHAT ng branch entry sa
+// ilalim ng groupKeyHash na ibinigay — kaya SINUMANG makakakuha ng
+// tamang hash (nangangahulugang alam nila ang plain Business Group
+// Code, o na-guess/na-brute-force nila ang hash) ay makikita ang
+// combined data ng group na iyon. Dalawang layer pa rin ng proteksyon
+// bago maabot ito: (1) requireApiKey — shared secret na tanging mga
+// legit na OMNIPOS client build lang ang may hawak, (2)
+// requireAllowedDevice — dapat naka-Allow na sa Relay ang installationId
+// mismo ng humihiling. Kaya HINDI ito basta bukas sa publiko sa
+// internet — pero hindi rin ito full end-to-end secret matching kaya
+// hindi dapat gamitin ang parehong code na ginagamit din bilang totoong
+// password kahit saan.
+// --------------------------------------------------------------
+app.get('/relay/branch-summary', requireApiKey, requireAllowedDevice, rateLimit('branch-summary', 120, 60 * 60 * 1000, (req) => req.query?.installationId), (req, res) => {
+    const groupKeyHash = String(req.query.groupKeyHash || '');
+    if (!BRANCH_GROUP_HASH_RE.test(groupKeyHash)) {
+        return res.status(400).json({ success: false, message: 'Kulang o mali ang format ng groupKeyHash query param.' });
+    }
+
+    const group = branchSummaries[groupKeyHash] || {};
+    const branches = Object.entries(group).map(([installationId, entry]) => ({
+        installationId,
+        branchName: entry.branchName,
+        summary: entry.summary,
+        updatedAt: entry.updatedAt
+    })).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+    const combined = branches.reduce((acc, b) => {
+        for (const field of BRANCH_SUMMARY_NUMERIC_FIELDS) {
+            acc[field] = (acc[field] || 0) + (Number(b.summary && b.summary[field]) || 0);
+        }
+        return acc;
+    }, {});
+
+    res.json({ success: true, branchCount: branches.length, branches, combined });
 });
 
 // --------------------------------------------------------------
@@ -4712,7 +4884,8 @@ async function bootstrapStores() {
         buildHistory,
         releaseBaselines,
         integrityStatus,
-        featureCatalogOverrides
+        featureCatalogOverrides,
+        branchSummaries
     ] = await Promise.all([
         loadAllowedDevices(),
         loadDeviceLabels(),
@@ -4727,7 +4900,8 @@ async function bootstrapStores() {
         loadBuildHistory(),
         loadReleaseBaselines(),
         loadIntegrityStatus(),
-        loadFeatureCatalogOverrides()
+        loadFeatureCatalogOverrides(),
+        loadBranchSummaries()
     ]);
 
     // I-merge ang anumang dating naka-auto-learn na features papunta sa
