@@ -3943,7 +3943,9 @@ app.get('/relay/admin/api/pending-admin-resets', requireAdminKey, (req, res) => 
             hintUsername: pending.hintUsername,
             approved: pending.approved,
             otpVerified: pending.otpVerified,
-            requestedAt: pending.requestedAt
+            requestedAt: pending.requestedAt,
+            expiresAt: pending.expiresAt,
+            code: pending.code
         });
     }
     res.json({ success: true, pending: list });
