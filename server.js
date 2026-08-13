@@ -4013,7 +4013,16 @@ app.post('/relay/admin/api/pending-admin-resets/approve', requireAdminKey, (req,
 app.post('/relay/confirm-admin-reset',
     requireApiKey,
     requireAllowedDevice,
-    rateLimit('confirm-admin-reset', 30, 15 * 60 * 1000, (req) => req.body?.installationId),
+    // FIX: ang client (OMNIPOS) ay AWTOMATIKONG nag-po-poll dito kada 6
+    // segundo (pollUntilApproved) habang naghihintay ng "Allow/Run" mula
+    // sa developer, kapareho ng ginagawa ng confirm-unlock. Ang dating
+    // limitasyong 30/15-min ay nauubos sa loob lang ng ~3 minuto ng
+    // polling — kung matagal pa bago ma-Approve ng developer (karaniwan,
+    // dahil kailangan pa niyang tumawag/mag-text para i-verify ang
+    // requester), basta na lang na-bo-block ng 429 ang flow kahit tama na
+    // ang OTP. Ginawa itong 120/10-min — kapareho ng limitasyon sa
+    // confirm-unlock — para sapat ito para sa buong 10-minutong OTP TTL.
+    rateLimit('confirm-admin-reset', 120, 10 * 60 * 1000, (req) => req.body?.installationId),
     (req, res) => {
         const { installationId, otp } = req.body;
 
