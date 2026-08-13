@@ -3868,10 +3868,37 @@ app.post('/relay/confirm-unlock-bulk', requireApiKey, requireAllowedDevice, rate
 
 // --------------------------------------------------------------
 // Admin password reset (self-service, developer-approved).
-// LAYUNIN: Self-service ang pag-request, PERO ang developer/owner pa
-// rin (dito, sa RELAY) ang huling humahawak ng desisyon — kailangan
-// pareho ng (a) tamang OTP at (b) manual Approve sa admin panel bago
-// ma-issue ang reset ticket. Parang unlock flow, pero:
+// REWRITTEN VERSION — pinalitan ang lumang implementasyon ng bagong
+// bersyon na gumagamit ng parehong URL paths, request body fields, at
+// response shapes (para hindi kailangang baguhin ang OMNIPOS client:
+// tingnan ang /api/admin/request-password-reset at
+// /api/admin/confirm-password-reset doon) pero may mga dagdag na
+// proteksyon:
+//
+//   1. AUTO-CLEANUP — dati, walang setInterval na naglilinis ng
+//      pendingAdminResets Map (kaiba sa pendingOtps na may cleanup
+//      taliwas dito). Ibig sabihin, kada humiling ng reset ang isang
+//      bagong installationId, PERMANENTENG naiiwan ang entry sa
+//      memory kahit na-expire/na-consume na — unbounded growth sa
+//      matagal na uptime. Idinagdag na ang parehong 30-segundong
+//      cleanup pattern na ginagamit ng pendingOtps.
+//   2. FAILED-ATTEMPT LOCKOUT — dati, walang bilang ng maling OTP
+//      guesses bukod sa generic na rate limit (30 tries/15 min bawat
+//      installationId). Dahil ito ay FULL ADMIN ACCOUNT TAKEOVER kapag
+//      na-guess, dagdag pang proteksyon: pagkatapos ng
+//      MAX_FAILED_OTP_ATTEMPTS na maling tangka, AWTOMATIKONG
+//      binubura ang pending request — kailangan nang humiling ulit ng
+//      bagong OTP (na kailangan pang aprubahan ulit ng developer),
+//      hindi lang basta maghintay ng rate-limit window.
+//   3. Ginagamit na ang parehong checkApprovalGate() helper (tulad ng
+//      confirm-unlock) sa halip na duplicate na inline na logic, para
+//      consistent ang approval-gate behavior sa buong relay.
+//
+// LAYUNIN (hindi nagbago): Self-service ang pag-request, PERO ang
+// developer/owner pa rin (dito, sa RELAY) ang huling humahawak ng
+// desisyon — kailangan pareho ng (a) tamang OTP at (b) manual Approve
+// sa admin panel bago ma-issue ang reset ticket. Parang unlock flow,
+// pero:
 //   - Ang OTP ay pumupunta sa DEVELOPER (hindi sa customer) dahil
 //     ito ay pag-reset ng Admin account mismo (walang ibang paraan
 //     para i-verify na TALAGANG ang may-ari ng store ang humihiling).
@@ -3881,9 +3908,29 @@ app.post('/relay/confirm-unlock-bulk', requireApiKey, requireAllowedDevice, rate
 // --------------------------------------------------------------
 const ADMIN_RESET_OTP_TTL_MS = 10 * 60 * 1000; // 10 minuto, tugma sa OTP_TTL_MS
 const ADMIN_RESET_TICKET_TTL_MS = 5 * 60 * 1000; // 5 minuto lang ang reset ticket
+const MAX_FAILED_OTP_ATTEMPTS = 5; // pagkatapos nito, kailangan nang humiling ng bagong OTP
 
-// key: installationId -> { code, expiresAt, approved, otpVerified, username, storeName, requestedAt }
+// key: installationId -> { code, expiresAt, approved, otpVerified, failedAttempts,
+//                           storeName, hintUsername, requestedAt }
 const pendingAdminResets = new Map();
+
+function generateAdminResetOtp() {
+    return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+// AUTO-CLEANUP — kada 30 segundo, tinatanggal ang kahit anong pending
+// admin-reset request na LUMAMPAS na sa expiry nito, kapareho ng
+// ginagawang cleanup para sa pendingOtps (tingnan sa itaas). Kung
+// walang ganito, hindi na-Run/Approve na requests ay MANANATILI sa
+// memory magpakailanman kahit hindi na kailanman magagamit muli.
+setInterval(() => {
+    const now = Date.now();
+    for (const [installationId, pending] of pendingAdminResets.entries()) {
+        if (now > pending.expiresAt) {
+            pendingAdminResets.delete(installationId);
+        }
+    }
+}, 30 * 1000).unref();
 
 app.post('/relay/request-admin-reset',
     requireApiKey,
@@ -3896,12 +3943,13 @@ app.post('/relay/request-admin-reset',
             return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
         }
 
-        const otpCode = String(Math.floor(100000 + Math.random() * 900000));
+        const otpCode = generateAdminResetOtp();
         pendingAdminResets.set(installationId, {
             code: otpCode,
             expiresAt: Date.now() + ADMIN_RESET_OTP_TTL_MS,
             approved: false,
             otpVerified: false,
+            failedAttempts: 0,
             storeName: storeName || null,
             hintUsername: hintUsername || null,
             requestedAt: Date.now()
@@ -3982,10 +4030,24 @@ app.post('/relay/confirm-admin-reset',
             return res.status(400).json({ success: false, message: 'Expired na ang OTP. Humingi ng bago.' });
         }
         if (!safeCompare(String(otp).trim(), pending.code)) {
+            // FAILED-ATTEMPT LOCKOUT: bilangin ang maling tangka. Pagkatapos
+            // ng MAX_FAILED_OTP_ATTEMPTS, buburahin na ang buong pending
+            // request kahit hindi pa na-expire — kailangan nang humiling ng
+            // bagong OTP (bagong developer approval) sa halip na patuloy na
+            // maka-guess hangga't hindi pa naaabot ang generic rate limit.
+            pending.failedAttempts = (pending.failedAttempts || 0) + 1;
+            if (pending.failedAttempts >= MAX_FAILED_OTP_ATTEMPTS) {
+                pendingAdminResets.delete(installationId);
+                logActivity(installationId, 'admin_reset_locked_out', { failedAttempts: pending.failedAttempts });
+                return res.status(400).json({
+                    success: false,
+                    message: 'Sobra na sa pinapayagang maling tangka. Nakansela ang request na ito — humiling ng bagong reset request at OTP.'
+                });
+            }
             return res.status(400).json({ success: false, message: 'Maling OTP code.' });
         }
-        if (!pending.approved) {
-            pending.otpVerified = true;
+
+        if (!checkApprovalGate(pending)) {
             return res.json({
                 success: false,
                 pending: true,
