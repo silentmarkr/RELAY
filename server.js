@@ -694,6 +694,17 @@ const FEATURE_CATALOG_BASE = {
     advanced_reports: { name: 'Sales Analytics & Advanced Reports', price: 799, category: 'module' },
     shift_management: { name: 'Multi-Cashier Shift Oversight & Z-Reading Reports', price: 699, category: 'module' },
     rbac_management: { name: 'Roles & Permissions (RBAC) Management', price: 999, category: 'module' },
+    // BUG FIX: 'multi_branch' was missing from this mirror entirely. Since
+    // this file is a MANUALLY-synced copy of OMNIPOS/server.js's
+    // FEATURE_CATALOG, and the 'pro' tier below is built from
+    // Object.keys(FEATURE_CATALOG), a missing entry here means
+    // 'multi_branch' silently drops out of the 'pro' tier's featureIds —
+    // so the admin panel's "Activate Pro" bulk action never issues a
+    // token for it, and it stays locked even after the rest of Pro is
+    // activated (and, since it was never actually activated in the first
+    // place, "Deactivate Pro"/"Deactivate All" has nothing to remove for
+    // it either — it just remains locked either way).
+    multi_branch: { name: 'Multi-Branch Dashboard', price: 999, category: 'module' },
     cloud_backup: { name: 'Cloud Backup (Postgres)', price: 1499, category: 'module' }
 };
 
@@ -753,7 +764,9 @@ const UPGRADE_TIERS = [
     // resolve (tingnan ang recomputeProTierFeatureIds(), tinatawag sa
     // bootstrapStores() at muli sa tuwing may auto-add) — kaya kasama na
     // rito agad ang anumang bagong theme/module, manual man o auto-learned.
-    { id: 'pro', name: 'Pro Upgrade (Complete)', featureIds: Object.keys(FEATURE_CATALOG), bundlePrice: 4499 }
+    // bundlePrice: naka-sync sa OMNIPOS/server.js UPGRADE_TIERS 'pro'
+    // (6499, kasama na ang Cloud Backup at Multi-Branch Dashboard sa presyong ito).
+    { id: 'pro', name: 'Pro Upgrade (Complete)', featureIds: Object.keys(FEATURE_CATALOG), bundlePrice: 6499 }
 ];
 
 function recomputeProTierFeatureIds() {
