@@ -1668,6 +1668,20 @@ app.get('/relay/admin/api/devices', requireAdminKey, async (req, res) => {
         success: true,
         seenDevices: seen,
         allowedDevices: [...allowedDevices],
+        // BAGONG dagdag — FIX: hiwalay na deviceLabels map (installationId ->
+        // label), direkta mula sa PERSISTENT na deviceLabels store (Redis/
+        // device-labels.json), hindi mula sa in-memory seenDevices Map.
+        // Dati, ang tanging pinagmumulan ng "label" para sa isang allowed
+        // device sa admin UI ay ang kani-kanilang entry sa seenDevices — pero
+        // ang seenDevices ay in-memory lang at nawawala tuwing mag-restart
+        // ang server (o simpleng wala pang entry doon dahil hindi pa
+        // nakaka-request ang device kailanman mula nang mag-restart). Kaya
+        // ang label ng isang naka-Allow na device ay "nawawala" (o lumalabas
+        // lang) tuwing offline/hindi pa online ulit ang device — kahit na
+        // buo pa rin talaga ang label sa persistent storage. Sa
+        // pagpapadala ng buong deviceLabels dito, laging makikita sa admin
+        // ang label ng isang allowed device kahit offline ito.
+        deviceLabels: Object.fromEntries(deviceLabels),
         restrictionActive: true, // laging ON simula ngayon — tinanggal na ang dating "walang laman = walang restriction" na bypass
         // Para sa notification/dot blinker sa itaas ng "Allowed devices":
         // huling successful backup check-in mula SA KAHIT ANONG device,

@@ -2560,7 +2560,13 @@ async function loadDevices() {
   } else {
     allowedEl.innerHTML = data.allowedDevices.map(id => {
       const seen = data.seenDevices.find(d => d.installationId === id);
-      const devLabel = seen ? seen.label : null;
+      // FIX: kunin muna ang label mula sa PERSISTENT na data.deviceLabels
+      // (laging buo ito kahit offline ang device o kahit pa mag-restart
+      // ang server), bago mag-fallback sa seen.label — dati, seen.label
+      // lang ang pinagmumulan, kaya nawawala/lumalabas lang ang label
+      // pag online lang ang device (dahil doon lang siya nagiging bahagi
+      // ng in-memory seenDevices list).
+      const devLabel = (data.deviceLabels && data.deviceLabels[id]) || (seen ? seen.label : null);
       const fallback = seen ? (seen.storeName || 'No name') : 'No requests seen yet';
       const displayName = devLabel ? `🏷️ ${devLabel}` : fallback;
       const revokeName = devLabel || fallback;
