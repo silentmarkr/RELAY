@@ -1846,14 +1846,39 @@ function logout(message) {
 }
 
 async function api(path, opts = {}) {
-  const res = await fetch(path, {
-    ...opts,
-    headers: {
-      'Content-Type': 'application/json',
-      'x-relay-admin-key': adminKey,
-      ...(opts.headers || {})
-    }
-  });
+  // BUG FIX (progress bar "0% -> 100% bigla" sa mabagal na internet):
+  // dating walang timeout ang fetch() dito, kaya sa mabagal/hindi
+  // matatag na koneksyon, ang isang poll request papuntang
+  // /relay/admin/api/build-progress ay pwedeng "sumabit"/tumagal nang
+  // ilang segundo (o higit pa) bago ma-resolve — sa panahong iyon,
+  // walang bagong "target" percent na dumarating sa progress-bar
+  // controller, kaya nakatigil lang ito sa lumang halaga. Kung
+  // matapos na ang build habang naka-sabit pa ang naturang request,
+  // pagbalik ng response nito ay maaaring "done: true" na agad — at
+  // dahil isang malaking tumbong ang narating (hal. mula 5% papuntang
+  // 100%), parang "bigla na lang nag-100%" ang itsura kahit tama
+  // naman talaga ang datos. Fix: bigyan ng sariling maikling timeout
+  // (opts.timeoutMs, default null = walang timeout/dating gawi
+  // maliban dito) ang bawat poll — kapag na-timeout, itinuturing na
+  // lang itong isang normal na "failed poll" (parehong pattern ng
+  // catch block sa pollOnce), susubukan ulit sa susunod na tick, sa
+  // halip na hintaying kumapit ito sa buong network delay.
+  const controller = opts.timeoutMs ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), opts.timeoutMs) : null;
+  let res;
+  try {
+    res = await fetch(path, {
+      ...opts,
+      signal: controller ? controller.signal : opts.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'x-relay-admin-key': adminKey,
+        ...(opts.headers || {})
+      }
+    });
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   if (res.status === 403) {
     document.getElementById('loginError').innerText = 'Incorrect admin key.';
     logout();
@@ -2015,12 +2040,28 @@ function createProgressController(ids) {
 
   function tick() {
     const targetPct = Math.max(0, Math.min(100, Math.round(target.percent || 0)));
-    if (target.done || displayed > targetPct) {
-      // the real build finished (or the target dropped due to a new
-      // build/reset) — snap immediately, no need to animate step by step
+    if (displayed > targetPct) {
+      // the target dropped (e.g. a new build/reset) — this is not a
+      // "climbing forward" case, snap immediately.
       displayed = targetPct;
     } else if (displayed < targetPct) {
-      displayed += 1;
+      // BUG FIX (progress bar "0% -> 100% bigla" sa mabagal na
+      // internet): dati, `target.done` ay basta nagpapa-snap agad ng
+      // `displayed` diretso sa targetPct, kahit malayo pa ito (hal.
+      // 5%) — nangyayari ito kapag ang mga poll papuntang
+      // /relay/admin/api/build-progress ay hindi nakakarating nang
+      // maayos/sa oras dahil sa mabagal/hindi matatag na koneksyon ng
+      // ADMIN, kaya walang nakikitang paunti-unting pag-akyat ang
+      // display — bigla na lang itong "100%" pagdating ng huling
+      // "done" na resulta. Fix: kahit tapos na ang totoong build,
+      // hayaang mag-"mabilis na catch-up climb" pa rin ang display sa
+      // halip na instant teleport — laging umaakyat nang tuluy-tuloy
+      // (kahit malaki ang agwat, tinatapos lang ito sa ~10 tick /
+      // ~1.2s sa halip na isang segundong jump), para laging
+      // "bumibilang" ang itsura nito imbes na biglang lumundag.
+      const gap = targetPct - displayed;
+      const step = target.done ? Math.max(1, Math.ceil(gap / 10)) : 1;
+      displayed = Math.min(targetPct, displayed + step);
     }
     renderPercent(displayed);
 
@@ -2073,7 +2114,11 @@ function createProgressController(ids) {
   // responsible for finishing the climb to the final value.
   async function pollOnce() {
     try {
-      const data = await api('/relay/admin/api/build-progress');
+      // BUG FIX: 5s timeout dito (tingnan ang komento sa api() at sa
+      // tick() para sa buong konteksto) — sa halip na hayaang sumabit
+      // nang matagal ang isang mabagal na poll bago pa lang natin ito
+      // matawag na "failed" at masubukang muli.
+      const data = await api('/relay/admin/api/build-progress', { timeoutMs: 5000 });
       if (data && data.success && data.progress) {
         applyTarget(data.progress);
         if (data.progress.done) stopPolling();

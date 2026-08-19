@@ -1414,6 +1414,28 @@ let downloadCodes = new Map(); // pupunuin sa bootstrapStores()
 // OMNIPOS repo). HINDI kasama sa git ang zip mismo.
 const RELEASE_PACKAGE_PATH = path.join(__dirname, 'release', 'omnipos-client.zip');
 
+// BUG FIX (corrupted self-update downloads): dating direkta sa
+// RELEASE_PACKAGE_PATH mismo isinusulat ng build ang bagong zip gamit
+// ang fs.createWriteStream — pero WALANG lock sa pagitan ng build
+// (POST /relay/admin/api/build-release, isang write stream) at ng
+// download (GET /relay/release-package o /relay/download/:code, na
+// gumagamit ng res.download → fs.createReadStream sa PAREHONG path).
+// Kung may kasabay na build habang may aktibong download, na-oo-overwrite
+// ang file sa disk HABANG binabasa pa ito — resulta: halong lumang at
+// bagong bytes sa nakuhang zip ng client (mismatched na
+// central-directory offsets vs. aktwal na posisyon ng local file
+// headers — "bad zipfile offset (local header sig)" sa unzip).
+//
+// Fix: isulat muna ang bagong build sa ISANG HIWALAY na temp filename
+// sa loob mismo ng release/ folder (parehong filesystem/volume, kaya
+// atomic ang susunod na rename), at saka lang i-fs.renameSync() PAPUNTA
+// sa RELEASE_PACKAGE_PATH pagkatapos LANG na kumpleto/successful ang
+// buong archive.finalize(). Atomic ang rename() sa parehong
+// filesystem — hindi na kailanman makikita ng isang kasabay na
+// GET /relay/release-package o /relay/download/:code ang "half-written"
+// na file; laging BUO — luma man o bago — ang mababasa nito.
+const RELEASE_PACKAGE_TMP_PATH = path.join(__dirname, 'release', '.omnipos-client.zip.building');
+
 // --------------------------------------------------------------
 // BUILD HISTORY — log lang ng mga na-build/na-publish na
 // omnipos-client.zip. MAHALAGA: HINDI nito binabago ang filename ng
@@ -4590,7 +4612,18 @@ function encryptClientEnvAndPatchLoader(tmpDir, envContent) {
 // hinaharap ay may idagdag/tanggal na hakbang sa BUILD_STEPS, awtomatiko
 // na lang muling maghahati ang formula na ito — hindi na kailangang
 // i-adjust ang mga percent nang manu-mano bawat pagbabago.
-const BUILD_STEPS = ['clone', 'filter', 'env', 'obfuscate', 'zip'];
+// BUG FIX: idinagdag ang 'verify' bilang huling hakbang — ang
+// integrity-check (unzip -tq) at atomic rename() na idinagdag para sa
+// corrupted-download fix (tingnan ang RELEASE_PACKAGE_TMP_PATH sa
+// itaas) ay may sariling oras na kinukuha (lalo na ang unzip -tq sa
+// isang zip na ilang MB), pero dati ay wala itong sariling stage/%
+// window — natatago lang ito sa pagitan ng 'zip' pagtapos (na
+// tumatama na sa 100%) at ng 'done'. Ibig sabihin, kung sakaling
+// tumagal ang verify+rename step, mukhang "nakatigil sa 100%" ang
+// progress bar sa mata ng admin bago pa talaga tapos — hindi tugma sa
+// totoong estado. Ngayon, may sarili nang % allocation ang hakbang na
+// ito, kaya tumpak ang display sa buong proseso.
+const BUILD_STEPS = ['clone', 'filter', 'env', 'obfuscate', 'zip', 'verify'];
 const BUILD_FIRST_STEP_PERCENT = 10;
 const BUILD_STEP_END_PERCENT = (() => {
     const map = {};
@@ -4793,11 +4826,20 @@ async function performBuildRelease(reqBody, req, publishOverride) {
         if (!fs.existsSync(releaseDir)) fs.mkdirSync(releaseDir, { recursive: true });
 
         const zipStepStart = BUILD_STEP_END_PERCENT.obfuscate;
-        // Ang natitirang % papunta sa 100 ay para lang sa zip step (huling
-        // hakbang sa BUILD_STEPS), kaya diretso na papuntang 100 dito.
-        const zipStepEnd = 100;
+        // BUG FIX: ang 'zip' ay HINDI na ang huling hakbang sa
+        // BUILD_STEPS ngayon (may dagdag na 'verify' step pagkatapos)
+        // — kaya dito na lang hanggang sa nakalaang % ng 'zip' step
+        // mismo umaabot ang progreso, hindi na diretso hanggang 100.
+        const zipStepEnd = BUILD_STEP_END_PERCENT.zip;
+        // BUG FIX: isulat muna sa hiwalay/temp na filename (HINDI direkta sa
+        // RELEASE_PACKAGE_PATH) — tingnan ang komento sa RELEASE_PACKAGE_TMP_PATH
+        // sa itaas kung bakit. Anumang lumang natitirang temp file (hal.
+        // dahil sa nag-crash na build) ay linisin muna bago simulan.
+        if (fs.existsSync(RELEASE_PACKAGE_TMP_PATH)) {
+            fs.rmSync(RELEASE_PACKAGE_TMP_PATH, { force: true });
+        }
         await new Promise((resolve, reject) => {
-            const output = fs.createWriteStream(RELEASE_PACKAGE_PATH);
+            const output = fs.createWriteStream(RELEASE_PACKAGE_TMP_PATH);
             // PERFORMANCE FIX: zlib level 9 (max compression) costs
             // significantly more CPU time than level 6 for only a small
             // reduction in zip size — not a good trade-off on a
@@ -4826,6 +4868,29 @@ async function performBuildRelease(reqBody, req, publishOverride) {
             archive.directory(tmpDir, false);
             archive.finalize();
         });
+
+        // BUG FIX: bago i-expose sa mga kliyente (rename papunta sa
+        // RELEASE_PACKAGE_PATH), i-verify muna na hindi sira ang na-build
+        // na zip — kung paano man ito nasira (bug sa archiver, puno ang
+        // disk, atbp.), mas mabuting mahuli ito DITO, bago pa maka-download
+        // ang kahit isang client, kaysa palitan lang ang lumang gumaganang
+        // release ng sira.
+        setBuildProgress({ stage: 'verify', percent: zipStepEnd, message: 'Sinusuri ang integridad ng bagong zip...' });
+        try {
+            execSync(`unzip -tq "${RELEASE_PACKAGE_TMP_PATH}"`, { stdio: 'pipe' });
+        } catch (zipCheckErr) {
+            fs.rmSync(RELEASE_PACKAGE_TMP_PATH, { force: true });
+            throw new Error(`Nabuo ang zip pero HINDI ito pumasa sa integrity check (unzip -t) — hindi ito ipapalit sa kasalukuyang release. Detalye: ${zipCheckErr.message}`);
+        }
+        setBuildProgress({ stage: 'verify', percent: BUILD_STEP_END_PERCENT.verify, message: 'Pumasa sa integrity check — inilalapat na ang bagong release...' });
+
+        // BUG FIX (corrupted self-update downloads — root cause): atomic
+        // ang rename() sa loob ng parehong filesystem/volume, kaya kahit
+        // may kasabay na GET /relay/release-package o /relay/download/:code
+        // na nagbabasa ng RELEASE_PACKAGE_PATH sa eksaktong sandaling ito,
+        // makikita nila ALINMAN sa buong lumang file O buong bagong file —
+        // hindi na kailanman ang halo ng dalawa.
+        fs.renameSync(RELEASE_PACKAGE_TMP_PATH, RELEASE_PACKAGE_PATH);
 
         const stats = fs.statSync(RELEASE_PACKAGE_PATH);
         const builtAt = Date.now();
