@@ -4138,6 +4138,187 @@ app.post('/relay/confirm-admin-reset',
 );
 
 // --------------------------------------------------------------
+// RECEIPT CUSTOMIZATION COUNTER RESET (self-service, RELAY-verified)
+// Pareho ito sa admin-password-reset flow sa itaas — LUMIPAT dito
+// mula sa dating implementasyon (OMNIPOS mismo ang nagpapadala ng OTP
+// via sarili nitong Gmail sender sa Receipt Customization panel).
+// Ngayon, kagaya na ng feature-unlock at admin-password-reset,
+// dito na RIN dumadaan ang OTP para sa pag-reset ng 2-free-attempts
+// na counter ng Receipt Customization — pumupunta ito sa DEVELOPER
+// (hindi sa store), at kailangan pa rin ng manual Approve dito bago
+// ma-issue ang reset ticket. Kapareho rin ng admin-reset:
+//   - AUTO-CLEANUP kada 30s ng mga expired na pending request.
+//   - FAILED-ATTEMPT LOCKOUT pagkatapos ng MAX_FAILED_OTP_ATTEMPTS.
+//   - Ginagamit ang parehong checkApprovalGate() helper.
+//   - Naka-sign na ticket lang (purpose:'receipt-customization-reset')
+//     ang ibinabalik — WALANG ibang datos na binabago dito sa RELAY;
+//     ang OMNIPOS mismo ang nag-a-apply ng reset gamit ang ticket.
+// --------------------------------------------------------------
+const RECEIPT_RESET_OTP_TTL_MS = 10 * 60 * 1000; // 10 minuto, tugma sa OTP_TTL_MS
+const RECEIPT_RESET_TICKET_TTL_MS = 5 * 60 * 1000; // 5 minuto lang ang reset ticket
+
+// key: installationId -> { code, expiresAt, approved, otpVerified, failedAttempts,
+//                           storeName, requestedBy, requestedAt }
+const pendingReceiptResets = new Map();
+
+function generateReceiptResetOtp() {
+    return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+// AUTO-CLEANUP — kada 30 segundo, tinatanggal ang kahit anong pending
+// receipt-reset request na LUMAMPAS na sa expiry nito.
+setInterval(() => {
+    const now = Date.now();
+    for (const [installationId, pending] of pendingReceiptResets.entries()) {
+        if (now > pending.expiresAt) {
+            pendingReceiptResets.delete(installationId);
+        }
+    }
+}, 30 * 1000).unref();
+
+app.post('/relay/request-receipt-reset',
+    requireApiKey,
+    requireAllowedDevice,
+    rateLimit('request-receipt-reset', 3, 15 * 60 * 1000, (req) => req.body?.installationId),
+    async (req, res) => {
+        const { installationId, storeName, requestedBy } = req.body;
+
+        if (!installationId) {
+            return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+        }
+
+        const otpCode = generateReceiptResetOtp();
+        pendingReceiptResets.set(installationId, {
+            code: otpCode,
+            expiresAt: Date.now() + RECEIPT_RESET_OTP_TTL_MS,
+            approved: false,
+            otpVerified: false,
+            failedAttempts: 0,
+            storeName: storeName || null,
+            requestedBy: requestedBy || null,
+            requestedAt: Date.now()
+        });
+
+        try {
+            await notifyUnlockRequest({
+                subject: `🧾 Receipt Customization Reset Request — ${storeName || installationId}`,
+                text: `May humiling na i-reset ang 2-free-attempts na Receipt Customization counter ng isang OMNIPOS installation.\n\n` +
+                      `Store: ${storeName || 'Hindi tiyak'}\n` +
+                      `Installation ID: ${installationId}\n` +
+                      `Hiniling ni: ${requestedBy || 'Hindi tiyak'}\n` +
+                      `OTP Code: ${otpCode}\n` +
+                      `Mag-e-expire ito sa loob ng 10 minuto.\n\n` +
+                      `I-verify muna kung kinakailangan bago mag-Approve at ibigay ang OTP na ito sa kliyente.`
+            });
+
+            logActivity(installationId, 'receipt_reset_requested', { storeName: storeName || null });
+            res.json({ success: true, message: 'Naipadala ang reset request. Kontakin ang developer para sa OTP.' });
+        } catch (err) {
+            console.error('Relay mail send failure (receipt-reset):', err);
+            pendingReceiptResets.delete(installationId);
+            res.status(500).json({ success: false, message: `Nabigo ang pagpapadala ng OTP: ${err.message}` });
+        }
+    }
+);
+
+app.get('/relay/admin/api/pending-receipt-resets', requireAdminKey, (req, res) => {
+    const list = [];
+    for (const [installationId, pending] of pendingReceiptResets) {
+        if (Date.now() > pending.expiresAt) continue;
+        list.push({
+            installationId,
+            storeName: pending.storeName,
+            requestedBy: pending.requestedBy,
+            approved: pending.approved,
+            otpVerified: pending.otpVerified,
+            requestedAt: pending.requestedAt,
+            expiresAt: pending.expiresAt,
+            code: pending.code
+        });
+    }
+    res.json({ success: true, pending: list });
+});
+
+app.post('/relay/admin/api/pending-receipt-resets/approve', requireAdminKey, (req, res) => {
+    const { installationId } = req.body;
+    const pending = pendingReceiptResets.get(installationId);
+    if (!pending) {
+        return res.status(404).json({ success: false, message: 'Walang pending receipt-reset request para dito.' });
+    }
+    pending.approved = true;
+    logActivity(installationId, 'receipt_reset_approved', {});
+    res.json({ success: true, message: 'Naaprubahan. Puwede nang gamitin ng client ang OTP.' });
+});
+
+app.post('/relay/confirm-receipt-reset',
+    requireApiKey,
+    requireAllowedDevice,
+    // Kagaya ng confirm-admin-reset — AWTOMATIKONG nag-po-poll dito ang
+    // client kada 6 segundo (pollUntilApproved) habang naghihintay ng
+    // Allow/Run mula sa developer, kaya ginawang 120/10-min ang limitasyon.
+    rateLimit('confirm-receipt-reset', 120, 10 * 60 * 1000, (req) => req.body?.installationId),
+    (req, res) => {
+        const { installationId, otp } = req.body;
+
+        if (!installationId || !otp) {
+            return res.status(400).json({ success: false, message: 'Kulang ang installationId o otp.' });
+        }
+
+        const pending = pendingReceiptResets.get(installationId);
+        if (!pending) {
+            return res.status(400).json({ success: false, message: 'Walang aktibong reset request. Humingi muna ng OTP.' });
+        }
+        if (Date.now() > pending.expiresAt) {
+            pendingReceiptResets.delete(installationId);
+            return res.status(400).json({ success: false, message: 'Expired na ang OTP. Humingi ng bago.' });
+        }
+        if (!safeCompare(String(otp).trim(), pending.code)) {
+            pending.failedAttempts = (pending.failedAttempts || 0) + 1;
+            if (pending.failedAttempts >= MAX_FAILED_OTP_ATTEMPTS) {
+                pendingReceiptResets.delete(installationId);
+                logActivity(installationId, 'receipt_reset_locked_out', { failedAttempts: pending.failedAttempts });
+                return res.status(400).json({
+                    success: false,
+                    message: 'Sobra na sa pinapayagang maling tangka. Nakansela ang request na ito — humiling ng bagong reset request at OTP.'
+                });
+            }
+            return res.status(400).json({ success: false, message: 'Maling OTP code.' });
+        }
+
+        if (!checkApprovalGate(pending)) {
+            return res.json({
+                success: false,
+                pending: true,
+                message: 'Tama ang OTP! Naghihintay pa lang ng approval mula sa developer. Subukan ulit paglipas ng ilang segundo.'
+            });
+        }
+
+        // Tama ang OTP AT naaprubahan — gumawa ng SHORT-LIVED signed
+        // ticket. `purpose` field ang nagbubukod dito sa ibang klase ng
+        // tickets (admin-password-reset, feature unlocks) kahit parehong
+        // private key ang gamit.
+        const now = Date.now();
+        const payload = {
+            installationId,
+            purpose: 'receipt-customization-reset',
+            issuedAt: now,
+            expiresAt: now + RECEIPT_RESET_TICKET_TTL_MS
+        };
+        const payloadString = JSON.stringify(payload);
+        const signature = crypto.sign(null, Buffer.from(payloadString), privateKey).toString('base64');
+
+        logActivity(installationId, 'receipt_reset_ticket_issued', {});
+        pendingReceiptResets.delete(installationId);
+
+        res.json({
+            success: true,
+            message: 'Na-verify. Puwede nang i-reset ang counter.',
+            ticket: { payload, signature }
+        });
+    }
+);
+
+// --------------------------------------------------------------
 // GET /relay/latest-version
 // Tinatawag ito ng OMNIPOS CLIENT SERVER (hindi ng browser mismo) sa
 // "Check for Updates" ng Settings nito. Basic API key lang ang
