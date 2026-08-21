@@ -189,6 +189,20 @@ app.use(express.json({ limit: '2mb' }));
 // --------------------------------------------------------------
 const PORT = process.env.PORT || 4477;
 const RELAY_API_KEY = process.env.RELAY_API_KEY || null; // shared secret — pumipigil sa random tao (hindi mo kliyente) na mag-spam sa relay mo
+
+// SerpAPI (Product Image Search) na dapat awtomatikong isama sa .env ng
+// bawat bagong omnipos-client.zip na binubuo dito sa RELAY (build-release),
+// kapareho ng key na ginagamit na sa panig ng OMNIPOS .env mismo — kaya
+// AGAD gumagana ang "Search Image" button sa Add/Edit Product form ng
+// bagong kliyente, walang kailangan pang i-configure nang manual. Kasama
+// ito dito bilang ENV VAR lang (hindi hardcoded value) — tugma sa
+// convention ng buong file na ito: manggagaling dapat sa environment
+// variables ng hosting mo (Render/VPS/atbp.) ang mga secret, HINDI
+// isusulat diretso sa source code. I-set ang IMAGE_SEARCH_API_KEY dito
+// gamit ang PAREHONG value na nasa IMAGE_SEARCH_API_KEY ng OMNIPOS .env mo.
+const DEFAULT_IMAGE_SEARCH_PROVIDER = process.env.IMAGE_SEARCH_PROVIDER || null;
+const DEFAULT_IMAGE_SEARCH_API_KEY = process.env.IMAGE_SEARCH_API_KEY || null;
+const DEFAULT_IMAGE_SEARCH_CX = process.env.IMAGE_SEARCH_CX || '';
 const MAIL_USER = process.env.RELAY_MAIL_USER;
 const MAIL_PASS = process.env.RELAY_MAIL_PASS;
 const RECIPIENT_EMAIL = process.env.RELAY_RECIPIENT_EMAIL; // ang TOTOONG email mo — dito lang ito nakatira ngayon, hindi na sa client
@@ -4979,10 +4993,27 @@ async function performBuildRelease(reqBody, req, publishOverride) {
             throw new Error('Walang RELAY_API_KEY na naka-set (ni sa request body ni sa RELAY .env) — hindi makakagawa ng client .env.');
         }
 
+        // SerpAPI (Product Image Search) — isinasama rin AGAD sa bagong
+        // client .env, gamit ang parehong key na naka-set na sa RELAY
+        // (IMAGE_SEARCH_API_KEY env var, tingnan ang DEFAULT_IMAGE_SEARCH_*
+        // sa itaas), pwede ring i-override per-build gamit ang reqBody —
+        // kapareho ng pattern ng relayUrl/relayApiKey/port sa itaas.
+        // Kung wala namang naka-configure kahit saan (reqBody o RELAY .env),
+        // hinahayaan lang itong blangko sa client .env — normal namang
+        // gumagana pa rin ang OMNIPOS nang walang ito (walang "Search Image"
+        // button lang, tingnan ang OMNIPOS .env comments), kaya hindi ito
+        // dapat mag-fail ng buong build.
+        const imageSearchProvider = (reqBody && reqBody.imageSearchProvider) || DEFAULT_IMAGE_SEARCH_PROVIDER || '';
+        const imageSearchApiKey = (reqBody && reqBody.imageSearchApiKey) || DEFAULT_IMAGE_SEARCH_API_KEY || '';
+        const imageSearchCx = (reqBody && reqBody.imageSearchCx) || DEFAULT_IMAGE_SEARCH_CX || '';
+
         const clientEnvContent = [
             `RELAY_URL=${relayUrl}`,
             `RELAY_API_KEY=${relayApiKey}`,
             `PORT=${clientPort}`,
+            `IMAGE_SEARCH_PROVIDER=${imageSearchProvider}`,
+            `IMAGE_SEARCH_API_KEY=${imageSearchApiKey}`,
+            `IMAGE_SEARCH_CX=${imageSearchCx}`,
             ''
         ].join('\n');
         setBuildProgress({ stage: 'env', percent: BUILD_STEP_END_PERCENT.filter, message: 'Ini-encrypt ang client .env...' });
