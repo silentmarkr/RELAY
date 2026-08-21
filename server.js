@@ -201,21 +201,21 @@ const RELAY_API_KEY = process.env.RELAY_API_KEY || null; // shared secret — pu
 // isusulat diretso sa source code. I-set ang IMAGE_SEARCH_API_KEY dito
 // gamit ang PAREHONG value na nasa IMAGE_SEARCH_API_KEY ng OMNIPOS .env mo.
 //
-// BUG FIX: dating ini-cache ito dito bilang mga module-level constant
-// (binabasa lang ISANG BESES, nang mag-boot ang RELAY process). Kaya kung
-// idinagdag/binago mo ang IMAGE_SEARCH_PROVIDER/IMAGE_SEARCH_API_KEY (hal.
-// kakalagay mo lang sa .env o sa dashboard ng hosting) HABANG tumatakbo na
-// ang RELAY — hindi na ito muling babasahin, kahit mag-build-release/
-// publish-release ka pa — dahil naka-freeze na sa lumang (madalas blangko)
-// value ang mga constant na ito. Kaya lumalabas na "OK naman ang setup pero
-// wala pa ring SerpAPI sa bagong omnipos-client.zip" — kailangan pa ng
-// buong restart ng RELAY process bago ito mapulot. Ang RELAY_URL/
-// RELAY_API_KEY sa ibaba (performBuildRelease) ay direkta nang bumabasa ng
-// process.env sa MISMONG ORAS ng build (hindi cached) — dinala rito ang
-// parehong pattern: process.env.IMAGE_SEARCH_* ang binabasa DIREKTA sa loob
-// ng performBuildRelease sa ibaba, sa halip na itong mga cached constant,
-// kaya laging sinusunod ang pinakabagong value kahit hindi pa ni-restart
-// ang RELAY pagkatapos i-set/i-update ang key.
+// BUG FIX (history): dating ini-cache ito dito bilang mga module-level
+// constant (binabasa lang ISANG BESES, nang mag-boot ang RELAY process).
+// Nag-attempt na dati ng fix na gawing direktang process.env.IMAGE_SEARCH_*
+// na lang ang binabasa sa loob ng performBuildRelease sa halip na cached
+// constants — pero HINDI pa rin nito nalulutas ang totoong ugat ng
+// problema: si process.env mismo ay stale, dahil ang process.loadEnvFile()
+// (tingnan sa itaas ng file) ay tumatakbo lang NANG ISANG BESES sa pag-boot.
+// Kaya kahit "direkta" na ang pagbasa sa process.env sa loob ng
+// performBuildRelease, kung stale/wala pa rin ang process.env mismo
+// (hal. kadarating lang idagdag ang IMAGE_SEARCH_API_KEY sa .env HABANG
+// tumatakbo na ang RELAY), stale/wala pa rin ang mababasa. Ang TUNAY na fix
+// ay nasa simula ng performBuildRelease(): muling tinatawag doon ang
+// process.loadEnvFile() sa mismong oras ng build/publish, kaya nare-refresh
+// ang process.env ng anumang BAGONG idinagdag na key sa .env nang hindi na
+// kailangang i-restart ang buong RELAY process.
 const MAIL_USER = process.env.RELAY_MAIL_USER;
 const MAIL_PASS = process.env.RELAY_MAIL_PASS;
 const RECIPIENT_EMAIL = process.env.RELAY_RECIPIENT_EMAIL; // ang TOTOONG email mo — dito lang ito nakatira ngayon, hindi na sa client
@@ -4932,6 +4932,34 @@ app.get('/relay/admin/api/build-progress', requireAdminKey, (req, res) => {
 // route handlers na ang bahalang mag-catch at mag-format ng sagot.
 // --------------------------------------------------------------
 async function performBuildRelease(reqBody, req, publishOverride) {
+    // ROOT CAUSE FIX (SerpAPI key laging blangko sa bagong build kahit
+    // "naka-set" na ito sa .env): si process.loadEnvFile() sa itaas ng file
+    // ay TUMATAKBO LANG NANG ISANG BESES — sa mismong pag-boot ng RELAY
+    // process. Ibig sabihin, kapag nag-edit ka ng .env (hal. nagdagdag ng
+    // IMAGE_SEARCH_PROVIDER/IMAGE_SEARCH_API_KEY) HABANG tumatakbo na ang
+    // RELAY, hindi talaga nag-uupdate ang process.env — nananatili itong
+    // "blangko"/wala hangga't hindi mo ni-restart ang buong RELAY process.
+    // Ang naunang "BUG FIX" sa IMAGE_SEARCH_* sa ibaba (na direktang
+    // process.env.IMAGE_SEARCH_* na ang binabasa sa halip na cached
+    // constants) ay HINDI pa rin nagre-resolve nito, dahil parehong
+    // process.env ang pinagmumulan ng dalawa — kung stale/wala ang
+    // process.env, mananatiling stale/wala rin ang binabasa nito kahit
+    // "direkta" na ang pagbasa. Dito, muling tinatawag ang
+    // process.loadEnvFile() sa MISMONG ORAS ng build/publish — hindi
+    // ino-overwrite nito ang mga existing na key sa process.env (per Node
+    // docs), dagdag lang ito ng mga BAGONG idinagdag na key mula sa .env
+    // file, kaya kahit hindi pa na-restart ang RELAY, agad nasusundan ng
+    // susunod na build/publish ang bagong SerpAPI key (o anumang bagong env
+    // var) na kadarating lang idagdag sa .env.
+    try {
+        process.loadEnvFile();
+    } catch (err) {
+        // Walang nakitang .env file o hindi supported ng Node version na ito
+        // ang loadEnvFile() — okay lang, babalik na lang sa mga value na
+        // nasa process.env na mula sa pag-boot (o sa env vars ng hosting
+        // dashboard).
+    }
+
     const repoUrl = (reqBody && reqBody.repoUrl) || process.env.OMNIPOS_REPO_URL;
     const ref = (reqBody && reqBody.ref) || 'main';
     // Optional na maikling paglalarawan ng build na ito (hal. "hotfix
