@@ -1190,7 +1190,7 @@ function mostRecentBackupCheckinAt() {
 // runtime data lang na iba-iba talaga bawat device.
 const INTEGRITY_EXCLUDE_NAMES = new Set([
     '.env', '.env.key', 'database', 'node_modules', 'uploads_tmp',
-    '.git', 'release', 'cf.log', 'server.log'
+    '.git', 'release', 'cf.log', 'server.log', '.start.sh.lock'
 ]);
 const INTEGRITY_EXCLUDE_EXTENSIONS = new Set(['.log', '.patch']);
 
@@ -4476,7 +4476,12 @@ app.get('/relay/admin/api/system/version', requireAdminKey, (req, res) => {
 // uploads_tmp/ (temp uploaded files — resibo/proof-of-payment photos)
 // sa git repo, ma-i-ship ito sa customer release zip dahil hindi ito
 // na-filter dati ng remote build endpoint na ito.
-const BUILD_EXCLUDE_NAMES = new Set(['.git', 'node_modules', 'database', 'release', 'uploads_tmp']);
+// '.start.sh.lock' idinagdag — runtime lock file lang ito na ginagawa
+// (at binubura) ng OMNIPOS start.sh/stop.sh habang tumatakbo ang server
+// sa device ng kliyente. Hindi ito bahagi ng orihinal na release, kaya
+// dapat laging tanggalin/hindi isama sa bawat bagong build-release —
+// baka aksidenteng ma-commit/ma-push ito papasok sa package.
+const BUILD_EXCLUDE_NAMES = new Set(['.git', 'node_modules', 'database', 'release', 'uploads_tmp', '.start.sh.lock']);
 const BUILD_EXCLUDE_EXTENSIONS = new Set(['.log', '.patch']);
 
 function removeExcludedRecursive(dir) {
