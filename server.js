@@ -200,9 +200,22 @@ const RELAY_API_KEY = process.env.RELAY_API_KEY || null; // shared secret — pu
 // variables ng hosting mo (Render/VPS/atbp.) ang mga secret, HINDI
 // isusulat diretso sa source code. I-set ang IMAGE_SEARCH_API_KEY dito
 // gamit ang PAREHONG value na nasa IMAGE_SEARCH_API_KEY ng OMNIPOS .env mo.
-const DEFAULT_IMAGE_SEARCH_PROVIDER = process.env.IMAGE_SEARCH_PROVIDER || null;
-const DEFAULT_IMAGE_SEARCH_API_KEY = process.env.IMAGE_SEARCH_API_KEY || null;
-const DEFAULT_IMAGE_SEARCH_CX = process.env.IMAGE_SEARCH_CX || '';
+//
+// BUG FIX: dating ini-cache ito dito bilang mga module-level constant
+// (binabasa lang ISANG BESES, nang mag-boot ang RELAY process). Kaya kung
+// idinagdag/binago mo ang IMAGE_SEARCH_PROVIDER/IMAGE_SEARCH_API_KEY (hal.
+// kakalagay mo lang sa .env o sa dashboard ng hosting) HABANG tumatakbo na
+// ang RELAY — hindi na ito muling babasahin, kahit mag-build-release/
+// publish-release ka pa — dahil naka-freeze na sa lumang (madalas blangko)
+// value ang mga constant na ito. Kaya lumalabas na "OK naman ang setup pero
+// wala pa ring SerpAPI sa bagong omnipos-client.zip" — kailangan pa ng
+// buong restart ng RELAY process bago ito mapulot. Ang RELAY_URL/
+// RELAY_API_KEY sa ibaba (performBuildRelease) ay direkta nang bumabasa ng
+// process.env sa MISMONG ORAS ng build (hindi cached) — dinala rito ang
+// parehong pattern: process.env.IMAGE_SEARCH_* ang binabasa DIREKTA sa loob
+// ng performBuildRelease sa ibaba, sa halip na itong mga cached constant,
+// kaya laging sinusunod ang pinakabagong value kahit hindi pa ni-restart
+// ang RELAY pagkatapos i-set/i-update ang key.
 const MAIL_USER = process.env.RELAY_MAIL_USER;
 const MAIL_PASS = process.env.RELAY_MAIL_PASS;
 const RECIPIENT_EMAIL = process.env.RELAY_RECIPIENT_EMAIL; // ang TOTOONG email mo — dito lang ito nakatira ngayon, hindi na sa client
@@ -4995,17 +5008,24 @@ async function performBuildRelease(reqBody, req, publishOverride) {
 
         // SerpAPI (Product Image Search) — isinasama rin AGAD sa bagong
         // client .env, gamit ang parehong key na naka-set na sa RELAY
-        // (IMAGE_SEARCH_API_KEY env var, tingnan ang DEFAULT_IMAGE_SEARCH_*
-        // sa itaas), pwede ring i-override per-build gamit ang reqBody —
-        // kapareho ng pattern ng relayUrl/relayApiKey/port sa itaas.
-        // Kung wala namang naka-configure kahit saan (reqBody o RELAY .env),
-        // hinahayaan lang itong blangko sa client .env — normal namang
-        // gumagana pa rin ang OMNIPOS nang walang ito (walang "Search Image"
-        // button lang, tingnan ang OMNIPOS .env comments), kaya hindi ito
-        // dapat mag-fail ng buong build.
-        const imageSearchProvider = (reqBody && reqBody.imageSearchProvider) || DEFAULT_IMAGE_SEARCH_PROVIDER || '';
-        const imageSearchApiKey = (reqBody && reqBody.imageSearchApiKey) || DEFAULT_IMAGE_SEARCH_API_KEY || '';
-        const imageSearchCx = (reqBody && reqBody.imageSearchCx) || DEFAULT_IMAGE_SEARCH_CX || '';
+        // (IMAGE_SEARCH_API_KEY env var), pwede ring i-override per-build
+        // gamit ang reqBody — kapareho ng pattern ng relayUrl/relayApiKey/
+        // port sa itaas. Kung wala namang naka-configure kahit saan
+        // (reqBody o RELAY .env), hinahayaan lang itong blangko sa client
+        // .env — normal namang gumagana pa rin ang OMNIPOS nang walang ito
+        // (walang "Search Image" button lang, tingnan ang OMNIPOS .env
+        // comments), kaya hindi ito dapat mag-fail ng buong build.
+        //
+        // BUG FIX: direktang process.env.IMAGE_SEARCH_* na ang binabasa
+        // dito (hindi na ang dating cached DEFAULT_IMAGE_SEARCH_* na
+        // constant sa itaas), kapareho ng ginagawa na ng relayApiKey sa
+        // itaas — para laging pinakabagong value ang nasusunod, kahit
+        // idinagdag/binago mo lang ang key HABANG tumatakbo na ang RELAY
+        // process (walang kailangan pang i-restart ang RELAY bago ito
+        // mapulot ng susunod na build/publish).
+        const imageSearchProvider = (reqBody && reqBody.imageSearchProvider) || process.env.IMAGE_SEARCH_PROVIDER || '';
+        const imageSearchApiKey = (reqBody && reqBody.imageSearchApiKey) || process.env.IMAGE_SEARCH_API_KEY || '';
+        const imageSearchCx = (reqBody && reqBody.imageSearchCx) || process.env.IMAGE_SEARCH_CX || '';
 
         const clientEnvContent = [
             `RELAY_URL=${relayUrl}`,
