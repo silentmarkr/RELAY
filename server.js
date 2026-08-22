@@ -4491,7 +4491,11 @@ app.get('/relay/admin/api/system/version', requireAdminKey, (req, res) => {
 // sa device ng kliyente. Hindi ito bahagi ng orihinal na release, kaya
 // dapat laging tanggalin/hindi isama sa bawat bagong build-release —
 // baka aksidenteng ma-commit/ma-push ito papasok sa package.
-const BUILD_EXCLUDE_NAMES = new Set(['.git', 'node_modules', 'database', 'release', 'uploads_tmp', '.start.sh.lock']);
+// BUG FIX: idinagdag ang '.self-update-backup' — itinugma sa EXCLUDE
+// set ng OMNIPOS/build-release.js (parehong dahilan doon: runtime
+// backup dir lang ito na ginagawa ng OMNIPOS server.js bago mag-apply
+// ng self-update, hindi dapat kasama sa customer release zip).
+const BUILD_EXCLUDE_NAMES = new Set(['.git', 'node_modules', 'database', 'release', 'uploads_tmp', '.start.sh.lock', '.self-update-backup']);
 const BUILD_EXCLUDE_EXTENSIONS = new Set(['.log', '.patch']);
 
 function removeExcludedRecursive(dir) {
