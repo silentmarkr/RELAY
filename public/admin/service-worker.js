@@ -7,10 +7,11 @@
 // mapanganib mag-serve ng lumang OTP code o lumang device list mula sa
 // cache, kaya hindi natin ito ginagalaw dito.
 
-// BUMPED: v10 -> v11 (dagdag na "Ibukod bilang bagong device" (splitClone)
-// button + JS handler para sa clone-split feature — nabago ulit ang
-// index.html).
-const CACHE_VERSION = 'relay-admin-shell-v11';
+// BUMPED: v12 -> v13 (matrix rain resize handler ay hinahon/debounced na
+// at hindi na basta nagre-reset kapag address bar lang ng mobile browser
+// ang lumitaw/nawala habang nag-sscroll — parte pa rin ng "biglang
+// nag-a-auto-scroll/parang nag-reload" na series of fixes).
+const CACHE_VERSION = 'relay-admin-shell-v13';
 
 // Mga static shell file lang — walang laman na dynamic/sensitive data.
 const SHELL_FILES = [

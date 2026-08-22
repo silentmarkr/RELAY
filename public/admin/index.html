@@ -2090,8 +2090,31 @@ function createProgressController(ids) {
     if (animInterval) { clearInterval(animInterval); animInterval = null; }
   }
 
+  // BUG FIX (biglang "nag-a-auto-scroll/parang nag-reload" ang page):
+  // buildProgressWrap/publishProgressWrap ay NASA normal na document
+  // flow (hindi position:fixed) — kaya tuwing show() (display:none ->
+  // block) o hide() (block -> none), biglang tumataas o bumababa ang
+  // KABUUANG height ng page. Kung naka-scroll pababa ang admin habang
+  // tumatakbo ang build/publish sa background (hal. tumitingin sa
+  // devices list), ang biglaang pagbabago ng height sa itaas ay
+  // nagdudulot ng biglaang paglundag ng scroll position — nakaka-
+  // distract, parang may auto-reload/refresh na nangyari kahit wala
+  // naman talagang binago ang laman ng ibang parte ng screen. Ayos:
+  // kunin ang scroll position BAGO baguhin ang display, at ibalik ito
+  // pagkatapos (sa susunod na paint, kagaya ng withScrollPreserved),
+  // para tuluyang "silent" ang buong transition sa mata ng admin.
+  function withScrollHold(fn) {
+    const scrollY = window.scrollY;
+    fn();
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (Math.abs(window.scrollY - scrollY) > 0) window.scrollTo(0, scrollY);
+      });
+    });
+  }
+
   function show() {
-    if (wrap) wrap.style.display = 'block';
+    withScrollHold(() => { if (wrap) wrap.style.display = 'block'; });
     displayed = 0;
     renderPercent(0);
     etaMsLocal = null;
@@ -2103,7 +2126,7 @@ function createProgressController(ids) {
 
   function hide(delayMs) {
     if (!wrap) return;
-    setTimeout(() => { wrap.style.display = 'none'; }, delayMs == null ? 1200 : delayMs);
+    setTimeout(() => { withScrollHold(() => { wrap.style.display = 'none'; }); }, delayMs == null ? 1200 : delayMs);
   }
 
   function setTarget(progress) {
@@ -3851,7 +3874,26 @@ function createMatrixRain(canvas, opts) {
     return { dir, cross: Math.random() * h, progress: -len * settings.fontSize - Math.random() * w, speed, color, text: randomText(len), len };
   }
 
-  function resize() {
+  // BUG FIX (biglang kumikislap/nag-re-reset ang matrix rain background
+  // habang nag-sscroll sa MOBILE — isa pang sanhi ng "parang may
+  // auto-reload/refresh" na distraction): dati, bawat 'resize' event ay
+  // agad na binubura AT nire-regenerate (lines = new Array(...).map(
+  // makeLine)) ang lahat ng streaks, at walang debounce. Sa mobile
+  // Chrome/Safari, ang pag-scroll ay nagpapa-collapse/expand ng address
+  // bar, na nag-fi-fire ng 'resize' event dahil sa pagbabago ng viewport
+  // HEIGHT lang (hindi naman talaga "nag-resize" ang screen) — kaya
+  // bawat scroll, kumikislap/nagre-reset ang buong ambient animation sa
+  // likod ng panel. Ayos: (1) i-debounce ang resize handler (150ms) para
+  // hindi ito paulit-ulit tumakbo habang tuloy-tuloy pa ang scroll
+  // gesture, at (2) huwag munang galawin ang canvas/lines kung HEIGHT
+  // LANG ang nagbago nang MALIIT (< 120px — tipikal na sukat ng
+  // mobile browser address bar) — tunay na resize/orientation change
+  // lang (malaking pagbabago sa width o height) ang magre-regenerate.
+  let resizeDebounceTimer = null;
+  let lastResizeW = 0, lastResizeH = 0;
+  const RESIZE_HEIGHT_IGNORE_THRESHOLD = 120;
+
+  function doResize() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     w = canvas.clientWidth || canvas.parentElement.clientWidth;
     h = canvas.clientHeight || canvas.parentElement.clientHeight;
@@ -3859,6 +3901,25 @@ function createMatrixRain(canvas, opts) {
     canvas.height = h * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     lines = new Array(settings.lineCount).fill(0).map(makeLine);
+    lastResizeW = w;
+    lastResizeH = h;
+  }
+
+  function resize() {
+    if (resizeDebounceTimer) clearTimeout(resizeDebounceTimer);
+    resizeDebounceTimer = setTimeout(() => {
+      resizeDebounceTimer = null;
+      const newW = canvas.clientWidth || canvas.parentElement.clientWidth;
+      const newH = canvas.clientHeight || canvas.parentElement.clientHeight;
+      const widthChanged = lastResizeW > 0 && newW !== lastResizeW;
+      const heightChangedALot = lastResizeH > 0 && Math.abs(newH - lastResizeH) >= RESIZE_HEIGHT_IGNORE_THRESHOLD;
+      if (!widthChanged && !heightChangedALot && lastResizeW > 0) {
+        // Mobile address-bar show/hide lang ito habang nag-sscroll —
+        // huwag munang buburahin/i-reset ang animation.
+        return;
+      }
+      doResize();
+    }, 150);
   }
 
   function frame() {
@@ -3894,7 +3955,7 @@ function createMatrixRain(canvas, opts) {
     raf = requestAnimationFrame(frame);
   }
 
-  resize();
+  doResize();
   ctx.fillStyle = '#05070d';
   ctx.fillRect(0, 0, w, h);
   raf = requestAnimationFrame(frame);
@@ -3903,6 +3964,7 @@ function createMatrixRain(canvas, opts) {
   return {
     stop() {
       if (raf) cancelAnimationFrame(raf);
+      if (resizeDebounceTimer) clearTimeout(resizeDebounceTimer);
       window.removeEventListener('resize', resize);
     }
   };
