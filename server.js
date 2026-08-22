@@ -147,7 +147,17 @@ function redisSetJSON(key, value) {
 // ibaba ang malinaw na "Kulang ang env vars" na check kung talagang
 // wala pa ring nakuhang value.
 try {
-    process.loadEnvFile();
+    // ROOT CAUSE FIX: process.loadEnvFile() na WALANG argumento ay
+    // humahanap ng ".env" relative sa process.cwd() (kung saan/paano
+    // pinatakbo ang process — hal. `node /opt/relay/server.js` mula sa
+    // "/"), HINDI relative sa __dirname (kung saan talaga nakatira ang
+    // file na ito). Ito ang TUNAY na dahilan kung bakit "blangko" pa
+    // rin minsan ang IMAGE_SEARCH_* (o anumang env var) kahit tama na
+    // ang laman ng .env — maling direktoryo ang hinahanap, hindi
+    // staleness ng cache. Lahat ng ibang path sa file na ito (tingnan
+    // ang DEVICE_STORE_PATH, RELEASE_PACKAGE_PATH, atbp.) ay gumagamit
+    // ng path.join(__dirname, ...) — dapat ganito rin dito.
+    process.loadEnvFile(path.join(__dirname, '.env'));
 } catch (err) {
     // Walang nakitang .env file sa direktoryo na ito — okay lang, baka
     // ibang paraan (Render/Railway env vars dashboard) ang ginamit.
@@ -4952,7 +4962,16 @@ async function performBuildRelease(reqBody, req, publishOverride) {
     // susunod na build/publish ang bagong SerpAPI key (o anumang bagong env
     // var) na kadarating lang idagdag sa .env.
     try {
-        process.loadEnvFile();
+        // Tingnan ang paliwanag sa unang process.loadEnvFile() call malapit
+        // sa itaas ng file na ito: kailangan ng EXPLICIT na path
+        // (path.join(__dirname, '.env')), hindi ang default/no-argument na
+        // bersyon — dahil ang default ay humahanap batay sa process.cwd()
+        // (posibleng ibang direktoryo kaysa dito ito pinatakbo), hindi sa
+        // aktwal na lokasyon ng file na ito. Ito talaga ang dahilan kaya
+        // "blangko" pa rin ang nakukuhang IMAGE_SEARCH_* (o anumang bagong
+        // idinagdag na env var) sa bagong build kahit tama na ang laman ng
+        // .env at kahit muling tinawag na ang loadEnvFile() dito.
+        process.loadEnvFile(path.join(__dirname, '.env'));
     } catch (err) {
         // Walang nakitang .env file o hindi supported ng Node version na ito
         // ang loadEnvFile() — okay lang, babalik na lang sa mga value na
