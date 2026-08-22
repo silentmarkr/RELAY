@@ -726,7 +726,7 @@ const FEATURE_CATALOG_BASE = {
     liquidglass: { name: 'Liquid Glass Pro', price: 149, category: 'theme' },
     galaxyambient: { name: 'Galaxy Ambient Pro', price: 149, category: 'theme' },
     purchase_orders: { name: 'Purchase Orders Module', price: 999, category: 'module' },
-    customer_crm: { name: 'Customer Profiles & Loyalty', price: 799, category: 'module' },
+    customer_crm: { name: 'Customer Profiles, Loyalty & Debtors', price: 799, category: 'module' }, // naka-sync sa OMNIPOS/server.js FEATURE_CATALOG — pinalitan ang pangalan para makasama ang Debtors ledger
     promo_codes: { name: 'Promo Codes Module', price: 499, category: 'module' },
     advanced_reports: { name: 'Sales Analytics & Advanced Reports', price: 799, category: 'module' },
     shift_management: { name: 'Multi-Cashier Shift Oversight & Z-Reading Reports', price: 699, category: 'module' },
