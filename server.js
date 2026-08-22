@@ -5045,6 +5045,45 @@ async function performBuildRelease(reqBody, req, publishOverride) {
         setBuildProgress({ stage: 'filter', percent: BUILD_STEP_END_PERCENT.clone, message: 'Tinatanggal ang mga excluded file...' });
         removeExcludedRecursive(tmpDir);
 
+        // BUG FIX (root cause ng "Waiting for the New Version..." na
+        // nakatigil habang paikot-ikot ang poll): ang version na ipina-
+        // publish (systemVersionInfo.version / publishOverride.version,
+        // sinasagot ng /relay/latest-version) at ang aktwal na
+        // package.json "version" na naka-bake sa loob ng ipinapadalang
+        // zip (binabasa ng client bilang APP_VERSION pagkatapos ng
+        // self-update) ay DALAWANG HIWALAY na bagay dati — ang isa ay
+        // manu-manong tinatype ng admin sa publish form, ang isa naman
+        // ay kung anuman ang laman ng package.json sa cloned repo/ref.
+        // Walang code na nagsi-sync sa dalawa. Kapag hindi tugma ang mga
+        // ito (typo, o hindi na-bump ang package.json bago mag-push),
+        // matagumpay pa rin ang self-update sa likod ng eksena, pero ang
+        // pollForDeployCompletion() sa app.js ay walang katapusang
+        // maghihintay dahil ang bagong result.currentVersion (mula sa
+        // bagong package.json) ay hindi na kailanman magiging pareho sa
+        // targetVersion (ang dating-ipina-publish na string) — kaya
+        // "nakatigil" ang modal kahit tapos na talaga ang deploy.
+        // AYOS: dito mismo i-patch ang package.json sa loob ng tmpDir
+        // (staging copy lang — hindi nagagalaw ang orihinal na git repo)
+        // para eksaktong tumugma ang "version" field nito sa version na
+        // talagang ipapa-publish ng build na ito — parehong pinagmulan
+        // (single source of truth) na ang dalawa mula ngayon.
+        const resolvedVersion = (publishOverride && publishOverride.version) || systemVersionInfo.version || '0.0.0';
+        try {
+            const pkgPath = path.join(tmpDir, 'package.json');
+            if (fs.existsSync(pkgPath)) {
+                const pkgJson = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+                if (pkgJson.version !== resolvedVersion) {
+                    console.log(`ℹ️  Pinapatch ang package.json version mula "${pkgJson.version}" papuntang "${resolvedVersion}" (para tumugma sa ipapa-publish na version).`);
+                }
+                pkgJson.version = resolvedVersion;
+                fs.writeFileSync(pkgPath, JSON.stringify(pkgJson, null, 2) + '\n', 'utf8');
+            } else {
+                console.warn('⚠️  Walang package.json sa cloned repo — hindi na-patch ang version (magiging mismatch ang client APP_VERSION kung may laman itong default).');
+            }
+        } catch (pkgErr) {
+            console.warn(`⚠️  Hindi ma-patch ang package.json version: ${pkgErr.message}`);
+        }
+
         // Gumawa ng client .env DIREKTA sa loob ng tmpDir bago mag-zip,
         // para READY NA AGAD ang zip pagka-download ng bagong kliyente
         // (walang kailangan pang gawin/i-upload na .env sa panig nila).
@@ -5193,7 +5232,7 @@ async function performBuildRelease(reqBody, req, publishOverride) {
         // route wrapper) para sabay ito laging tumatakbo kada
         // matagumpay na build, kahit anong entry point ang tumawag dito
         // (build-only o publish-release).
-        const baselineVersion = (publishOverride && publishOverride.version) || systemVersionInfo.version || '0.0.0';
+        const baselineVersion = resolvedVersion;
         const baselineFiles = buildFileManifest(tmpDir);
         releaseBaselines.set(baselineVersion, {
             builtAt,
@@ -5216,7 +5255,7 @@ async function performBuildRelease(reqBody, req, publishOverride) {
         recordBuildHistoryEntry({
             id: crypto.randomBytes(6).toString('hex'),
             caption: caption || null,
-            version: (publishOverride && publishOverride.version) || systemVersionInfo.version || '0.0.0',
+            version: resolvedVersion,
             targetInstallationId: (publishOverride && publishOverride.targetInstallationId) || null,
             ref,
             builtAt,
