@@ -190,7 +190,51 @@ app.use((req, res, next) => {
 // route — ibig sabihin, minsan hindi lang yung photo ang nawawala, buong
 // unlock/demo/bundle request mismo ang nabibigo dahil dito. 2mb na ngayon,
 // katumbas ng limit na ginagamit na rin ng OMNIPOS client server mismo.
-app.use(express.json({ limit: '2mb' }));
+//
+// BUG FIX: itong 2mb na limit ay ginagamit din (dating walang exception)
+// ng /relay/cloud-backup/upload — kung saan naka-attach ang BUONG
+// database ng store (lahat ng modules bilang JSON). Kapag lumaki na ang
+// data ng isang store (maraming transactions/products/customers), sobra
+// agad ito sa 2mb at basta na-REJECT ng body-parser BAGO pa man umabot
+// sa route handler — kaya "hindi basta maka-backup" kapag mataas na ang
+// data. Dinagdagan ng sarili nitong mas malaking limit (1gb) ang
+// cloud-backup upload route lang — hindi ito ginagawang global default
+// (para hindi buksan ang ibang routes sa parehong panganib), gamit ang
+// path-based na pagpili sa pagitan ng dalawang parser sa ibaba.
+const CLOUD_BACKUP_UPLOAD_PATH = '/relay/cloud-backup/upload';
+const CLOUD_BACKUP_JSON_LIMIT = '1024mb'; // 1GB
+const defaultJsonParser = express.json({ limit: '2mb' });
+const cloudBackupJsonParser = express.json({ limit: CLOUD_BACKUP_JSON_LIMIT });
+
+app.use((req, res, next) => {
+    if (req.path === CLOUD_BACKUP_UPLOAD_PATH) {
+        return cloudBackupJsonParser(req, res, next);
+    }
+    return defaultJsonParser(req, res, next);
+});
+
+// BUG FIX: wala pang dedicated error handler para sa PayloadTooLargeError
+// (mula sa express.json() body-parser) dati — kaya kapag na-reject ang
+// isang request dahil sobra sa limit, ang sagot ay isang generic
+// HTML/plain-text error page ng Express (hindi JSON). Sa OMNIPOS client
+// (parseRelayResponse sa server.js doon), hindi na-JSON.parse ang sagot
+// na ito, kaya lumalabas ang misleading na error message na parang
+// "hindi gumagana/naka-configure nang mali ang RELAY" — kahit ang totoong
+// dahilan ay masyadong malaki lang ang datos. Dito, hinuhuli na ito
+// nang partikular at binibigyan ng malinaw, user-facing na JSON message.
+app.use((err, req, res, next) => {
+    if (err && err.type === 'entity.too.large') {
+        const limitLabel = req.path === CLOUD_BACKUP_UPLOAD_PATH ? CLOUD_BACKUP_JSON_LIMIT : '2mb';
+        return res.status(413).json({
+            success: false,
+            payloadTooLarge: true,
+            message: req.path === CLOUD_BACKUP_UPLOAD_PATH
+                ? `Masyadong malaki na ang datos ng store para ma-backup sa isang pagkakataon (lumagpas sa ${limitLabel} limit). Mag-archive/burahin muna ng lumang transactions/records, o makipag-ugnayan sa developer para itaas pa ang limit.`
+                : `Masyadong malaki ang request (lumagpas sa ${limitLabel} limit).`
+        });
+    }
+    return next(err);
+});
 
 // --------------------------------------------------------------
 // CONFIG — lahat ito ay dapat manggaling sa environment variables ng
