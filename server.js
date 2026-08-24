@@ -1243,8 +1243,14 @@ function mostRecentBackupCheckinAt() {
 // (false "modified/deleted") na hindi naman talagang tampering, kundi
 // runtime data lang na iba-iba talaga bawat device.
 const INTEGRITY_EXCLUDE_NAMES = new Set([
+    // BUG FIX: idinagdag ang '.self-update-backup' para tumugma sa
+    // EXCLUDE set ng build-release.js (OMNIPOS) — kung natirang
+    // hindi nalinis ang backup folder na ito pagkatapos ng isang
+    // self-update, huwag itong isali sa integrity comparison (hindi
+    // ito bahagi ng aktwal na release).
     '.env', '.env.key', 'database', 'node_modules', 'uploads_tmp',
-    '.git', 'release', 'cf.log', 'server.log', '.start.sh.lock'
+    '.git', 'release', 'cf.log', 'server.log', '.start.sh.lock',
+    '.self-update-backup'
 ]);
 const INTEGRITY_EXCLUDE_EXTENSIONS = new Set(['.log', '.patch']);
 
