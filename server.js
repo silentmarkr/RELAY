@@ -4545,7 +4545,20 @@ app.get('/relay/admin/api/system/version', requireAdminKey, (req, res) => {
 // set ng OMNIPOS/build-release.js (parehong dahilan doon: runtime
 // backup dir lang ito na ginagawa ng OMNIPOS server.js bago mag-apply
 // ng self-update, hindi dapat kasama sa customer release zip).
-const BUILD_EXCLUDE_NAMES = new Set(['.git', 'node_modules', 'database', 'release', 'uploads_tmp', '.start.sh.lock', '.self-update-backup', 'package-lock.json']);
+const BUILD_EXCLUDE_NAMES = new Set([
+    '.git', 'node_modules', 'database', 'release', 'uploads_tmp',
+    '.start.sh.lock', '.self-update-backup', 'package-lock.json',
+    // BUG FIX: itinugma sa EXCLUDE set ng OMNIPOS/build-release.js — dev/
+    // build-only tooling na nasasama pala sa omnipos-client.zip dahil wala
+    // silang exclude entry dito (Method B remote build): build-release.js /
+    // obfuscate-worker.js (ang build script mismo at ang worker nito —
+    // nangangailangan ng javascript-obfuscator na hindi naman naka-install
+    // sa client, at naglalantad ng obfuscation config/EXCLUDE list),
+    // start.sh.bak (stray backup, walang gamit sa client), at vacuum-now.js
+    // (developer-only diagnostic CLI — redundant dahil may built-in
+    // auto-vacuum na ang server.js pagkatapos ng hard reset).
+    'build-release.js', 'obfuscate-worker.js', 'start.sh.bak', 'vacuum-now.js',
+]);
 const BUILD_EXCLUDE_EXTENSIONS = new Set(['.log', '.patch']);
 
 function removeExcludedRecursive(dir) {
