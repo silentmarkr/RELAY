@@ -1250,7 +1250,7 @@ const INTEGRITY_EXCLUDE_NAMES = new Set([
     // ito bahagi ng aktwal na release).
     '.env', '.env.key', 'database', 'node_modules', 'uploads_tmp',
     '.git', 'release', 'cf.log', 'server.log', '.start.sh.lock',
-    '.self-update-backup'
+    '.self-update-backup', 'package-lock.json', 'certs'
 ]);
 const INTEGRITY_EXCLUDE_EXTENSIONS = new Set(['.log', '.patch']);
 
@@ -4545,7 +4545,7 @@ app.get('/relay/admin/api/system/version', requireAdminKey, (req, res) => {
 // set ng OMNIPOS/build-release.js (parehong dahilan doon: runtime
 // backup dir lang ito na ginagawa ng OMNIPOS server.js bago mag-apply
 // ng self-update, hindi dapat kasama sa customer release zip).
-const BUILD_EXCLUDE_NAMES = new Set(['.git', 'node_modules', 'database', 'release', 'uploads_tmp', '.start.sh.lock', '.self-update-backup']);
+const BUILD_EXCLUDE_NAMES = new Set(['.git', 'node_modules', 'database', 'release', 'uploads_tmp', '.start.sh.lock', '.self-update-backup', 'package-lock.json']);
 const BUILD_EXCLUDE_EXTENSIONS = new Set(['.log', '.patch']);
 
 function removeExcludedRecursive(dir) {
