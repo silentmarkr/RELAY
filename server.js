@@ -9,7 +9,7 @@
 // verification) sa loob ng server ng bawat kliyente — kaya kahit
 // technical lang ang isang kliyente, kayang basahin ang sariling
 // database nila at makita ang OTP code mismo. Dito, LUMILIPAT ang
-// buong desisyon kung "totoo ba ang unlock na ito" papunta rito — sa
+// buong desisyon kungs "totoo ba ang unlock na ito" papunta rito — sa
 // makinang HAWAK lang ng developer. Ang client server ay tumatawag
 // lang dito sa network, at nagve-verify ng SIGNATURE gamit ang isang
 // PUBLIC key (ligtas ipamahagi) — hindi nito kayang gumawa ng sarili
