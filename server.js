@@ -23,6 +23,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { execSync, execFileSync, spawn } = require('child_process');
+const { Worker } = require('worker_threads');
 const archiver = require('archiver');
 const Redis = require('ioredis');
 const JavaScriptObfuscator = require('javascript-obfuscator');
@@ -4720,10 +4721,48 @@ function pickReleaseObfOptions(fullPath, isClient) {
     return isLarge ? largeServerObfOptions : releaseServerObfOptions;
 }
 
-function obfuscateFileInPlace(fullPath, options) {
-    const code = fs.readFileSync(fullPath, 'utf8');
-    const result = JavaScriptObfuscator.obfuscate(code, options);
-    fs.writeFileSync(fullPath, result.getObfuscatedCode(), 'utf8');
+// ROOT CAUSE FIX (progress bar "freezes"/stops updating mid-build):
+// JavaScriptObfuscator.obfuscate() is a heavy, fully SYNCHRONOUS, CPU-bound
+// call — for a large file (server.js is 400+KB, OMNIPOS's public/app.js is
+// even bigger) with controlFlowFlattening/deadCodeInjection/selfDefending
+// all turned on, a single call can take many seconds. Because it runs on
+// RELAY's one and only main thread, it blocks the ENTIRE Node.js event
+// loop for that whole stretch — so GET /relay/admin/api/build-progress
+// (the request the admin panel is polling every 700ms) can't even be
+// answered until the big file finishes, which is exactly what makes the
+// progress bar look "stuck"/frozen instead of just moving slowly. The
+// existing `await yieldToEventLoop()` between files (setImmediate) did
+// NOT help with this, because it only yields BETWEEN files — it can't
+// yield in the middle of one single obfuscate() call.
+//
+// FIX: run the actual obfuscation inside a worker_threads Worker (same
+// pattern already used by the local/offline OMNIPOS/build-release.js +
+// OMNIPOS/obfuscate-worker.js for this exact reason) so the CPU-heavy work
+// happens on a separate thread — RELAY's main thread (and therefore the
+// build-progress polling route) stays free and responsive the whole time,
+// even while obfuscating the biggest files.
+function obfuscateInWorker({ code, srcPath, destPath, options }) {
+    return new Promise((resolve, reject) => {
+        const worker = new Worker(path.join(__dirname, 'obfuscate-worker.js'), {
+            workerData: { code, srcPath, destPath, options }
+        });
+        worker.on('message', (msg) => {
+            if (msg && msg.ok) resolve(msg.obfuscatedCode);
+            else reject(new Error((msg && msg.error) || 'Nabigo ang obfuscate worker.'));
+        });
+        worker.on('error', reject);
+        worker.on('exit', (exitCode) => {
+            if (exitCode !== 0) reject(new Error(`Ang obfuscate worker para sa ${srcPath || '(inline script)'} ay lumabas nang code ${exitCode}.`));
+        });
+    });
+}
+
+// Drop-in async replacement para sa dating obfuscateFileInPlace() —
+// pareho pa rin ang ginagawa (basahin ang file, obfuscate, isulat pabalik
+// sa parehong path), pero sa loob ng worker thread na tumatakbo (tingnan
+// ang komento sa obfuscateInWorker() sa itaas).
+async function obfuscateFileInPlace(fullPath, options) {
+    await obfuscateInWorker({ srcPath: fullPath, destPath: fullPath, options });
 }
 
 // Yields control back to the event loop. Used between obfuscation
@@ -4749,15 +4788,40 @@ function stripCssComments(css) {
 // direktang nakasulat sa index.html mismo, hindi lang sa hiwalay na .js
 // files. Ang mga <script src="..."> (external references) ay HINDI
 // hinahawakan dito.
-function obfuscateHtmlInlineScripts(html, options) {
-    return html.replace(/<script(\s[^>]*)?>([\s\S]*?)<\/script>/gi, (match, attrs, content) => {
-        const attrStr = attrs || '';
-        if (/\bsrc\s*=/i.test(attrStr)) return match; // external script, walang inline content
-        const trimmed = content.trim();
-        if (!trimmed) return match; // walang laman
-        const obfuscated = JavaScriptObfuscator.obfuscate(content, options).getObfuscatedCode();
-        return `<script${attrStr}>${obfuscated}</script>`;
-    });
+// NOTE: dating gumagamit ito ng String.replace() na may SYNCHRONOUS
+// callback (JavaScriptObfuscator.obfuscate() diretso sa main thread) —
+// kasama ito sa root cause ng "nag-fi-freeze ang progress bar" (tingnan
+// ang malaking komento sa obfuscateInWorker() sa itaas). String.replace()
+// mismo ay hindi kayang mag-await ng async callback, kaya dito, unang
+// kinokolekta ang lahat ng match (regex.exec loop) bago i-obfuscate ang
+// bawat isa nang paisa-isa sa loob ng worker thread (await sa bawat isa),
+// saka lang muling pinagsasama-sama ang buong HTML string.
+async function obfuscateHtmlInlineScripts(html, options) {
+    const re = /<script(\s[^>]*)?>([\s\S]*?)<\/script>/gi;
+    const matches = [];
+    let m;
+    while ((m = re.exec(html)) !== null) {
+        const attrStr = m[1] || '';
+        const content = m[2];
+        const isExternal = /\bsrc\s*=/i.test(attrStr);
+        const isEmpty = !content.trim();
+        matches.push({ index: m.index, fullMatch: m[0], attrStr, content, skip: isExternal || isEmpty });
+    }
+
+    let result = '';
+    let cursor = 0;
+    for (const match of matches) {
+        result += html.slice(cursor, match.index);
+        if (match.skip) {
+            result += match.fullMatch;
+        } else {
+            const obfuscated = await obfuscateInWorker({ code: match.content, options });
+            result += `<script${match.attrStr}>${obfuscated}</script>`;
+        }
+        cursor = match.index + match.fullMatch.length;
+    }
+    result += html.slice(cursor);
+    return result;
 }
 
 // Collects every file that needs obfuscating/stripping first (cheap,
@@ -4801,9 +4865,9 @@ async function obfuscateReleaseTree(tmpDir, onProgress) {
 
     for (const { type, full } of items) {
         if (type === 'server') {
-            obfuscateFileInPlace(full, pickReleaseObfOptions(full, false));
+            await obfuscateFileInPlace(full, pickReleaseObfOptions(full, false));
         } else if (type === 'client') {
-            obfuscateFileInPlace(full, pickReleaseObfOptions(full, true));
+            await obfuscateFileInPlace(full, pickReleaseObfOptions(full, true));
         } else if (type === 'html') {
             let html = fs.readFileSync(full, 'utf8');
             // FIX: inline-script obfuscation used to run BEFORE comment
@@ -4819,7 +4883,7 @@ async function obfuscateReleaseTree(tmpDir, onProgress) {
             // scanning for script tags removes any comment text that
             // could confuse the scanner.
             html = stripHtmlComments(html);
-            html = obfuscateHtmlInlineScripts(html, pickReleaseObfOptions(full, true));
+            html = await obfuscateHtmlInlineScripts(html, pickReleaseObfOptions(full, true));
             fs.writeFileSync(full, html, 'utf8');
         } else if (type === 'css') {
             const css = fs.readFileSync(full, 'utf8');
@@ -4853,7 +4917,7 @@ async function obfuscateReleaseTree(tmpDir, onProgress) {
 // Kung walang env-loader.js sa cloned repo (hal. hindi mo pa na-commit),
 // babalik lang ito sa dating plaintext .env — walang masisira, pero
 // mananatiling readable ang .env sa ganitong kaso.
-function encryptClientEnvAndPatchLoader(tmpDir, envContent) {
+async function encryptClientEnvAndPatchLoader(tmpDir, envContent) {
     const loaderPath = path.join(tmpDir, RELEASE_ENV_LOADER_FILENAME);
 
     if (!fs.existsSync(loaderPath)) {
@@ -4875,7 +4939,7 @@ function encryptClientEnvAndPatchLoader(tmpDir, envContent) {
     fs.writeFileSync(path.join(tmpDir, '.env'), JSON.stringify(payload));
     fs.writeFileSync(path.join(tmpDir, RELEASE_ENV_KEY_FILENAME), key.toString('hex'), 'utf8');
 
-    obfuscateFileInPlace(loaderPath, releaseServerObfOptions);
+    await obfuscateFileInPlace(loaderPath, releaseServerObfOptions);
 
     return { encrypted: true };
 }
@@ -5195,7 +5259,7 @@ async function performBuildRelease(reqBody, req, publishOverride) {
             ''
         ].join('\n');
         setBuildProgress({ stage: 'env', percent: BUILD_STEP_END_PERCENT.filter, message: 'Ini-encrypt ang client .env...' });
-        const envResult = encryptClientEnvAndPatchLoader(tmpDir, clientEnvContent);
+        const envResult = await encryptClientEnvAndPatchLoader(tmpDir, clientEnvContent);
 
         // Obfuscate OMNIPOS's own server-side/client-side JS here, inside
         // tmpDir only (a staging copy) — this never touches your original
