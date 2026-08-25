@@ -2114,6 +2114,49 @@ app.get('/relay/admin/api/analytics', requireAdminKey, (req, res) => {
 });
 
 // --------------------------------------------------------------
+// POST /relay/admin/api/analytics/reset
+// "Reset Analytics" — binubura LANG ang buong activityLog (ang pinagmumulan
+// ng "Activity" na 7d/30d na bilang ng unlocks, at ng "History" timeline sa
+// Device Detail ng BAWAT device). Ito rin ang tanging bahagi ng Analytics
+// dashboard na TALAGANG hiwalay sa aktwal na entitlements/customer data —
+// kaya ito lang ang binubura, at HINDI ito nagagalaw:
+//   - issuedUnlocks    (mga naka-unlock/binayarang features ng customer)
+//   - allowedDevices / deviceLabels / deviceFingerprints (device+customer list)
+//   - backupCheckins   (backup metadata ng customer)
+//   - seenDevices, pendingOtps (live status, hindi rin naman "history")
+// Kaya kahit ma-reset ang Analytics, hindi mawawala ang mga nabenta/
+// naka-unlock na feature at hindi rin madadamay ang naka-save na
+// customer database.
+// Kailangan ng ?confirm=RESET (o {confirm:"RESET"} sa body) bilang
+// safety check, dahil hindi na ito mababawi.
+// --------------------------------------------------------------
+app.post('/relay/admin/api/analytics/reset', requireAdminKey, (req, res) => {
+    const confirm = req.query.confirm || req.body?.confirm;
+    if (confirm !== 'RESET') {
+        return res.status(400).json({
+            success: false,
+            message: 'Safety check: kailangan ng ?confirm=RESET (o "confirm":"RESET" sa JSON body) para i-reset ang Analytics. Hindi na ito mababawi.'
+        });
+    }
+
+    const clearedCount = activityLog.length;
+    activityLog = [];
+    saveActivityLog(activityLog);
+
+    // Bagong unang linya ng buong (bagong-simula) activity log — audit
+    // trail na may nagbura ng analytics, at kasabay nito ay nire-reset na
+    // rin ang "unlocksLast7d/30d" pababalik sa 0 (dahil doon nagmumula ang
+    // mga bilang na iyon).
+    logActivity(null, 'analytics_reset', { clearedCount });
+
+    res.json({
+        success: true,
+        clearedCount,
+        message: `Na-reset ang Analytics: nabura ang ${clearedCount} activity-log entries (Activity 7d/30d at Device History). Hindi ginalaw ang issued unlocks/features at ang device/customer database (allowed devices, labels, backup check-ins).`
+    });
+});
+
+// --------------------------------------------------------------
 // GET /relay/admin/api/devices/:installationId/detail
 // Ang buong detalye ng isang device: naka-unlock na, locked pa, demo
 // status, at history ng lahat ng pangyayari — ito ang pina-pakita sa

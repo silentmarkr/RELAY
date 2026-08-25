@@ -1503,6 +1503,7 @@ a:focus-visible,
       </div>
     </div>
     <div class="topbar-actions">
+      <button class="icon-btn" onclick="resetAnalytics()" id="resetAnalyticsBtn" title="Clears the Activity/History log only — hindi ito nagagalaw sa unlocked features o sa customer/device database.">🔄 Reset Analytics</button>
       <button class="icon-btn" onclick="closeAnalytics()">← Back</button>
     </div>
   </div>
@@ -3255,6 +3256,38 @@ async function loadAnalytics() {
   } catch (err) { return; }
   if (!data.success) { toast(data.message || 'Could not load analytics.', 'error'); return; }
   renderAnalytics(data.analytics);
+}
+
+// Ito ay BUBURA LANG ng buong activity log (ang pinagmumulan ng "Activity"
+// 7d/30d na bilang, at ng History timeline ng BAWAT device sa Device
+// Detail page). HINDI nito ginagalaw ang mga naka-unlock na features
+// (issuedUnlocks) o ang naka-save na customer/device database (allowed
+// devices, labels, backup check-ins) — kaya safe itong i-reset kahit may
+// mga aktibong lisensya at customer records.
+async function resetAnalytics() {
+  const ok = await confirmAction({
+    title: 'Reset Analytics?',
+    message: 'Ire-reset ang Activity log (7d/30d na bilang ng unlocks, at ang History timeline ng lahat ng device). Hindi ito magagalaw sa mga naka-unlock na features o sa naka-save na customer/device database — mananatiling buo ang mga iyon. Hindi na ito mababawi.',
+    confirmLabel: 'Oo, i-reset',
+    danger: true
+  });
+  if (!ok) return;
+
+  const btn = document.getElementById('resetAnalyticsBtn');
+  if (btn) { btn.disabled = true; btn.innerText = '⏳ Ni-reresetan...'; }
+  try {
+    const data = await api('/relay/admin/api/analytics/reset?confirm=RESET', { method: 'POST' });
+    if (data.success) {
+      toast(`✅ Na-reset ang Analytics (${data.clearedCount} entries na-clear).`, 'success');
+      loadAnalytics();
+    } else {
+      toast(data.message || 'Could not reset analytics.', 'error');
+    }
+  } catch (err) {
+    // api() already shows the toast for 403/429; other errors here
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerText = '🔄 Reset Analytics'; }
+  }
 }
 
 function renderAnalytics(a) {
