@@ -2047,18 +2047,30 @@ app.get('/relay/admin/api/analytics', requireAdminKey, (req, res) => {
     const expiringSoon = [];
 
     for (const [installationId, record] of Object.entries(issuedUnlocks)) {
+        // Ang "ACTIVE" na mga bilang (active licenses, active revenue, top
+        // features, expiring soon) ay dapat laging TUGMA sa "Allowed
+        // devices" — ibig sabihin, isang device na (1) may naka-issue na
+        // hindi pa expired na unlock, AT (2) kasalukuyang naka-Allow pa rin.
+        // Kung na-revoke/na-tanggal na ang isang device sa allowlist
+        // (hal. dahil sa "reset device list"), ang mga naiwan nitong
+        // issuedUnlocks record ay itinuturing na ORPHAN/STALE — hindi na
+        // dapat mabilang sa "active" — kahit hindi pa sila tinatanggal sa
+        // ALL-TIME na kasaysayan (allTime* pa rin ang naghahawak ng
+        // buong history, kasama na ang mga orphan, para sa audit trail).
+        const isAllowedDevice = allowedDevices.has(installationId);
+
         for (const [featureId, entry] of Object.entries(record)) {
             const isExpired = typeof entry.expiresAt === 'number' && now > entry.expiresAt;
 
             if (featureId === DEMO_FEATURE_ID) {
-                if (!isExpired) demoActiveCount++;
+                if (!isExpired && isAllowedDevice) demoActiveCount++;
                 continue;
             }
 
             allTimeUnlocksCount++;
             allTimeRevenue += entry.price || 0;
 
-            if (!isExpired) {
+            if (!isExpired && isAllowedDevice) {
                 activeUnlocksCount++;
                 activeRevenue += entry.price || 0;
                 featureCounts[featureId] = (featureCounts[featureId] || 0) + 1;
@@ -2115,18 +2127,28 @@ app.get('/relay/admin/api/analytics', requireAdminKey, (req, res) => {
 
 // --------------------------------------------------------------
 // POST /relay/admin/api/analytics/reset
-// "Reset Analytics" — binubura LANG ang buong activityLog (ang pinagmumulan
-// ng "Activity" na 7d/30d na bilang ng unlocks, at ng "History" timeline sa
-// Device Detail ng BAWAT device). Ito rin ang tanging bahagi ng Analytics
-// dashboard na TALAGANG hiwalay sa aktwal na entitlements/customer data —
-// kaya ito lang ang binubura, at HINDI ito nagagalaw:
-//   - issuedUnlocks    (mga naka-unlock/binayarang features ng customer)
+// "Reset Analytics" — dalawang bagay LANG ang ginagalaw nito:
+//
+// 1. Binubura ang buong activityLog (ang pinagmumulan ng "Activity" na
+//    7d/30d na bilang ng unlocks, at ng "History" timeline sa Device
+//    Detail ng BAWAT device).
+//
+// 2. Binubura ang mga ORPHAN/STALE na entry sa issuedUnlocks — ibig
+//    sabihin, mga naka-record na "unlock" para sa isang installationId na
+//    HINDI NA kasalukuyang naka-Allow (hal. dating na-unlock na device na
+//    tinanggal na sa allowlist noong nag-reset ng device list, pero
+//    naiwan pa rin ang lumang unlock record nito). ANG MGA ITO ANG
+//    SANHI kung bakit hindi tugma ang "Active Licenses"/"Active Revenue"
+//    sa aktwal na bilang ng "Allowed devices" — kaya ito ang binubura
+//    dito para talagang mag-zero/mag-tama ang mga bilang.
+//
+// MAHALAGA: hindi kailanman ginagalaw nito ang mga unlock record ng mga
+// device na KASALUKUYANG naka-Allow pa rin — ibig sabihin, ligtas ang
+// mga totoong aktibong customer/naka-unlock na features nila. Gayundin,
+// HINDI ginagalaw:
 //   - allowedDevices / deviceLabels / deviceFingerprints (device+customer list)
 //   - backupCheckins   (backup metadata ng customer)
-//   - seenDevices, pendingOtps (live status, hindi rin naman "history")
-// Kaya kahit ma-reset ang Analytics, hindi mawawala ang mga nabenta/
-// naka-unlock na feature at hindi rin madadamay ang naka-save na
-// customer database.
+//   - seenDevices, pendingOtps (live status)
 // Kailangan ng ?confirm=RESET (o {confirm:"RESET"} sa body) bilang
 // safety check, dahil hindi na ito mababawi.
 // --------------------------------------------------------------
@@ -2139,20 +2161,42 @@ app.post('/relay/admin/api/analytics/reset', requireAdminKey, (req, res) => {
         });
     }
 
-    const clearedCount = activityLog.length;
+    // 1. Activity log — buong "Activity" 7d/30d at Device History timeline.
+    const clearedActivityCount = activityLog.length;
     activityLog = [];
     saveActivityLog(activityLog);
 
+    // 2. Orphan/stale na issuedUnlocks — mga record para sa device na
+    //    HINDI NA naka-Allow. Ang mga record ng KASALUKUYANG naka-Allow na
+    //    device ay hindi ginagalaw (kaya buo pa rin ang totoong customer
+    //    data/naka-unlock na features).
+    let clearedOrphanDeviceCount = 0;
+    let clearedOrphanFeatureCount = 0;
+    for (const installationId of Object.keys(issuedUnlocks)) {
+        if (!allowedDevices.has(installationId)) {
+            clearedOrphanFeatureCount += Object.keys(issuedUnlocks[installationId]).length;
+            delete issuedUnlocks[installationId];
+            clearedOrphanDeviceCount++;
+        }
+    }
+    if (clearedOrphanDeviceCount > 0) {
+        saveIssuedUnlocks(issuedUnlocks);
+    }
+
     // Bagong unang linya ng buong (bagong-simula) activity log — audit
-    // trail na may nagbura ng analytics, at kasabay nito ay nire-reset na
-    // rin ang "unlocksLast7d/30d" pababalik sa 0 (dahil doon nagmumula ang
-    // mga bilang na iyon).
-    logActivity(null, 'analytics_reset', { clearedCount });
+    // trail na may nagbura ng analytics.
+    logActivity(null, 'analytics_reset', {
+        clearedActivityCount,
+        clearedOrphanDeviceCount,
+        clearedOrphanFeatureCount
+    });
 
     res.json({
         success: true,
-        clearedCount,
-        message: `Na-reset ang Analytics: nabura ang ${clearedCount} activity-log entries (Activity 7d/30d at Device History). Hindi ginalaw ang issued unlocks/features at ang device/customer database (allowed devices, labels, backup check-ins).`
+        clearedActivityCount,
+        clearedOrphanDeviceCount,
+        clearedOrphanFeatureCount,
+        message: `Na-reset ang Analytics: nabura ang ${clearedActivityCount} activity-log entries, at ${clearedOrphanFeatureCount} orphan/stale na license record mula sa ${clearedOrphanDeviceCount} device na hindi na naka-Allow. Hindi ginalaw ang unlocks ng mga device na kasalukuyang naka-Allow, at hindi rin ginalaw ang device/customer database (allowed devices, labels, backup check-ins).`
     });
 });
 

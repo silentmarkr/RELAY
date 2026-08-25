@@ -3267,7 +3267,7 @@ async function loadAnalytics() {
 async function resetAnalytics() {
   const ok = await confirmAction({
     title: 'Reset Analytics?',
-    message: 'Ire-reset ang Activity log (7d/30d na bilang ng unlocks, at ang History timeline ng lahat ng device). Hindi ito magagalaw sa mga naka-unlock na features o sa naka-save na customer/device database — mananatiling buo ang mga iyon. Hindi na ito mababawi.',
+    message: 'Ire-reset ang Activity log (7d/30d na bilang ng unlocks, at ang History timeline ng lahat ng device), at bubura ng mga orphan/stale na license record na naiwan ng mga device na HINDI NA naka-Allow (para tumugma ang Active Licenses/Revenue sa aktwal na Allowed devices). Hindi ito magagalaw sa unlocks ng mga device na KASALUKUYANG naka-Allow, o sa naka-save na customer/device database — mananatiling buo ang mga iyon. Hindi na ito mababawi.',
     confirmLabel: 'Oo, i-reset',
     danger: true
   });
@@ -3278,7 +3278,7 @@ async function resetAnalytics() {
   try {
     const data = await api('/relay/admin/api/analytics/reset?confirm=RESET', { method: 'POST' });
     if (data.success) {
-      toast(`✅ Na-reset ang Analytics (${data.clearedCount} entries na-clear).`, 'success');
+      toast(`✅ Na-reset ang Analytics (${data.clearedActivityCount} activity entries, ${data.clearedOrphanFeatureCount} orphan license record mula sa ${data.clearedOrphanDeviceCount} device na hindi na naka-Allow).`, 'success');
       loadAnalytics();
     } else {
       toast(data.message || 'Could not reset analytics.', 'error');
