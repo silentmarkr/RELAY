@@ -2318,12 +2318,45 @@ app.post('/relay/admin/api/devices/:installationId/activate', requireAdminKey, (
         : null;
 
     const tokens = {};
+
+    // Kung tierId ang ginamit, gamitin ang bundlePrice ng tier (na may
+    // discount) sa halip na ang buong à la carte na presyo ng bawat
+    // feature — kaya tumutugma rin dito ang na-record na revenue sa
+    // aktwal na presyo ng bundle/tier na ito (parehong logic ng
+    // ginagamit sa /relay/confirm-unlock-bulk para sa customer-facing
+    // na bundle purchases). Kung featureId/featureIds (à la carte,
+    // hindi tier) ang ginamit, mananatili ang dating gawi — ang buong
+    // à la carte price ng bawat isa.
+    let perFeaturePrice = {};
+    if (tierId) {
+        const tier = UPGRADE_TIERS.find(t => t.id === tierId);
+        const alaCartePrices = idsToActivate.map(id => (FEATURE_CATALOG[id] && FEATURE_CATALOG[id].price) || 0);
+        const alaCarteTotal = alaCartePrices.reduce((s, p) => s + p, 0);
+
+        if (alaCarteTotal > 0) {
+            let allocated = 0;
+            idsToActivate.forEach((id, i) => {
+                const share = Math.floor((tier.bundlePrice * alaCartePrices[i]) / alaCarteTotal);
+                perFeaturePrice[id] = share;
+                allocated += share;
+            });
+            const remainder = Math.round(tier.bundlePrice) - allocated;
+            if (remainder !== 0 && idsToActivate.length > 0) {
+                const priciestIdx = alaCartePrices.indexOf(Math.max(...alaCartePrices));
+                perFeaturePrice[idsToActivate[priciestIdx]] += remainder;
+            }
+        }
+    }
+
     for (const id of idsToActivate) {
         const token = issueSignedToken(installationId, id, durationMs);
         tokens[id] = token;
+        const priceForThisFeature = Object.prototype.hasOwnProperty.call(perFeaturePrice, id)
+            ? perFeaturePrice[id]
+            : FEATURE_CATALOG[id].price;
         recordIssuedUnlock(installationId, id, token, {
             featureName: FEATURE_CATALOG[id].name,
-            price: FEATURE_CATALOG[id].price,
+            price: priceForThisFeature,
             source: 'admin-direct',
             note: note || null
         });
@@ -4071,15 +4104,72 @@ app.post('/relay/confirm-unlock-bulk', requireApiKey, requireAllowedDevice, rate
     const durationMs = typeof pending.durationDays === 'number' && pending.durationDays > 0
         ? pending.durationDays * 24 * 60 * 60 * 1000
         : null;
+
+    // --------------------------------------------------------------
+    // PROPORTIONAL BUNDLE-DISCOUNT PRICING — dati, bawat featureId sa
+    // bundle ay naire-record gamit ang SARILING à la carte na presyo
+    // mula sa FEATURE_CATALOG (walang discount), kahit na ang aktwal
+    // na binayaran ng customer (pending.price, mula sa totalPrice na
+    // ipinasa ng OMNIPOS client noong /request-unlock-bulk) ay MAS
+    // MABABA dahil sa bundle/tier discount. Ibig sabihin, kada mag-
+    // bundle ang isang customer, "bumubulak" (overstated) ang
+    // Active Revenue sa Analytics kumpara sa TOTOONG binayaran.
+    //
+    // Para tumugma ang revenue sa Relay sa aktwal na binayaran (kasama
+    // ang discount), ipinapamahagi na natin ang pending.price nang
+    // PROPORTIONAL sa à la carte na presyo ng bawat feature (kaya ang
+    // mas mahal na feature ay mas malaking bahagi ng discount ang
+    // natatanggap), sa halip na gamitin ang buong à la carte price ng
+    // bawat isa. Kung walang pending.price (hal. direktang na-activate
+    // ng admin nang walang totalPrice), babalik ito sa dating gawi —
+    // gamitin na lang ang à la carte price ng bawat feature.
+    // --------------------------------------------------------------
+    let perFeaturePrice = {};
+    if (typeof pending.price === 'number' && pending.price >= 0) {
+        const alaCartePrices = featureIds.map(id => (FEATURE_CATALOG[id] && FEATURE_CATALOG[id].price) || 0);
+        const alaCarteTotal = alaCartePrices.reduce((s, p) => s + p, 0);
+
+        if (alaCarteTotal > 0) {
+            let allocated = 0;
+            featureIds.forEach((id, i) => {
+                const share = Math.floor((pending.price * alaCartePrices[i]) / alaCarteTotal);
+                perFeaturePrice[id] = share;
+                allocated += share;
+            });
+            // Ilagay ang natirang piso (dahil sa pag-round-down) sa
+            // pinakamahal na feature, para eksaktong tumutugma pa rin
+            // ang KABUUAN ng mga naka-record na presyo sa pending.price
+            // (ang aktwal na binayaran).
+            let remainder = Math.round(pending.price) - allocated;
+            if (remainder !== 0 && featureIds.length > 0) {
+                const priciestIdx = alaCartePrices.indexOf(Math.max(...alaCartePrices));
+                perFeaturePrice[featureIds[priciestIdx]] += remainder;
+            }
+        } else {
+            // Walang à la carte reference (hal. lahat unknown/₱0 sa
+            // catalog) — hatiin na lang nang pantay-pantay.
+            const evenShare = Math.floor(pending.price / featureIds.length);
+            let allocated = 0;
+            featureIds.forEach((id, i) => {
+                perFeaturePrice[id] = evenShare;
+                allocated += evenShare;
+            });
+            perFeaturePrice[featureIds[featureIds.length - 1]] += Math.round(pending.price) - allocated;
+        }
+    }
+
     for (let i = 0; i < featureIds.length; i++) {
         const featureId = featureIds[i];
         const token = issueSignedToken(installationId, featureId, durationMs);
         tokens[featureId] = token;
 
         const featureName = namesList[i] || featureId;
+        const priceForThisFeature = Object.prototype.hasOwnProperty.call(perFeaturePrice, featureId)
+            ? perFeaturePrice[featureId]
+            : (FEATURE_CATALOG[featureId] ? FEATURE_CATALOG[featureId].price : null);
         recordIssuedUnlock(installationId, featureId, token, {
             featureName,
-            price: FEATURE_CATALOG[featureId] ? FEATURE_CATALOG[featureId].price : null,
+            price: priceForThisFeature,
             source: 'otp-bulk'
         });
         logActivity(installationId, 'unlock_issued', { featureId, featureName, source: 'otp-bulk' });
