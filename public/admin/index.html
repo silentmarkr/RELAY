@@ -2111,11 +2111,50 @@ function createProgressController(ids) {
   let animInterval = null;
   let displayed = 0;
   let target = { percent: 0, message: '', stage: 'idle', done: false, etaMs: null };
+  // ROOT CAUSE FIX (live progress "hindi gumagana"/namamatay agad):
+  // startPolling() ay tinatawag BAGO pa man maipadala ang aktwal na
+  // build/publish request (tingnan ang buildRelease()/publishRelease()) —
+  // kaya ang UNANG poll papuntang /relay/admin/api/build-progress ay
+  // madalas na UMAABOT sa server BAGO pa dumating doon ang totoong POST
+  // build-release/publish-release request (dalawang magkahiwalay ngunit
+  // halos magkasabay na fetch() mula sa parehong JS tick — walang
+  // garantiya kung alin ang mauunang ma-proseso ng server). Kapag
+  // nangyari ito, ang nakikita ng unang (o unang ilang) poll ay ang
+  // LUMANG buildProgressState — na "done: true" (idle state ng server,
+  // o natapos na ang isang NAKARAANG build) — kaya AGAD na tinatawag
+  // ang stopPolling() bago pa man magsimula ang totoong build,
+  // kahit hindi pa talaga ito nagsisimula/tapos. Ito ang dahilan kaya
+  // parang "namamatay"/hindi gumagalaw ang progress bar.
+  // FIX: huwag munang paniwalaan/i-apply ang isang "done: true" na
+  // resulta hangga't hindi pa nakikita ang build bilang AKTIBO
+  // (ibig sabihin, isang "done: false" na resulta muna mula sa
+  // TALAGANG tumatakbo nang build na ito) — ligtas na ipagpalagay na
+  // stale/luma pa lang ito, kaya patuloy lang mag-poll sa halip na
+  // itigil agad.
+  let sawActive = false;
   // Sariling "local clock" para sa ETA countdown — hindi na kailangang
   // hintayin ang susunod na 700ms poll para bumaba nang isang segundo ang
   // ipinapakitang "time remaining"; kada tick (120ms), bumababa ito nang
-  // katumbas na oras, at ni-re-sync na lang sa totoong server value kada
-  // may bagong poll result (para hindi ito lumihis nang husto sa totoo).
+  // katumbas na oras.
+  // BUG FIX ("minute:second na parang naglo-loop/umuulit" habang
+  // nag-oobfuscate): dati, kada dumarating ang bagong poll (700ms),
+  // DIRETSONG pinapalitan/ni-reresync ang `etaMsLocal` sa bagong raw na
+  // estimate mula sa server (walang smoothing) — tingnan ang
+  // estimateRemainingMs() sa server: iba't ibang oras ang inaabot ng
+  // pag-obfuscate ng bawat file (malaki vs. maliit na file), kaya
+  // lumulundag-lundag/hindi pantay ang bawat bagong estimate. Dahil
+  // basta pinapalitan agad ang buong displayed countdown sa bawat
+  // 700ms, ang itsura sa admin ay parang "tumatalbog"/umuulit ang
+  // minute:second (hal. 1m52s → 10s → 1m40s...) sa halip na tuluy-
+  // tuloy na bumababa. FIX: hiwalayin ang "raw target mula sa server"
+  // (etaTargetMs) sa "displayed na oras" (etaMsLocal) — patuloy pa ring
+  // bumababa ang displayed kada tick gaya ng dati, pero sa halip na
+  // basta i-snap papunta sa bagong etaTargetMs sa tuwing may bagong
+  // poll, dahan-dahan lang itong ihinahatak papunta doon (10% ng
+  // agwat kada tick) — kaya kahit lumundag ang totoong estimate,
+  // tuluy-tuloy pa ring bumababa ang nakikita ng admin, walang
+  // biglaang "pag-loop"/pagtalbog pabalik-balik.
+  let etaTargetMs = null;
   let etaMsLocal = null;
   let etaLastTickAt = null;
 
@@ -2142,8 +2181,14 @@ function createProgressController(ids) {
         : 'linear-gradient(90deg, var(--accent-dim), var(--accent))';
     }
     if (typeof target.etaMs === 'number') {
-      etaMsLocal = target.etaMs;
-      etaLastTickAt = Date.now();
+      etaTargetMs = target.etaMs;
+      // Kung wala pang displayed value (unang estimate ng build na ito),
+      // simulan dito nang direkta — walang dating countdown na dapat
+      // i-preserve pa.
+      if (etaMsLocal == null) {
+        etaMsLocal = etaTargetMs;
+        etaLastTickAt = Date.now();
+      }
     }
     if (target.done && etaEl) etaEl.innerText = '';
   }
@@ -2178,8 +2223,23 @@ function createProgressController(ids) {
     if (etaEl && !target.done) {
       if (etaMsLocal != null && etaLastTickAt != null) {
         const now = Date.now();
-        etaMsLocal = Math.max(0, etaMsLocal - (now - etaLastTickAt));
+        const elapsedTick = now - etaLastTickAt;
         etaLastTickAt = now;
+        // Bumababa muna nang normal ayon sa totoong lumipas na oras
+        // (parang normal na countdown clock).
+        etaMsLocal = Math.max(0, etaMsLocal - elapsedTick);
+        // Pagkatapos, dahan-dahan lang ihatak papunta sa pinakabagong
+        // totoong estimate ng server (etaTargetMs) — 10% ng natitirang
+        // agwat kada tick (120ms) — sa halip na basta i-snap papunta
+        // dito. Kaya kahit lumundag ang totoong estimate mula file
+        // patungo sa file (malaki vs. maliit), hindi ito biglang
+        // "tumatalbog"/naglo-loop sa mata ng admin — tuluy-tuloy pa
+        // ring bumababa, unti-unti na lang itong nahihila papunta sa
+        // tamang halaga sa paglipas ng ilang segundo.
+        if (etaTargetMs != null) {
+          const gap = etaTargetMs - etaMsLocal;
+          etaMsLocal = Math.max(0, etaMsLocal + gap * 0.1);
+        }
         etaEl.innerText = formatEta(etaMsLocal);
       } else {
         etaEl.innerText = '';
@@ -2222,6 +2282,8 @@ function createProgressController(ids) {
     withScrollHold(() => { if (wrap) wrap.style.display = 'block'; });
     displayed = 0;
     renderPercent(0);
+    sawActive = false;
+    etaTargetMs = null;
     etaMsLocal = null;
     etaLastTickAt = null;
     if (etaEl) etaEl.innerText = '';
@@ -2253,6 +2315,21 @@ function createProgressController(ids) {
       // matawag na "failed" at masubukang muli.
       const data = await api('/relay/admin/api/build-progress', { timeoutMs: 5000 });
       if (data && data.success && data.progress) {
+        // ROOT CAUSE FIX (tingnan ang malaking komento sa `sawActive`
+        // sa itaas): kung "done: true" pa ang nakikita natin dito
+        // pero hindi pa natin ito nakikitang "active" (hindi pa
+        // natin nakikita bilang done:false na galing mismo sa
+        // build na ito), ipagpalagay na LUMANG state pa lang ito
+        // (stale mula sa nakaraang build, o idle state ng server) —
+        // huwag itong i-apply sa progress bar (para hindi
+        // magpakita ng maling "Build finished."/"error" mula sa
+        // dati) at HUWAG munang itigil ang polling; hintayin na
+        // lang ang susunod na tick (700ms) hanggang aktwal na
+        // maproseso ng server ang totoong build/publish request.
+        if (data.progress.done && !sawActive) {
+          return;
+        }
+        if (!data.progress.done) sawActive = true;
         applyTarget(data.progress);
         if (data.progress.done) stopPolling();
       }
@@ -2264,6 +2341,7 @@ function createProgressController(ids) {
 
   function startPolling() {
     stopPolling();
+    sawActive = false;
     pollOnce();
     pollInterval = setInterval(pollOnce, 700);
   }
