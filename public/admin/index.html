@@ -1290,7 +1290,7 @@ a:focus-visible,
     </div>
 
     <div class="tab-panel" id="tabPanel-devices" style="display:none;">
-      <div class="card collapsible" id="cardAllowedDevices" data-card-id="allowedDevices">
+      <div class="card collapsible collapsed" id="cardAllowedDevices" data-card-id="allowedDevices">
         <h2 onclick="toggleCardCollapse('cardAllowedDevices')">Allowed devices <span class="count-pill" id="allowedCountPill">0</span><span class="collapse-chevron">▾</span></h2>
         <div class="collapse-body">
           <div class="bulk-reset-bar" id="bulkResetBar" style="display:flex; align-items:center; gap:10px; margin-bottom:10px; flex-wrap:wrap;">
@@ -1307,7 +1307,7 @@ a:focus-visible,
         </div>
       </div>
 
-      <div class="card collapsible" id="cardRecentlySeen" data-card-id="recentlySeen">
+      <div class="card collapsible collapsed" id="cardRecentlySeen" data-card-id="recentlySeen">
         <h2 onclick="toggleCardCollapse('cardRecentlySeen')">Recently seen (everyone who requested) <span class="count-pill" id="seenCountPill">0</span><span class="collapse-chevron">▾</span></h2>
         <div class="collapse-body">
           <div class="filter-bar">
@@ -1341,7 +1341,7 @@ a:focus-visible,
         </div>
       </div>
 
-      <div class="card collapsible" id="cardBackupRestore" data-card-id="backupRestore">
+      <div class="card collapsible collapsed" id="cardBackupRestore" data-card-id="backupRestore">
         <h2 onclick="toggleCardCollapse('cardBackupRestore')">💾 Backup / Restore<span class="collapse-chevron">▾</span></h2>
         <div class="collapse-body">
           <div class="backup-note">
@@ -1363,7 +1363,7 @@ a:focus-visible,
         </div>
       </div>
 
-      <div class="card collapsible" id="cardPublishUpdate" data-card-id="publishUpdate">
+      <div class="card collapsible collapsed" id="cardPublishUpdate" data-card-id="publishUpdate">
         <h2 onclick="toggleCardCollapse('cardPublishUpdate')">🚀 Publish a New Update <span style="font-size:11px; color:var(--muted); font-weight:normal;">(build + publish in one click — no Termux/curl required)</span><span class="collapse-chevron">▾</span></h2>
         <div class="collapse-body">
           <div class="backup-note">
@@ -1402,7 +1402,7 @@ a:focus-visible,
         </div>
       </div>
 
-      <div class="card collapsible" id="cardDownloadPackage" data-card-id="downloadPackage">
+      <div class="card collapsible collapsed" id="cardDownloadPackage" data-card-id="downloadPackage">
         <h2 onclick="toggleCardCollapse('cardDownloadPackage')">📦 Download Client Package <span style="font-size:11px; color:var(--muted); font-weight:normal;">(offline setup for a new client)</span><span class="collapse-chevron">▾</span></h2>
         <div class="collapse-body">
           <div class="backup-note">
@@ -1436,7 +1436,7 @@ a:focus-visible,
         </div>
       </div>
 
-      <div class="card collapsible" id="cardBuildHistory" data-card-id="buildHistory">
+      <div class="card collapsible collapsed" id="cardBuildHistory" data-card-id="buildHistory">
         <h2 onclick="toggleCardCollapse('cardBuildHistory')">🕘 Build History<span class="collapse-chevron">▾</span></h2>
         <div class="collapse-body">
           <div class="backup-note">
@@ -1503,7 +1503,7 @@ a:focus-visible,
       </div>
     </div>
 
-    <div class="card collapsible" id="cardCloudBackup" data-card-id="cloudBackup">
+    <div class="card collapsible collapsed" id="cardCloudBackup" data-card-id="cloudBackup">
       <h2 onclick="toggleCardCollapse('cardCloudBackup')">☁️ Cloud Backup <span style="font-size:11px; color:var(--muted); font-weight:normal;">(this device's full database, excluding user accounts)</span><span class="collapse-chevron">▾</span></h2>
       <div class="collapse-body">
         <div id="cloudBackupStatusLine" class="meta">Loading...</div>
@@ -1515,14 +1515,14 @@ a:focus-visible,
       </div>
     </div>
 
-    <div class="card collapsible" id="cardUnlocked" data-card-id="unlocked">
+    <div class="card collapsible collapsed" id="cardUnlocked" data-card-id="unlocked">
       <h2 onclick="toggleCardCollapse('cardUnlocked')">✅ Unlocked<span class="collapse-chevron">▾</span></h2>
       <div class="collapse-body">
         <div id="detailUnlockedList" class="empty">Loading...</div>
       </div>
     </div>
 
-    <div class="card collapsible" id="cardLocked" data-card-id="locked">
+    <div class="card collapsible collapsed" id="cardLocked" data-card-id="locked">
       <h2 onclick="toggleCardCollapse('cardLocked')">🔒 Still Locked <span style="font-size:11px; color:var(--muted); font-weight:normal;">(already have a reference? activate right away)</span><span class="collapse-chevron">▾</span></h2>
       <div class="collapse-body">
         <div id="detailTierRow" class="tier-row"></div>
@@ -1674,10 +1674,13 @@ function escapeAttr(str) {
 
 // ---------------- COLLAPSIBLE CARDS ----------------
 // Toggle-fold ng mga card na "Cloud Backup", "Allowed devices",
-// "Recently seen", "Unlocked", at "Still Locked" — inaalala ang
-// bukas/sara na estado kada card sa localStorage (ng browser ng admin
-// na ito lang, hindi ini-sync sa ibang tao) para pareho pa rin ang
-// tingin sa susunod na pagbukas ng panel/page.
+// "Recently seen", "Unlocked", "Still Locked", at ang mga card sa
+// Downloads tab. NAKA-DEFAULT COLLAPSED lahat ng card na ito kada
+// mag-login (tingnan ang login()sa ibaba, kung saan ini-clear ang mga
+// stored na estado) — pero habang nakalogin/naka-open ang tab, inaalala
+// pa rin kung alin ang binuksan/isinara ng admin (sessionStorage — awtomatikong
+// nawawala pag nag-logout o nagsara ng tab), para hindi mawala ang
+// pagkakabukas nito habang nagpapalipat-lipat lang ng tab/screen.
 const COLLAPSE_STORAGE_PREFIX = 'relay-admin-collapsed:';
 
 function toggleCardCollapse(cardId) {
@@ -1685,24 +1688,44 @@ function toggleCardCollapse(cardId) {
   if (!card) return;
   const collapsed = card.classList.toggle('collapsed');
   try {
-    localStorage.setItem(COLLAPSE_STORAGE_PREFIX + (card.dataset.cardId || cardId), collapsed ? '1' : '0');
-  } catch (err) { /* localStorage unavailable — okay lang, hindi mahalaga sa functionality */ }
+    sessionStorage.setItem(COLLAPSE_STORAGE_PREFIX + (card.dataset.cardId || cardId), collapsed ? '1' : '0');
+  } catch (err) { /* sessionStorage unavailable — okay lang, hindi mahalaga sa functionality */ }
 }
 
 // Tinatawag ito tuwing ipinapakita ang isang screen na may collapsible
-// card (Home/Devices tab, Device Detail) para ma-apply ang naka-save
-// nang estado (kung meron) sa bawat card.
+// card (Home/Devices tab, Device Detail, Downloads tab) para ma-apply
+// ang naka-save nang estado ngayong session (kung meron) sa bawat card —
+// kung wala pang naka-toggle ngayong session (bagong login lang), COLLAPSED
+// ang default.
 function applyStoredCardCollapse(cardIds) {
   cardIds.forEach(cardId => {
     const card = document.getElementById(cardId);
     if (!card) return;
     try {
-      const stored = localStorage.getItem(COLLAPSE_STORAGE_PREFIX + (card.dataset.cardId || cardId));
+      const stored = sessionStorage.getItem(COLLAPSE_STORAGE_PREFIX + (card.dataset.cardId || cardId));
       if (stored === '1') card.classList.add('collapsed');
       else if (stored === '0') card.classList.remove('collapsed');
-    } catch (err) { /* localStorage unavailable — okay lang, default na lang (open) */ }
+      // kung wala pang stored value, iwan na lang ang default (collapsed) na
+      // galing sa HTML markup mismo.
+    } catch (err) { /* sessionStorage unavailable — okay lang, default na lang (collapsed) */ }
   });
 }
+
+// Binubura ang lahat ng "binukas/isinara" na estado ng mga collapsible
+// card ngayong session — tinatawag sa TUWING matagumpay na mag-login,
+// para laging NAKA-DEFAULT COLLAPSED ang lahat ng card kada bagong
+// pag-login (hindi na basta "naaalala" mula sa dating session).
+function resetCollapsedCardsOnLogin() {
+  try {
+    const keysToRemove = [];
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const key = sessionStorage.key(i);
+      if (key && key.startsWith(COLLAPSE_STORAGE_PREFIX)) keysToRemove.push(key);
+    }
+    keysToRemove.forEach(key => sessionStorage.removeItem(key));
+  } catch (err) { /* sessionStorage unavailable — okay lang */ }
+}
+
 
 function onDeviceCheckboxChange(id, checked) {
   if (checked) selectedForReset.add(id);
@@ -1913,6 +1936,7 @@ function login() {
   adminKey = document.getElementById('adminKeyInput').value.trim();
   if (!adminKey) return;
   sessionStorage.setItem('relayAdminKey', adminKey);
+  resetCollapsedCardsOnLogin();
   lastActivityAt = Date.now();
   renderLastExportNote();
   renderAutoBackupToggle();
