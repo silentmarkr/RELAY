@@ -1386,6 +1386,12 @@ a:focus-visible,
           <div class="backup-note" style="margin-top:6px;">
             If you fill in a Target Installation ID, the "update available" notice will go ONLY to that device — other clients won't see it until you clear the target or make the same version global (blank Target ID). <strong>Note:</strong> the actual zip file is still shared/single — this only targets who sees the notice, it's not a hard download block.
           </div>
+          <div class="backup-row" style="margin-top:8px; align-items:center;">
+            <label style="display:flex; align-items:center; gap:6px; font-size:13px; color:var(--muted); cursor:pointer;">
+              <input type="checkbox" id="publishObfuscateCheckbox" checked style="width:16px; height:16px; cursor:pointer;">
+              Obfuscate the code in this release
+            </label>
+          </div>
           <div class="backup-row" style="margin-top:10px;">
             <button class="btn-primary" onclick="publishRelease()" id="publishReleaseBtn">🚀 Build & Publish</button>
           </div>
@@ -1412,6 +1418,12 @@ a:focus-visible,
             <input type="text" id="buildCaption" placeholder="Caption for this build (optional, e.g. 'hotfix barcode scan')" style="flex:2; min-width:200px;">
             <button class="btn-ghost" onclick="buildRelease()" id="buildReleaseBtn">🛠️ Build Release (git → zip)</button>
             <button class="btn-ghost" onclick="downloadCodesJSON()">⬇️ Download List (JSON)</button>
+          </div>
+          <div class="backup-row" style="margin-top:8px; align-items:center;">
+            <label style="display:flex; align-items:center; gap:6px; font-size:13px; color:var(--muted); cursor:pointer;">
+              <input type="checkbox" id="buildObfuscateCheckbox" checked style="width:16px; height:16px; cursor:pointer;">
+              Obfuscate the code in this build
+            </label>
           </div>
           <div class="backup-note" style="margin-top:6px;">
             The caption is only for the history log below — it doesn't change the filename of the built package (it's always <code>omnipos-client.zip</code>, just overwritten each build).
@@ -2373,18 +2385,26 @@ async function buildRelease() {
   const btn = document.getElementById('buildReleaseBtn');
   const captionInput = document.getElementById('buildCaption');
   const caption = captionInput ? captionInput.value.trim() : '';
+  const obfuscateCheckbox = document.getElementById('buildObfuscateCheckbox');
+  // Default TRUE kung nawawala ang checkbox sa DOM sa anumang dahilan —
+  // ito rin ang default ng backend kapag walang natanggap na "obfuscate"
+  // field, kaya walang pagbabago sa dating behavior.
+  const obfuscate = obfuscateCheckbox ? !!obfuscateCheckbox.checked : true;
   btn.disabled = true;
   btn.innerText = '⏳ Ginagawa...';
   buildProgressCtl.show();
   buildProgressCtl.startPolling();
   try {
+    const body = { obfuscate };
+    if (caption) body.caption = caption;
     const data = await api('/relay/admin/api/build-release', {
       method: 'POST',
-      body: JSON.stringify(caption ? { caption } : {})
+      body: JSON.stringify(body)
     });
     if (data.success) {
       buildProgressCtl.setTarget({ percent: 100, message: 'Build finished.', stage: 'done', done: true });
-      toast(`✅ Release built (${(data.sizeBytes / 1024 / 1024).toFixed(2)} MB).`, 'success');
+      const obfNote = data.obfuscated === false ? ' — unobfuscated' : '';
+      toast(`✅ Release built (${(data.sizeBytes / 1024 / 1024).toFixed(2)} MB)${obfNote}.`, 'success');
       if (captionInput) captionInput.value = '';
       loadBuildHistory();
     } else {
@@ -2420,6 +2440,7 @@ async function publishRelease() {
   const repoUrlInput = document.getElementById('publishRepoUrlInput');
   const refInput = document.getElementById('publishRefInput');
   const targetIdInput = document.getElementById('publishTargetIdInput');
+  const obfuscateCheckbox = document.getElementById('publishObfuscateCheckbox');
 
   const version = versionInput ? versionInput.value.trim() : '';
   if (!version) {
@@ -2427,7 +2448,11 @@ async function publishRelease() {
     return;
   }
 
-  const body = { version };
+  // Default TRUE kung nawawala ang checkbox sa DOM sa anumang dahilan —
+  // ito rin ang default ng backend kapag walang natanggap na "obfuscate"
+  // field, kaya walang pagbabago sa dating behavior.
+  const obfuscate = obfuscateCheckbox ? !!obfuscateCheckbox.checked : true;
+  const body = { version, obfuscate };
   const changelog = changelogInput ? changelogInput.value.trim() : '';
   // FIX: the caption used to be missing from the body here — so it was always
   // "(no caption)" in the History log whenever "Build & Publish" (one
@@ -2460,7 +2485,8 @@ async function publishRelease() {
       const scopeMsg = data.targeted
         ? `targeted only at installationId ${data.installationId}`
         : 'now visible to ALL clients';
-      toast(`✅ Built v${version} (${mb} MB) — ${scopeMsg}.`, 'success');
+      const obfNote = data.build && data.build.obfuscated === false ? ' — unobfuscated' : '';
+      toast(`✅ Built v${version} (${mb} MB)${obfNote} — ${scopeMsg}.`, 'success');
       if (versionInput) versionInput.value = '';
       if (changelogInput) changelogInput.value = '';
       if (captionInput) captionInput.value = '';

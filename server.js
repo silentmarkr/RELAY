@@ -5056,16 +5056,25 @@ function planReleaseTree(tmpDir) {
     return items;
 }
 
-async function obfuscateReleaseTree(tmpDir, onProgress) {
+// shouldObfuscate (default true — dating default/pre-existing na
+// behavior kung walang ipinasa/reqBody.obfuscate ay undefined, para
+// walang masirang existing na build/publish flow o API caller na hindi
+// pa alam sa bagong option na ito): kapag false, LILIPAT LANG ang mga
+// server/client JS at inline <script> nang hindi dumadaan sa
+// JavaScriptObfuscator (walang rename/string-encode/dead-code) — pero
+// tuloy pa rin ang comment-stripping ng CSS/HTML (cosmetic lang,
+// hindi nakakaapekto sa functionality) para pareho pa rin ang laki/
+// package structure ng resulta.
+async function obfuscateReleaseTree(tmpDir, onProgress, shouldObfuscate = true) {
     const items = planReleaseTree(tmpDir);
     const totalItems = items.length;
     let obfuscatedCount = 0;
 
     for (const { type, full } of items) {
         if (type === 'server') {
-            await obfuscateFileInPlace(full, pickReleaseObfOptions(full, false));
+            if (shouldObfuscate) await obfuscateFileInPlace(full, pickReleaseObfOptions(full, false));
         } else if (type === 'client') {
-            await obfuscateFileInPlace(full, pickReleaseObfOptions(full, true));
+            if (shouldObfuscate) await obfuscateFileInPlace(full, pickReleaseObfOptions(full, true));
         } else if (type === 'html') {
             let html = fs.readFileSync(full, 'utf8');
             // FIX: inline-script obfuscation used to run BEFORE comment
@@ -5081,12 +5090,15 @@ async function obfuscateReleaseTree(tmpDir, onProgress) {
             // scanning for script tags removes any comment text that
             // could confuse the scanner.
             html = stripHtmlComments(html);
-            html = await obfuscateHtmlInlineScripts(html, pickReleaseObfOptions(full, true));
+            if (shouldObfuscate) html = await obfuscateHtmlInlineScripts(html, pickReleaseObfOptions(full, true));
             fs.writeFileSync(full, html, 'utf8');
         } else if (type === 'css') {
             const css = fs.readFileSync(full, 'utf8');
             fs.writeFileSync(full, stripCssComments(css), 'utf8');
         }
+        // Bilang ng na-PROCESS (hindi lang "na-obfuscate") na file —
+        // ginagamit pa rin ito para sa progress bar % kahit naka-off
+        // ang obfuscation, dahil dumadaan pa rin ang bawat file dito.
         obfuscatedCount += 1;
         if (typeof onProgress === 'function') {
             try { onProgress(obfuscatedCount, totalItems); } catch (_) { /* huwag hayaang masira ng UI callback ang build */ }
@@ -5314,6 +5326,12 @@ async function performBuildRelease(reqBody, req, publishOverride) {
     // barcode scan bug"). Puro history/log lang ang gamit nito — hindi
     // ito nakakaapekto sa aktwal na filename ng na-build na zip.
     const caption = String((reqBody && reqBody.caption) || '').trim();
+    // OBFUSCATE TOGGLE (bago): checkbox sa "Build Release" at "Publish a
+    // New Update" cards sa admin UI — default TRUE (dating behavior)
+    // kapag walang ipinasang reqBody.obfuscate, para walang masirang
+    // luma nang caller/flow. Explicit lang na false (mula sa unchecked
+    // na checkbox) ang mag-o-off nito.
+    const shouldObfuscate = !(reqBody && (reqBody.obfuscate === false || reqBody.obfuscate === 'false' || reqBody.obfuscate === 0 || reqBody.obfuscate === '0'));
 
     if (!repoUrl) {
         const err = new Error('Walang repoUrl na ibinigay at walang OMNIPOS_REPO_URL env var na naka-set.');
@@ -5465,13 +5483,14 @@ async function performBuildRelease(reqBody, req, publishOverride) {
         // ma-update ang % LIVE bawat file (ito karaniwan ang pinakamatagal
         // na hakbang ng buong build), gamit ang existing per-file loop —
         // walang dagdag na I/O, text-lang na update sa in-memory object.
-        setBuildProgress({ stage: 'obfuscate', percent: BUILD_STEP_END_PERCENT.env, message: 'Ino-obfuscate ang mga file...' });
+        setBuildProgress({ stage: 'obfuscate', percent: BUILD_STEP_END_PERCENT.env, message: shouldObfuscate ? 'Ino-obfuscate ang mga file...' : 'Inihahanda ang mga file (obfuscation OFF)...' });
         const obfuscateStart = BUILD_STEP_END_PERCENT.env;
         const obfuscateEnd = BUILD_STEP_END_PERCENT.obfuscate;
         const obfuscatedCount = await obfuscateReleaseTree(tmpDir, (done, total) => {
             const pct = total > 0 ? obfuscateStart + ((done / total) * (obfuscateEnd - obfuscateStart)) : obfuscateStart;
-            setBuildProgress({ stage: 'obfuscate', percent: Math.round(pct * 10) / 10, message: `Ino-obfuscate ang mga file... (${done}/${total})` });
-        });
+            const msg = shouldObfuscate ? `Ino-obfuscate ang mga file... (${done}/${total})` : `Inihahanda ang mga file (obfuscation OFF)... (${done}/${total})`;
+            setBuildProgress({ stage: 'obfuscate', percent: Math.round(pct * 10) / 10, message: msg });
+        }, shouldObfuscate);
 
         setBuildProgress({ stage: 'zip', percent: BUILD_STEP_END_PERCENT.obfuscate, message: 'Ginagawa ang zip package...' });
         const releaseDir = path.dirname(RELEASE_PACKAGE_PATH);
@@ -5550,6 +5569,7 @@ async function performBuildRelease(reqBody, req, publishOverride) {
             ref,
             sizeBytes: stats.size,
             obfuscatedFiles: obfuscatedCount,
+            obfuscated: shouldObfuscate,
             envEncrypted: envResult.encrypted
         });
 
@@ -5590,6 +5610,7 @@ async function performBuildRelease(reqBody, req, publishOverride) {
             builtAt,
             sizeBytes: stats.size,
             obfuscatedFiles: obfuscatedCount,
+            obfuscated: shouldObfuscate,
             envEncrypted: envResult.encrypted,
             fileName: 'omnipos-client.zip'
         });
@@ -5599,12 +5620,16 @@ async function performBuildRelease(reqBody, req, publishOverride) {
         }
         setBuildProgress({ stage: 'done', percent: 100, message: 'Tapos na ang build.', done: true });
 
+        const obfMsgPart = shouldObfuscate
+            ? `Na-obfuscate ang ${obfuscatedCount} file(s)`
+            : `Nagawa nang HINDI obfuscated (${obfuscatedCount} file(s) na-process)`;
         return {
             message: envResult.encrypted
-                ? `Nagawa ang bagong release package. Na-obfuscate ang ${obfuscatedCount} file(s), naka-encrypt na ang .env.`
-                : `Nagawa ang bagong release package. Na-obfuscate ang ${obfuscatedCount} file(s). PAALALA: walang env-loader.js sa repo mo — plaintext pa rin ang .env.`,
+                ? `Nagawa ang bagong release package. ${obfMsgPart}, naka-encrypt na ang .env.`
+                : `Nagawa ang bagong release package. ${obfMsgPart}. PAALALA: walang env-loader.js sa repo mo — plaintext pa rin ang .env.`,
             sizeBytes: stats.size,
             obfuscatedFiles: obfuscatedCount,
+            obfuscated: shouldObfuscate,
             envEncrypted: envResult.encrypted,
             builtAt
         };
