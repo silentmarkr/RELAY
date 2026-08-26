@@ -4779,6 +4779,15 @@ function removeExcludedRecursive(dir) {
 // kahit sinasabi ng komentong ito na "dapat laging magkasabay". Ngayon,
 // pareho na sila.
 // --------------------------------------------------------------
+// AUDIT FIX: idinagdag ang 'webauthn.js' (CBOR decode/passkey credential
+// verification — security-critical) at 'cloud-snapshot.js' (Postgres
+// backup/restore ng buong SQLite DB) — dalawang first-party server module
+// na aktwal na ginagamit ng server.js (require('./webauthn'),
+// require('./cloud-snapshot')) pero hindi kasama dati dito, kaya naka-
+// PLAINTEXT pa rin sila sa bawat na-build na omnipos-client.zip kahit
+// obfuscated na ang lahat ng ibang server file. Na-verify: walang
+// self-referential/eval na code sa dalawang ito, parehong klase lang ng
+// code gaya ng db.js/mailer.js na matagal nang gumagana nang naka-obfuscate.
 const RELEASE_SERVER_TARGETS = new Set([
     'server.js',
     'db.js',
@@ -4786,6 +4795,8 @@ const RELEASE_SERVER_TARGETS = new Set([
     '_fix_project.js',
     'mailer.js',
     'verify-gmail-connection.js',
+    'webauthn.js',
+    'cloud-snapshot.js',
 ]);
 // NOTE: public/service-worker.js ay SADYANG HINDI kasama dito. Service
 // workers ay may mas mahigpit na execution context kaysa normal na page
@@ -4813,8 +4824,18 @@ const RELEASE_ENV_KEY_FILENAME = '.env.key';
 // public/index.html — dito ilalagay ang comment-stripping AT
 // pag-obfuscate ng anumang inline <script> na laman nito (hiwalay
 // sa mga hiwalay na .js file na SERVER/CLIENT_TARGETS).
+// AUDIT FIX: idinagdag ang 'public/customer-display.html' — may sarili
+// itong ~200+ linyang inline <script> (loyalty display, idle rotation,
+// pagpoproseso ng data mula sa BroadcastChannel) na hindi kasama dati
+// dito, kaya kumpletong readable/hindi obfuscated pa rin ito sa bawat
+// na-build na zip kahit na-obfuscate na ang index.html. Na-verify: walang
+// onclick/inline HTML attribute na umaasa sa pangalan ng function (lahat
+// addEventListener-based sa loob mismo ng script), at walang
+// server-side templating dito (static file lang) — ligtas itong
+// idagdag gamit ang parehong obfuscation path ng index.html.
 const RELEASE_HTML_TARGETS = new Set([
     path.join('public', 'index.html'),
+    path.join('public', 'customer-display.html'),
 ]);
 
 // Third-party CSS na dapat HUWAG galawin — kasama ang mga license/
