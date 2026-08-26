@@ -1341,104 +1341,112 @@ a:focus-visible,
         </div>
       </div>
 
-      <div class="card">
-        <h2>💾 Backup / Restore</h2>
-        <div class="backup-note">
-          Render's free tier has no persistent disk — allowed devices, unlocked features, and history are lost on every <code>git push</code>/redeploy, and everything is lost if you delete the service/domain. Download the backup periodically (especially after a new unlock/customer) and keep it somewhere safe.
-        </div>
-        <div class="backup-row">
-          <button class="btn-primary" onclick="downloadBackup()">⬇️ Download Backup</button>
-          <button class="btn-ghost" onclick="document.getElementById('restoreFileInput').click()">⬆️ Restore from Backup</button>
-        </div>
-        <input type="file" id="restoreFileInput" accept="application/json" style="display:none;" onchange="restoreBackupFromFile(event)">
-        <div class="backup-lastexport" id="backupLastExport"></div>
-        <label class="auto-backup-toggle">
-          <input type="checkbox" id="autoBackupOnAllowToggle" onchange="onAutoBackupToggleChange()">
-          Automatically download a timestamped backup whenever a new device is allowed
-        </label>
-        <div class="backup-note" style="margin-top:6px;">
-          The auto-download filename includes a date/time stamp (e.g. <code>relaybackup07260130.json</code> = July 26, 1:30 AM — your browser's LOCAL time), so each allow creates a new file instead of overwriting the last one. These stay in your Downloads folder as your backup history.
-        </div>
-      </div>
-
-      <div class="card">
-        <h2>🚀 Publish a New Update <span style="font-size:11px; color:var(--muted); font-weight:normal;">(build + publish in one click — no Termux/curl required)</span></h2>
-        <div class="backup-note">
-          One button, two steps: (1) builds a fresh <code>omnipos-client.zip</code> from the latest code in your repo, and (2) immediately announces this new version/changelog to existing clients (they'll see it in their "Check for Update"). If the build fails, the version publish will NOT proceed.
-        </div>
-        <div class="backup-row">
-          <input type="text" id="publishVersionInput" placeholder="New version (e.g. 1.0.43)" style="flex:1; min-width:140px;">
-          <input type="text" id="publishRepoUrlInput" placeholder="repoUrl (optional — leave blank if OMNIPOS_REPO_URL is already set)" style="flex:2; min-width:220px;">
-          <input type="text" id="publishRefInput" placeholder="branch/ref (default: main)" style="flex:1; min-width:120px;">
-        </div>
-        <div class="backup-row" style="margin-top:8px;">
-          <textarea id="publishChangelogInput" placeholder="Changelog (optional — this is what customers see in the update notice)" rows="2" style="flex:1; min-width:200px; resize:vertical; background:var(--panel-2, #1a1a1a); color:inherit; border:1px solid var(--border, #2a2a2a); border-radius:8px; padding:8px;"></textarea>
-        </div>
-        <div class="backup-row" style="margin-top:8px;">
-          <input type="text" id="publishCaptionInput" placeholder="Caption (optional — for the history log below only, e.g. &quot;hotfix barcode scan bug&quot;)" style="flex:1; min-width:220px;">
-        </div>
-        <div class="backup-row" style="margin-top:8px;">
-          <input type="text" id="publishTargetIdInput" placeholder="Target Installation ID (optional — leave blank to target ALL clients)" style="flex:1; min-width:220px;">
-        </div>
-        <div class="backup-note" style="margin-top:6px;">
-          If you fill in a Target Installation ID, the "update available" notice will go ONLY to that device — other clients won't see it until you clear the target or make the same version global (blank Target ID). <strong>Note:</strong> the actual zip file is still shared/single — this only targets who sees the notice, it's not a hard download block.
-        </div>
-        <div class="backup-row" style="margin-top:10px;">
-          <button class="btn-primary" onclick="publishRelease()" id="publishReleaseBtn">🚀 Build & Publish</button>
-        </div>
-        <div id="publishProgressWrap" class="abar-row" style="margin-top:12px; display:none;">
-          <div class="abar-label">
-            <span class="name" id="publishProgressLabel">Building...</span>
-            <span class="count" id="publishProgressPercent">0%</span>
-            <span class="count" id="publishProgressEta" style="color:var(--muted); font-weight:normal;"></span>
+      <div class="card collapsible" id="cardBackupRestore" data-card-id="backupRestore">
+        <h2 onclick="toggleCardCollapse('cardBackupRestore')">💾 Backup / Restore<span class="collapse-chevron">▾</span></h2>
+        <div class="collapse-body">
+          <div class="backup-note">
+            Render's free tier has no persistent disk — allowed devices, unlocked features, and history are lost on every <code>git push</code>/redeploy, and everything is lost if you delete the service/domain. Download the backup periodically (especially after a new unlock/customer) and keep it somewhere safe.
           </div>
-          <div class="abar-track">
-            <div class="abar-fill" id="publishProgressFill" style="width:0%; transition: width .3s ease;"></div>
+          <div class="backup-row">
+            <button class="btn-primary" onclick="downloadBackup()">⬇️ Download Backup</button>
+            <button class="btn-ghost" onclick="document.getElementById('restoreFileInput').click()">⬆️ Restore from Backup</button>
+          </div>
+          <input type="file" id="restoreFileInput" accept="application/json" style="display:none;" onchange="restoreBackupFromFile(event)">
+          <div class="backup-lastexport" id="backupLastExport"></div>
+          <label class="auto-backup-toggle">
+            <input type="checkbox" id="autoBackupOnAllowToggle" onchange="onAutoBackupToggleChange()">
+            Automatically download a timestamped backup whenever a new device is allowed
+          </label>
+          <div class="backup-note" style="margin-top:6px;">
+            The auto-download filename includes a date/time stamp (e.g. <code>relaybackup07260130.json</code> = July 26, 1:30 AM — your browser's LOCAL time), so each allow creates a new file instead of overwriting the last one. These stay in your Downloads folder as your backup history.
           </div>
         </div>
       </div>
 
-      <div class="card">
-        <h2>📦 Download Client Package <span style="font-size:11px; color:var(--muted); font-weight:normal;">(offline setup for a new client)</span></h2>
-        <div class="backup-note">
-          Create a one-time (or limited-use) link so a new client can download <code>omnipos-client.zip</code> — the files they need to install and run OMNIPOS offline on their own device. Run "Build Release" first if there's a new update to the OMNIPOS code before generating a link.
-        </div>
-        <div class="backup-row">
-          <input type="text" id="buildCaption" placeholder="Caption for this build (optional, e.g. 'hotfix barcode scan')" style="flex:2; min-width:200px;">
-          <button class="btn-ghost" onclick="buildRelease()" id="buildReleaseBtn">🛠️ Build Release (git → zip)</button>
-          <button class="btn-ghost" onclick="downloadCodesJSON()">⬇️ Download List (JSON)</button>
-        </div>
-        <div class="backup-note" style="margin-top:6px;">
-          The caption is only for the history log below — it doesn't change the filename of the built package (it's always <code>omnipos-client.zip</code>, just overwritten each build).
-        </div>
-        <div id="buildProgressWrap" class="abar-row" style="margin-top:12px; display:none;">
-          <div class="abar-label">
-            <span class="name" id="buildProgressLabel">Building...</span>
-            <span class="count" id="buildProgressPercent">0%</span>
-            <span class="count" id="buildProgressEta" style="color:var(--muted); font-weight:normal;"></span>
+      <div class="card collapsible" id="cardPublishUpdate" data-card-id="publishUpdate">
+        <h2 onclick="toggleCardCollapse('cardPublishUpdate')">🚀 Publish a New Update <span style="font-size:11px; color:var(--muted); font-weight:normal;">(build + publish in one click — no Termux/curl required)</span><span class="collapse-chevron">▾</span></h2>
+        <div class="collapse-body">
+          <div class="backup-note">
+            One button, two steps: (1) builds a fresh <code>omnipos-client.zip</code> from the latest code in your repo, and (2) immediately announces this new version/changelog to existing clients (they'll see it in their "Check for Update"). If the build fails, the version publish will NOT proceed.
           </div>
-          <div class="abar-track">
-            <div class="abar-fill" id="buildProgressFill" style="width:0%; transition: width .3s ease;"></div>
+          <div class="backup-row">
+            <input type="text" id="publishVersionInput" placeholder="New version (e.g. 1.0.43)" style="flex:1; min-width:140px;">
+            <input type="text" id="publishRepoUrlInput" placeholder="repoUrl (optional — leave blank if OMNIPOS_REPO_URL is already set)" style="flex:2; min-width:220px;">
+            <input type="text" id="publishRefInput" placeholder="branch/ref (default: main)" style="flex:1; min-width:120px;">
+          </div>
+          <div class="backup-row" style="margin-top:8px;">
+            <textarea id="publishChangelogInput" placeholder="Changelog (optional — this is what customers see in the update notice)" rows="2" style="flex:1; min-width:200px; resize:vertical; background:var(--panel-2, #1a1a1a); color:inherit; border:1px solid var(--border, #2a2a2a); border-radius:8px; padding:8px;"></textarea>
+          </div>
+          <div class="backup-row" style="margin-top:8px;">
+            <input type="text" id="publishCaptionInput" placeholder="Caption (optional — for the history log below only, e.g. &quot;hotfix barcode scan bug&quot;)" style="flex:1; min-width:220px;">
+          </div>
+          <div class="backup-row" style="margin-top:8px;">
+            <input type="text" id="publishTargetIdInput" placeholder="Target Installation ID (optional — leave blank to target ALL clients)" style="flex:1; min-width:220px;">
+          </div>
+          <div class="backup-note" style="margin-top:6px;">
+            If you fill in a Target Installation ID, the "update available" notice will go ONLY to that device — other clients won't see it until you clear the target or make the same version global (blank Target ID). <strong>Note:</strong> the actual zip file is still shared/single — this only targets who sees the notice, it's not a hard download block.
+          </div>
+          <div class="backup-row" style="margin-top:10px;">
+            <button class="btn-primary" onclick="publishRelease()" id="publishReleaseBtn">🚀 Build & Publish</button>
+          </div>
+          <div id="publishProgressWrap" class="abar-row" style="margin-top:12px; display:none;">
+            <div class="abar-label">
+              <span class="name" id="publishProgressLabel">Building...</span>
+              <span class="count" id="publishProgressPercent">0%</span>
+              <span class="count" id="publishProgressEta" style="color:var(--muted); font-weight:normal;"></span>
+            </div>
+            <div class="abar-track">
+              <div class="abar-fill" id="publishProgressFill" style="width:0%; transition: width .3s ease;"></div>
+            </div>
           </div>
         </div>
-        <div class="backup-row" style="margin-top:10px;">
-          <input type="text" id="newCodeLabel" placeholder="Label (e.g. Juan's Store)" style="flex:2; min-width:160px;">
-          <input type="number" id="newCodeMaxUses" placeholder="Max uses (default 1)" min="1" style="flex:1; min-width:120px;">
-          <input type="number" id="newCodeExpiresHours" placeholder="Expires in (hours)" min="1" style="flex:1; min-width:120px;">
-          <button class="btn-primary" onclick="generateDownloadCode()">➕ Create Download Link</button>
-        </div>
-        <div id="downloadCodesList" class="empty" style="margin-top:12px;">Loading...</div>
       </div>
 
-      <div class="card">
-        <h2>🕘 Build History</h2>
-        <div class="backup-note">
-          A log of every time <code>omnipos-client.zip</code> was built/copied — caption, the published version number at build time, and date/time. This is just a log; it doesn't change the actual zip filename.
+      <div class="card collapsible" id="cardDownloadPackage" data-card-id="downloadPackage">
+        <h2 onclick="toggleCardCollapse('cardDownloadPackage')">📦 Download Client Package <span style="font-size:11px; color:var(--muted); font-weight:normal;">(offline setup for a new client)</span><span class="collapse-chevron">▾</span></h2>
+        <div class="collapse-body">
+          <div class="backup-note">
+            Create a one-time (or limited-use) link so a new client can download <code>omnipos-client.zip</code> — the files they need to install and run OMNIPOS offline on their own device. Run "Build Release" first if there's a new update to the OMNIPOS code before generating a link.
+          </div>
+          <div class="backup-row">
+            <input type="text" id="buildCaption" placeholder="Caption for this build (optional, e.g. 'hotfix barcode scan')" style="flex:2; min-width:200px;">
+            <button class="btn-ghost" onclick="buildRelease()" id="buildReleaseBtn">🛠️ Build Release (git → zip)</button>
+            <button class="btn-ghost" onclick="downloadCodesJSON()">⬇️ Download List (JSON)</button>
+          </div>
+          <div class="backup-note" style="margin-top:6px;">
+            The caption is only for the history log below — it doesn't change the filename of the built package (it's always <code>omnipos-client.zip</code>, just overwritten each build).
+          </div>
+          <div id="buildProgressWrap" class="abar-row" style="margin-top:12px; display:none;">
+            <div class="abar-label">
+              <span class="name" id="buildProgressLabel">Building...</span>
+              <span class="count" id="buildProgressPercent">0%</span>
+              <span class="count" id="buildProgressEta" style="color:var(--muted); font-weight:normal;"></span>
+            </div>
+            <div class="abar-track">
+              <div class="abar-fill" id="buildProgressFill" style="width:0%; transition: width .3s ease;"></div>
+            </div>
+          </div>
+          <div class="backup-row" style="margin-top:10px;">
+            <input type="text" id="newCodeLabel" placeholder="Label (e.g. Juan's Store)" style="flex:2; min-width:160px;">
+            <input type="number" id="newCodeMaxUses" placeholder="Max uses (default 1)" min="1" style="flex:1; min-width:120px;">
+            <input type="number" id="newCodeExpiresHours" placeholder="Expires in (hours)" min="1" style="flex:1; min-width:120px;">
+            <button class="btn-primary" onclick="generateDownloadCode()">➕ Create Download Link</button>
+          </div>
+          <div id="downloadCodesList" class="empty" style="margin-top:12px;">Loading...</div>
         </div>
-        <div class="backup-row" style="margin-top:8px;">
-          <button class="btn-revoke" onclick="clearBuildHistory()" id="clearBuildHistoryBtn">🗑️ Clear History</button>
+      </div>
+
+      <div class="card collapsible" id="cardBuildHistory" data-card-id="buildHistory">
+        <h2 onclick="toggleCardCollapse('cardBuildHistory')">🕘 Build History<span class="collapse-chevron">▾</span></h2>
+        <div class="collapse-body">
+          <div class="backup-note">
+            A log of every time <code>omnipos-client.zip</code> was built/copied — caption, the published version number at build time, and date/time. This is just a log; it doesn't change the actual zip filename.
+          </div>
+          <div class="backup-row" style="margin-top:8px;">
+            <button class="btn-revoke" onclick="clearBuildHistory()" id="clearBuildHistoryBtn">🗑️ Clear History</button>
+          </div>
+          <div id="buildHistoryList" class="empty" style="margin-top:12px;">Loading...</div>
         </div>
-        <div id="buildHistoryList" class="empty" style="margin-top:12px;">Loading...</div>
       </div>
     </div>
 
@@ -1795,6 +1803,9 @@ function switchTab(name) {
   document.querySelectorAll('.tab-btn[data-tab]').forEach(btn => {
     btn.classList.toggle('active', btn.getAttribute('data-tab') === name);
   });
+  if (name === 'downloads') {
+    applyStoredCardCollapse(['cardBackupRestore', 'cardPublishUpdate', 'cardDownloadPackage', 'cardBuildHistory']);
+  }
 }
 
 // Rolls the count of "needs attention" items (pending OTP, clone flagged,
