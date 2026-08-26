@@ -361,6 +361,33 @@ h1 { font-family: var(--font-ui); font-size: 19px; font-weight: 700; margin: 0 0
   border-radius: 999px;
 }
 
+/* ---------------- COLLAPSIBLE CARDS ----------------
+   Ginagamit sa mga card na madalas mahaba ang laman (Cloud Backup,
+   Allowed devices, Recently seen, Unlocked, Still Locked) para hindi
+   sobrang haba ang pag-scroll sa page — pwedeng i-fold/collapse ang
+   bawat isa. Ina-alala ang bukas/sara na estado kada card (localStorage)
+   para pareho pa rin ang tingin sa susunod na pagbukas ng panel. */
+.card.collapsible h2 {
+  cursor: pointer;
+  user-select: none;
+  margin-bottom: 0;
+}
+.card.collapsible .collapse-chevron {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted);
+  transition: transform .18s ease;
+  flex: 0 0 auto;
+}
+.card.collapsible.collapsed .collapse-chevron { transform: rotate(-90deg); }
+.card.collapsible .collapse-body {
+  margin-top: 14px;
+  overflow: hidden;
+}
+.card.collapsible.collapsed .collapse-body {
+  display: none;
+}
+
 input[type=text], input[type=password] {
   width: 100%;
   padding: 11px 13px;
@@ -1263,41 +1290,45 @@ a:focus-visible,
     </div>
 
     <div class="tab-panel" id="tabPanel-devices" style="display:none;">
-      <div class="card">
-        <h2>Allowed devices <span class="count-pill" id="allowedCountPill">0</span></h2>
-        <div class="bulk-reset-bar" id="bulkResetBar" style="display:flex; align-items:center; gap:10px; margin-bottom:10px; flex-wrap:wrap;">
-          <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); cursor:pointer;">
-            <input type="checkbox" id="selectAllDevicesCheckbox" onchange="toggleSelectAllDevices(this.checked)">
-            Select all
-          </label>
-          <span id="selectedCountLabel" style="font-size:12px; color:var(--muted);">0 selected</span>
-          <button class="btn-ghost" id="bulkResetBtn" onclick="bulkResetSelected()" disabled style="margin-left:auto;">
-            🧹 Reset selected (label, fingerprint, clone-split, online status)
-          </button>
+      <div class="card collapsible" id="cardAllowedDevices" data-card-id="allowedDevices">
+        <h2 onclick="toggleCardCollapse('cardAllowedDevices')">Allowed devices <span class="count-pill" id="allowedCountPill">0</span><span class="collapse-chevron">▾</span></h2>
+        <div class="collapse-body">
+          <div class="bulk-reset-bar" id="bulkResetBar" style="display:flex; align-items:center; gap:10px; margin-bottom:10px; flex-wrap:wrap;">
+            <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); cursor:pointer;">
+              <input type="checkbox" id="selectAllDevicesCheckbox" onchange="toggleSelectAllDevices(this.checked)">
+              Select all
+            </label>
+            <span id="selectedCountLabel" style="font-size:12px; color:var(--muted);">0 selected</span>
+            <button class="btn-ghost" id="bulkResetBtn" onclick="bulkResetSelected()" disabled style="margin-left:auto;">
+              🧹 Reset selected (label, fingerprint, clone-split, online status)
+            </button>
+          </div>
+          <div id="allowedList" class="empty">Loading...</div>
         </div>
-        <div id="allowedList" class="empty">Loading...</div>
       </div>
 
-      <div class="card">
-        <h2>Recently seen (everyone who requested) <span class="count-pill" id="seenCountPill">0</span></h2>
-        <div class="filter-bar">
-          <input type="text" id="seenFilterInput" placeholder="Search: store, username, or installation ID" oninput="renderSeenList()">
-          <select id="seenFilterStatus" onchange="renderSeenList()">
-            <option value="all">All</option>
-            <option value="allowed">Allowed only</option>
-            <option value="blocked">Blocked only</option>
-            <option value="flagged">🚩 Flagged clone only</option>
-            <option value="integrity">🛠️ Modified/deleted files only</option>
-            <option value="noBaseline">⚠️ No baseline (not actually checked)</option>
-          </select>
-          <select id="seenSortBy" onchange="renderSeenList()">
-            <option value="lastSeen">Sort: Last seen</option>
-            <option value="mostUnlocked">Sort: Most unlocked</option>
-            <option value="storeName">Sort: Store name</option>
-          </select>
-          <button class="btn-export" onclick="exportDevicesCSV()">⬇️ Export CSV</button>
+      <div class="card collapsible" id="cardRecentlySeen" data-card-id="recentlySeen">
+        <h2 onclick="toggleCardCollapse('cardRecentlySeen')">Recently seen (everyone who requested) <span class="count-pill" id="seenCountPill">0</span><span class="collapse-chevron">▾</span></h2>
+        <div class="collapse-body">
+          <div class="filter-bar">
+            <input type="text" id="seenFilterInput" placeholder="Search: store, username, or installation ID" oninput="renderSeenList()">
+            <select id="seenFilterStatus" onchange="renderSeenList()">
+              <option value="all">All</option>
+              <option value="allowed">Allowed only</option>
+              <option value="blocked">Blocked only</option>
+              <option value="flagged">🚩 Flagged clone only</option>
+              <option value="integrity">🛠️ Modified/deleted files only</option>
+              <option value="noBaseline">⚠️ No baseline (not actually checked)</option>
+            </select>
+            <select id="seenSortBy" onchange="renderSeenList()">
+              <option value="lastSeen">Sort: Last seen</option>
+              <option value="mostUnlocked">Sort: Most unlocked</option>
+              <option value="storeName">Sort: Store name</option>
+            </select>
+            <button class="btn-export" onclick="exportDevicesCSV()">⬇️ Export CSV</button>
+          </div>
+          <div id="seenList" class="empty">Loading...</div>
         </div>
-        <div id="seenList" class="empty">Loading...</div>
       </div>
     </div>
 
@@ -1464,25 +1495,31 @@ a:focus-visible,
       </div>
     </div>
 
-    <div class="card">
-      <h2>☁️ Cloud Backup <span style="font-size:11px; color:var(--muted); font-weight:normal;">(this device's full database, excluding user accounts)</span></h2>
-      <div id="cloudBackupStatusLine" class="meta">Loading...</div>
-      <div id="cloudBackupModuleList" style="margin-top:8px;"></div>
-      <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
-        <button class="icon-btn" onclick="loadCloudBackupDetail(currentDetailId)">🔄 Refresh</button>
-        <button class="icon-btn" id="cloudBackupDownloadBtn" style="display:none;" onclick="downloadCloudBackup(currentDetailId)">⬇️ Download JSON</button>
+    <div class="card collapsible" id="cardCloudBackup" data-card-id="cloudBackup">
+      <h2 onclick="toggleCardCollapse('cardCloudBackup')">☁️ Cloud Backup <span style="font-size:11px; color:var(--muted); font-weight:normal;">(this device's full database, excluding user accounts)</span><span class="collapse-chevron">▾</span></h2>
+      <div class="collapse-body">
+        <div id="cloudBackupStatusLine" class="meta">Loading...</div>
+        <div id="cloudBackupModuleList" style="margin-top:8px;"></div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
+          <button class="icon-btn" onclick="loadCloudBackupDetail(currentDetailId)">🔄 Refresh</button>
+          <button class="icon-btn" id="cloudBackupDownloadBtn" style="display:none;" onclick="downloadCloudBackup(currentDetailId)">⬇️ Download JSON</button>
+        </div>
       </div>
     </div>
 
-    <div class="card">
-      <h2>✅ Unlocked</h2>
-      <div id="detailUnlockedList" class="empty">Loading...</div>
+    <div class="card collapsible" id="cardUnlocked" data-card-id="unlocked">
+      <h2 onclick="toggleCardCollapse('cardUnlocked')">✅ Unlocked<span class="collapse-chevron">▾</span></h2>
+      <div class="collapse-body">
+        <div id="detailUnlockedList" class="empty">Loading...</div>
+      </div>
     </div>
 
-    <div class="card">
-      <h2>🔒 Still Locked <span style="font-size:11px; color:var(--muted); font-weight:normal;">(already have a reference? activate right away)</span></h2>
-      <div id="detailTierRow" class="tier-row"></div>
-      <div id="detailLockedList" class="empty">Loading...</div>
+    <div class="card collapsible" id="cardLocked" data-card-id="locked">
+      <h2 onclick="toggleCardCollapse('cardLocked')">🔒 Still Locked <span style="font-size:11px; color:var(--muted); font-weight:normal;">(already have a reference? activate right away)</span><span class="collapse-chevron">▾</span></h2>
+      <div class="collapse-body">
+        <div id="detailTierRow" class="tier-row"></div>
+        <div id="detailLockedList" class="empty">Loading...</div>
+      </div>
     </div>
 
     <div class="card">
@@ -1625,6 +1662,38 @@ function withScrollPreserved(fn) {
 
 function escapeAttr(str) {
   return String(str).replace(/'/g, "\\'").replace(/"/g, '&quot;');
+}
+
+// ---------------- COLLAPSIBLE CARDS ----------------
+// Toggle-fold ng mga card na "Cloud Backup", "Allowed devices",
+// "Recently seen", "Unlocked", at "Still Locked" — inaalala ang
+// bukas/sara na estado kada card sa localStorage (ng browser ng admin
+// na ito lang, hindi ini-sync sa ibang tao) para pareho pa rin ang
+// tingin sa susunod na pagbukas ng panel/page.
+const COLLAPSE_STORAGE_PREFIX = 'relay-admin-collapsed:';
+
+function toggleCardCollapse(cardId) {
+  const card = document.getElementById(cardId);
+  if (!card) return;
+  const collapsed = card.classList.toggle('collapsed');
+  try {
+    localStorage.setItem(COLLAPSE_STORAGE_PREFIX + (card.dataset.cardId || cardId), collapsed ? '1' : '0');
+  } catch (err) { /* localStorage unavailable — okay lang, hindi mahalaga sa functionality */ }
+}
+
+// Tinatawag ito tuwing ipinapakita ang isang screen na may collapsible
+// card (Home/Devices tab, Device Detail) para ma-apply ang naka-save
+// nang estado (kung meron) sa bawat card.
+function applyStoredCardCollapse(cardIds) {
+  cardIds.forEach(cardId => {
+    const card = document.getElementById(cardId);
+    if (!card) return;
+    try {
+      const stored = localStorage.getItem(COLLAPSE_STORAGE_PREFIX + (card.dataset.cardId || cardId));
+      if (stored === '1') card.classList.add('collapsed');
+      else if (stored === '0') card.classList.remove('collapsed');
+    } catch (err) { /* localStorage unavailable — okay lang, default na lang (open) */ }
+  });
 }
 
 function onDeviceCheckboxChange(id, checked) {
@@ -2679,6 +2748,7 @@ async function loadDevices() {
   document.getElementById('seenCountPill').innerText = data.seenDevices.length;
   renderSeenList();
   updateTabBadges();
+  applyStoredCardCollapse(['cardAllowedDevices', 'cardRecentlySeen']);
 }
 
 function renderSeenList() {
@@ -3191,6 +3261,7 @@ async function openDeviceDetail(installationId) {
   await loadCloudBackupDetail(installationId);
   if (detailPollTimer) clearInterval(detailPollTimer);
   detailPollTimer = setInterval(withScrollPreserved(loadDeviceDetail), 8000);
+  applyStoredCardCollapse(['cardCloudBackup', 'cardUnlocked', 'cardLocked']);
 }
 
 function closeDeviceDetail() {
