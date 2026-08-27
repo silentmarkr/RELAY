@@ -808,9 +808,9 @@ const FEATURE_CATALOG_BASE = {
 // since this is RELAY, not just whatever the client claims).
 // ============================================================
 const CLOUD_BACKUP_PLANS = {
-    basic: { id: 'basic', name: 'Cloud Backup — Basic', price: { monthly: 129, yearly: 1290 } },
-    standard: { id: 'standard', name: 'Cloud Backup — Standard', price: { monthly: 249, yearly: 2490 } },
-    pro: { id: 'pro', name: 'Cloud Backup — Pro', price: { monthly: 399, yearly: 3990 } }
+    basic: { id: 'basic', name: 'Cloud Backup — Basic', price: { monthly: 129, yearly: 1290 }, storageQuotaMB: 250 },
+    standard: { id: 'standard', name: 'Cloud Backup — Standard', price: { monthly: 249, yearly: 2490 }, storageQuotaMB: 1024 },
+    pro: { id: 'pro', name: 'Cloud Backup — Pro', price: { monthly: 399, yearly: 3990 }, storageQuotaMB: 5120 }
 };
 const CLOUD_BACKUP_BILLING_DAYS = { monthly: 30, yearly: 365 };
 
@@ -3172,30 +3172,60 @@ app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rate
         return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL) sa RELAY. Sabihin sa developer na i-set ito.' });
     }
 
+    // Alamin muna ang tier/quota ng installation na ito BAGO isulat
+    // kahit ano sa Postgres — kailangan ito para malaman kung sapat pa
+    // ang natitirang allowance bago tanggapin ang buong upload.
+    const cloudBackupUnlockForQuota = (issuedUnlocks[installationId] || {})['cloud_backup'];
+    const tierForQuota = (cloudBackupUnlockForQuota && cloudBackupUnlockForQuota.tier && CLOUD_BACKUP_PLANS[cloudBackupUnlockForQuota.tier]) ? cloudBackupUnlockForQuota.tier : 'basic';
+    const quotaMBForQuota = CLOUD_BACKUP_PLANS[tierForQuota].storageQuotaMB;
+
+    // I-serialize muna ang LAHAT ng module (hindi pa isinusulat) para
+    // masukat ang TOTAL na byte size bago pa magsimula ng anumang
+    // Postgres write — kaya kung lalagpas sa quota, WALANG NAISULAT na
+    // kahit ano (hindi partial write), tanggihan lang agad ito nang
+    // buo.
+    const serializedModules = {};
+    let projectedSizeBytes = 0;
+    for (const [moduleName, rawData] of Object.entries(modules)) {
+        const data = stripCloudBackupRedactedFields(moduleName, rawData);
+        const serialized = JSON.stringify(data);
+        serializedModules[moduleName] = { data, serialized, recordCount: Array.isArray(data) ? data.length : 0 };
+        projectedSizeBytes += Buffer.byteLength(serialized, 'utf8');
+    }
+    const projectedSizeMB = Math.round((projectedSizeBytes / (1024 * 1024)) * 100) / 100;
+
+    if (projectedSizeMB > quotaMBForQuota) {
+        logActivity(installationId, 'cloud_backup_blocked', { reason: 'storage_quota_exceeded', tier: tierForQuota, quotaMB: quotaMBForQuota, sizeMB: projectedSizeMB });
+        return res.status(413).json({
+            success: false,
+            storageQuotaExceeded: true,
+            tier: tierForQuota,
+            quotaMB: quotaMBForQuota,
+            sizeMB: projectedSizeMB,
+            overageMB: Math.round((projectedSizeMB - quotaMBForQuota) * 100) / 100,
+            message: `Cloud backup exceeds your ${CLOUD_BACKUP_PLANS[tierForQuota].name} storage allowance (${projectedSizeMB} MB used, ${quotaMBForQuota} MB limit). Upgrade your Cloud Backup plan or free up space (e.g., trim old transaction/userlog history) before syncing.`
+        });
+    }
+
     try {
         const client = await pgPool.connect();
         let totalSizeBytes = 0;
         try {
             await client.query('BEGIN');
             let moduleCount = 0;
-            for (const [moduleName, rawData] of Object.entries(modules)) {
-                // Defense-in-depth: kahit ano ang ipadala ng client, hindi
-                // kailanman isusulat ang "password" field ng "users" dito.
-                const data = stripCloudBackupRedactedFields(moduleName, rawData);
-                const recordCount = Array.isArray(data) ? data.length : 0;
-                const serialized = JSON.stringify(data);
+            for (const [moduleName, entry] of Object.entries(serializedModules)) {
                 // "Na-consume" na storage: sinusukat sa aktwal na byte size
                 // ng na-store na JSON bawat module (Buffer.byteLength dahil
                 // multi-byte ang UTF-8 characters gaya ng ₱/ñ), tapos
                 // sinusuma ito para sa TOTAL ng buong installation sa ibaba.
-                const sizeBytes = Buffer.byteLength(serialized, 'utf8');
+                const sizeBytes = Buffer.byteLength(entry.serialized, 'utf8');
                 totalSizeBytes += sizeBytes;
                 await client.query(
                     `INSERT INTO cloud_backup_modules (installation_id, module, data, record_count, size_bytes, updated_at)
                      VALUES ($1, $2, $3, $4, $5, now())
                      ON CONFLICT (installation_id, module) DO UPDATE SET
                         data = excluded.data, record_count = excluded.record_count, size_bytes = excluded.size_bytes, updated_at = excluded.updated_at`,
-                    [installationId, moduleName, serialized, recordCount, sizeBytes]
+                    [installationId, moduleName, entry.serialized, entry.recordCount, sizeBytes]
                 );
                 moduleCount++;
             }
@@ -3223,12 +3253,26 @@ app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rate
 
         logActivity(installationId, 'cloud_backup_sync', { moduleCount: Object.keys(modules).length, totalRecords: totalRecords || null, storeName: storeName || null, sizeBytes: totalSizeBytes });
 
+        const tierForResponse = tierForQuota;
+        const quotaMBForResponse = quotaMBForQuota;
+        const sizeMBForResponse = Math.round((totalSizeBytes / (1024 * 1024)) * 100) / 100;
+        const percentUsedForResponse = quotaMBForResponse > 0 ? Math.round(Math.min(100, (sizeMBForResponse / quotaMBForResponse) * 100) * 10) / 10 : 0;
+        // Malapit na sa quota (>=90%) pero HINDI pa lumagpas — pinapayagan
+        // pa rin ang sync (hindi ito ang 413 na block sa itaas), pero
+        // idinadagdag itong warning flag para maka-heads-up na ang client
+        // BAGO pa lumagpas at ma-block sa susunod na sync.
+        const nearQuota = percentUsedForResponse >= 90;
+
         res.json({
             success: true,
             message: 'Na-save sa Postgres ang cloud backup.',
             moduleNames: moduleNames || Object.keys(modules),
             sizeBytes: totalSizeBytes,
-            sizeMB: Math.round((totalSizeBytes / (1024 * 1024)) * 100) / 100
+            sizeMB: sizeMBForResponse,
+            tier: tierForResponse,
+            quotaMB: quotaMBForResponse,
+            percentUsed: percentUsedForResponse,
+            nearQuota
         });
     } catch (err) {
         console.error('⚠️ CLOUD_BACKUP: hindi na-save sa Postgres:', err.message);
@@ -3254,22 +3298,37 @@ app.get('/relay/cloud-backup/usage', requireApiKey, requireAllowedDevice, rateLi
     if (!pgPool) {
         return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
     }
+
+    // Tignan kung anong tier ang aktibo para malaman ang storageQuotaMB
+    // na dapat ipalabas kasama ng usage — kung walang naka-record na
+    // tier (hal. legacy one-time buyer bago pa idagdag ang tier
+    // metadata), i-default sa Basic bilang pinaka-ligtas na palagay.
+    const cloudBackupUnlock = (issuedUnlocks[installationId] || {})['cloud_backup'];
+    const tier = (cloudBackupUnlock && cloudBackupUnlock.tier && CLOUD_BACKUP_PLANS[cloudBackupUnlock.tier]) ? cloudBackupUnlock.tier : 'basic';
+    const quotaMB = CLOUD_BACKUP_PLANS[tier].storageQuotaMB;
+
     try {
         const result = await pgPool.query(
             'SELECT total_records, module_count, size_bytes, last_sync_at, sync_count FROM cloud_backup_meta WHERE installation_id = $1',
             [installationId]
         );
         if (!result.rows[0]) {
-            return res.json({ success: true, hasBackup: false, sizeBytes: 0, sizeMB: 0 });
+            return res.json({ success: true, hasBackup: false, sizeBytes: 0, sizeMB: 0, tier, quotaMB, percentUsed: 0 });
         }
         const row = result.rows[0];
         const sizeBytes = Number(row.size_bytes) || 0;
+        const sizeMB = Math.round((sizeBytes / (1024 * 1024)) * 100) / 100;
+        const percentUsed = quotaMB > 0 ? Math.round(Math.min(100, (sizeMB / quotaMB) * 100) * 10) / 10 : 0;
         res.json({
             success: true,
             hasBackup: true,
             sizeBytes,
-            sizeMB: Math.round((sizeBytes / (1024 * 1024)) * 100) / 100,
+            sizeMB,
             sizeGB: Math.round((sizeBytes / (1024 * 1024 * 1024)) * 1000) / 1000,
+            tier,
+            quotaMB,
+            percentUsed,
+            nearQuota: percentUsed >= 90,
             totalRecords: row.total_records,
             moduleCount: row.module_count,
             lastSyncAt: row.last_sync_at,
@@ -3312,9 +3371,23 @@ app.get('/relay/admin/api/cloud-backup/:installationId', requireAdminKey, async 
         if (!metaResult.rows[0]) {
             return res.status(404).json({ success: false, message: 'Walang cloud backup na nakita para sa installationId na ito.' });
         }
+        const sizeBytesForMeta = Number(metaResult.rows[0].size_bytes || 0);
+        const sizeMBForMeta = Math.round((sizeBytesForMeta / (1024 * 1024)) * 100) / 100;
+
+        // Same tier lookup logic as /relay/cloud-backup/usage — kailangan
+        // dito ang tier para malaman ang quotaMB na ipapakita sa admin
+        // panel na progress bar (Basic/Standard/Pro), default sa Basic
+        // kung walang naka-record na tier.
+        const cloudBackupUnlockForAdmin = (issuedUnlocks[installationId] || {})['cloud_backup'];
+        const tierForAdmin = (cloudBackupUnlockForAdmin && cloudBackupUnlockForAdmin.tier && CLOUD_BACKUP_PLANS[cloudBackupUnlockForAdmin.tier]) ? cloudBackupUnlockForAdmin.tier : 'basic';
+        const quotaMBForAdmin = CLOUD_BACKUP_PLANS[tierForAdmin].storageQuotaMB;
+
         const meta = {
             ...metaResult.rows[0],
-            size_mb: Math.round((Number(metaResult.rows[0].size_bytes || 0) / (1024 * 1024)) * 100) / 100
+            size_mb: sizeMBForMeta,
+            tier: tierForAdmin,
+            quota_mb: quotaMBForAdmin,
+            percent_used: quotaMBForAdmin > 0 ? Math.round(Math.min(100, (sizeMBForMeta / quotaMBForAdmin) * 100) * 10) / 10 : 0
         };
         const modules = modulesResult.rows.map((m) => ({
             ...m,

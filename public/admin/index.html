@@ -1519,6 +1519,15 @@ a:focus-visible,
       <h2 onclick="toggleCardCollapse('cardCloudBackup')">☁️ Cloud Backup <span style="font-size:11px; color:var(--muted); font-weight:normal;">(this device's full database, excluding user accounts)</span><span class="collapse-chevron">▾</span></h2>
       <div class="collapse-body">
         <div id="cloudBackupStatusLine" class="meta">Loading...</div>
+        <div id="cloudBackupStorageBarWrap" style="display:none; margin-top:8px;">
+          <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--muted); margin-bottom:3px;">
+            <span id="cloudBackupStorageLabel"></span>
+            <span id="cloudBackupStorageRemaining"></span>
+          </div>
+          <div style="background:var(--border-color, #e2e8f0); border-radius:6px; height:10px; overflow:hidden;">
+            <div id="cloudBackupStorageBarFill" style="height:100%; width:0%; border-radius:6px; background:#2563eb; transition:width 0.3s ease;"></div>
+          </div>
+        </div>
         <div id="cloudBackupModuleList" style="margin-top:8px;"></div>
         <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
           <button class="icon-btn" onclick="loadCloudBackupDetail(currentDetailId)">🔄 Refresh</button>
@@ -3581,11 +3590,16 @@ async function loadCloudBackupDetail(installationId) {
   const lineEl = document.getElementById('cloudBackupStatusLine');
   const listEl = document.getElementById('cloudBackupModuleList');
   const downloadBtn = document.getElementById('cloudBackupDownloadBtn');
+  const barWrap = document.getElementById('cloudBackupStorageBarWrap');
+  const barFill = document.getElementById('cloudBackupStorageBarFill');
+  const barLabel = document.getElementById('cloudBackupStorageLabel');
+  const barRemaining = document.getElementById('cloudBackupStorageRemaining');
   if (!lineEl || !listEl) return;
 
   lineEl.innerText = 'Loading...';
   listEl.innerHTML = '';
   downloadBtn.style.display = 'none';
+  if (barWrap) barWrap.style.display = 'none';
   lastCloudBackupDetail = null;
 
   let data;
@@ -3604,6 +3618,19 @@ async function loadCloudBackupDetail(installationId) {
   const meta = data.meta;
   const metaSizeLabel = formatStorageSize(meta.size_bytes);
   lineEl.innerHTML = `🟢 <strong>${meta.total_records ?? '—'} records</strong> across ${meta.module_count ?? (data.modules || []).length} module(s) · <strong>${metaSizeLabel}</strong> consumed · last sync ${timeAgo(new Date(meta.last_sync_at).getTime())} · synced ${meta.sync_count} time(s)`;
+
+  // Storage progress bar — kung ilan (%) na ang na-consume laban sa
+  // quota ng kasalukuyang naka-record na tier (Basic/Standard/Pro).
+  if (barWrap && barFill && barLabel && barRemaining && typeof meta.quota_mb === 'number' && meta.quota_mb > 0) {
+    const pct = typeof meta.percent_used === 'number' ? meta.percent_used : 0;
+    const remainingMB = Math.max(0, Math.round((meta.quota_mb - (meta.size_mb || 0)) * 100) / 100);
+    const tierName = (meta.tier || 'basic').charAt(0).toUpperCase() + (meta.tier || 'basic').slice(1);
+    barWrap.style.display = 'block';
+    barFill.style.width = `${Math.min(100, pct)}%`;
+    barFill.style.background = pct >= 95 ? '#dc2626' : (pct >= 75 ? '#d97706' : '#2563eb');
+    barLabel.textContent = `${tierName} plan · ${meta.size_mb ?? 0} MB / ${meta.quota_mb} MB (${pct}%)`;
+    barRemaining.textContent = `${remainingMB} MB left`;
+  }
 
   listEl.innerHTML = (data.modules || []).map(m => `
     <div class="feature-item">
