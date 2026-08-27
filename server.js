@@ -99,6 +99,7 @@ async function ensureCloudBackupSchema() {
             module          TEXT NOT NULL,
             data            JSONB NOT NULL,
             record_count    INTEGER NOT NULL DEFAULT 0,
+            size_bytes      BIGINT NOT NULL DEFAULT 0,
             updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
             PRIMARY KEY (installation_id, module)
         );
@@ -109,10 +110,17 @@ async function ensureCloudBackupSchema() {
             store_name        TEXT,
             total_records     INTEGER,
             module_count      INTEGER,
+            size_bytes        BIGINT NOT NULL DEFAULT 0,
             last_sync_at      TIMESTAMPTZ,
             sync_count        INTEGER NOT NULL DEFAULT 0
         );
     `);
+    // MIGRATION: kung dati nang existing ang mga table na ito (bago
+    // idinagdag ang size_bytes column sa itaas), i-add pa rin ito nang
+    // hindi nawawala ang existing data. Walang epekto ito sa mga bagong
+    // installation dahil kasama na ang column sa CREATE TABLE sa itaas.
+    await pgPool.query(`ALTER TABLE cloud_backup_modules ADD COLUMN IF NOT EXISTS size_bytes BIGINT NOT NULL DEFAULT 0;`);
+    await pgPool.query(`ALTER TABLE cloud_backup_meta ADD COLUMN IF NOT EXISTS size_bytes BIGINT NOT NULL DEFAULT 0;`);
     console.log('✅ Cloud backup Postgres schema ready (cloud_backup_modules, cloud_backup_meta).');
 }
 ensureCloudBackupSchema().catch((err) => {
@@ -3166,6 +3174,7 @@ app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rate
 
     try {
         const client = await pgPool.connect();
+        let totalSizeBytes = 0;
         try {
             await client.query('BEGIN');
             let moduleCount = 0;
@@ -3174,26 +3183,34 @@ app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rate
                 // kailanman isusulat ang "password" field ng "users" dito.
                 const data = stripCloudBackupRedactedFields(moduleName, rawData);
                 const recordCount = Array.isArray(data) ? data.length : 0;
+                const serialized = JSON.stringify(data);
+                // "Na-consume" na storage: sinusukat sa aktwal na byte size
+                // ng na-store na JSON bawat module (Buffer.byteLength dahil
+                // multi-byte ang UTF-8 characters gaya ng ₱/ñ), tapos
+                // sinusuma ito para sa TOTAL ng buong installation sa ibaba.
+                const sizeBytes = Buffer.byteLength(serialized, 'utf8');
+                totalSizeBytes += sizeBytes;
                 await client.query(
-                    `INSERT INTO cloud_backup_modules (installation_id, module, data, record_count, updated_at)
-                     VALUES ($1, $2, $3, $4, now())
+                    `INSERT INTO cloud_backup_modules (installation_id, module, data, record_count, size_bytes, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, now())
                      ON CONFLICT (installation_id, module) DO UPDATE SET
-                        data = excluded.data, record_count = excluded.record_count, updated_at = excluded.updated_at`,
-                    [installationId, moduleName, JSON.stringify(data), recordCount]
+                        data = excluded.data, record_count = excluded.record_count, size_bytes = excluded.size_bytes, updated_at = excluded.updated_at`,
+                    [installationId, moduleName, serialized, recordCount, sizeBytes]
                 );
                 moduleCount++;
             }
 
             await client.query(
-                `INSERT INTO cloud_backup_meta (installation_id, store_name, total_records, module_count, last_sync_at, sync_count)
-                 VALUES ($1, $2, $3, $4, now(), 1)
+                `INSERT INTO cloud_backup_meta (installation_id, store_name, total_records, module_count, size_bytes, last_sync_at, sync_count)
+                 VALUES ($1, $2, $3, $4, $5, now(), 1)
                  ON CONFLICT (installation_id) DO UPDATE SET
                     store_name = excluded.store_name,
                     total_records = excluded.total_records,
                     module_count = excluded.module_count,
+                    size_bytes = excluded.size_bytes,
                     last_sync_at = now(),
                     sync_count = cloud_backup_meta.sync_count + 1`,
-                [installationId, storeName || null, typeof totalRecords === 'number' ? totalRecords : null, moduleCount]
+                [installationId, storeName || null, typeof totalRecords === 'number' ? totalRecords : null, moduleCount, totalSizeBytes]
             );
 
             await client.query('COMMIT');
@@ -3204,12 +3221,62 @@ app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rate
             client.release();
         }
 
-        logActivity(installationId, 'cloud_backup_sync', { moduleCount: Object.keys(modules).length, totalRecords: totalRecords || null, storeName: storeName || null });
+        logActivity(installationId, 'cloud_backup_sync', { moduleCount: Object.keys(modules).length, totalRecords: totalRecords || null, storeName: storeName || null, sizeBytes: totalSizeBytes });
 
-        res.json({ success: true, message: 'Na-save sa Postgres ang cloud backup.', moduleNames: moduleNames || Object.keys(modules) });
+        res.json({
+            success: true,
+            message: 'Na-save sa Postgres ang cloud backup.',
+            moduleNames: moduleNames || Object.keys(modules),
+            sizeBytes: totalSizeBytes,
+            sizeMB: Math.round((totalSizeBytes / (1024 * 1024)) * 100) / 100
+        });
     } catch (err) {
         console.error('⚠️ CLOUD_BACKUP: hindi na-save sa Postgres:', err.message);
         res.status(500).json({ success: false, message: 'May error habang sine-save sa Postgres: ' + err.message });
+    }
+});
+
+// --------------------------------------------------------------
+// GET /relay/cloud-backup/usage
+// Tinatawag ito ng OMNIPOS CLIENT SERVER (tuwing binubuksan/ini-refresh
+// ang Cloud Backup section sa My Store) para malaman kung ilang MB/GB
+// na ang NA-CONSUME nitong installation sa Postgres storage — hindi
+// lang pagkatapos ng sync (`/relay/cloud-backup/upload` na response
+// ay mayroon na ring sizeBytes/sizeMB, pero hindi tinatawag yun sa
+// tuwing binubuksan lang ang page, kaya ito ang mabilis/read-only na
+// bersyon para doon).
+// --------------------------------------------------------------
+app.get('/relay/cloud-backup/usage', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-usage', 60, 60 * 60 * 1000, (req) => req.query?.installationId), async (req, res) => {
+    const installationId = String(req.query.installationId || '').trim();
+    if (!installationId) {
+        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+    }
+    if (!pgPool) {
+        return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
+    }
+    try {
+        const result = await pgPool.query(
+            'SELECT total_records, module_count, size_bytes, last_sync_at, sync_count FROM cloud_backup_meta WHERE installation_id = $1',
+            [installationId]
+        );
+        if (!result.rows[0]) {
+            return res.json({ success: true, hasBackup: false, sizeBytes: 0, sizeMB: 0 });
+        }
+        const row = result.rows[0];
+        const sizeBytes = Number(row.size_bytes) || 0;
+        res.json({
+            success: true,
+            hasBackup: true,
+            sizeBytes,
+            sizeMB: Math.round((sizeBytes / (1024 * 1024)) * 100) / 100,
+            sizeGB: Math.round((sizeBytes / (1024 * 1024 * 1024)) * 1000) / 1000,
+            totalRecords: row.total_records,
+            moduleCount: row.module_count,
+            lastSyncAt: row.last_sync_at,
+            syncCount: row.sync_count
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
     }
 });
 
@@ -3225,8 +3292,12 @@ app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rate
 app.get('/relay/admin/api/cloud-backup', requireAdminKey, async (req, res) => {
     if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
     try {
-        const result = await pgPool.query('SELECT installation_id, store_name, total_records, module_count, last_sync_at, sync_count FROM cloud_backup_meta ORDER BY last_sync_at DESC NULLS LAST');
-        res.json({ success: true, backups: result.rows });
+        const result = await pgPool.query('SELECT installation_id, store_name, total_records, module_count, size_bytes, last_sync_at, sync_count FROM cloud_backup_meta ORDER BY last_sync_at DESC NULLS LAST');
+        const backups = result.rows.map((r) => ({
+            ...r,
+            size_mb: Math.round((Number(r.size_bytes || 0) / (1024 * 1024)) * 100) / 100
+        }));
+        res.json({ success: true, backups });
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });
     }
@@ -3237,11 +3308,19 @@ app.get('/relay/admin/api/cloud-backup/:installationId', requireAdminKey, async 
     try {
         const { installationId } = req.params;
         const metaResult = await pgPool.query('SELECT * FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
-        const modulesResult = await pgPool.query('SELECT module, data, record_count, updated_at FROM cloud_backup_modules WHERE installation_id = $1 ORDER BY module', [installationId]);
+        const modulesResult = await pgPool.query('SELECT module, data, record_count, size_bytes, updated_at FROM cloud_backup_modules WHERE installation_id = $1 ORDER BY module', [installationId]);
         if (!metaResult.rows[0]) {
             return res.status(404).json({ success: false, message: 'Walang cloud backup na nakita para sa installationId na ito.' });
         }
-        res.json({ success: true, meta: metaResult.rows[0], modules: modulesResult.rows });
+        const meta = {
+            ...metaResult.rows[0],
+            size_mb: Math.round((Number(metaResult.rows[0].size_bytes || 0) / (1024 * 1024)) * 100) / 100
+        };
+        const modules = modulesResult.rows.map((m) => ({
+            ...m,
+            size_mb: Math.round((Number(m.size_bytes || 0) / (1024 * 1024)) * 100) / 100
+        }));
+        res.json({ success: true, meta, modules });
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });
     }
