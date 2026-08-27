@@ -787,8 +787,30 @@ const FEATURE_CATALOG_BASE = {
     // place, "Deactivate Pro"/"Deactivate All" has nothing to remove for
     // it either — it just remains locked either way).
     multi_branch: { name: 'Multi-Branch Dashboard', price: 999, category: 'module' },
-    cloud_backup: { name: 'Cloud Backup (Postgres)', price: 1499, category: 'module' }
+    // 'cloud_backup': no longer has a single flat `price` here — it's a
+    // subscription now (Basic/Standard/Pro, monthly/yearly). See
+    // CLOUD_BACKUP_PLANS below, which is now the GROUND TRUTH for pricing
+    // (must be mirrored exactly in OMNIPOS/server.js).
+    cloud_backup: { name: 'Cloud Backup (Postgres)', price: null, category: 'module', isSubscription: true }
 };
+
+// ============================================================
+// CLOUD BACKUP — SUBSCRIPTION PLANS (must match OMNIPOS/server.js
+// CLOUD_BACKUP_PLANS exactly — this IS the ground truth for pricing
+// since this is RELAY, not just whatever the client claims).
+// ============================================================
+const CLOUD_BACKUP_PLANS = {
+    basic: { id: 'basic', name: 'Cloud Backup — Basic', price: { monthly: 129, yearly: 1290 } },
+    standard: { id: 'standard', name: 'Cloud Backup — Standard', price: { monthly: 249, yearly: 2490 } },
+    pro: { id: 'pro', name: 'Cloud Backup — Pro', price: { monthly: 399, yearly: 3990 } }
+};
+const CLOUD_BACKUP_BILLING_DAYS = { monthly: 30, yearly: 365 };
+
+function getCloudBackupPlanPrice(tier, billingCycle) {
+    const plan = CLOUD_BACKUP_PLANS[tier];
+    if (!plan || !CLOUD_BACKUP_BILLING_DAYS[billingCycle]) return null;
+    return typeof plan.price[billingCycle] === 'number' ? plan.price[billingCycle] : null;
+}
 
 // --------------------------------------------------------------
 // AUTO-LEARNED FEATURES — kapag may dumaang unlock request papunta sa
@@ -847,13 +869,17 @@ const UPGRADE_TIERS = [
     // bootstrapStores() at muli sa tuwing may auto-add) — kaya kasama na
     // rito agad ang anumang bagong theme/module, manual man o auto-learned.
     // bundlePrice: naka-sync sa OMNIPOS/server.js UPGRADE_TIERS 'pro'
-    // (6499, kasama na ang Cloud Backup at Multi-Branch Dashboard sa presyong ito).
-    { id: 'pro', name: 'Pro Upgrade (Complete)', featureIds: Object.keys(FEATURE_CATALOG), bundlePrice: 6499 }
+    // (6499, now including Multi-Branch Dashboard in this price).
+    // NOTE: 'cloud_backup' is no longer included here — it's a
+    // subscription now (Basic/Standard/Pro monthly/yearly), so it's
+    // purchased SEPARATELY from the one-time Pro bundle, not part of this
+    // bundlePrice.
+    { id: 'pro', name: 'Pro Upgrade (Complete)', featureIds: Object.keys(FEATURE_CATALOG).filter(id => id !== 'cloud_backup'), bundlePrice: 6499 }
 ];
 
 function recomputeProTierFeatureIds() {
     const proTier = UPGRADE_TIERS.find(t => t.id === 'pro');
-    if (proTier) proTier.featureIds = Object.keys(FEATURE_CATALOG);
+    if (proTier) proTier.featureIds = Object.keys(FEATURE_CATALOG).filter(id => id !== 'cloud_backup');
 }
 
 // Tinatawag sa sandaling AKTWAL nang na-isyu ang isang unlock token (hindi
@@ -955,7 +981,13 @@ function recordIssuedUnlock(installationId, featureId, token, meta = {}) {
         payload: token.payload,
         signature: token.signature,
         source: meta.source || 'otp', // 'otp' | 'admin-direct'
-        note: meta.note || null
+        note: meta.note || null,
+        // Cloud Backup subscription metadata only (Basic/Standard/Pro,
+        // Monthly/Yearly) — so the admin panel/analytics can show which
+        // plan was activated; the expiresAt above (from the signed token)
+        // is still what actually enforces access.
+        tier: meta.tier || null,
+        billingCycle: meta.billingCycle || null
     };
     saveIssuedUnlocks(issuedUnlocks);
 }
@@ -1660,6 +1692,13 @@ app.post('/relay/admin/api/pending-otps/approve', requireAdminKey, (req, res) =>
         pending.durationDays = durationDays;
     } else if (durationDays === 0) {
         pending.durationDays = null; // tahasang "Permanente" na pinili ng admin
+    } else if (pending.featureId === 'cloud_backup' && pending.billingCycle && CLOUD_BACKUP_BILLING_DAYS[pending.billingCycle]) {
+        // Cloud Backup subscription: if the admin didn't pass an explicit
+        // durationDays, use the correct number of days based on the
+        // billing cycle the customer requested (30 for monthly, 365 for
+        // yearly) — NOT the generic RELAY_DEFAULT_LICENSE_DAYS, since that
+        // default means something different (for other features).
+        pending.durationDays = CLOUD_BACKUP_BILLING_DAYS[pending.billingCycle];
     } else {
         pending.durationDays = RELAY_DEFAULT_LICENSE_DAYS;
     }
@@ -3115,8 +3154,9 @@ app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rate
             featureLocked: true,
             featureId: 'cloud_backup',
             featureName: FEATURE_CATALOG.cloud_backup.name,
-            price: FEATURE_CATALOG.cloud_backup.price,
-            message: 'Naka-lock pa ang Cloud Backup feature para sa installation na ito. Kailangan muna itong i-unlock bago magamit ang Cloud Backup.'
+            isSubscription: true,
+            plans: CLOUD_BACKUP_PLANS,
+            message: 'There is no active/it has expired for the Cloud Backup subscription for this installation. You must subscribe (or renew) first before using Cloud Backup.'
         });
     }
 
@@ -3257,8 +3297,9 @@ app.post('/relay/cloud-backup/restore', requireApiKey, requireAllowedDevice, rat
             featureLocked: true,
             featureId: 'cloud_backup',
             featureName: FEATURE_CATALOG.cloud_backup.name,
-            price: FEATURE_CATALOG.cloud_backup.price,
-            message: 'Naka-lock pa ang Cloud Backup feature para sa installation na ito.'
+            isSubscription: true,
+            plans: CLOUD_BACKUP_PLANS,
+            message: 'There is no active Cloud Backup subscription for this installation, or it has expired.'
         });
     }
 
@@ -3630,10 +3671,23 @@ app.post('/relay/admin/api/devices/:installationId/split-clone', requireAdminKey
 // tuwing may humihiling mag-unlock ng isang Pro theme.
 // --------------------------------------------------------------
 app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit('request-unlock', 5, 10 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
-    const { installationId, featureId, featureName, price, username, storeName, photo } = req.body;
+    const { installationId, featureId, featureName, price, username, storeName, photo, tier, billingCycle } = req.body;
 
     if (!installationId || !featureId) {
         return res.status(400).json({ success: false, message: 'Kulang ang installationId o featureId.' });
+    }
+
+    const isCloudBackup = featureId === 'cloud_backup';
+    let groundTruthPrice = null;
+
+    if (isCloudBackup) {
+        // Subscription — needs a valid tier + billingCycle, and the PRICE
+        // does NOT come from the client (`price` in the body) but from
+        // RELAY's own CLOUD_BACKUP_PLANS (ground truth).
+        groundTruthPrice = getCloudBackupPlanPrice(tier, billingCycle);
+        if (groundTruthPrice === null) {
+            return res.status(400).json({ success: false, message: 'Invalid Cloud Backup tier/billingCycle.' });
+        }
     }
 
     const otpCode = String(Math.floor(100000 + Math.random() * 900000));
@@ -3648,36 +3702,46 @@ app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit
         otpVerified: false,
         installationId,
         featureId,
-        featureName: featureName || featureId,
-        price: price || null
+        featureName: isCloudBackup ? CLOUD_BACKUP_PLANS[tier].name : (featureName || featureId),
+        price: isCloudBackup ? groundTruthPrice : (price || null),
+        tier: isCloudBackup ? tier : null,
+        billingCycle: isCloudBackup ? billingCycle : null,
+        // durationDays is pre-set based on the chosen billing cycle — the
+        // admin no longer needs to guess/type this manually on each
+        // approval (see also /relay/admin/api/pending-otps/approve).
+        durationDays: isCloudBackup ? CLOUD_BACKUP_BILLING_DAYS[billingCycle] : undefined
     });
 
     try {
-        // Ground-truth mula sa SARILING FEATURE_CATALOG ng relay — hindi
-        // basta client-supplied na featureName/price ang isasalig, dahil
-        // ang mga iyon ay galing lang sa request body (pwedeng palitan).
-        // Kung hindi tugma, tahasang i-flag sa email para alertuhan ang
-        // admin bago pa mag-Approve.
+        // Ground-truth from RELAY's OWN FEATURE_CATALOG/CLOUD_BACKUP_PLANS —
+        // we don't rely on the client-supplied featureName/price, since
+        // those just come from the request body (which can be altered).
+        // If there's a mismatch, explicitly flag it in the email to alert
+        // the admin before they Approve.
         const catalogEntry = FEATURE_CATALOG[featureId] || null;
-        const priceMismatch = catalogEntry && typeof price === 'number' && price !== catalogEntry.price;
-        const nameMismatch = catalogEntry && featureName && featureName !== catalogEntry.name;
+        const displayPrice = isCloudBackup ? groundTruthPrice : price;
+        const displayName = isCloudBackup ? CLOUD_BACKUP_PLANS[tier].name : (featureName || featureId);
+        const priceMismatch = !isCloudBackup && catalogEntry && typeof price === 'number' && price !== catalogEntry.price;
+        const nameMismatch = !isCloudBackup && catalogEntry && featureName && featureName !== catalogEntry.name;
 
         await notifyUnlockRequest({
-            subject: `🎨 Unlock Request — ${featureName || featureId}${price ? ` (₱${price})` : ''}`,
-            text: `May humiling na i-unlock ang isang Pro theme.\n\n` +
-                  `Store: ${storeName || 'Hindi tiyak'}\n` +
+            subject: `🎨 Unlock Request — ${displayName}${displayPrice ? ` (₱${displayPrice})` : ''}`,
+            text: `Someone requested to ${isCloudBackup ? 'subscribe/renew Cloud Backup' : 'unlock a Pro theme'}.\n\n` +
+                  `Store: ${storeName || 'Not specified'}\n` +
                   `Installation ID: ${installationId}\n` +
-                  `Feature: ${featureName || featureId}\n` +
-                  (price ? `Presyo (sinabi ng client): ₱${price}\n` : '') +
-                  (catalogEntry ? `Presyo ayon sa price list namin: ₱${catalogEntry.price} (${catalogEntry.name})\n` : `⚠️ Hindi nakita sa price list namin ang featureId na "${featureId}" — mag-ingat.\n`) +
-                  ((priceMismatch || nameMismatch) ? `⚠️⚠️ MAY DISKREPANSIYA sa presyo/pangalan — hindi tugma sa opisyal na price list. HUWAG mag-Approve hangga't hindi ito na-verify.\n` : '') +
-                  `Hiniling ni: ${username || 'Unknown'}\n` +
+                  `Feature: ${displayName}\n` +
+                  (isCloudBackup ? `Plan: ${tier} (${billingCycle}) — ₱${groundTruthPrice}\n` : '') +
+                  (isCloudBackup ? `Access to be granted: ${CLOUD_BACKUP_BILLING_DAYS[billingCycle]} days from approval\n` : '') +
+                  (!isCloudBackup && price ? `Price (stated by client): ₱${price}\n` : '') +
+                  (!isCloudBackup && catalogEntry ? `Price per our price list: ₱${catalogEntry.price} (${catalogEntry.name})\n` : (!isCloudBackup ? `⚠️ featureId "${featureId}" was not found in our price list — be careful.\n` : '')) +
+                  ((priceMismatch || nameMismatch) ? `⚠️⚠️ THERE IS A DISCREPANCY in price/name — it does not match the official price list. DO NOT Approve until this is verified.\n` : '') +
+                  `Requested by: ${username || 'Unknown'}\n` +
                   `OTP Code: ${otpCode}\n` +
-                  `Mag-e-expire ito sa loob ng 10 minuto.\n\n` +
-                  `I-verify muna ang bayad bago ibigay ang OTP na ito sa kliyente.`
+                  `This will expire within 10 minutes.\n\n` +
+                  `Verify payment first before giving this OTP to the client.`
         });
 
-        logActivity(installationId, 'otp_requested', { featureId, featureName: featureName || featureId });
+        logActivity(installationId, 'otp_requested', { featureId, featureName: displayName, tier: tier || null, billingCycle: billingCycle || null });
         res.json({ success: true, message: 'Naipadala ang OTP request.' });
     } catch (err) {
         console.error('Relay mail send failure:', err);
@@ -3752,16 +3816,20 @@ app.post('/relay/confirm-unlock', requireApiKey, requireAllowedDevice, rateLimit
     recordIssuedUnlock(installationId, featureId, token, {
         featureName: pending.featureName,
         price: pending.price,
-        source: 'otp'
+        source: 'otp',
+        tier: pending.tier || null,
+        billingCycle: pending.billingCycle || null
     });
-    logActivity(installationId, 'unlock_issued', { featureId, featureName: pending.featureName, source: 'otp' });
+    logActivity(installationId, 'unlock_issued', { featureId, featureName: pending.featureName, source: 'otp', tier: pending.tier || null, billingCycle: pending.billingCycle || null });
 
     pendingOtps.delete(key);
 
     res.json({
         success: true,
         message: `Na-unlock ang ${pending.featureName}!`,
-        token
+        token,
+        tier: pending.tier || undefined,
+        billingCycle: pending.billingCycle || undefined
     });
 });
 

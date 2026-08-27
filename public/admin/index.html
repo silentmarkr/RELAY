@@ -3020,7 +3020,7 @@ function renderOtps(list) {
         ? `<img src="${o.photo}" class="requestor-photo" onclick="viewPhotoFullSize('${o.photo}')" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'requestor-photo-placeholder',innerText:'⚠️'}))">`
         : `<div class="requestor-photo-placeholder" title="No photo (camera permission may have been denied, or the device has no camera)">🚫</div>`}
       <div class="row-info">
-        <div><strong>${label}</strong>${o.price ? ' · ₱' + o.price : ''}</div>
+        <div><strong>${label}</strong>${o.price ? ' · ₱' + o.price : ''}${o.billingCycle ? ' · ' + (o.billingCycle === 'yearly' ? 'Yearly' : 'Monthly') + ' subscription' : ''}</div>
         <div class="meta">${o.storeName || 'No store name'} · requested by ${o.requestedBy}</div>
         <div style="margin:6px 0;">${statusHtml}</div>
         <div class="countdown">Mag-e-expire sa ${minsLeft(o.expiresAt)}</div>
@@ -3029,15 +3029,16 @@ function renderOtps(list) {
         <div class="otp-code">${o.code}</div>
         <button class="btn-copy" style="margin-top:6px; display:block; width:100%;" onclick="copyCode('${o.code}', this)">Copy</button>
         ${!o.approved
-          ? `<button class="btn-allow" style="margin-top:6px; width:100%;" onclick="approveOtp('${o.key}', '${(label || '').replace(/'/g, "\\'")}', '${(o.storeName || '').replace(/'/g, "\\'")}', '${(o.featureId || '').replace(/'/g, "\\'")}')">✓ Allow / Run</button>`
+          ? `<button class="btn-allow" style="margin-top:6px; width:100%;" onclick="approveOtp('${o.key}', '${(label || '').replace(/'/g, "\\'")}', '${(o.storeName || '').replace(/'/g, "\\'")}', '${(o.featureId || '').replace(/'/g, "\\'")}', ${typeof o.durationDays === 'number' ? o.durationDays : 'null'})">✓ Allow / Run</button>`
           : ''}
       </div>
     </div>`;
   }).join('');
 }
 
-async function approveOtp(key, featureLabel, storeName, featureId) {
+async function approveOtp(key, featureLabel, storeName, featureId, presetDurationDays) {
   const isDemo = featureId === '__demo__';
+  const isCloudBackup = featureId === 'cloud_backup';
   const ok = await confirmAction({
     title: 'Approve the unlock?',
     message: isDemo
@@ -3046,9 +3047,16 @@ async function approveOtp(key, featureLabel, storeName, featureId) {
     confirmLabel: '✓ Allow / Run'
   });
   if (!ok) return;
+  // For Cloud Backup subscriptions, presetDurationDays comes from the
+  // billing cycle the CUSTOMER CHOSE (30 = Monthly, 365 = Yearly) — it's
+  // just pre-selected in the duration dropdown, but the admin can still
+  // change it (e.g. if giving a promo/extension).
   const durationDays = isDemo
     ? await promptForDemoDuration(`How long should Demo Mode run before it expires?`)
-    : await promptForDuration(`How long until "${featureLabel}" expires and needs renewal?`);
+    : await promptForDuration(
+        isCloudBackup ? `Confirm the Cloud Backup subscription length (pre-filled based on the customer's chosen billing cycle):` : `How long until "${featureLabel}" expires and needs renewal?`,
+        (isCloudBackup && typeof presetDurationDays === 'number') ? String(presetDurationDays) : undefined
+      );
   if (durationDays === null) return; // kinansela
   try {
     const res = await api('/relay/admin/api/pending-otps/approve', { method: 'POST', body: JSON.stringify({ key, durationDays }) });
