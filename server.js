@@ -2755,15 +2755,7 @@ function issueDevicePermit(installationId, fingerprint) {
 // kailangang mabuhay nang matagal, at yun ay naka-save na sa panig
 // ng CLIENT (ang bawat kliyente ang nag-iingat ng sarili nilang token).
 // --------------------------------------------------------------
-const pendingOtps = new Map(); // key: `${installationId}:${featureId}` -> { code, expiresAt, requestedBy, featureName, price, failedAttempts }
-
-// FAILED-ATTEMPT LOCKOUT (feature-unlock / demo-mode OTP) — kapag
-// tatlong (3) beses nang MALI ang inilagay na OTP para sa isang
-// pending unlock/demo request, buburahin na AGAD ang buong pending
-// entry na iyon (kasama na ang otp-code at ang countdown/timer nito
-// sa Admin Panel) — kailangan na nilang humiling ng bagong OTP kung
-// gusto pa nilang magpatuloy.
-const MAX_FAILED_UNLOCK_OTP_ATTEMPTS = 3;
+const pendingOtps = new Map(); // key: `${installationId}:${featureId}` -> { code, expiresAt, requestedBy, featureName, price }
 
 function requireApiKey(req, res, next) {
     if (!RELAY_API_KEY) return next(); // walang na-configure na key = walang gate (hindi rekomendado, pero valid config)
@@ -3795,7 +3787,6 @@ app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit
         photo: photo || null,
         approved: false,
         otpVerified: false,
-        failedAttempts: 0,
         installationId,
         featureId,
         featureName: isCloudBackup ? CLOUD_BACKUP_PLANS[tier].name : (featureName || featureId),
@@ -3888,17 +3879,6 @@ app.post('/relay/confirm-unlock', requireApiKey, requireAllowedDevice, rateLimit
         return res.status(400).json({ success: false, message: 'Expired na ang OTP code. Humingi ng bago.' });
     }
     if (!safeCompare(String(otp).trim(), pending.code)) {
-        // FAILED-ATTEMPT LOCKOUT: bilangin ang maling tangka. Pagkatapos ng
-        // MAX_FAILED_UNLOCK_OTP_ATTEMPTS (3), buburahin na AGAD ang buong
-        // pending entry na ito — kaya mawawala rin agad ito (kasama ang
-        // otp-code at ang countdown/timer nito) sa pending list ng Admin
-        // Panel, hindi na kailangang antayin pang mag-expire.
-        pending.failedAttempts = (pending.failedAttempts || 0) + 1;
-        if (pending.failedAttempts >= MAX_FAILED_UNLOCK_OTP_ATTEMPTS) {
-            pendingOtps.delete(key);
-            logActivity(installationId, 'unlock_otp_locked_out', { featureId, failedAttempts: pending.failedAttempts });
-            return res.status(400).json({ success: false, message: 'Maling OTP code nang maraming beses. Kailangan nang humiling ng bagong OTP.' });
-        }
         return res.status(400).json({ success: false, message: 'Maling OTP code.' });
     }
 
@@ -3941,47 +3921,8 @@ app.post('/relay/confirm-unlock', requireApiKey, requireAllowedDevice, rateLimit
 });
 
 // --------------------------------------------------------------
-// POST /relay/cancel-unlock
-// Tinatawag ito kapag KINANSELA ng cashier/client ang isang unlock
-// request — sa OTP-entry step mismo (pinindot ang Cancel) o habang
-// naghihintay pa ng admin approval (pinindot ang Cancel sa "Waiting
-// for Approval" dialog). Buburahin AGAD ang buong pending entry na
-// ito, para mawala rin agad ito (kasama ang otp-code at countdown/
-// timer nito) sa pending list ng Admin Panel — hindi na kailangang
-// antayin pang mag-expire nang mag-isa.
-//
-// Sinusuportahan nito ang PAREHONG uri ng key na ginagawa ng ibang
-// /relay/request-* endpoints sa itaas: single feature/theme/demo
-// ({ installationId, featureId }) at bundle/bulk unlock
-// ({ installationId, featureIds }).
-// --------------------------------------------------------------
-app.post('/relay/cancel-unlock', requireApiKey, requireAllowedDevice, rateLimit('cancel-unlock', 30, 10 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
-    const { installationId, featureId, featureIds } = req.body;
-
-    if (!installationId || (!featureId && !(Array.isArray(featureIds) && featureIds.length))) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId at featureId/featureIds.' });
-    }
-
-    const key = Array.isArray(featureIds) && featureIds.length
-        ? `${installationId}:__bulk__:${featureIds.slice().sort().join(',')}`
-        : `${installationId}:${featureId}`;
-
-    if (pendingOtps.has(key)) {
-        pendingOtps.delete(key);
-        logActivity(installationId, 'otp_cancelled_by_client', { featureId: featureId || null, featureIds: featureIds || null });
-    }
-
-    // Idempotent — success pa rin kahit wala nang laman ang entry
-    // (hal. na-expire na, na-lock out na sa maling attempts, o naka-
-    // cancel na dati), dahil ang gusto lang talaga ng caller ay
-    // masiguradong wala nang aktibong pending request.
-    res.json({ success: true });
-});
-
-// --------------------------------------------------------------
 // DEMO MODE — pansamantalang bubuksan ang LAHAT ng features (walang
 // paywall) para sa isang installation, pero:
-
 //   1) kailangan pa ring humingi/mag-verify ng OTP (parang unlock din,
 //      kaya kontrolado pa rin ng developer kung sino/ilang beses ito
 //      maibibigay), at
@@ -4026,7 +3967,6 @@ app.post('/relay/request-demo', requireApiKey, requireAllowedDevice, rateLimit('
         photo: photo || null,
         approved: false,
         otpVerified: false,
-        failedAttempts: 0,
         installationId,
         featureId: DEMO_FEATURE_ID,
         featureName: 'Full Demo Mode',
@@ -4073,15 +4013,6 @@ app.post('/relay/confirm-demo', requireApiKey, requireAllowedDevice, rateLimit('
         return res.status(400).json({ success: false, message: 'Expired na ang OTP code. Humingi ng bago.' });
     }
     if (!safeCompare(String(otp).trim(), pending.code)) {
-        // FAILED-ATTEMPT LOCKOUT: pareho ng /relay/confirm-unlock — 3 maling
-        // tangka lang ang bibigyan bago agad buburahin ang buong pending
-        // demo request (kasama ang otp-code at countdown/timer sa Admin Panel).
-        pending.failedAttempts = (pending.failedAttempts || 0) + 1;
-        if (pending.failedAttempts >= MAX_FAILED_UNLOCK_OTP_ATTEMPTS) {
-            pendingOtps.delete(key);
-            logActivity(installationId, 'demo_otp_locked_out', { failedAttempts: pending.failedAttempts });
-            return res.status(400).json({ success: false, message: 'Maling OTP code nang maraming beses. Kailangan nang humiling ng bagong OTP.' });
-        }
         return res.status(400).json({ success: false, message: 'Maling OTP code.' });
     }
 
