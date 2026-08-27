@@ -113,14 +113,6 @@ async function ensureCloudBackupSchema() {
             sync_count        INTEGER NOT NULL DEFAULT 0
         );
     `);
-    // BUG FIX: added so we can show the customer how much of their plan's
-    // data limit (storageLimitBytes, see CLOUD_BACKUP_PLANS below) has
-    // actually been consumed. Uses ADD COLUMN IF NOT EXISTS so this is
-    // safe to run against a database that already has the table from
-    // before this column existed.
-    await pgPool.query(`
-        ALTER TABLE cloud_backup_meta ADD COLUMN IF NOT EXISTS storage_bytes BIGINT NOT NULL DEFAULT 0;
-    `);
     console.log('✅ Cloud backup Postgres schema ready (cloud_backup_modules, cloud_backup_meta).');
 }
 ensureCloudBackupSchema().catch((err) => {
@@ -807,17 +799,10 @@ const FEATURE_CATALOG_BASE = {
 // CLOUD_BACKUP_PLANS exactly — this IS the ground truth for pricing
 // since this is RELAY, not just whatever the client claims).
 // ============================================================
-// storageLimitBytes = how much backed-up data (JSON payload size) each
-// tier is allowed to hold in Postgres. This is the GROUND TRUTH used by
-// the /relay/cloud-backup/upload route below to reject an upload that
-// would put the installation over its plan's limit (returns 413 with
-// storageQuotaExceeded: true) — must be mirrored in OMNIPOS/server.js
-// CLOUD_BACKUP_PLANS for display purposes only (that copy is not
-// trusted for enforcement, this one is).
 const CLOUD_BACKUP_PLANS = {
-    basic: { id: 'basic', name: 'Cloud Backup — Basic', price: { monthly: 129, yearly: 1290 }, storageLimitBytes: 250 * 1024 * 1024 },       // 250 MB
-    standard: { id: 'standard', name: 'Cloud Backup — Standard', price: { monthly: 249, yearly: 2490 }, storageLimitBytes: 1024 * 1024 * 1024 }, // 1 GB
-    pro: { id: 'pro', name: 'Cloud Backup — Pro', price: { monthly: 399, yearly: 3990 }, storageLimitBytes: 5 * 1024 * 1024 * 1024 }             // 5 GB
+    basic: { id: 'basic', name: 'Cloud Backup — Basic', price: { monthly: 129, yearly: 1290 } },
+    standard: { id: 'standard', name: 'Cloud Backup — Standard', price: { monthly: 249, yearly: 2490 } },
+    pro: { id: 'pro', name: 'Cloud Backup — Pro', price: { monthly: 399, yearly: 3990 } }
 };
 const CLOUD_BACKUP_BILLING_DAYS = { monthly: 30, yearly: 365 };
 
@@ -3179,43 +3164,15 @@ app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rate
         return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL) sa RELAY. Sabihin sa developer na i-set ito.' });
     }
 
-    // --------------------------------------------------------------
-    // DATA LIMIT (storage quota) CHECK — each Cloud Backup tier (Basic/
-    // Standard/Pro) has a storageLimitBytes cap (see CLOUD_BACKUP_PLANS
-    // above). This is checked SERVER-SIDE, using the tier RELAY itself
-    // recorded when the subscription was activated (issuedUnlocks[...]
-    // .tier) — not whatever tier the client claims — before anything is
-    // written to Postgres. Sizes the actual JSON payload that would be
-    // stored (post password-redaction) so the number shown to the
-    // customer matches what's really being counted against their quota.
-    // --------------------------------------------------------------
-    const activeTier = ((issuedUnlocks[installationId] || {})['cloud_backup'] || {}).tier || 'basic';
-    const activePlan = CLOUD_BACKUP_PLANS[activeTier] || CLOUD_BACKUP_PLANS.basic;
-
-    const redactedModules = {};
-    for (const [moduleName, rawData] of Object.entries(modules)) {
-        redactedModules[moduleName] = stripCloudBackupRedactedFields(moduleName, rawData);
-    }
-    const storageBytes = Buffer.byteLength(JSON.stringify(redactedModules), 'utf8');
-
-    if (storageBytes > activePlan.storageLimitBytes) {
-        logActivity(installationId, 'cloud_backup_blocked', { reason: 'storage_quota_exceeded', tier: activeTier, storageBytes, storageLimitBytes: activePlan.storageLimitBytes });
-        return res.status(413).json({
-            success: false,
-            storageQuotaExceeded: true,
-            tier: activeTier,
-            storageUsedBytes: storageBytes,
-            storageLimitBytes: activePlan.storageLimitBytes,
-            message: `Your current backup data (${(storageBytes / 1024 / 1024).toFixed(1)} MB) exceeds the data limit of your ${CLOUD_BACKUP_PLANS[activeTier].name.replace('Cloud Backup — ', '')} plan (${(activePlan.storageLimitBytes / 1024 / 1024).toFixed(0)} MB). Please upgrade to a higher tier, or archive/delete old records first.`
-        });
-    }
-
     try {
         const client = await pgPool.connect();
         try {
             await client.query('BEGIN');
             let moduleCount = 0;
-            for (const [moduleName, data] of Object.entries(redactedModules)) {
+            for (const [moduleName, rawData] of Object.entries(modules)) {
+                // Defense-in-depth: kahit ano ang ipadala ng client, hindi
+                // kailanman isusulat ang "password" field ng "users" dito.
+                const data = stripCloudBackupRedactedFields(moduleName, rawData);
                 const recordCount = Array.isArray(data) ? data.length : 0;
                 await client.query(
                     `INSERT INTO cloud_backup_modules (installation_id, module, data, record_count, updated_at)
@@ -3228,16 +3185,15 @@ app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rate
             }
 
             await client.query(
-                `INSERT INTO cloud_backup_meta (installation_id, store_name, total_records, module_count, last_sync_at, sync_count, storage_bytes)
-                 VALUES ($1, $2, $3, $4, now(), 1, $5)
+                `INSERT INTO cloud_backup_meta (installation_id, store_name, total_records, module_count, last_sync_at, sync_count)
+                 VALUES ($1, $2, $3, $4, now(), 1)
                  ON CONFLICT (installation_id) DO UPDATE SET
                     store_name = excluded.store_name,
                     total_records = excluded.total_records,
                     module_count = excluded.module_count,
                     last_sync_at = now(),
-                    sync_count = cloud_backup_meta.sync_count + 1,
-                    storage_bytes = excluded.storage_bytes`,
-                [installationId, storeName || null, typeof totalRecords === 'number' ? totalRecords : null, moduleCount, storageBytes]
+                    sync_count = cloud_backup_meta.sync_count + 1`,
+                [installationId, storeName || null, typeof totalRecords === 'number' ? totalRecords : null, moduleCount]
             );
 
             await client.query('COMMIT');
@@ -3248,55 +3204,12 @@ app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rate
             client.release();
         }
 
-        logActivity(installationId, 'cloud_backup_sync', { moduleCount: Object.keys(modules).length, totalRecords: totalRecords || null, storeName: storeName || null, storageBytes });
+        logActivity(installationId, 'cloud_backup_sync', { moduleCount: Object.keys(modules).length, totalRecords: totalRecords || null, storeName: storeName || null });
 
-        res.json({
-            success: true,
-            message: 'Na-save sa Postgres ang cloud backup.',
-            moduleNames: moduleNames || Object.keys(modules),
-            storageUsedBytes: storageBytes,
-            storageLimitBytes: activePlan.storageLimitBytes,
-            tier: activeTier
-        });
+        res.json({ success: true, message: 'Na-save sa Postgres ang cloud backup.', moduleNames: moduleNames || Object.keys(modules) });
     } catch (err) {
         console.error('⚠️ CLOUD_BACKUP: hindi na-save sa Postgres:', err.message);
         res.status(500).json({ success: false, message: 'May error habang sine-save sa Postgres: ' + err.message });
-    }
-});
-
-// --------------------------------------------------------------
-// GET /relay/cloud-backup/usage — how much of the installation's
-// Cloud Backup data limit (storageLimitBytes, based on their CURRENT
-// tier) is already consumed. Called by the OMNIPOS client server so it
-// can show the customer a "142 MB of 250 MB used" indicator, both in
-// the System settings status box and in the plan-picker modal.
-// --------------------------------------------------------------
-app.get('/relay/cloud-backup/usage', requireApiKey, requireAllowedDevice, async (req, res) => {
-    const installationId = req.query.installationId;
-    if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Missing installationId.' });
-    }
-    if (!isFeatureCurrentlyUnlocked(installationId, 'cloud_backup')) {
-        return res.status(402).json({ success: false, featureLocked: true, message: 'There is no active Cloud Backup subscription for this installation, or it has expired.' });
-    }
-    const tier = ((issuedUnlocks[installationId] || {})['cloud_backup'] || {}).tier || 'basic';
-    const plan = CLOUD_BACKUP_PLANS[tier] || CLOUD_BACKUP_PLANS.basic;
-
-    if (!pgPool) {
-        return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured on RELAY.' });
-    }
-    try {
-        const result = await pgPool.query('SELECT storage_bytes FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
-        const storageUsedBytes = (result.rows[0] && Number(result.rows[0].storage_bytes)) || 0;
-        res.json({
-            success: true,
-            tier,
-            storageUsedBytes,
-            storageLimitBytes: plan.storageLimitBytes,
-            storageUsedPercent: Math.min(100, Math.round((storageUsedBytes / plan.storageLimitBytes) * 1000) / 10)
-        });
-    } catch (err) {
-        res.status(500).json({ success: false, message: err.message });
     }
 });
 
