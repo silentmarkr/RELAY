@@ -128,6 +128,20 @@ if (pgPool) {
 // (retryable), dahil safe namang i-retry ang buong cloud-backup upload
 // transaction (idempotent ito — UPSERT/ON CONFLICT DO UPDATE lahat ng
 // writes dito).
+//
+// BUG FIX: dagdag na ngayon ang ENOTFOUND (DNS resolution failure — hal.
+// "getaddrinfo ENOTFOUND dpg-xxxxx-a") at ECONNREFUSED sa transient list.
+// Dating hindi ito retryable, kaya kahit TAMA na ang DATABASE_URL
+// (gumana pa nga ito ilang minuto lang bago nito) — isang saglit na
+// DNS hiccup lang (hal. Render Postgres na "gumigising" mula sa idle,
+// o RELAY mismong kararestart pa lang at hindi pa na-propagate ang
+// internal hostname resolution) — agad na ituturing na TAPOS na, walang
+// retry, kahit maaayos na sana ito sa loob ng ilang segundo. Dagdag din
+// ang isang MAIKLING paghihintay (1.5s) BAGO mag-retry kapag ito ang
+// klase ng error (hindi kagaya ng ibang transient error na agad
+// nagre-retry) — dahil ang DNS resolution ay kailangan talaga ng saglit
+// na oras para lumipas, hindi katulad ng ibang koneksyon error na pwede
+// nang ayusin ng bagong connection kaagad.
 // --------------------------------------------------------------
 function isTransientPgConnectionError(err) {
     if (!err) return false;
@@ -138,11 +152,14 @@ function isTransientPgConnectionError(err) {
         msg.includes('Connection terminated') ||
         code === 'ECONNRESET' ||
         code === 'EPIPE' ||
+        code === 'ENOTFOUND' ||   // DNS hindi pa na-resolve (hal. DB gumigising/RELAY kararestart)
+        code === 'ECONNREFUSED' || // DB tumangging kumonekta (hal. DB gumigising pa)
         code === '57P01' || // admin_shutdown
         code === '57P02' || // crash_shutdown
         code === '57P03'    // cannot_connect_now
     );
 }
+const PG_RECONNECT_DELAY_MS = 1500;
 
 // --------------------------------------------------------------
 // runCloudBackupWrite — isinasagawa ang buong BEGIN…COMMIT ng cloud
@@ -171,6 +188,7 @@ async function runCloudBackupWrite(writeFn, { maxAttempts = 3 } = {}) {
         } finally {
             client.release();
         }
+        await new Promise(r => setTimeout(r, PG_RECONNECT_DELAY_MS));
     }
     throw lastErr;
 }
@@ -206,6 +224,7 @@ async function queryWithRetry(text, params, { maxAttempts = 3 } = {}) {
                 throw err;
             }
             console.warn(`⚠️  CLOUD_BACKUP: transient Postgres connection error on read attempt ${attempt}/${maxAttempts} (${err.message}) — retrying with a fresh connection…`);
+            await new Promise(r => setTimeout(r, PG_RECONNECT_DELAY_MS));
         }
     }
     throw lastErr;
