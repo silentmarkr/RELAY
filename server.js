@@ -3275,7 +3275,7 @@ function stripCloudBackupRedactedFields(moduleName, data) {
     });
 }
 
-app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-upload', 12, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-upload', 30, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
     const { installationId, storeName, modules, moduleNames, totalRecords } = req.body;
 
     if (!installationId || !modules || typeof modules !== 'object') {
