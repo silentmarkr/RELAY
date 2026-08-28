@@ -79,8 +79,35 @@ const REDIS_KEY_PREFIX = 'omnipos-relay:';
 // --------------------------------------------------------------
 const { Pool } = require('pg');
 const DATABASE_URL = process.env.DATABASE_URL || null;
+// BUG FIX: "Connection terminated unexpectedly" mula sa `pg` (nakikita
+// sa cloud-backup upload, lalo na sa malalaking store data) — karaniwang
+// dahilan nito ay may intermediate NAT/load-balancer/firewall (karaniwan
+// sa mga hosted platform tulad ng Render, at sa maraming managed Postgres
+// provider din tulad ng Supabase/Neon sa likod ng isang pooler) na
+// tahimik na pumuputol ng TCP connection na WALANG traffic sa loob ng
+// ilang segundo/minuto — at kayang mangyari ito sa GITNA ng isang mabigat
+// na INSERT/transaction (hal. malaking JSONB module) kahit tumatakbo pa
+// ang Postgres mismo sa likod. Dinagdagan ito ng:
+//  - keepAlive — nagpapadala ng TCP keepalive packets para hindi ito
+//    ituring na "idle" ng mga intermediate na proxy/NAT sa itaas.
+//  - statement_timeout: 0 / query_timeout: 0 — walang server/client-side
+//    query timeout na maaaring pumutol nang maaga sa isang mabigat na
+//    write (may sarili nang ceiling ang buong request sa pamamagitan ng
+//    Express/Node request timeout, hindi na kailangan ng dagdag na
+//    maikling limitasyon dito sa query level).
+//  - connectionTimeoutMillis — 15s na sapat lang para gumawa ng bagong
+//    koneksyon sa pool (hiwalay ito sa haba ng query mismo).
 const pgPool = DATABASE_URL
-    ? new Pool({ connectionString: DATABASE_URL, ssl: process.env.PGSSL === 'false' ? false : { rejectUnauthorized: false } })
+    ? new Pool({
+        connectionString: DATABASE_URL,
+        ssl: process.env.PGSSL === 'false' ? false : { rejectUnauthorized: false },
+        keepAlive: true,
+        keepAliveInitialDelayMillis: 10000,
+        statement_timeout: 0,
+        query_timeout: 0,
+        idle_in_transaction_session_timeout: 0,
+        connectionTimeoutMillis: 15000
+    })
     : null;
 
 if (pgPool) {
@@ -89,6 +116,63 @@ if (pgPool) {
     });
 } else {
     console.warn('⚠️  Walang DATABASE_URL na naka-set — hindi gagana ang Cloud Backup (Postgres) feature hangga\'t hindi ito nalagyan.');
+}
+
+// --------------------------------------------------------------
+// isTransientPgConnectionError — tinutukoy kung ang isang error mula sa
+// `pg` ay dahil lang sa isang biglaang/pansamantalang pagkaputol ng
+// connection (hal. "Connection terminated unexpectedly", ECONNRESET,
+// admin_shutdown/crash_shutdown mula sa Postgres mismo) sa halip na isang
+// TUNAY na problema sa datos/query (hal. syntax error, constraint
+// violation) — ang mga una lang ang dapat awtomatikong ULITIN
+// (retryable), dahil safe namang i-retry ang buong cloud-backup upload
+// transaction (idempotent ito — UPSERT/ON CONFLICT DO UPDATE lahat ng
+// writes dito).
+// --------------------------------------------------------------
+function isTransientPgConnectionError(err) {
+    if (!err) return false;
+    const msg = String(err.message || '');
+    const code = err.code || '';
+    return (
+        msg.includes('Connection terminated unexpectedly') ||
+        msg.includes('Connection terminated') ||
+        code === 'ECONNRESET' ||
+        code === 'EPIPE' ||
+        code === '57P01' || // admin_shutdown
+        code === '57P02' || // crash_shutdown
+        code === '57P03'    // cannot_connect_now
+    );
+}
+
+// --------------------------------------------------------------
+// runCloudBackupWrite — isinasagawa ang buong BEGIN…COMMIT ng cloud
+// backup upload gamit ang isang FRESH na connection mula sa pool, at
+// AWTOMATIKONG ULINIT (hanggang 2 pang pagsubok, 3 total) kapag
+// TRANSIENT connection error lang ang dahilan ng pagkabigo (tingnan sa
+// itaas) — kung sa dahilang iba naman (hal. mismong mali ang datos),
+// hindi ito ULIT-ULITIN, agad na itinapon ang error papunta sa caller.
+// --------------------------------------------------------------
+async function runCloudBackupWrite(writeFn, { maxAttempts = 3 } = {}) {
+    let lastErr = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const client = await pgPool.connect();
+        try {
+            await client.query('BEGIN');
+            const result = await writeFn(client);
+            await client.query('COMMIT');
+            return result;
+        } catch (err) {
+            try { await client.query('ROLLBACK'); } catch (rollbackErr) { /* connection likely already gone — ignore */ }
+            lastErr = err;
+            if (!isTransientPgConnectionError(err) || attempt === maxAttempts) {
+                throw err;
+            }
+            console.warn(`⚠️  CLOUD_BACKUP: transient Postgres connection error on attempt ${attempt}/${maxAttempts} (${err.message}) — retrying with a fresh connection…`);
+        } finally {
+            client.release();
+        }
+    }
+    throw lastErr;
 }
 
 async function ensureCloudBackupSchema() {
@@ -3159,7 +3243,7 @@ app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rate
     const { installationId, storeName, modules, moduleNames, totalRecords } = req.body;
 
     if (!installationId || !modules || typeof modules !== 'object') {
-        return res.status(400).json({ success: false, message: 'Kulang o mali ang installationId/modules.' });
+        return res.status(400).json({ success: false, message: 'Missing or invalid installationId/modules.' });
     }
 
     if (!isFeatureCurrentlyUnlocked(installationId, 'cloud_backup')) {
@@ -3176,7 +3260,7 @@ app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rate
     }
 
     if (!pgPool) {
-        return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL) sa RELAY. Sabihin sa developer na i-set ito.' });
+        return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured yet on RELAY. Tell the developer to set it.' });
     }
 
     // Alamin muna ang tier/quota ng installation na ito BAGO isulat
@@ -3215,11 +3299,18 @@ app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rate
     }
 
     try {
-        const client = await pgPool.connect();
         let totalSizeBytes = 0;
-        try {
-            await client.query('BEGIN');
-            let moduleCount = 0;
+        let moduleCount = 0;
+
+        await runCloudBackupWrite(async (client) => {
+            // I-reset ang mga counter na ito sa SIMULA ng bawat pagsubok
+            // (attempt) — kung ito ay isang RETRY (dahil sa transient
+            // connection error), gusto nating simulan ulit mula sa zero
+            // ang totalSizeBytes/moduleCount ng bagong attempt sa halip
+            // na dagdagan pa ang natitirang value mula sa nabigong
+            // attempt bago rito.
+            totalSizeBytes = 0;
+            moduleCount = 0;
             for (const [moduleName, entry] of Object.entries(serializedModules)) {
                 // "Na-consume" na storage: sinusukat sa aktwal na byte size
                 // ng na-store na JSON bawat module (Buffer.byteLength dahil
@@ -3249,14 +3340,7 @@ app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rate
                     sync_count = cloud_backup_meta.sync_count + 1`,
                 [installationId, storeName || null, typeof totalRecords === 'number' ? totalRecords : null, moduleCount, totalSizeBytes]
             );
-
-            await client.query('COMMIT');
-        } catch (err) {
-            await client.query('ROLLBACK');
-            throw err;
-        } finally {
-            client.release();
-        }
+        });
 
         logActivity(installationId, 'cloud_backup_sync', { moduleCount: Object.keys(modules).length, totalRecords: totalRecords || null, storeName: storeName || null, sizeBytes: totalSizeBytes });
 
@@ -3272,7 +3356,7 @@ app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rate
 
         res.json({
             success: true,
-            message: 'Na-save sa Postgres ang cloud backup.',
+            message: 'Cloud backup successfully saved to Postgres.',
             moduleNames: moduleNames || Object.keys(modules),
             sizeBytes: totalSizeBytes,
             sizeMB: sizeMBForResponse,
@@ -3283,7 +3367,10 @@ app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rate
         });
     } catch (err) {
         console.error('⚠️ CLOUD_BACKUP: hindi na-save sa Postgres:', err.message);
-        res.status(500).json({ success: false, message: 'May error habang sine-save sa Postgres: ' + err.message });
+        const friendlyMessage = isTransientPgConnectionError(err)
+            ? 'Lost connection to the database while saving the cloud backup (this can happen with very large uploads). Please try syncing again — no partial data was saved.'
+            : ('An error occurred while saving to Postgres: ' + err.message);
+        res.status(500).json({ success: false, message: friendlyMessage });
     }
 });
 
