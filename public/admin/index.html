@@ -3385,6 +3385,7 @@ async function manualAllow() {
 // ---------------- DEVICE DETAIL SCREEN ----------------
 const ACTIVITY_LABELS = {
   otp_requested: '🔑 Requested OTP',
+  otp_cancelled: '❌ OTP cancelled by client (closed/cancelled the modal, or ran out of attempts)',
   admin_approved: '✓ Na-approve mo',
   unlock_issued: '🔓 Unlock token issued',
   feature_deactivated: '🔒 Feature deactivated',
@@ -3408,6 +3409,7 @@ function activityDescription(entry) {
   if (entry.type === 'feature_deactivated') return `${d.featureName || d.featureId}`;
   if (entry.type === 'device_reset') return `${d.deactivatedCount || 0} feature(s) removed`;
   if (entry.type === 'otp_requested') return d.featureNames ? (Array.isArray(d.featureNames) ? d.featureNames.join(', ') : d.featureNames) : (d.featureName || d.featureId || '');
+  if (entry.type === 'otp_cancelled') return d.featureName || (Array.isArray(d.featureIds) ? d.featureIds.join(', ') : d.featureId) || (d.demo ? 'Full Demo Mode' : '');
   if (entry.type === 'restore_checkin') return `${d.restoredCount || 0} feature(s) restored`;
   if (entry.type === 'feature_status_checked') return `${(d.featureIds || []).length} feature(s) checked`;
   if (entry.type === 'device_labeled') return d.label ? `→ "${d.label}"` : '(label removed)';

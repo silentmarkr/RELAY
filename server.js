@@ -4173,6 +4173,61 @@ app.post('/relay/end-demo', requireApiKey, requireAllowedDevice, rateLimit('end-
 });
 
 // --------------------------------------------------------------
+// POST /relay/cancel-otp
+// Lets the CLIENT (OMNIPOS, on behalf of whoever is looking at the
+// verification modal) proactively expire a pending OTP BEFORE its
+// normal 10-minute TTL, instead of waiting for cleanupExpiredOtps()
+// to eventually sweep it. This is used for two cases:
+//   1) The client closed/cancelled the "Verification Required" modal
+//      without entering a code.
+//   2) The client ran out of verification attempts (wrong code 3
+//      times) and the modal auto-closed on its own.
+// In both cases the OTP must not remain usable — even though time
+// is technically still left on the clock — so we delete it from
+// pendingOtps right away. This mirrors the SAME key formats used by
+// /relay/request-unlock, /relay/request-unlock-bulk, and
+// /relay/request-demo above, so pass one of: featureId (single
+// feature/theme/cloud-backup), featureIds (bundle), or demo: true.
+// Body: { installationId, featureId? , featureIds?, demo? }
+// --------------------------------------------------------------
+app.post('/relay/cancel-otp', requireApiKey, requireAllowedDevice, rateLimit('cancel-otp', 30, 10 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
+    const { installationId, featureId, featureIds, demo } = req.body;
+
+    if (!installationId) {
+        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+    }
+
+    let key;
+    if (demo) {
+        key = `${installationId}:${DEMO_FEATURE_ID}`;
+    } else if (Array.isArray(featureIds) && featureIds.length > 0) {
+        key = `${installationId}:__bulk__:${featureIds.slice().sort().join(',')}`;
+    } else if (featureId) {
+        key = `${installationId}:${featureId}`;
+    } else {
+        return res.status(400).json({ success: false, message: 'Kulang ang featureId, featureIds, o demo flag.' });
+    }
+
+    const pending = pendingOtps.get(key);
+    if (!pending) {
+        // Already gone (expired, already confirmed, or never existed) —
+        // still a success from the client's point of view, since the
+        // end state (no usable pending OTP) is what it wanted anyway.
+        return res.json({ success: true, alreadyGone: true, message: 'Wala nang pending OTP dito.' });
+    }
+
+    pendingOtps.delete(key);
+    logActivity(installationId, 'otp_cancelled', {
+        featureId: featureId || null,
+        featureIds: featureIds || null,
+        demo: !!demo,
+        featureName: pending.featureName || pending.featureNames || null
+    });
+
+    res.json({ success: true, message: 'Na-cancel ang pending OTP.' });
+});
+
+// --------------------------------------------------------------
 // POST /relay/admin/api/devices/:installationId/activate-demo
 // Direktang nagbibigay ng FULL DEMO MODE (lahat ng features, pansamantala
 // lang) sa isang device — WALANG OTP kailangan, at HINDI na kailangang
