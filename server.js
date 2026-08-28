@@ -211,7 +211,14 @@ app.use((req, res, next) => {
 // (para hindi buksan ang ibang routes sa parehong panganib), gamit ang
 // path-based na pagpili sa pagitan ng dalawang parser sa ibaba.
 const CLOUD_BACKUP_UPLOAD_PATH = '/relay/cloud-backup/upload';
-const CLOUD_BACKUP_JSON_LIMIT = '1024mb'; // 1GB
+// BUG FIX: dating eksaktong '1024mb' (1 GiB) ang limit — kung sakaling
+// aabot ang aktwal na store data sa eksaktong 1GB, may posibilidad itong
+// ma-reject dahil sa JSON structural overhead (mga key names, quotes,
+// brackets/commas ng array/object wrapping bawat module) sa ibabaw pa ng
+// mismong laki ng mga naka-embed na base64 image. Dinagdagan ng ~15%
+// headroom (1200mb) para hindi ito ang dahilan ng pagkabigo kapag
+// eksaktong "1GB" mismo ang laki ng datos ng store.
+const CLOUD_BACKUP_JSON_LIMIT = '1200mb';
 const defaultJsonParser = express.json({ limit: '2mb' });
 const cloudBackupJsonParser = express.json({ limit: CLOUD_BACKUP_JSON_LIMIT });
 
@@ -6188,9 +6195,30 @@ async function bootstrapStores() {
 
 bootstrapStores()
     .then(() => {
-        app.listen(PORT, () => {
+        const server = app.listen(PORT, () => {
             console.log(`OmniPOS Unlock Relay running sa port ${PORT}`);
         });
+
+        // BUG FIX: default sa Node.js ang `requestTimeout` ng http.Server ay
+        // 300000ms (5 minuto) lamang — ito ang oras na binibigay para
+        // TAPUSIN matanggap ang BUONG request (kasama na ang buong body) mula
+        // sa client. Sa isang mabigat na /relay/cloud-backup/upload (hanggang
+        // ~1GB, see CLOUD_BACKUP_JSON_LIMIT sa itaas) na dumadaan sa mabagal
+        // na upload speed ng isang tindahan, kayang lumagpas ng 5 minuto ang
+        // PAG-UPLOAD PALANG bago pa man ito maka-abot sa route handler — kaya
+        // basta pinuputol ito ng Node mismo (bago pa man ma-apply ang
+        // AbortController timeout na nasa relayFetch ng OMNIPOS client),
+        // lumalabas na "network error"/dropped connection kahit walang
+        // problema sa route handler o sa quota/size-limit logic nito.
+        // 60 minuto na ngayon dito — mas mataas pa sa 40-minutong client-side
+        // timeout (relayFetch sa OMNIPOS server.js) — para ang OMNIPOS client
+        // ang laging unang mag-a-abort nang may malinaw na error, sa halip na
+        // ang RELAY na basta mag-drop ng koneksyon nang tahimik.
+        server.requestTimeout = 60 * 60 * 1000;
+        // headersTimeout (default 60000ms) ay para lang sa pagtanggap ng mga
+        // HTTP headers — maliit lang ito kahit malaking upload, kaya default
+        // na lang ang iniiwan dito (kailangan lang siguraduhing mas mababa
+        // ito kaysa requestTimeout sa itaas, na siyang totoo pa rin).
     })
     .catch((err) => {
         console.error('❌ Hindi ma-bootstrap ang persistent storage — hindi tumakbo ang server:', err);
