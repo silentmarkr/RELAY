@@ -175,6 +175,42 @@ async function runCloudBackupWrite(writeFn, { maxAttempts = 3 } = {}) {
     throw lastErr;
 }
 
+// --------------------------------------------------------------
+// queryWithRetry — kagaya ng retry logic ng runCloudBackupWrite sa itaas
+// (hanggang 3 attempts, fresh connection bawat retry, TRANSIENT lang na
+// connection errors ang ino-otomatikong ulit-ulitin) pero para sa mga
+// SIMPLENG READ (SELECT) query sa halip na isang buong BEGIN…COMMIT
+// write transaction.
+//
+// BUG FIX: dati, ang runCloudBackupWrite lang (ginagamit ng UPLOAD/write
+// path) ang may retry protection laban sa "Connection terminated
+// unexpectedly" — lahat ng READ endpoints (cloud-backup/restore,
+// cloud-backup/usage quota check, admin panel listing/detail/download)
+// ay direktang tumatawag ng pgPool.query() nang walang retry. Ibig
+// sabihin, kahit PAREHONG uri ng transient na Postgres/proxy connection
+// blip (tingnan ang isTransientPgConnectionError sa itaas) ang dahilan,
+// ang UPLOAD ay awtomatikong nakaka-recover na, pero ang RESTORE ay
+// hindi — kaya mas madalas mag-"Failed: Could not reach RELAY" ang
+// "Restore from Cloud" kesa sa "Cloud Backup Now" sa eksaktong parehong
+// klase ng problema. Ginagamit na ngayon ang helper na ito sa lahat ng
+// dating direktang pgPool.query() na read call para pantay ang proteksyon.
+// --------------------------------------------------------------
+async function queryWithRetry(text, params, { maxAttempts = 3 } = {}) {
+    let lastErr = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            return await pgPool.query(text, params);
+        } catch (err) {
+            lastErr = err;
+            if (!isTransientPgConnectionError(err) || attempt === maxAttempts) {
+                throw err;
+            }
+            console.warn(`⚠️  CLOUD_BACKUP: transient Postgres connection error on read attempt ${attempt}/${maxAttempts} (${err.message}) — retrying with a fresh connection…`);
+        }
+    }
+    throw lastErr;
+}
+
 async function ensureCloudBackupSchema() {
     if (!pgPool) return;
     await pgPool.query(`
@@ -3402,7 +3438,7 @@ app.get('/relay/cloud-backup/usage', requireApiKey, requireAllowedDevice, rateLi
     const quotaMB = CLOUD_BACKUP_PLANS[tier].storageQuotaMB;
 
     try {
-        const result = await pgPool.query(
+        const result = await queryWithRetry(
             'SELECT total_records, module_count, size_bytes, last_sync_at, sync_count FROM cloud_backup_meta WHERE installation_id = $1',
             [installationId]
         );
@@ -3445,7 +3481,7 @@ app.get('/relay/cloud-backup/usage', requireApiKey, requireAllowedDevice, rateLi
 app.get('/relay/admin/api/cloud-backup', requireAdminKey, async (req, res) => {
     if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
     try {
-        const result = await pgPool.query('SELECT installation_id, store_name, total_records, module_count, size_bytes, last_sync_at, sync_count FROM cloud_backup_meta ORDER BY last_sync_at DESC NULLS LAST');
+        const result = await queryWithRetry('SELECT installation_id, store_name, total_records, module_count, size_bytes, last_sync_at, sync_count FROM cloud_backup_meta ORDER BY last_sync_at DESC NULLS LAST');
         const backups = result.rows.map((r) => ({
             ...r,
             size_mb: Math.round((Number(r.size_bytes || 0) / (1024 * 1024)) * 100) / 100
@@ -3460,8 +3496,8 @@ app.get('/relay/admin/api/cloud-backup/:installationId', requireAdminKey, async 
     if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
     try {
         const { installationId } = req.params;
-        const metaResult = await pgPool.query('SELECT * FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
-        const modulesResult = await pgPool.query('SELECT module, data, record_count, size_bytes, updated_at FROM cloud_backup_modules WHERE installation_id = $1 ORDER BY module', [installationId]);
+        const metaResult = await queryWithRetry('SELECT * FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
+        const modulesResult = await queryWithRetry('SELECT module, data, record_count, size_bytes, updated_at FROM cloud_backup_modules WHERE installation_id = $1 ORDER BY module', [installationId]);
         if (!metaResult.rows[0]) {
             return res.status(404).json({ success: false, message: 'Walang cloud backup na nakita para sa installationId na ito.' });
         }
@@ -3497,7 +3533,7 @@ app.get('/relay/admin/api/cloud-backup/:installationId/download', requireAdminKe
     if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
     try {
         const { installationId } = req.params;
-        const modulesResult = await pgPool.query('SELECT module, data FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
+        const modulesResult = await queryWithRetry('SELECT module, data FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
         if (modulesResult.rows.length === 0) {
             return res.status(404).json({ success: false, message: 'Walang cloud backup na nakita para sa installationId na ito.' });
         }
@@ -3579,11 +3615,11 @@ app.post('/relay/cloud-backup/restore', requireApiKey, requireAllowedDevice, rat
     }
 
     try {
-        const metaResult = await pgPool.query('SELECT * FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
+        const metaResult = await queryWithRetry('SELECT * FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
         if (!metaResult.rows[0]) {
             return res.status(404).json({ success: false, message: 'Walang cloud backup na nakita para sa installation na ito.' });
         }
-        const modulesResult = await pgPool.query('SELECT module, data, record_count FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
+        const modulesResult = await queryWithRetry('SELECT module, data, record_count FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
 
         const modules = {};
         modulesResult.rows.forEach((r) => { modules[r.module] = r.data; });
