@@ -339,53 +339,51 @@ app.use((req, res, next) => {
 // unlock/demo/bundle request mismo ang nabibigo dahil dito. 2mb na ngayon,
 // katumbas ng limit na ginagamit na rin ng OMNIPOS client server mismo.
 //
-// BUG FIX: itong 2mb na limit ay ginagamit din (dating walang exception)
-// ng /relay/cloud-backup/upload — kung saan naka-attach ang BUONG
-// database ng store (lahat ng modules bilang JSON). Kapag lumaki na ang
-// data ng isang store (maraming transactions/products/customers), sobra
-// agad ito sa 2mb at basta na-REJECT ng body-parser BAGO pa man umabot
-// sa route handler — kaya "hindi basta maka-backup" kapag mataas na ang
-// data. Dinagdagan ng sarili nitong mas malaking limit (1gb) ang
-// cloud-backup upload route lang — hindi ito ginagawang global default
-// (para hindi buksan ang ibang routes sa parehong panganib), gamit ang
-// path-based na pagpili sa pagitan ng dalawang parser sa ibaba.
-const CLOUD_BACKUP_UPLOAD_PATH = '/relay/cloud-backup/upload';
-// BUG FIX: dating eksaktong '1024mb' (1 GiB) ang limit — kung sakaling
-// aabot ang aktwal na store data sa eksaktong 1GB, may posibilidad itong
-// ma-reject dahil sa JSON structural overhead (mga key names, quotes,
-// brackets/commas ng array/object wrapping bawat module) sa ibabaw pa ng
-// mismong laki ng mga naka-embed na base64 image. Dinagdagan ng ~15%
-// headroom (1200mb) para hindi ito ang dahilan ng pagkabigo kapag
-// eksaktong "1GB" mismo ang laki ng datos ng store.
-const CLOUD_BACKUP_JSON_LIMIT = '1200mb';
+// BUG FIX (cloud backup upload — now CHUNKED): dating pinapasa dito ang
+// BUONG database ng store bilang IISANG malaking JSON request (kailangan
+// nito ng sarili niyang 1200mb na JSON limit) — kaya lang, ang "progress"
+// na naipapakita sa user batay dito ay hindi totoo: umaakyat agad ito sa
+// halos 100% dahil kayang isiksik ng OS TCP send buffer ang ilang MB nang
+// lokal bago pa man ito talaga maabot ang RELAY, kaya kung mabigo ang
+// koneksyon PAGKATAPOS "100%" na, mukhang nawala ang datos kahit wala
+// namang natatanggap na kahit ano ang RELAY. Ngayon, hinahati na ng
+// OMNIPOS client ang buong backup sa maliliit na CHUNKS (1 MB bawat isa)
+// — bawat chunk ay sarili niyang MALIIT na request papunta sa
+// /relay/cloud-backup/upload/chunk (raw binary, hindi JSON), kaya hindi
+// na kailangan ang malaking 1200mb na JSON limit — 2mb na lang ang
+// default limit ng lahat, maliban sa chunk route na may sarili niyang
+// raw-body parser (limit na bahagyang mas malaki lang sa 1 MB chunk size).
+const CLOUD_BACKUP_UPLOAD_CHUNK_PATH = '/relay/cloud-backup/upload/chunk';
 const defaultJsonParser = express.json({ limit: '2mb' });
-const cloudBackupJsonParser = express.json({ limit: CLOUD_BACKUP_JSON_LIMIT });
+// Raw binary parser para lang sa /relay/cloud-backup/upload/chunk — 2mb
+// na limit dito, may headroom sa 1 MB na chunk size (CLOUD_BACKUP_CHUNK_SIZE_BYTES).
+const cloudBackupChunkRawParser = express.raw({ type: '*/*', limit: '2mb' });
 
 app.use((req, res, next) => {
-    if (req.path === CLOUD_BACKUP_UPLOAD_PATH) {
-        return cloudBackupJsonParser(req, res, next);
+    if (req.path === CLOUD_BACKUP_UPLOAD_CHUNK_PATH) {
+        return cloudBackupChunkRawParser(req, res, next);
     }
     return defaultJsonParser(req, res, next);
 });
 
 // BUG FIX: wala pang dedicated error handler para sa PayloadTooLargeError
-// (mula sa express.json() body-parser) dati — kaya kapag na-reject ang
-// isang request dahil sobra sa limit, ang sagot ay isang generic
-// HTML/plain-text error page ng Express (hindi JSON). Sa OMNIPOS client
-// (parseRelayResponse sa server.js doon), hindi na-JSON.parse ang sagot
-// na ito, kaya lumalabas ang misleading na error message na parang
+// (mula sa express.json()/express.raw() body-parser) dati — kaya kapag
+// na-reject ang isang request dahil sobra sa limit, ang sagot ay isang
+// generic HTML/plain-text error page ng Express (hindi JSON). Sa OMNIPOS
+// client (parseRelayResponse sa server.js doon), hindi na-JSON.parse ang
+// sagot na ito, kaya lumalabas ang misleading na error message na parang
 // "hindi gumagana/naka-configure nang mali ang RELAY" — kahit ang totoong
-// dahilan ay masyadong malaki lang ang datos. Dito, hinuhuli na ito
-// nang partikular at binibigyan ng malinaw, user-facing na JSON message.
+// dahilan ay masyadong malaki lang ang isang chunk/request. Dito, hinuhuli
+// na ito nang partikular at binibigyan ng malinaw, user-facing na JSON
+// message.
 app.use((err, req, res, next) => {
     if (err && err.type === 'entity.too.large') {
-        const limitLabel = req.path === CLOUD_BACKUP_UPLOAD_PATH ? CLOUD_BACKUP_JSON_LIMIT : '2mb';
         return res.status(413).json({
             success: false,
             payloadTooLarge: true,
-            message: req.path === CLOUD_BACKUP_UPLOAD_PATH
-                ? `Masyadong malaki na ang datos ng store para ma-backup sa isang pagkakataon (lumagpas sa ${limitLabel} limit). Mag-archive/burahin muna ng lumang transactions/records, o makipag-ugnayan sa developer para itaas pa ang limit.`
-                : `Masyadong malaki ang request (lumagpas sa ${limitLabel} limit).`
+            message: req.path === CLOUD_BACKUP_UPLOAD_CHUNK_PATH
+                ? 'A cloud backup chunk was larger than expected — this should not normally happen. Please try syncing again.'
+                : 'Masyadong malaki ang request (lumagpas sa 2mb limit).'
         });
     }
     return next(err);
@@ -3278,24 +3276,53 @@ function isFeatureCurrentlyUnlocked(installationId, featureId) {
 }
 
 // --------------------------------------------------------------
-// POST /relay/cloud-backup/upload
+// CLOUD BACKUP UPLOAD — CHUNKED (real per-MB progress + no-interrupt)
+// ================================================================
 // Tinatawag ito ng OMNIPOS CLIENT SERVER (manual — pinindot ng customer
-// ang "Cloud Backup" button) para i-sync ang BUONG database nito
-// (maliban sa user accounts — hinihigpitan din ito DITO, hindi lang
-// umaasa sa client) papunta sa Postgres. TINATANGGIHAN ito (402) kung
-// HINDI pa naka-unlock ang 'cloud_backup' feature para sa
-// installationId na ito — kahit anong ipadala ng client, walang
-// maisusulat sa Postgres hangga't hindi ito na-verify dito.
+// ang "Cloud Backup" button — o automatic, mula sa sarili niyang
+// scheduler) para i-sync ang BUONG database nito (maliban sa user
+// accounts — hinihigpitan din ito DITO, hindi lang umaasa sa client)
+// papunta sa Postgres. TINATANGGIHAN ito (402) kung HINDI pa naka-unlock
+// ang 'cloud_backup' feature para sa installationId na ito — kahit anong
+// ipadala ng client, walang maisusulat sa Postgres hangga't hindi ito
+// na-verify dito.
 //
 // UPDATE: dating buong-module ang laging tinatanggihan dito ("users",
 // "featureUnlocks") — ngayon, sadyang GUSTO NA ring i-backup ang mga
 // ito (user accounts, unlocked features/themes). Ang "users" module
 // mismo ay dapat nang dumating dito na WALANG "password" field —
-// ginagawa ito ng OMNIPOS client bago pa ito ipadala (tingnan ang
-// stripRedactedFields()/REDACTED_FIELDS_BY_MODULE sa db.js doon). Dito,
-// defense-in-depth pa rin: kahit sumingit ang isang password field sa
-// bawat record ng "users" (hal. luma/binagong client), tinatanggal pa
-// rin ito dito bago isulat sa Postgres.
+// ginagawa ito ng OMNIPOS client bago pa ito ipadala. Dito, defense-in-
+// depth pa rin: kahit sumingit ang isang password field sa bawat record
+// ng "users" (hal. luma/binagong client), tinatanggal pa rin ito dito
+// bago isulat sa Postgres.
+//
+// BUG FIX (fake/instant progress bar): dati, IISANG malaking request
+// (hanggang ~1GB) ang tumatanggap ng buong backup nang sabay-sabay.
+// Kahit "streamed" pa ito sa panig ng OMNIPOS client, ang "progress" na
+// nakikita ay batay lang sa ilang bytes ang naisiksik sa LOKAL na TCP
+// send buffer ng OS — hindi sa aktwal na natanggap na ng RELAY — kaya
+// napakabilis "umaakyat" sa 100% ang progress bar kahit tumatagal pa
+// ang totoong paglipat ng datos sa network, at kung mabigo pagkatapos
+// nito, mukhang "na-upload na pero nawala pala" sa mata ng user.
+//
+// FIX: hinati na ngayon sa magkakahiwalay na CHUNKS (1 MB bawat isa) ang
+// buong upload, TATLONG endpoint (start → chunk (paulit-ulit) → finish).
+// Isang chunk ay itinuturing lang na "natanggap" (at idinadagdag sa
+// progress na ipinapakita sa OMNIPOS client) kapag TALAGANG bumalik na
+// ang successful na response ng RELAY para dito — buong HTTP round-trip,
+// hindi lang lokal na buffer.
+//
+// NO-INTERRUPT GUARD: iisang upload session lang ang pinapayagang
+// tumakbo BAWAT installationId sa isang pagkakataon (CLOUD_BACKUP_UPLOAD_LOCKS)
+// — kahit manual man o mula sa automatic scheduler ang trigger, kung may
+// kasalukuyan nang tumatakbo, tatanggihan (409) ang panibagong
+// pagsisimula hangga't hindi pa natatapos (tagumpay o pinal na kabiguan)
+// ang isa. Ang TANGING dahilan na dapat pumigil/humadlang sa isang
+// upload BAGO pa man ito matapos ay ang paglagpas sa storage quota ng
+// plano — sinusuri ito DALAWANG BESES: bago pa man tanggapin ang unang
+// chunk (batay sa deklaradong laki), at ulit sa /finish (batay sa
+// AKTWAL na natanggap na laki) — bago pa man magsulat ng kahit ano sa
+// Postgres.
 // --------------------------------------------------------------
 const CLOUD_BACKUP_REDACTED_FIELDS_BY_MODULE = { users: ['password'] };
 
@@ -3310,11 +3337,52 @@ function stripCloudBackupRedactedFields(moduleName, data) {
     });
 }
 
-app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-upload', 30, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
-    const { installationId, storeName, modules, moduleNames, totalRecords } = req.body;
+// 1 MB bawat chunk — tumutugma sa "real, live, per-MB" na progress na
+// dapat ipakita ng progress bar sa OMNIPOS client.
+const CLOUD_BACKUP_CHUNK_SIZE_BYTES = 1024 * 1024;
 
-    if (!installationId || !modules || typeof modules !== 'object') {
-        return res.status(400).json({ success: false, message: 'Missing or invalid installationId/modules.' });
+// uploadId -> { installationId, totalBytes, receivedBytes, chunks: [Buffer], tier, quotaMB, createdAt, idleTimer }
+const CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS = new Map();
+// installationId -> uploadId na kasalukuyang tumatakbo (ang lock mismo)
+const CLOUD_BACKUP_UPLOAD_LOCKS = new Map();
+// Kung walang natanggap na chunk sa loob ng ganitong katagalan, ituring
+// nang inabandona ang session (hal. crashed/na-kill ang OMNIPOS client
+// process sa gitna ng upload) — nililinis at pinapalaya ang lock, para
+// hindi permanenteng maka-block ng susunod na totoong pagsubok.
+const CLOUD_BACKUP_CHUNK_SESSION_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+
+function cleanupCloudBackupUploadSession(uploadId) {
+    const session = CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS.get(uploadId);
+    if (!session) return;
+    CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS.delete(uploadId);
+    if (CLOUD_BACKUP_UPLOAD_LOCKS.get(session.installationId) === uploadId) {
+        CLOUD_BACKUP_UPLOAD_LOCKS.delete(session.installationId);
+    }
+    if (session.idleTimer) clearTimeout(session.idleTimer);
+}
+
+function armCloudBackupSessionIdleTimer(uploadId) {
+    const session = CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS.get(uploadId);
+    if (!session) return;
+    if (session.idleTimer) clearTimeout(session.idleTimer);
+    session.idleTimer = setTimeout(() => {
+        console.warn(`⚠️ CLOUD_BACKUP: inabandona ang upload session ${uploadId} (walang bagong chunk sa loob ng ${CLOUD_BACKUP_CHUNK_SESSION_IDLE_TIMEOUT_MS / 60000} min) — nililinis, pinapalaya ang lock.`);
+        cleanupCloudBackupUploadSession(uploadId);
+    }, CLOUD_BACKUP_CHUNK_SESSION_IDLE_TIMEOUT_MS);
+    if (typeof session.idleTimer.unref === 'function') session.idleTimer.unref();
+}
+
+// ----------------------------------------------------------------
+// POST /relay/cloud-backup/upload/start
+// Ire-reserve ang isang upload session. Dito nasusuri: (a) naka-unlock
+// ba ang 'cloud_backup' feature, (b) kasya ba sa quota ng plano ang
+// deklaradong totalBytes, at (c) walang ibang tumatakbo nang upload
+// session PARA SA installationId na ito (ang "no-interrupt" lock).
+// ----------------------------------------------------------------
+app.post('/relay/cloud-backup/upload/start', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-upload-start', 30, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
+    const { installationId, totalBytes } = req.body || {};
+    if (!installationId || typeof totalBytes !== 'number' || totalBytes <= 0) {
+        return res.status(400).json({ success: false, message: 'Missing or invalid installationId/totalBytes.' });
     }
 
     if (!isFeatureCurrentlyUnlocked(installationId, 'cloud_backup')) {
@@ -3334,18 +3402,156 @@ app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rate
         return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured yet on RELAY. Tell the developer to set it.' });
     }
 
-    // Alamin muna ang tier/quota ng installation na ito BAGO isulat
-    // kahit ano sa Postgres — kailangan ito para malaman kung sapat pa
-    // ang natitirang allowance bago tanggapin ang buong upload.
+    // NO-INTERRUPT GUARD: kung may kasalukuyan nang tumatakbong upload
+    // session ang installationId na ito, tanggihan ang bagong
+    // pagsisimula — iisa lang ang pinapayagang tumakbo bawat
+    // installation sa isang pagkakataon (manual man o automatic ang
+    // trigger), hangga't hindi pa ito natatapos (tagumpay o pinal na
+    // kabiguan).
+    const existingUploadId = CLOUD_BACKUP_UPLOAD_LOCKS.get(installationId);
+    if (existingUploadId && CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS.has(existingUploadId)) {
+        return res.status(409).json({
+            success: false,
+            uploadInProgress: true,
+            message: 'A cloud backup upload for this installation is already in progress. Please wait for it to finish before starting another.'
+        });
+    }
+
     const cloudBackupUnlockForQuota = (issuedUnlocks[installationId] || {})['cloud_backup'];
-    const tierForQuota = (cloudBackupUnlockForQuota && cloudBackupUnlockForQuota.tier && CLOUD_BACKUP_PLANS[cloudBackupUnlockForQuota.tier]) ? cloudBackupUnlockForQuota.tier : 'basic';
-    const quotaMBForQuota = CLOUD_BACKUP_PLANS[tierForQuota].storageQuotaMB;
+    const tier = (cloudBackupUnlockForQuota && cloudBackupUnlockForQuota.tier && CLOUD_BACKUP_PLANS[cloudBackupUnlockForQuota.tier]) ? cloudBackupUnlockForQuota.tier : 'basic';
+    const quotaMB = CLOUD_BACKUP_PLANS[tier].storageQuotaMB;
+    const totalMB = Math.round((totalBytes / (1024 * 1024)) * 100) / 100;
+
+    // Ang TANGING kondisyon na dapat pumigil/humadlang sa isang cloud
+    // backup upload — lumagpas na sa storage quota ng plano. Sinusuri
+    // ito AGAD, bago pa man tanggapin ang unang chunk.
+    if (totalMB > quotaMB) {
+        logActivity(installationId, 'cloud_backup_blocked', { reason: 'storage_quota_exceeded', tier, quotaMB, sizeMB: totalMB });
+        return res.status(413).json({
+            success: false,
+            storageQuotaExceeded: true,
+            tier,
+            quotaMB,
+            sizeMB: totalMB,
+            overageMB: Math.round((totalMB - quotaMB) * 100) / 100,
+            message: `Cloud backup exceeds your ${CLOUD_BACKUP_PLANS[tier].name} storage allowance (${totalMB} MB used, ${quotaMB} MB limit). Upgrade your Cloud Backup plan or free up space (e.g., trim old transaction/userlog history) before syncing.`
+        });
+    }
+
+    const uploadId = crypto.randomUUID();
+    CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS.set(uploadId, {
+        installationId,
+        totalBytes,
+        receivedBytes: 0,
+        chunks: [],
+        tier,
+        quotaMB,
+        createdAt: Date.now(),
+        idleTimer: null
+    });
+    CLOUD_BACKUP_UPLOAD_LOCKS.set(installationId, uploadId);
+    armCloudBackupSessionIdleTimer(uploadId);
+
+    res.json({ success: true, uploadId, chunkSizeBytes: CLOUD_BACKUP_CHUNK_SIZE_BYTES });
+});
+
+// ----------------------------------------------------------------
+// POST /relay/cloud-backup/upload/chunk?uploadId=...&installationId=...
+// Raw binary body (isang piraso, hanggang CLOUD_BACKUP_CHUNK_SIZE_BYTES).
+// Idinadagdag lang ito sa buffer ng session — ang RESPONSE na ito
+// (successful HTTP round-trip) ang TUNAY na katibayan na natanggap na
+// ng RELAY ang chunk na ito, kaya ito ang basehan ng progress bar sa
+// OMNIPOS client (hindi lang kung ilan ang nailagay sa lokal na buffer).
+// ----------------------------------------------------------------
+app.post('/relay/cloud-backup/upload/chunk', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-upload-chunk', 5000, 60 * 60 * 1000, (req) => req.query?.installationId), (req, res) => {
+    const uploadId = String(req.query.uploadId || '');
+    const installationId = String(req.query.installationId || '');
+    const session = uploadId && CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS.get(uploadId);
+
+    if (!session || session.installationId !== installationId) {
+        return res.status(404).json({ success: false, message: 'Unknown or expired upload session. Start a new cloud backup upload.' });
+    }
+
+    const chunk = req.body;
+    if (!Buffer.isBuffer(chunk) || chunk.length === 0) {
+        return res.status(400).json({ success: false, message: 'Empty or invalid chunk.' });
+    }
+
+    if (session.receivedBytes + chunk.length > session.totalBytes) {
+        cleanupCloudBackupUploadSession(uploadId);
+        return res.status(400).json({ success: false, message: 'Received more bytes than declared at upload start — aborting session. Please start a new sync.' });
+    }
+
+    session.chunks.push(chunk);
+    session.receivedBytes += chunk.length;
+    armCloudBackupSessionIdleTimer(uploadId);
+
+    res.json({ success: true, receivedBytes: session.receivedBytes, totalBytes: session.totalBytes });
+});
+
+// ----------------------------------------------------------------
+// POST /relay/cloud-backup/upload/finish
+// Pinagsasama-sama ang lahat ng natanggap na chunk, ine-JSON.parse,
+// ULIT sinusuri ang feature unlock + storage quota (base sa AKTWAL na
+// natanggap na laki ngayon, hindi lang sa deklarado sa /start), tapos
+// isinusulat sa Postgres — kapareho ng dating single-request na
+// endpoint, PERO ngayon batay sa totoong natanggap na datos.
+// ----------------------------------------------------------------
+app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-upload-finish', 30, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    const { uploadId, installationId } = req.body || {};
+    const session = uploadId && CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS.get(String(uploadId));
+
+    if (!session || session.installationId !== installationId) {
+        return res.status(404).json({ success: false, message: 'Unknown or expired upload session. Start a new cloud backup upload.' });
+    }
+
+    if (session.receivedBytes !== session.totalBytes) {
+        return res.status(400).json({
+            success: false,
+            message: `Incomplete upload — received ${session.receivedBytes} of ${session.totalBytes} declared bytes. No partial backup was saved; keep sending the remaining chunks or start a new sync.`
+        });
+    }
+
+    let parsedBody;
+    try {
+        const fullBuffer = Buffer.concat(session.chunks, session.receivedBytes);
+        parsedBody = JSON.parse(fullBuffer.toString('utf8'));
+    } catch (err) {
+        cleanupCloudBackupUploadSession(String(uploadId));
+        return res.status(400).json({ success: false, message: 'Could not parse the assembled backup data as JSON — the upload may have been corrupted in transit. Please try syncing again.' });
+    }
+
+    const { storeName, modules, moduleNames, totalRecords } = parsedBody || {};
+    if (!modules || typeof modules !== 'object') {
+        cleanupCloudBackupUploadSession(String(uploadId));
+        return res.status(400).json({ success: false, message: 'Missing or invalid modules in the assembled backup data.' });
+    }
+
+    if (!isFeatureCurrentlyUnlocked(installationId, 'cloud_backup')) {
+        cleanupCloudBackupUploadSession(String(uploadId));
+        logActivity(installationId, 'cloud_backup_blocked', { reason: 'feature_not_unlocked' });
+        return res.status(402).json({
+            success: false,
+            featureLocked: true,
+            featureId: 'cloud_backup',
+            featureName: FEATURE_CATALOG.cloud_backup.name,
+            isSubscription: true,
+            plans: CLOUD_BACKUP_PLANS,
+            message: 'There is no active/it has expired for the Cloud Backup subscription for this installation. You must subscribe (or renew) first before using Cloud Backup.'
+        });
+    }
+
+    if (!pgPool) {
+        cleanupCloudBackupUploadSession(String(uploadId));
+        return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured yet on RELAY. Tell the developer to set it.' });
+    }
 
     // I-serialize muna ang LAHAT ng module (hindi pa isinusulat) para
-    // masukat ang TOTAL na byte size bago pa magsimula ng anumang
-    // Postgres write — kaya kung lalagpas sa quota, WALANG NAISULAT na
-    // kahit ano (hindi partial write), tanggihan lang agad ito nang
-    // buo.
+    // masukat ang TOTAL na byte size — kailangan ito para malaman kung
+    // sapat pa ang natitirang allowance BASE SA AKTWAL na natanggap na
+    // laki ngayon (hindi lang sa deklarado sa /start) bago tanggapin ang
+    // buong upload. Kung lalagpas, WALANG NAISULAT na kahit ano (hindi
+    // partial write) — tanggihan lang agad ito nang buo.
     const serializedModules = {};
     let projectedSizeBytes = 0;
     for (const [moduleName, rawData] of Object.entries(modules)) {
@@ -3355,17 +3561,19 @@ app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rate
         projectedSizeBytes += Buffer.byteLength(serialized, 'utf8');
     }
     const projectedSizeMB = Math.round((projectedSizeBytes / (1024 * 1024)) * 100) / 100;
+    const { tier, quotaMB } = session;
 
-    if (projectedSizeMB > quotaMBForQuota) {
-        logActivity(installationId, 'cloud_backup_blocked', { reason: 'storage_quota_exceeded', tier: tierForQuota, quotaMB: quotaMBForQuota, sizeMB: projectedSizeMB });
+    if (projectedSizeMB > quotaMB) {
+        cleanupCloudBackupUploadSession(String(uploadId));
+        logActivity(installationId, 'cloud_backup_blocked', { reason: 'storage_quota_exceeded', tier, quotaMB, sizeMB: projectedSizeMB });
         return res.status(413).json({
             success: false,
             storageQuotaExceeded: true,
-            tier: tierForQuota,
-            quotaMB: quotaMBForQuota,
+            tier,
+            quotaMB,
             sizeMB: projectedSizeMB,
-            overageMB: Math.round((projectedSizeMB - quotaMBForQuota) * 100) / 100,
-            message: `Cloud backup exceeds your ${CLOUD_BACKUP_PLANS[tierForQuota].name} storage allowance (${projectedSizeMB} MB used, ${quotaMBForQuota} MB limit). Upgrade your Cloud Backup plan or free up space (e.g., trim old transaction/userlog history) before syncing.`
+            overageMB: Math.round((projectedSizeMB - quotaMB) * 100) / 100,
+            message: `Cloud backup exceeds your ${CLOUD_BACKUP_PLANS[tier].name} storage allowance (${projectedSizeMB} MB used, ${quotaMB} MB limit). Upgrade your Cloud Backup plan or free up space (e.g., trim old transaction/userlog history) before syncing.`
         });
     }
 
@@ -3383,10 +3591,6 @@ app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rate
             totalSizeBytes = 0;
             moduleCount = 0;
             for (const [moduleName, entry] of Object.entries(serializedModules)) {
-                // "Na-consume" na storage: sinusukat sa aktwal na byte size
-                // ng na-store na JSON bawat module (Buffer.byteLength dahil
-                // multi-byte ang UTF-8 characters gaya ng ₱/ñ), tapos
-                // sinusuma ito para sa TOTAL ng buong installation sa ibaba.
                 const sizeBytes = Buffer.byteLength(entry.serialized, 'utf8');
                 totalSizeBytes += sizeBytes;
                 await client.query(
@@ -3415,8 +3619,8 @@ app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rate
 
         logActivity(installationId, 'cloud_backup_sync', { moduleCount: Object.keys(modules).length, totalRecords: totalRecords || null, storeName: storeName || null, sizeBytes: totalSizeBytes });
 
-        const tierForResponse = tierForQuota;
-        const quotaMBForResponse = quotaMBForQuota;
+        const tierForResponse = tier;
+        const quotaMBForResponse = quotaMB;
         const sizeMBForResponse = Math.round((totalSizeBytes / (1024 * 1024)) * 100) / 100;
         const percentUsedForResponse = quotaMBForResponse > 0 ? Math.round(Math.min(100, (sizeMBForResponse / quotaMBForResponse) * 100) * 10) / 10 : 0;
         // Malapit na sa quota (>=90%) pero HINDI pa lumagpas — pinapayagan
@@ -3442,6 +3646,8 @@ app.post('/relay/cloud-backup/upload', requireApiKey, requireAllowedDevice, rate
             ? 'Lost connection to the database while saving the cloud backup (this can happen with very large uploads). Please try syncing again — no partial data was saved.'
             : ('An error occurred while saving to Postgres: ' + err.message);
         res.status(500).json({ success: false, message: friendlyMessage });
+    } finally {
+        cleanupCloudBackupUploadSession(String(uploadId));
     }
 });
 
@@ -6358,20 +6564,16 @@ bootstrapStores()
         });
 
         // BUG FIX: default sa Node.js ang `requestTimeout` ng http.Server ay
-        // 300000ms (5 minuto) lamang — ito ang oras na binibigay para
-        // TAPUSIN matanggap ang BUONG request (kasama na ang buong body) mula
-        // sa client. Sa isang mabigat na /relay/cloud-backup/upload (hanggang
-        // ~1GB, see CLOUD_BACKUP_JSON_LIMIT sa itaas) na dumadaan sa mabagal
-        // na upload speed ng isang tindahan, kayang lumagpas ng 5 minuto ang
-        // PAG-UPLOAD PALANG bago pa man ito maka-abot sa route handler — kaya
-        // basta pinuputol ito ng Node mismo (bago pa man ma-apply ang
-        // AbortController timeout na nasa relayFetch ng OMNIPOS client),
-        // lumalabas na "network error"/dropped connection kahit walang
-        // problema sa route handler o sa quota/size-limit logic nito.
-        // 60 minuto na ngayon dito — mas mataas pa sa 40-minutong client-side
-        // timeout (relayFetch sa OMNIPOS server.js) — para ang OMNIPOS client
-        // ang laging unang mag-a-abort nang may malinaw na error, sa halip na
-        // ang RELAY na basta mag-drop ng koneksyon nang tahimik.
+        // 300000ms (5 minuto) lamang. Ngayon na CHUNKED na ang cloud backup
+        // upload (1 MB bawat request sa /relay/cloud-backup/upload/chunk,
+        // hindi na iisang malaking request), bawat indibidwal na request ay
+        // mabilis nang matatapos — pero iniiwan pa rin dito ang mas mataas
+        // na 60-minutong ceiling bilang generous na safety margin (hal. kung
+        // sobrang bagal ng koneksyon ng isang tindahan sa iisang chunk),
+        // mas mataas pa rin kaysa sa client-side timeout ng OMNIPOS server
+        // bawat request (relayFetch), para ang OMNIPOS client ang laging
+        // unang mag-a-abort nang may malinaw na error sa halip na ang RELAY
+        // na basta mag-drop ng koneksyon nang tahimik.
         server.requestTimeout = 60 * 60 * 1000;
         // headersTimeout (default 60000ms) ay para lang sa pagtanggap ng mga
         // HTTP headers — maliit lang ito kahit malaking upload, kaya default
