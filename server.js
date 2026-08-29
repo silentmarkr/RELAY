@@ -429,17 +429,25 @@ app.use((req, res, next) => {
 // lokal bago pa man ito talaga maabot ang RELAY, kaya kung mabigo ang
 // koneksyon PAGKATAPOS "100%" na, mukhang nawala ang datos kahit wala
 // namang natatanggap na kahit ano ang RELAY. Ngayon, hinahati na ng
-// OMNIPOS client ang buong backup sa maliliit na CHUNKS (100 KB bawat isa)
-// — bawat chunk ay sarili niyang MALIIT na request papunta sa
+// OMNIPOS client ang buong backup sa maliliit na CHUNKS — bawat chunk ay
+// sarili niyang MALIIT na request papunta sa
 // /relay/cloud-backup/upload/chunk (raw binary, hindi JSON), kaya hindi
 // na kailangan ang malaking 1200mb na JSON limit — 2mb na lang ang
 // default limit ng lahat, maliban sa chunk route na may sarili niyang
-// raw-body parser (2mb pa rin ang limit dito — malaking headroom na sa
-// 100 KB na chunk size, CLOUD_BACKUP_CHUNK_SIZE_BYTES sa ibaba).
+// raw-body parser.
+//
+// ADAPTIVE CHUNK SIZE: hindi na FIXED sa 100 KB ang bawat chunk sa
+// OMNIPOS client — kusa na itong "nag-fu-fluctuate" paakyat hanggang
+// CLOUD_BACKUP_MAX_CHUNK_SIZE_BYTES (5 MB, sa ibaba) depende sa TUNAY na
+// measured upload speed papunta dito. Kaya itinaas din ang raw-body
+// parser limit ng chunk route mula 2mb -> 6mb (headroom sa itaas ng 5 MB
+// na pinakamalaking chunk) — kung hindi ito itataas, mag-e-413
+// "payload too large" ang bawat chunk na lumagpas sa 2mb kapag umakyat
+// na sa 3 MB/5 MB na tier ang OMNIPOS client.
 const CLOUD_BACKUP_UPLOAD_CHUNK_PATH = '/relay/cloud-backup/upload/chunk';
 const defaultJsonParser = express.json({ limit: '2mb' });
 // Raw binary parser para lang sa /relay/cloud-backup/upload/chunk.
-const cloudBackupChunkRawParser = express.raw({ type: '*/*', limit: '2mb' });
+const cloudBackupChunkRawParser = express.raw({ type: '*/*', limit: '6mb' });
 
 app.use((req, res, next) => {
     if (req.path === CLOUD_BACKUP_UPLOAD_CHUNK_PATH) {
@@ -3419,10 +3427,22 @@ function stripCloudBackupRedactedFields(moduleName, data) {
     });
 }
 
-// 100 KB bawat chunk — mas madalas mag-update ang progress bar kaysa sa
-// dating 1 MB (mas "smooth"/granular ang live progress, lalo na para sa
-// mas maliliit na backup na hindi umaabot ng maraming MB).
-const CLOUD_BACKUP_CHUNK_SIZE_BYTES = 100 * 1024;
+// Pinakamalaking chunk na tinatanggap ng RELAY — inaabiso ito sa
+// OMNIPOS client bilang "chunkSizeBytes" sa /upload/start (sa ibaba),
+// pero doon ito itinuturing na ANG CEILING na lang, hindi na fixed na
+// laki: nagsisimula ang OMNIPOS client sa maliit (100 KB) at unti-unting
+// tumataas ang bawat susunod na chunk (100 KB -> 500 KB -> 1 MB -> 3 MB
+// -> 5 MB) base sa TUNAY na measured upload speed nito papunta rito, mas
+// madalas na progress update kapag mabagal, mas kaunting round-trips
+// (mas mabilis) kapag mabilis ang koneksyon. Dapat tugma ang value na
+// ito sa pinakamataas na tier ng OMNIPOS client (CLOUD_BACKUP_CHUNK_TIERS
+// sa server.js doon) — at dapat may sapat na headroom pa rin ang
+// cloudBackupChunkRawParser sa itaas nito (6mb) kaysa dito.
+const CLOUD_BACKUP_MAX_CHUNK_SIZE_BYTES = 5 * 1024 * 1024;
+// Pangalan mula noong fixed pa ang chunk size — pinapanatili para hindi
+// na kailangang palitan ang lahat ng reference dito sa ibaba; ceiling na
+// rin ito ngayon, kagaya ng nasa itaas.
+const CLOUD_BACKUP_CHUNK_SIZE_BYTES = CLOUD_BACKUP_MAX_CHUNK_SIZE_BYTES;
 
 // uploadId -> { installationId, totalBytes, receivedBytes, chunks: [Buffer], tier, quotaMB, createdAt, idleTimer }
 const CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS = new Map();
