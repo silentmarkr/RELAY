@@ -181,17 +181,40 @@ function isTransientPgConnectionError(err) {
         code === '57P03'    // cannot_connect_now
     );
 }
-const PG_RECONNECT_DELAY_MS = 1500;
+// BUG FIX: 1.5 segundo lang dating parehong ginagamit na delay sa LAHAT
+// ng retry, kahit anong klase ng transient error — sapat ito para sa
+// isang random/saglit na network blip, PERO hindi sapat kapag ang
+// TALAGANG dahilan ay isang NATUTULOG na Postgres database (maraming
+// libreng-tier na Postgres provider ang "pinapatulog"/pineperiodically-
+// pause ang database pagkatapos ng ilang minutong walang aktibidad,
+// kagaya mismo ng banner na "Your free instance will spin down..." na
+// makikita sa Render dashboard mismo para sa web service — posible ring
+// mangyari ito sa Postgres database na naka-attach dito). Ang paggising
+// ng isang NATUTULOG na database ay maaaring umabot ng 10-30+ segundo —
+// kung 3 beses lang subukan, 1.5s ang pagitan, ~4.5 segundo lang ang
+// TOTAL na oras na binibigay bago sumuko — halos hindi pa nagigising
+// ang database sa oras na iyon.
+//
+// Ngayon, ISANG PATAAS na (exponential) backoff schedule na ang
+// ginagamit BAGO SUMUKO sa isang cloud backup WRITE (ang mismong
+// mag-a-upload/mag-sa-save sa Postgres) — 5 pagsubok, humihinto nang
+// hanggang ~37 segundo sa pagitan (2s → 5s → 10s → 20s), sapat na oras
+// para sa isang natutulog na database na magising, PERO nasa loob pa
+// rin ng 120-segundong (2 minuto) timeout na ginagamit ng OMNIPOS client
+// para sa /relay/cloud-backup/upload/finish request, kaya hindi ito
+// mag-a-abort nang maaga sa gitna ng paghihintay.
+const PG_WRITE_RETRY_DELAYS_MS = [2000, 5000, 10000, 20000];
 
 // --------------------------------------------------------------
 // runCloudBackupWrite — isinasagawa ang buong BEGIN…COMMIT ng cloud
 // backup upload gamit ang isang FRESH na connection mula sa pool, at
-// AWTOMATIKONG ULINIT (hanggang 2 pang pagsubok, 3 total) kapag
+// AWTOMATIKONG ULINIT (hanggang 4 pang pagsubok, 5 total, tumataas na
+// paghihintay sa pagitan — see PG_WRITE_RETRY_DELAYS_MS) kapag
 // TRANSIENT connection error lang ang dahilan ng pagkabigo (tingnan sa
 // itaas) — kung sa dahilang iba naman (hal. mismong mali ang datos),
 // hindi ito ULIT-ULITIN, agad na itinapon ang error papunta sa caller.
 // --------------------------------------------------------------
-async function runCloudBackupWrite(writeFn, { maxAttempts = 3 } = {}) {
+async function runCloudBackupWrite(writeFn, { maxAttempts = 5 } = {}) {
     let lastErr = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         const client = await pgPool.connect();
@@ -230,11 +253,13 @@ async function runCloudBackupWrite(writeFn, { maxAttempts = 3 } = {}) {
             if (!isTransientPgConnectionError(err) || attempt === maxAttempts) {
                 throw err;
             }
-            console.warn(`⚠️  CLOUD_BACKUP: transient Postgres connection error on attempt ${attempt}/${maxAttempts} (${err.message}) — retrying with a fresh connection…`);
+            const delayMs = PG_WRITE_RETRY_DELAYS_MS[attempt - 1] || PG_WRITE_RETRY_DELAYS_MS[PG_WRITE_RETRY_DELAYS_MS.length - 1];
+            console.warn(`⚠️  CLOUD_BACKUP: transient Postgres connection error on attempt ${attempt}/${maxAttempts} (${err.message}) — waiting ${delayMs}ms then retrying with a fresh connection (database may be waking up from idle)…`);
         } finally {
             client.release();
         }
-        await new Promise(r => setTimeout(r, PG_RECONNECT_DELAY_MS));
+        const delayMs = PG_WRITE_RETRY_DELAYS_MS[attempt - 1] || PG_WRITE_RETRY_DELAYS_MS[PG_WRITE_RETRY_DELAYS_MS.length - 1];
+        await new Promise(r => setTimeout(r, delayMs));
     }
     throw lastErr;
 }
@@ -259,6 +284,16 @@ async function runCloudBackupWrite(writeFn, { maxAttempts = 3 } = {}) {
 // klase ng problema. Ginagamit na ngayon ang helper na ito sa lahat ng
 // dating direktang pgPool.query() na read call para pantay ang proteksyon.
 // --------------------------------------------------------------
+// BUG FIX: bahagyang tinaasan din ang paghihintay dito (2s → 5s sa
+// pagitan, sa halip na parehong 1.5s) — mas malaking tsansang
+// mahabol ang isang natutulog/gumigising na database, pero pinapanatili
+// pa ring MAIKSI ang kabuuan (≈7s) dahil ang mga READ endpoints na ito
+// (usage, restore listing, atbp.) ay gumagamit ng mas maiksing
+// client-side timeout (default 20s sa relayFetch) kumpara sa
+// cloud-backup UPLOAD/finish (na may 2-minutong timeout, kaya doon
+// naka-set ang mas mahabang PG_WRITE_RETRY_DELAYS_MS sa itaas).
+const READ_RETRY_DELAYS_MS = [2000, 5000];
+
 async function queryWithRetry(text, params, { maxAttempts = 3 } = {}) {
     let lastErr = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -269,8 +304,9 @@ async function queryWithRetry(text, params, { maxAttempts = 3 } = {}) {
             if (!isTransientPgConnectionError(err) || attempt === maxAttempts) {
                 throw err;
             }
-            console.warn(`⚠️  CLOUD_BACKUP: transient Postgres connection error on read attempt ${attempt}/${maxAttempts} (${err.message}) — retrying with a fresh connection…`);
-            await new Promise(r => setTimeout(r, PG_RECONNECT_DELAY_MS));
+            const delayMs = READ_RETRY_DELAYS_MS[attempt - 1] || READ_RETRY_DELAYS_MS[READ_RETRY_DELAYS_MS.length - 1];
+            console.warn(`⚠️  CLOUD_BACKUP: transient Postgres connection error on read attempt ${attempt}/${maxAttempts} (${err.message}) — waiting ${delayMs}ms then retrying with a fresh connection…`);
+            await new Promise(r => setTimeout(r, delayMs));
         }
     }
     throw lastErr;
