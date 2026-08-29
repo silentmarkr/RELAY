@@ -23,6 +23,28 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { execSync, execFileSync, spawn } = require('child_process');
+
+// --------------------------------------------------------------
+// SAFETY NET: log-and-continue for uncaught exceptions/unhandled
+// rejections, instead of letting Node's default behavior (crash the
+// ENTIRE process) run. This is what turned one dropped Postgres
+// connection during a single cloud backup write into a run of 502s for
+// EVERY customer hitting RELAY at that moment (see the client.on('error', ...)
+// fix on the checked-out client in runCloudBackupWrite — that was the
+// specific, now-fixed cause of the crash seen in the logs). This handler
+// is kept as a broader safety net in case some other unforeseen spot in
+// this file ever throws/rejects the same way — better to log it and keep
+// serving everyone else than to crash and restart (which, on Render's
+// free tier especially, also triggers the ~50s cold-start delay for
+// whoever's next request comes in during the restart).
+// --------------------------------------------------------------
+process.on('uncaughtException', (err) => {
+    console.error('🔥 UNCAUGHT EXCEPTION (RELAY stayed up — this should be investigated):', err);
+});
+process.on('unhandledRejection', (reason) => {
+    console.error('🔥 UNHANDLED PROMISE REJECTION (RELAY stayed up — this should be investigated):', reason);
+});
+
 const { Worker } = require('worker_threads');
 const archiver = require('archiver');
 const Redis = require('ioredis');
@@ -173,6 +195,30 @@ async function runCloudBackupWrite(writeFn, { maxAttempts = 3 } = {}) {
     let lastErr = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         const client = await pgPool.connect();
+        // BUG FIX (root cause of the process CRASH seen in the RELAY logs —
+        // "Error: Connection terminated unexpectedly" with a raw Node stack
+        // trace, immediately followed by a run of 502s): pgPool.on('error', ...)
+        // (see above) ONLY catches errors on clients that are IDLE INSIDE
+        // THE POOL. A client that has been checked out via pgPool.connect()
+        // — exactly what happens here, held across BEGIN → several
+        // INSERT/UPSERT queries → COMMIT — is a SEPARATE EventEmitter. If the
+        // underlying Postgres connection drops during one of the idle GAPS
+        // between those awaited queries (not literally mid-query), `pg`
+        // emits an 'error' event directly ON THIS CLIENT. With no listener
+        // attached to it, Node treats that as an uncaught exception and
+        // KILLS THE WHOLE PROCESS — taking down every in-flight request
+        // (including unrelated ones), which is why a single dropped DB
+        // connection during a cloud backup turned into a run of 502s from
+        // Render restarting the crashed instance.
+        //
+        // Attaching a no-op listener here means this same error is now only
+        // ever seen where it's actually awaited — as a rejected promise from
+        // the next client.query() call — which is already caught by the
+        // try/catch below and (for transient errors) retried with a fresh
+        // connection, instead of crashing the whole server.
+        client.on('error', (err) => {
+            console.warn(`⚠️  CLOUD_BACKUP: checked-out Postgres client emitted an error while idle between queries (${err.message}) — this attempt will fail and retry below instead of crashing the server.`);
+        });
         try {
             await client.query('BEGIN');
             const result = await writeFn(client);
@@ -347,16 +393,16 @@ app.use((req, res, next) => {
 // lokal bago pa man ito talaga maabot ang RELAY, kaya kung mabigo ang
 // koneksyon PAGKATAPOS "100%" na, mukhang nawala ang datos kahit wala
 // namang natatanggap na kahit ano ang RELAY. Ngayon, hinahati na ng
-// OMNIPOS client ang buong backup sa maliliit na CHUNKS (1 MB bawat isa)
+// OMNIPOS client ang buong backup sa maliliit na CHUNKS (100 KB bawat isa)
 // — bawat chunk ay sarili niyang MALIIT na request papunta sa
 // /relay/cloud-backup/upload/chunk (raw binary, hindi JSON), kaya hindi
 // na kailangan ang malaking 1200mb na JSON limit — 2mb na lang ang
 // default limit ng lahat, maliban sa chunk route na may sarili niyang
-// raw-body parser (limit na bahagyang mas malaki lang sa 1 MB chunk size).
+// raw-body parser (2mb pa rin ang limit dito — malaking headroom na sa
+// 100 KB na chunk size, CLOUD_BACKUP_CHUNK_SIZE_BYTES sa ibaba).
 const CLOUD_BACKUP_UPLOAD_CHUNK_PATH = '/relay/cloud-backup/upload/chunk';
 const defaultJsonParser = express.json({ limit: '2mb' });
-// Raw binary parser para lang sa /relay/cloud-backup/upload/chunk — 2mb
-// na limit dito, may headroom sa 1 MB na chunk size (CLOUD_BACKUP_CHUNK_SIZE_BYTES).
+// Raw binary parser para lang sa /relay/cloud-backup/upload/chunk.
 const cloudBackupChunkRawParser = express.raw({ type: '*/*', limit: '2mb' });
 
 app.use((req, res, next) => {
@@ -3305,7 +3351,7 @@ function isFeatureCurrentlyUnlocked(installationId, featureId) {
 // ang totoong paglipat ng datos sa network, at kung mabigo pagkatapos
 // nito, mukhang "na-upload na pero nawala pala" sa mata ng user.
 //
-// FIX: hinati na ngayon sa magkakahiwalay na CHUNKS (1 MB bawat isa) ang
+// FIX: hinati na ngayon sa magkakahiwalay na CHUNKS (100 KB bawat isa) ang
 // buong upload, TATLONG endpoint (start → chunk (paulit-ulit) → finish).
 // Isang chunk ay itinuturing lang na "natanggap" (at idinadagdag sa
 // progress na ipinapakita sa OMNIPOS client) kapag TALAGANG bumalik na
@@ -3337,9 +3383,10 @@ function stripCloudBackupRedactedFields(moduleName, data) {
     });
 }
 
-// 1 MB bawat chunk — tumutugma sa "real, live, per-MB" na progress na
-// dapat ipakita ng progress bar sa OMNIPOS client.
-const CLOUD_BACKUP_CHUNK_SIZE_BYTES = 1024 * 1024;
+// 100 KB bawat chunk — mas madalas mag-update ang progress bar kaysa sa
+// dating 1 MB (mas "smooth"/granular ang live progress, lalo na para sa
+// mas maliliit na backup na hindi umaabot ng maraming MB).
+const CLOUD_BACKUP_CHUNK_SIZE_BYTES = 100 * 1024;
 
 // uploadId -> { installationId, totalBytes, receivedBytes, chunks: [Buffer], tier, quotaMB, createdAt, idleTimer }
 const CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS = new Map();
@@ -6565,7 +6612,7 @@ bootstrapStores()
 
         // BUG FIX: default sa Node.js ang `requestTimeout` ng http.Server ay
         // 300000ms (5 minuto) lamang. Ngayon na CHUNKED na ang cloud backup
-        // upload (1 MB bawat request sa /relay/cloud-backup/upload/chunk,
+        // upload (100 KB bawat request sa /relay/cloud-backup/upload/chunk,
         // hindi na iisang malaking request), bawat indibidwal na request ay
         // mabilis nang matatapos — pero iniiwan pa rin dito ang mas mataas
         // na 60-minutong ceiling bilang generous na safety margin (hal. kung
