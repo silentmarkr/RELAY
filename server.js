@@ -3684,28 +3684,72 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
         let totalSizeBytes = 0;
         let moduleCount = 0;
 
-        await runCloudBackupWrite(async (client) => {
-            // I-reset ang mga counter na ito sa SIMULA ng bawat pagsubok
-            // (attempt) — kung ito ay isang RETRY (dahil sa transient
-            // connection error), gusto nating simulan ulit mula sa zero
-            // ang totalSizeBytes/moduleCount ng bagong attempt sa halip
-            // na dagdagan pa ang natitirang value mula sa nabigong
-            // attempt bago rito.
-            totalSizeBytes = 0;
-            moduleCount = 0;
-            for (const [moduleName, entry] of Object.entries(serializedModules)) {
-                const sizeBytes = Buffer.byteLength(entry.serialized, 'utf8');
+        // ------------------------------------------------------------
+        // BUG FIX (uploads na may maraming MATATAAS-RESOLUTION na larawan
+        // ng produkto — sinasadyang HINDI kino-compress ang mga ito para
+        // mapanatili ang orihinal na kalidad, kaya ito talaga ang dapat
+        // suportahan, hindi bawasan): dati, ISANG malaking BEGIN...COMMIT
+        // transaction lang ang sumasaklaw sa LAHAT ng module nang sabay.
+        // Ibig sabihin, kapag ang "products" module (kung saan nakakabit
+        // ang mga base64 na larawan) ay lumaki nang husto at natagalan/
+        // naputol ang koneksyon sa GITNA ng pagsulat nito, kailangan pang
+        // ULITIN mula sa simula ang pagsulat ng LAHAT ng ibang module rin
+        // — kahit matagumpay na naman silang naisulat sa parehong pagsubok.
+        // Mas lumalaki ang isang transaction, mas matagal itong bukas, mas
+        // malaki ang tsansang maabutan ng idle-connection cut (tingnan ang
+        // paliwanag sa runCloudBackupWrite sa itaas) — kaya lalong madalas
+        // mabigo ang mismong module na may pinakamaraming larawan.
+        //
+        // Ngayon, HIWALAY na maliit na transaction ang bawat module (sarili
+        // niyang BEGIN...COMMIT, sarili niyang 5x retry sa runCloudBackupWrite)
+        // — kaya kung "products" lang (mabigat dahil sa mga larawan) ang
+        // paulit-ulit na nabibigo, HINDI na kailangang isulat ulit ang mga
+        // maliit/mabilis na module (users, settings, atbp.) na matagumpay
+        // naman. Ligtas ito dahil per-module UPSERT (ON CONFLICT DO UPDATE)
+        // na rin talaga ang bawat isa — idempotent, walang masisirang datos
+        // kahit paulit-ulit itong subukan mula sa OMNIPOS client.
+        // ------------------------------------------------------------
+        const failedModules = [];
+        for (const [moduleName, entry] of Object.entries(serializedModules)) {
+            const sizeBytes = Buffer.byteLength(entry.serialized, 'utf8');
+            try {
+                await runCloudBackupWrite(async (client) => {
+                    await client.query(
+                        `INSERT INTO cloud_backup_modules (installation_id, module, data, record_count, size_bytes, updated_at)
+                         VALUES ($1, $2, $3, $4, $5, now())
+                         ON CONFLICT (installation_id, module) DO UPDATE SET
+                            data = excluded.data, record_count = excluded.record_count, size_bytes = excluded.size_bytes, updated_at = excluded.updated_at`,
+                        [installationId, moduleName, entry.serialized, entry.recordCount, sizeBytes]
+                    );
+                });
                 totalSizeBytes += sizeBytes;
-                await client.query(
-                    `INSERT INTO cloud_backup_modules (installation_id, module, data, record_count, size_bytes, updated_at)
-                     VALUES ($1, $2, $3, $4, $5, now())
-                     ON CONFLICT (installation_id, module) DO UPDATE SET
-                        data = excluded.data, record_count = excluded.record_count, size_bytes = excluded.size_bytes, updated_at = excluded.updated_at`,
-                    [installationId, moduleName, entry.serialized, entry.recordCount, sizeBytes]
-                );
                 moduleCount++;
+            } catch (moduleErr) {
+                failedModules.push({
+                    module: moduleName,
+                    message: moduleErr.message,
+                    transient: isTransientPgConnectionError(moduleErr),
+                    sizeMB: Math.round((sizeBytes / (1024 * 1024)) * 100) / 100
+                });
             }
+        }
 
+        if (failedModules.length > 0) {
+            const failedList = failedModules.map(f => `${f.module} (${f.sizeMB} MB)`).join(', ');
+            console.error(`⚠️ CLOUD_BACKUP: hindi na-save ang ${failedModules.length} module(s) para sa ${installationId}: ${failedList}`);
+            const anyTransient = failedModules.some(f => f.transient);
+            const friendlyMessage = anyTransient
+                ? `Lost connection to the database while saving ${failedList} (this can happen with very large modules, e.g. many high-resolution product photos). The other module(s) were already saved successfully — please try syncing again; only the module(s) above still need to go through.`
+                : `An error occurred while saving ${failedList} to Postgres: ${failedModules[0].message}`;
+            return res.status(500).json({ success: false, message: friendlyMessage, failedModules: failedModules.map(f => f.module) });
+        }
+
+        // Ang "meta" row (buod ng buong sync — pangalan ng tindahan, kabuuang
+        // records, module count, atbp.) ay isinusulat lang PAGKATAPOS na
+        // matagumpay na naisulat ang LAHAT ng module — para tumpak ang
+        // "last_sync_at"/"sync_count" bilang tunay na buo/kumpletong sync,
+        // hindi isang bahagyang (partial) resulta.
+        await runCloudBackupWrite(async (client) => {
             await client.query(
                 `INSERT INTO cloud_backup_meta (installation_id, store_name, total_records, module_count, size_bytes, last_sync_at, sync_count)
                  VALUES ($1, $2, $3, $4, $5, now(), 1)
