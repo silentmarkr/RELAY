@@ -2952,7 +2952,23 @@ function rateLimit(bucketName, max, windowMs, keyFn) {
         const bucket = rateBuckets.get(key) || [];
         const recent = bucket.filter(ts => now - ts < windowMs);
         if (recent.length >= max) {
-            return res.status(429).json({ success: false, message: 'Sobra sa pinapayagang bilang ng requests. Subukan mamaya.' });
+            // BUG FIX: dating walang Retry-After header o kahit anong hint
+            // kung gaano katagal pa bago i-clear ang limit — kaya ang mga
+            // caller (hal. ang OMNIPOS server's cloud-backup upload) ay
+            // basta "a few minutes or longer" na lang ang naipapakita sa
+            // user, hindi tumpak. Dahil naka-order na ang `recent` array
+            // ayon sa oras (palaging pinapasok ang bagong `now` sa dulo),
+            // ang recent[0] ang PINAKALUMANG entry sa loob pa rin ng
+            // window — kapag lumipas na yun, sisiksik na papasok ang bagong
+            // request. Ibinabalik ito bilang eksaktong bilang ng segundo.
+            const earliestTs = recent[0];
+            const retryAfterSec = Math.max(1, Math.ceil((earliestTs + windowMs - now) / 1000));
+            res.set('Retry-After', String(retryAfterSec));
+            return res.status(429).json({
+                success: false,
+                message: 'Sobra sa pinapayagang bilang ng requests. Subukan mamaya.',
+                retryAfterSec
+            });
         }
         recent.push(now);
         rateBuckets.set(key, recent);
