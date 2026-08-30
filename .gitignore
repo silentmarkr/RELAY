@@ -20,6 +20,8 @@ integrity-status.json
 release-baselines.json
 system-version.json
 targeted-releases.json
+feature-catalog-overrides.json
+cloud-backup-plan-overrides.json
 
 # Private signing key — CRITICAL, must only ever live on the developer's
 # own hosting (or as the RELAY_PRIVATE_KEY_PEM env var). Committing this

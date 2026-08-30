@@ -1037,16 +1037,80 @@ const FEATURE_CATALOG_BASE = {
 };
 
 // ============================================================
-// CLOUD BACKUP — SUBSCRIPTION PLANS (must match OMNIPOS/server.js
-// CLOUD_BACKUP_PLANS exactly — this IS the ground truth for pricing
-// since this is RELAY, not just whatever the client claims).
+// CLOUD BACKUP — SUBSCRIPTION PLANS
 // ============================================================
-const CLOUD_BACKUP_PLANS = {
+// RELAY is the GROUND TRUTH for these — hindi na ito kailangang
+// i-mirror/hardcode sa OMNIPOS/server.js. Ang OMNIPOS ay kumukuha na
+// lang nito sa runtime via GET /relay/pricing (may local cache doon
+// sakaling mawalan ito ng koneksyon dito), kaya pagbabago ng presyo
+// dito (via /relay/admin/api/pricing/cloud-backup, o ang admin
+// pricing page sa /relay/admin/pricing.html) ay awtomatikong
+// naipapakita sa lahat ng OMNIPOS installation — walang kailangang
+// i-deploy ulit na code doon.
+//
+// CLOUD_BACKUP_PLANS_BASE = ang mga default/fallback na value (kung
+// walang override na na-configure). CLOUD_BACKUP_PLANS (sa ibaba) =
+// ang AKTWAL na ginagamit ng buong file (base + overrides), kaya
+// laging ito ang dapat basahin ng ibang code — hindi ang _BASE.
+const CLOUD_BACKUP_PLANS_BASE = {
     basic: { id: 'basic', name: 'Cloud Backup — Basic', price: { monthly: 129, yearly: 1290 }, storageQuotaMB: 250 },
     standard: { id: 'standard', name: 'Cloud Backup — Standard', price: { monthly: 249, yearly: 2490 }, storageQuotaMB: 1024 },
     pro: { id: 'pro', name: 'Cloud Backup — Pro', price: { monthly: 399, yearly: 3990 }, storageQuotaMB: 5120 }
 };
 const CLOUD_BACKUP_BILLING_DAYS = { monthly: 30, yearly: 365 };
+
+// --------------------------------------------------------------
+// Pagsave/load ng cloud-backup-plan-overrides — parehong pattern ng
+// feature-catalog-overrides sa itaas (Redis kung meron, JSON file
+// kung wala). Ang override object ay per-tier, PARTIAL na patch lang
+// (hal. { basic: { price: { monthly: 149 } } }) — hindi kailangang
+// isulat ulit ang buong plan kada edit.
+// --------------------------------------------------------------
+const CLOUD_BACKUP_PLAN_OVERRIDES_PATH = path.join(__dirname, 'cloud-backup-plan-overrides.json');
+
+async function loadCloudBackupPlanOverrides() {
+    const fromRedis = await redisGetJSON('cloud-backup-plan-overrides', null);
+    if (fromRedis !== null) return fromRedis;
+    try {
+        return JSON.parse(fs.readFileSync(CLOUD_BACKUP_PLAN_OVERRIDES_PATH, 'utf8'));
+    } catch (err) {
+        return {};
+    }
+}
+
+function saveCloudBackupPlanOverrides(obj) {
+    if (redisClient) {
+        redisSetJSON('cloud-backup-plan-overrides', obj);
+        return;
+    }
+    try {
+        fs.writeFileSync(CLOUD_BACKUP_PLAN_OVERRIDES_PATH, JSON.stringify(obj, null, 2));
+    } catch (err) {
+        console.error('Hindi ma-save ang cloud-backup-plan-overrides.json:', err);
+    }
+}
+
+let cloudBackupPlanOverrides = {}; // pupunuin sa bootstrapStores()
+
+// Ang mismong CLOUD_BACKUP_PLANS na ginagamit ng BUONG file (pati na
+// rin ang ibinabalik ng GET /relay/pricing papunta sa OMNIPOS) —
+// `let` (hindi `const`) dahil ini-recompute ito sa tuwing may
+// na-save na override (tingnan ang recomputeCloudBackupPlans()).
+let CLOUD_BACKUP_PLANS = { ...CLOUD_BACKUP_PLANS_BASE };
+
+function recomputeCloudBackupPlans() {
+    const merged = {};
+    for (const tier of Object.keys(CLOUD_BACKUP_PLANS_BASE)) {
+        const base = CLOUD_BACKUP_PLANS_BASE[tier];
+        const override = cloudBackupPlanOverrides[tier] || {};
+        merged[tier] = {
+            ...base,
+            ...override,
+            price: { ...base.price, ...(override.price || {}) }
+        };
+    }
+    CLOUD_BACKUP_PLANS = merged;
+}
 
 function getCloudBackupPlanPrice(tier, billingCycle) {
     const plan = CLOUD_BACKUP_PLANS[tier];
@@ -1525,7 +1589,14 @@ const INTEGRITY_EXCLUDE_NAMES = new Set([
     // ito bahagi ng aktwal na release).
     '.env', '.env.key', 'database', 'node_modules', 'uploads_tmp',
     '.git', 'release', 'cf.log', 'server.log', '.start.sh.lock',
-    '.self-update-backup', 'package-lock.json', 'certs'
+    '.self-update-backup', 'package-lock.json', 'certs',
+    // SYNC FIX: itinugma sa INTEGRITY_SCAN_EXCLUDE_NAMES ng
+    // OMNIPOS/server.js — kung wala ito rito, ang cache file na ginagawa
+    // ng fetchCloudBackupPricing() (hindi bahagi ng release baseline,
+    // dahil ginagawa lang ito PAGKATAPOS na-install ang OMNIPOS) ay
+    // palaging lalabas na "New file (not part of the release)" sa bawat
+    // integrity-checkin — false positive, hindi tunay na tampering.
+    'cloud-backup-pricing-cache.json'
 ]);
 const INTEGRITY_EXCLUDE_EXTENSIONS = new Set(['.log', '.patch']);
 
@@ -2303,6 +2374,79 @@ app.post('/relay/admin/api/devices/reset-all', requireAdminKey, async (req, res)
 // --------------------------------------------------------------
 app.get('/relay/admin/api/catalog', requireAdminKey, (req, res) => {
     res.json({ success: true, catalog: FEATURE_CATALOG, tiers: UPGRADE_TIERS });
+});
+
+// --------------------------------------------------------------
+// Cloud Backup pricing — admin read + edit.
+//
+// GET  /relay/admin/api/pricing            -> current effective plans
+//                                              (base + override) plus
+//                                              the raw base/override
+//                                              so the admin page can
+//                                              show "default" vs
+//                                              "customized" per field.
+// POST /relay/admin/api/pricing/cloud-backup       -> patch one tier
+// POST /relay/admin/api/pricing/cloud-backup/reset -> clear a tier's
+//                                                       override(s)
+//
+// Ito ang pinagmumulan ng GET /relay/pricing (client-facing, tinatawag
+// ng OMNIPOS) sa ibaba — kaya anumang i-save dito ay AGAD na makikita
+// ng lahat ng OMNIPOS installation sa susunod na fetch nila (walang
+// kailangang i-restart o i-deploy ulit ang RELAY o ang OMNIPOS).
+// --------------------------------------------------------------
+app.get('/relay/admin/api/pricing', requireAdminKey, (req, res) => {
+    res.json({
+        success: true,
+        cloudBackupPlans: CLOUD_BACKUP_PLANS,
+        cloudBackupPlansBase: CLOUD_BACKUP_PLANS_BASE,
+        cloudBackupPlanOverrides,
+        billingDays: CLOUD_BACKUP_BILLING_DAYS
+    });
+});
+
+app.post('/relay/admin/api/pricing/cloud-backup', requireAdminKey, (req, res) => {
+    const { tier, name, monthly, yearly, storageQuotaMB } = req.body || {};
+    if (!tier || !CLOUD_BACKUP_PLANS_BASE[tier]) {
+        return res.status(400).json({ success: false, message: 'Invalid o walang tier (basic/standard/pro).' });
+    }
+    if (monthly !== undefined && (typeof monthly !== 'number' || !isFinite(monthly) || monthly < 0)) {
+        return res.status(400).json({ success: false, message: 'Invalid monthly price.' });
+    }
+    if (yearly !== undefined && (typeof yearly !== 'number' || !isFinite(yearly) || yearly < 0)) {
+        return res.status(400).json({ success: false, message: 'Invalid yearly price.' });
+    }
+    if (storageQuotaMB !== undefined && (typeof storageQuotaMB !== 'number' || !isFinite(storageQuotaMB) || storageQuotaMB <= 0)) {
+        return res.status(400).json({ success: false, message: 'Invalid storageQuotaMB.' });
+    }
+
+    const existing = cloudBackupPlanOverrides[tier] || {};
+    const updated = { ...existing };
+    if (typeof name === 'string' && name.trim()) updated.name = name.trim();
+    if (typeof storageQuotaMB === 'number') updated.storageQuotaMB = storageQuotaMB;
+    if (typeof monthly === 'number' || typeof yearly === 'number') {
+        const price = { ...(existing.price || {}) };
+        if (typeof monthly === 'number') price.monthly = monthly;
+        if (typeof yearly === 'number') price.yearly = yearly;
+        updated.price = price;
+    }
+
+    cloudBackupPlanOverrides[tier] = updated;
+    saveCloudBackupPlanOverrides(cloudBackupPlanOverrides);
+    recomputeCloudBackupPlans();
+    console.log(`💳 Na-update ang Cloud Backup pricing override para sa "${tier}" via admin panel.`);
+    res.json({ success: true, plan: CLOUD_BACKUP_PLANS[tier] });
+});
+
+app.post('/relay/admin/api/pricing/cloud-backup/reset', requireAdminKey, (req, res) => {
+    const { tier } = req.body || {};
+    if (!tier || !CLOUD_BACKUP_PLANS_BASE[tier]) {
+        return res.status(400).json({ success: false, message: 'Invalid o walang tier (basic/standard/pro).' });
+    }
+    delete cloudBackupPlanOverrides[tier];
+    saveCloudBackupPlanOverrides(cloudBackupPlanOverrides);
+    recomputeCloudBackupPlans();
+    console.log(`💳 Na-reset sa default ang Cloud Backup pricing ng "${tier}" via admin panel.`);
+    res.json({ success: true, plan: CLOUD_BACKUP_PLANS[tier] });
 });
 
 // --------------------------------------------------------------
@@ -3085,6 +3229,31 @@ function rateLimit(bucketName, max, windowMs, keyFn) {
 // (shared secret) at rate limit, kaya hindi basta kahit sinong random
 // tao (na walang API key) ang makaka-trigger nito.
 // --------------------------------------------------------------
+// --------------------------------------------------------------
+// GET /relay/pricing
+// Client-facing endpoint na tinatawag ng OMNIPOS (relayFetch) para
+// makuha ang KASALUKUYANG Cloud Backup plan pricing (presyo,
+// storage quota) — ito na ang TANGING pinagmumulan ng presyo; wala
+// nang hardcoded na numero ang OMNIPOS/server.js. I-edit lang ang
+// presyo dito (via /relay/admin/pricing.html o ang mga endpoint sa
+// itaas), agad itong makikita ng lahat ng OMNIPOS installation sa
+// susunod na fetch nila (may sariling cache doon kaya hindi kailangan
+// ng laging live na koneksyon).
+//
+// SADYANG WALANG requireAllowedDevice dito (tulad ng backup-checkin
+// sa ibaba) — kailangan makita ang pricing kahit BAGO pa ma-Allow ang
+// device (para makapili muna sila ng plano bago pa man mag-subscribe).
+// Nananatili pa ring protektado ito ng requireApiKey (shared secret).
+// --------------------------------------------------------------
+app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 1000), (req, res) => {
+    res.json({
+        success: true,
+        cloudBackupPlans: CLOUD_BACKUP_PLANS,
+        billingDays: CLOUD_BACKUP_BILLING_DAYS,
+        fetchedAt: new Date().toISOString()
+    });
+});
+
 app.post('/relay/backup-checkin', requireApiKey, rateLimit('backup-checkin', 20, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
     const { installationId, storeName, username, fileSizeBytes, backupAt } = req.body;
 
@@ -5529,6 +5698,10 @@ const BUILD_EXCLUDE_NAMES = new Set([
     // (developer-only diagnostic CLI — redundant dahil may built-in
     // auto-vacuum na ang server.js pagkatapos ng hard reset).
     'build-release.js', 'obfuscate-worker.js', 'start.sh.bak', 'vacuum-now.js',
+    // SYNC FIX: itinugma sa INTEGRITY_SCAN_EXCLUDE_NAMES ng
+    // OMNIPOS/server.js — runtime cache lang ito ng huling Cloud Backup
+    // pricing na na-fetch mula RELAY, hindi dapat isama sa release.
+    'cloud-backup-pricing-cache.json',
 ]);
 const BUILD_EXCLUDE_EXTENSIONS = new Set(['.log', '.patch']);
 
@@ -6669,7 +6842,8 @@ async function bootstrapStores() {
         releaseBaselines,
         integrityStatus,
         featureCatalogOverrides,
-        branchSummaries
+        branchSummaries,
+        cloudBackupPlanOverrides
     ] = await Promise.all([
         loadAllowedDevices(),
         loadDeviceLabels(),
@@ -6685,7 +6859,8 @@ async function bootstrapStores() {
         loadReleaseBaselines(),
         loadIntegrityStatus(),
         loadFeatureCatalogOverrides(),
-        loadBranchSummaries()
+        loadBranchSummaries(),
+        loadCloudBackupPlanOverrides()
     ]);
 
     // I-merge ang anumang dating naka-auto-learn na features papunta sa
@@ -6695,6 +6870,13 @@ async function bootstrapStores() {
     recomputeProTierFeatureIds();
     if (Object.keys(featureCatalogOverrides).length > 0) {
         console.log(`🆕 Na-load ang ${Object.keys(featureCatalogOverrides).length} dating auto-learned na feature(s) papunta sa catalog mirror: ${Object.keys(featureCatalogOverrides).join(', ')}.`);
+    }
+
+    // Gayundin, i-apply ang anumang na-save nang Cloud Backup pricing
+    // override (mula sa admin pricing page) sa ibabaw ng BASE plans.
+    recomputeCloudBackupPlans();
+    if (Object.keys(cloudBackupPlanOverrides).length > 0) {
+        console.log(`💳 Na-load ang custom na Cloud Backup pricing override para sa: ${Object.keys(cloudBackupPlanOverrides).join(', ')}.`);
     }
 
     console.log(
