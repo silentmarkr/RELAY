@@ -1160,12 +1160,75 @@ function saveFeatureCatalogOverrides(obj) {
 
 let featureCatalogOverrides = {}; // pupunuin sa bootstrapStores()
 
+// --------------------------------------------------------------
+// FEATURE PRICING OVERRIDES — ito ang bagong, HIWALAY na price editor
+// para sa mga "ibang features" (themes/modules — HINDI Cloud Backup,
+// na may sarili nang subscription pricing editor sa itaas via
+// cloudBackupPlanOverrides/CLOUD_BACKUP_PLAN_OVERRIDES_PATH). Sadyang
+// hiwalay ang dalawang override store na ito kahit magkatulad ang
+// pattern nila, dahil magkaibang hugis ang pinepresyuhan nila (flat
+// `price` dito kumpara sa per-billing-cycle `price.monthly/yearly` sa
+// Cloud Backup) at para hindi magkahalo ang audit trail/edit history
+// ng dalawang bagay na ito.
+//
+// Hindi katulad ng featureCatalogOverrides (na para lang sa BAGONG
+// featureId na auto-learn — buong entry ang naka-imbak doon),
+// PARTIAL na patch lang ang naka-imbak dito bawat featureId (hal.
+// { ocean: { price: 199 } }) — kaya hindi na kailangang isulat ulit
+// ang buong entry kada edit, kagaya ng cloudBackupPlanOverrides.
+// --------------------------------------------------------------
+const FEATURE_PRICING_OVERRIDES_PATH = path.join(__dirname, 'feature-pricing-overrides.json');
+
+async function loadFeaturePricingOverrides() {
+    const fromRedis = await redisGetJSON('feature-pricing-overrides', null);
+    if (fromRedis !== null) return fromRedis;
+    try {
+        return JSON.parse(fs.readFileSync(FEATURE_PRICING_OVERRIDES_PATH, 'utf8'));
+    } catch (err) {
+        return {};
+    }
+}
+
+function saveFeaturePricingOverrides(obj) {
+    if (redisClient) {
+        redisSetJSON('feature-pricing-overrides', obj);
+        return;
+    }
+    try {
+        fs.writeFileSync(FEATURE_PRICING_OVERRIDES_PATH, JSON.stringify(obj, null, 2));
+    } catch (err) {
+        console.error('Hindi ma-save ang feature-pricing-overrides.json:', err);
+    }
+}
+
+let featurePricingOverrides = {}; // pupunuin sa bootstrapStores()
+
 // Ang mismong FEATURE_CATALOG na ginagamit ng buong file (admin panel,
-// pricing, atbp.) ay ang BASE + anumang auto-learned na overrides.
-// `let` (hindi `const`) dahil dinadagdagan ito sa runtime ng
-// registerFeatureIfUnknown() sa sandaling may bagong featureId na
-// ma-detect.
+// pricing, atbp.) ay ang BASE + anumang auto-learned na overrides
+// (featureCatalogOverrides, para sa BAGONG featureId), tapos sa ibabaw
+// pa niyan ay ang manual price/name overrides (featurePricingOverrides,
+// mula sa HIWALAY na Feature Pricing editor). `let` (hindi `const`)
+// dahil ini-recompute ito sa runtime — sa tuwing may bagong auto-learned
+// feature (registerFeatureIfUnknown()) O may na-save na manual price
+// override (ang bagong /relay/admin/api/pricing/features endpoints sa
+// ibaba) — kaya laging tumatawag sa recomputeFeatureCatalog() sa halip
+// na direktang i-mutate ang FEATURE_CATALOG sa magkabilang lugar.
 let FEATURE_CATALOG = { ...FEATURE_CATALOG_BASE };
+
+function recomputeFeatureCatalog() {
+    const merged = { ...FEATURE_CATALOG_BASE, ...featureCatalogOverrides };
+    for (const featureId of Object.keys(featurePricingOverrides)) {
+        // Hindi dapat maka-price-edit ng entry na wala talaga sa
+        // catalog (base o auto-learned) — at sadyang hindi kasama
+        // ang 'cloud_backup' dito kahit paano (may sarili itong
+        // subscription pricing editor; tingnan ang FEATURE_CATALOG_BASE
+        // sa itaas kung saan `price: null` ito).
+        if (!merged[featureId] || featureId === 'cloud_backup') continue;
+        merged[featureId] = { ...merged[featureId], ...featurePricingOverrides[featureId] };
+    }
+    FEATURE_CATALOG = merged;
+    recomputeProTierFeatureIds();
+}
 
 const UPGRADE_TIERS = [
     { id: 'basic', name: 'Basic Upgrade', featureIds: ['advanced_reports', 'promo_codes'], bundlePrice: 999 },
@@ -1214,8 +1277,7 @@ function registerFeatureIfUnknown(featureId, meta = {}, installationId = null) {
     };
 
     featureCatalogOverrides[featureId] = entry;
-    FEATURE_CATALOG = { ...FEATURE_CATALOG, [featureId]: entry };
-    recomputeProTierFeatureIds();
+    recomputeFeatureCatalog(); // kasama na ang recomputeProTierFeatureIds()
     saveFeatureCatalogOverrides(featureCatalogOverrides);
 
     console.log(`🆕 Bagong feature na na-detect at awtomatikong idinagdag sa RELAY catalog mirror: ${featureId} (${entry.name}, ${entry.price !== null ? '₱' + entry.price : 'walang presyo'}).`);
@@ -2450,6 +2512,88 @@ app.post('/relay/admin/api/pricing/cloud-backup/reset', requireAdminKey, (req, r
 });
 
 // --------------------------------------------------------------
+// FEATURE (themes/modules) pricing — admin read + edit.
+//
+// HIWALAY na feature ito sa Cloud Backup pricing sa itaas — sadyang
+// magkaibang override store (featurePricingOverrides, hindi
+// cloudBackupPlanOverrides), magkaibang endpoint path
+// (/relay/admin/api/pricing/features, hindi .../cloud-backup), at
+// magkaibang admin page (/relay/admin/feature-pricing.html, hindi
+// pricing.html) — kaya walang paghahalo ng edit history/audit trail
+// ng dalawang bagay na ito, at hindi na-a-apektuhan ng isa ang iba.
+//
+// GET  /relay/admin/api/pricing/features             -> lahat ng
+//        editable na feature (base + auto-learned, MALIBAN sa
+//        cloud_backup) kasama ang effective price/name, ang raw base,
+//        at ang mga override — para malaman ng admin page kung alin
+//        ang "default" vs "customized" bawat entry.
+// POST /relay/admin/api/pricing/features              -> i-patch ang
+//        name/price ng IISANG featureId.
+// POST /relay/admin/api/pricing/features/reset         -> alisin ang
+//        override ng IISANG featureId (babalik sa default/base).
+//
+// Ito ang pinagmumulan ng `featureCatalog` field sa GET /relay/pricing
+// sa ibaba (client-facing, tinatawag ng OMNIPOS) — kaya anumang i-save
+// dito ay AGAD na makikita ng lahat ng OMNIPOS installation sa susunod
+// na fetch nila, kagaya na rin ng Cloud Backup pricing — walang
+// kailangang i-restart o i-deploy ulit ang RELAY o ang OMNIPOS.
+// --------------------------------------------------------------
+app.get('/relay/admin/api/pricing/features', requireAdminKey, (req, res) => {
+    const editable = {};
+    for (const [featureId, entry] of Object.entries(FEATURE_CATALOG)) {
+        if (featureId === 'cloud_backup') continue; // may sarili itong pricing editor sa itaas
+        editable[featureId] = entry;
+    }
+    const editableBase = {};
+    for (const [featureId, entry] of Object.entries(FEATURE_CATALOG_BASE)) {
+        if (featureId === 'cloud_backup') continue;
+        editableBase[featureId] = entry;
+    }
+    res.json({
+        success: true,
+        featureCatalog: editable,
+        featureCatalogBase: editableBase,
+        featurePricingOverrides
+    });
+});
+
+app.post('/relay/admin/api/pricing/features', requireAdminKey, (req, res) => {
+    const { featureId, name, price } = req.body || {};
+    if (!featureId || featureId === 'cloud_backup' || !FEATURE_CATALOG[featureId]) {
+        return res.status(400).json({ success: false, message: 'Invalid o hindi kilalang featureId (o ito ay "cloud_backup", na may sariling pricing editor).' });
+    }
+    if (price !== undefined && (typeof price !== 'number' || !isFinite(price) || price < 0)) {
+        return res.status(400).json({ success: false, message: 'Invalid price.' });
+    }
+    if (name !== undefined && (typeof name !== 'string' || !name.trim())) {
+        return res.status(400).json({ success: false, message: 'Invalid name.' });
+    }
+
+    const existing = featurePricingOverrides[featureId] || {};
+    const updated = { ...existing };
+    if (typeof name === 'string' && name.trim()) updated.name = name.trim();
+    if (typeof price === 'number') updated.price = price;
+
+    featurePricingOverrides[featureId] = updated;
+    saveFeaturePricingOverrides(featurePricingOverrides);
+    recomputeFeatureCatalog();
+    console.log(`💳 Na-update ang pricing override ng feature "${featureId}" via admin panel.`);
+    res.json({ success: true, feature: { featureId, ...FEATURE_CATALOG[featureId] } });
+});
+
+app.post('/relay/admin/api/pricing/features/reset', requireAdminKey, (req, res) => {
+    const { featureId } = req.body || {};
+    if (!featureId || featureId === 'cloud_backup' || !FEATURE_CATALOG[featureId]) {
+        return res.status(400).json({ success: false, message: 'Invalid o hindi kilalang featureId.' });
+    }
+    delete featurePricingOverrides[featureId];
+    saveFeaturePricingOverrides(featurePricingOverrides);
+    recomputeFeatureCatalog();
+    console.log(`💳 Na-reset sa default ang pricing ng feature "${featureId}" via admin panel.`);
+    res.json({ success: true, feature: { featureId, ...FEATURE_CATALOG[featureId] } });
+});
+
+// --------------------------------------------------------------
 // GET /relay/admin/api/analytics
 // USAGE ANALYTICS DASHBOARD — buod ng "kalusugan" ng buong relay: ilang
 // device ang aktibo/naka-allow, ilang pending approval, ilang lisensyang
@@ -2712,10 +2856,29 @@ app.post('/relay/admin/api/devices/:installationId/clear-history', requireAdminK
 // ring env default. Ginagamit din ito para sa "Renew/Extend" ng isang
 // device — i-activate lang ulit ang parehong featureId na may bagong
 // durationDays, ma-o-overwrite nito ang dating entry (bagong expiresAt).
+//
+// BUG FIX — Cloud Backup ay SUBSCRIPTION (Basic/Standard/Pro x
+// monthly/yearly), hindi flat-price na à la carte item — kaya kailangan
+// nito ng `tier` + `billingCycle` sa body (kagaya na ng ginagawa na ng
+// OTP/customer-facing na /relay/confirm-unlock para dito). Dati, WALANG
+// selection na ito dito: dumadaan lang ang 'cloud_backup' sa parehong
+// generic na landas gaya ng ibang à la carte na feature, na nagdulot ng
+// TATLONG magkakahiwalay na butas kapag Manual Activate o "Renew" ang
+// ginamit dito para sa Cloud Backup: (1) FEATURE_CATALOG['cloud_backup']
+// .price ay `null` (subscription na ito, wala nang iisang flat price),
+// kaya `null` din ang naitatalang price sa audit trail/analytics
+// revenue; (2) walang `tier` na naisusulat sa unlock record, kaya sa
+// susunod na i-check ang storage quota (CLOUD_BACKUP_UPLOAD_CHUNK_PATH
+// handler sa ibaba), 'basic' (pinakamababa) ang laging ginagamit kahit
+// Pro ang aktwal na binayaran/ibinigay ng admin; at (3) ang
+// RELAY_DEFAULT_LICENSE_DAYS (o walang expiry) ang ginagamit sa halip
+// ng TAMANG bilang ng araw batay sa napiling monthly/yearly na
+// billing cycle — kaya puwedeng mali ang expiresAt ng isang "Renew" ng
+// Cloud Backup dito.
 // --------------------------------------------------------------
 app.post('/relay/admin/api/devices/:installationId/activate', requireAdminKey, (req, res) => {
     const { installationId } = req.params;
-    const { featureId, featureIds, tierId, note, durationDays } = req.body;
+    const { featureId, featureIds, tierId, note, durationDays, tier, billingCycle } = req.body;
 
     let idsToActivate = [];
     if (tierId) {
@@ -2735,11 +2898,38 @@ app.post('/relay/admin/api/devices/:installationId/activate', requireAdminKey, (
         return res.status(400).json({ success: false, message: `Hindi kilalang feature(s): ${unknown.join(', ')}` });
     }
 
+    // Cloud Backup: kailangan ng valid na tier + billingCycle selection
+    // dito bago tuluyan — ito mismo ang "selection na konektado sa
+    // presyo/plano" na dapat mayroon ang Manual Activate/Renew para dito,
+    // kagaya na ng meron na ang OTP flow.
+    const includesCloudBackup = idsToActivate.includes('cloud_backup');
+    let cloudBackupPrice = null;
+    if (includesCloudBackup) {
+        if (!tier || !CLOUD_BACKUP_PLANS_BASE[tier]) {
+            return res.status(400).json({ success: false, message: 'Kulang o invalid ang tier (basic/standard/pro) para sa Cloud Backup.' });
+        }
+        if (!billingCycle || !CLOUD_BACKUP_BILLING_DAYS[billingCycle]) {
+            return res.status(400).json({ success: false, message: 'Kulang o invalid ang billingCycle (monthly/yearly) para sa Cloud Backup.' });
+        }
+        cloudBackupPrice = getCloudBackupPlanPrice(tier, billingCycle);
+    }
+
     const resolvedDurationDays = (typeof durationDays === 'number' && durationDays > 0)
         ? durationDays
         : (durationDays === 0 ? null : RELAY_DEFAULT_LICENSE_DAYS);
     const durationMs = (typeof resolvedDurationDays === 'number' && resolvedDurationDays > 0)
         ? resolvedDurationDays * 24 * 60 * 60 * 1000
+        : null;
+    // Cloud Backup: kung walang EXPLICIT na durationDays na ipinasa ng
+    // admin (hal. gustong mag-extend nang custom/promo), gamitin ang
+    // TAMANG bilang ng araw ng napiling billing cycle (30/365) sa halip
+    // ng generic default sa itaas — ito mismo ang "Renew/Extend" na
+    // dapat mangyari para sa isang subscription.
+    const cloudBackupDurationMs = includesCloudBackup
+        ? ((typeof durationDays === 'number' && durationDays > 0) ? durationMs : CLOUD_BACKUP_BILLING_DAYS[billingCycle] * 24 * 60 * 60 * 1000)
+        : null;
+    const cloudBackupDurationDays = includesCloudBackup
+        ? ((typeof durationDays === 'number' && durationDays > 0) ? resolvedDurationDays : CLOUD_BACKUP_BILLING_DAYS[billingCycle])
         : null;
 
     const tokens = {};
@@ -2751,7 +2941,9 @@ app.post('/relay/admin/api/devices/:installationId/activate', requireAdminKey, (
     // ginagamit sa /relay/confirm-unlock-bulk para sa customer-facing
     // na bundle purchases). Kung featureId/featureIds (à la carte,
     // hindi tier) ang ginamit, mananatili ang dating gawi — ang buong
-    // à la carte price ng bawat isa.
+    // à la carte price ng bawat isa. (Hindi kailanman kasama ang
+    // 'cloud_backup' dito — sadyang tinanggal na ito sa UPGRADE_TIERS
+    // 'pro' bundle, tingnan ang recomputeProTierFeatureIds().)
     let perFeaturePrice = {};
     if (tierId) {
         const tier = UPGRADE_TIERS.find(t => t.id === tierId);
@@ -2774,18 +2966,31 @@ app.post('/relay/admin/api/devices/:installationId/activate', requireAdminKey, (
     }
 
     for (const id of idsToActivate) {
-        const token = issueSignedToken(installationId, id, durationMs);
+        const isThisCloudBackup = id === 'cloud_backup';
+        const tokenDurationMs = isThisCloudBackup ? cloudBackupDurationMs : durationMs;
+        const token = issueSignedToken(installationId, id, tokenDurationMs);
         tokens[id] = token;
-        const priceForThisFeature = Object.prototype.hasOwnProperty.call(perFeaturePrice, id)
-            ? perFeaturePrice[id]
-            : FEATURE_CATALOG[id].price;
+        const priceForThisFeature = isThisCloudBackup
+            ? cloudBackupPrice
+            : (Object.prototype.hasOwnProperty.call(perFeaturePrice, id) ? perFeaturePrice[id] : FEATURE_CATALOG[id].price);
+        const featureNameForThisFeature = isThisCloudBackup ? CLOUD_BACKUP_PLANS[tier].name : FEATURE_CATALOG[id].name;
         recordIssuedUnlock(installationId, id, token, {
-            featureName: FEATURE_CATALOG[id].name,
+            featureName: featureNameForThisFeature,
             price: priceForThisFeature,
             source: 'admin-direct',
-            note: note || null
+            note: note || null,
+            tier: isThisCloudBackup ? tier : null,
+            billingCycle: isThisCloudBackup ? billingCycle : null
         });
-        logActivity(installationId, 'unlock_issued', { featureId: id, featureName: FEATURE_CATALOG[id].name, source: 'admin-direct', note: note || null, durationDays: resolvedDurationDays || null });
+        logActivity(installationId, 'unlock_issued', {
+            featureId: id,
+            featureName: featureNameForThisFeature,
+            source: 'admin-direct',
+            note: note || null,
+            durationDays: isThisCloudBackup ? cloudBackupDurationDays : (resolvedDurationDays || null),
+            tier: isThisCloudBackup ? tier : null,
+            billingCycle: isThisCloudBackup ? billingCycle : null
+        });
     }
 
     res.json({ success: true, message: `Na-activate ang ${idsToActivate.length} feature(s).`, tokens });
@@ -3246,10 +3451,29 @@ function rateLimit(bucketName, max, windowMs, keyFn) {
 // Nananatili pa ring protektado ito ng requireApiKey (shared secret).
 // --------------------------------------------------------------
 app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 1000), (req, res) => {
+    // BUG FIX: dati, IISANG bagay lang (cloudBackupPlans) ang ibinabalik
+    // dito — kaya si Cloud Backup lang ang totoong "naka-sync" sa
+    // pagitan ng RELAY at OMNIPOS; ang mga ibang feature (themes/modules)
+    // ay hardcoded pa rin sa OMNIPOS/server.js FEATURE_CATALOG, kaya
+    // kahit i-edit ang presyo nila dito (via ang bagong Feature Pricing
+    // editor sa itaas), hindi ito magbabago sa OMNIPOS hangga't hindi
+    // ito ma-re-deploy nang manual doon. Ngayon, kasama na rin dito ang
+    // `featureCatalog` (id -> {name, price, category}, MALIBAN sa
+    // cloud_backup na may sarili nang field/pricing model sa itaas) —
+    // ito ang binabasa ng OMNIPOS para mag-overlay sa sarili nitong
+    // FEATURE_CATALOG, kagaya na rin ng ginagawa na nito ngayon para sa
+    // Cloud Backup — kaya FULLY SYNCED na rin ang mga ibang feature sa
+    // susunod na fetch ng OMNIPOS, walang kailangang i-deploy ulit doon.
+    const featureCatalog = {};
+    for (const [featureId, entry] of Object.entries(FEATURE_CATALOG)) {
+        if (featureId === 'cloud_backup') continue;
+        featureCatalog[featureId] = { name: entry.name, price: entry.price, category: entry.category };
+    }
     res.json({
         success: true,
         cloudBackupPlans: CLOUD_BACKUP_PLANS,
         billingDays: CLOUD_BACKUP_BILLING_DAYS,
+        featureCatalog,
         fetchedAt: new Date().toISOString()
     });
 });
@@ -6843,7 +7067,8 @@ async function bootstrapStores() {
         integrityStatus,
         featureCatalogOverrides,
         branchSummaries,
-        cloudBackupPlanOverrides
+        cloudBackupPlanOverrides,
+        featurePricingOverrides
     ] = await Promise.all([
         loadAllowedDevices(),
         loadDeviceLabels(),
@@ -6860,16 +7085,20 @@ async function bootstrapStores() {
         loadIntegrityStatus(),
         loadFeatureCatalogOverrides(),
         loadBranchSummaries(),
-        loadCloudBackupPlanOverrides()
+        loadCloudBackupPlanOverrides(),
+        loadFeaturePricingOverrides()
     ]);
 
-    // I-merge ang anumang dating naka-auto-learn na features papunta sa
-    // FEATURE_CATALOG mirror (BASE + overrides), tapos i-sync ang 'pro'
-    // tier para makasama agad ang mga ito.
-    FEATURE_CATALOG = { ...FEATURE_CATALOG_BASE, ...featureCatalogOverrides };
-    recomputeProTierFeatureIds();
+    // I-merge ang anumang dating naka-auto-learn na features AT anumang
+    // manual na price/name override (mula sa Feature Pricing editor)
+    // papunta sa FEATURE_CATALOG mirror (BASE + parehong overrides),
+    // tapos i-sync ang 'pro' tier para makasama agad ang mga ito.
+    recomputeFeatureCatalog();
     if (Object.keys(featureCatalogOverrides).length > 0) {
         console.log(`🆕 Na-load ang ${Object.keys(featureCatalogOverrides).length} dating auto-learned na feature(s) papunta sa catalog mirror: ${Object.keys(featureCatalogOverrides).join(', ')}.`);
+    }
+    if (Object.keys(featurePricingOverrides).length > 0) {
+        console.log(`💳 Na-load ang custom na Feature pricing override para sa: ${Object.keys(featurePricingOverrides).join(', ')}.`);
     }
 
     // Gayundin, i-apply ang anumang na-save nang Cloud Backup pricing

@@ -1203,6 +1203,7 @@ a:focus-visible,
       <span id="idleCountdownPill" class="idle-countdown"></span>
       <button id="installBtn" class="icon-btn" style="display:none;" onclick="installApp()">⬇️ Install</button>
       <button id="pricingBtn" class="icon-btn" onclick="window.location.href='pricing.html'" title="Cloud Backup pricing" aria-label="Cloud Backup pricing">💳 Pricing</button>
+      <button id="featurePricingBtn" class="icon-btn" onclick="window.location.href='feature-pricing.html'" title="Theme/Module pricing" aria-label="Theme/Module pricing">🎨 Feature Pricing</button>
       <button id="matrixToggleBtn" class="icon-btn icon-btn-matrix" onclick="toggleMatrixRain()" title="Toggle matrix animation" aria-label="Toggle matrix animation">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <rect x="3" y="3" width="18" height="18" rx="2"/>
@@ -3707,7 +3708,7 @@ function renderDeviceDetail(detail) {
         <div style="display:flex; align-items:center; gap:8px;">
           <div class="feature-price">${u.price ? '₱' + u.price : ''}</div>
           <div style="display:flex; flex-direction:column; gap:6px;">
-            <button class="btn-renew" onclick="activateFeature('${detail.installationId}', '${u.featureId}', '${u.featureName.replace(/'/g, "\\'")}')">🔄 Renew</button>
+            <button class="btn-renew" onclick="activateFeature('${detail.installationId}', '${u.featureId}', '${u.featureName.replace(/'/g, "\\'")}', ${u.tier ? `'${u.tier}'` : 'null'}, ${u.billingCycle ? `'${u.billingCycle}'` : 'null'})">🔄 Renew</button>
             <button class="btn-deactivate" onclick="deactivateFeature('${detail.installationId}', '${u.featureId}', '${u.featureName.replace(/'/g, "\\'")}')">Deactivate</button>
           </div>
         </div>
@@ -3731,7 +3732,7 @@ function renderDeviceDetail(detail) {
           <div class="feature-meta">${f.category === 'theme' ? 'Pro Theme' : 'Module'}</div>
         </div>
         <div style="display:flex; align-items:center; gap:8px;">
-          <div class="feature-price">₱${f.price}</div>
+          <div class="feature-price">${f.featureId === 'cloud_backup' ? 'Subscription' : '₱' + f.price}</div>
           <button class="btn-allow" onclick="activateFeature('${detail.installationId}', '${f.featureId}', '${f.name.replace(/'/g, "\\'")}')">Activate</button>
         </div>
       </div>
@@ -3770,20 +3771,110 @@ async function toggleAllowFromDetail(installationId, currentlyAllowed) {
   loadDeviceDetail();
 }
 
-async function activateFeature(installationId, featureId, featureName) {
+// BUG FIX: 'cloud_backup' ay isang SUBSCRIPTION (Basic/Standard/Pro x
+// monthly/yearly), hindi flat-price na à la carte item — kaya kailangan
+// muna nito ng tier + billingCycle selection (konektado sa aktwal na
+// pricing mula sa RELAY) bago ito i-activate/i-renew dito, kagaya na ng
+// meron na ang OTP approval flow (tingnan ang approveOtp() sa itaas).
+// Dati, dumadaan lang ito sa parehong generic na durationDays prompt
+// gaya ng ibang feature — walang plan/pricing na napipili, kaya
+// null/maling presyo at maling expiry ang naitatala (tingnan ang
+// comment sa /relay/admin/api/devices/:installationId/activate sa
+// server.js para sa buong detalye ng bug na ito).
+async function activateFeature(installationId, featureId, featureName, presetTier, presetBillingCycle) {
+  const isCloudBackup = featureId === 'cloud_backup';
   const note = await promptForNote(`Activate "${featureName}" for this device right now — no OTP needed. Only use this if you ALREADY HAVE A REFERENCE (already paid/previously unlocked).`);
   if (note === null) return; // kinansela
-  const durationDays = await promptForDuration(`How long until "${featureName}" should expire? (Also use this to RENEW — just activate the same feature again with a new duration.)`);
-  if (durationDays === null) return; // kinansela
+
+  let tier = null, billingCycle = null, durationDays;
+  if (isCloudBackup) {
+    const plan = await promptForCloudBackupPlan(
+      `Select the Cloud Backup plan + billing cycle to activate/renew for this device (pricing is pulled live from the current RELAY pricing):`,
+      presetTier, presetBillingCycle
+    );
+    if (plan === null) return; // kinansela
+    tier = plan.tier;
+    billingCycle = plan.billingCycle;
+    durationDays = 0; // walang custom override dito — gagamitin ng server ang tamang bilang ng araw ng billingCycle
+  } else {
+    durationDays = await promptForDuration(`How long until "${featureName}" should expire? (Also use this to RENEW — just activate the same feature again with a new duration.)`);
+    if (durationDays === null) return; // kinansela
+  }
+
   try {
     const res = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/activate`, {
       method: 'POST',
-      body: JSON.stringify({ featureId, note: note || null, durationDays })
+      body: JSON.stringify({ featureId, note: note || null, durationDays, tier, billingCycle })
     });
     if (res.success) toast(`${featureName} activated.`, 'success');
     else toast(res.message || 'Could not activate.', 'error');
   } catch (err) { /* handled */ }
   loadDeviceDetail();
+}
+
+// Modal para pumili ng Cloud Backup tier (basic/standard/pro) +
+// billingCycle (monthly/yearly) bago mag-Activate/Renew ng Cloud Backup
+// dito sa Device Detail page — kinukuha ang KASALUKUYANG effective
+// pricing mula GET /relay/admin/api/pricing (parehong endpoint na
+// binabasa ng pricing.html) para laging tumpak ang ipinapakitang presyo,
+// kahit pa na-customize ito sa Cloud Backup Pricing editor.
+async function promptForCloudBackupPlan(message, presetTier, presetBillingCycle) {
+  let plans;
+  try {
+    const data = await api('/relay/admin/api/pricing');
+    plans = data.cloudBackupPlans;
+  } catch (err) {
+    toast('Could not load Cloud Backup pricing — try again.', 'error');
+    return null;
+  }
+
+  return new Promise((resolve) => {
+    const backdrop = document.getElementById('confirmBackdrop');
+    const okBtn = document.getElementById('confirmActionBtn');
+    const cancelBtn = document.getElementById('confirmCancelBtn');
+
+    const tierOrder = ['basic', 'standard', 'pro'];
+    document.getElementById('confirmTitle').innerText = 'Cloud Backup plan';
+    document.getElementById('confirmMessage').innerHTML = `${message}<br><br>` +
+      `<select id="cbTierSelect" style="width:100%; padding:10px; border-radius:8px; border:1px solid var(--border-soft); background:var(--bg); color:var(--text); margin-top:4px;">` +
+      tierOrder.map(t => `<option value="${t}">${plans[t].name}</option>`).join('') +
+      `</select>` +
+      `<select id="cbBillingSelect" style="width:100%; padding:10px; border-radius:8px; border:1px solid var(--border-soft); background:var(--bg); color:var(--text); margin-top:8px;">` +
+      `<option value="monthly">Monthly</option>` +
+      `<option value="yearly">Yearly</option>` +
+      `</select>` +
+      `<div id="cbPlanPriceLine" style="margin-top:8px; color:var(--muted); font-size:.85rem;"></div>`;
+    okBtn.innerText = '✓ Tuloy';
+    okBtn.className = 'btn-allow';
+
+    backdrop.style.display = 'flex';
+
+    const tierSelect = document.getElementById('cbTierSelect');
+    const billingSelect = document.getElementById('cbBillingSelect');
+    const priceLine = document.getElementById('cbPlanPriceLine');
+    if (presetTier && plans[presetTier]) tierSelect.value = presetTier;
+    if (presetBillingCycle) billingSelect.value = presetBillingCycle;
+
+    function updatePriceLine() {
+      const plan = plans[tierSelect.value];
+      const price = plan.price[billingSelect.value];
+      priceLine.innerText = `₱${price} / ${billingSelect.value === 'yearly' ? 'year' : 'month'} · ${plan.storageQuotaMB} MB storage`;
+    }
+    updatePriceLine();
+    tierSelect.onchange = updatePriceLine;
+    billingSelect.onchange = updatePriceLine;
+
+    function cleanup(result) {
+      backdrop.style.display = 'none';
+      okBtn.onclick = null;
+      cancelBtn.onclick = null;
+      tierSelect.onchange = null;
+      billingSelect.onchange = null;
+      resolve(result);
+    }
+    okBtn.onclick = () => cleanup({ tier: tierSelect.value, billingCycle: billingSelect.value });
+    cancelBtn.onclick = () => cleanup(null);
+  });
 }
 
 // Removes an unlocked feature from this device — it does not

@@ -3,8 +3,17 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Cloud Backup Pricing — RELAY Admin</title>
+<title>Feature Pricing — RELAY Admin</title>
 <style>
+  /* --------------------------------------------------------------
+     HIWALAY na page ito sa pricing.html (Cloud Backup subscription
+     pricing). Parehong theme/CSS variables lang ang ginaya para
+     magkatugma ang itsura sa buong admin panel — pero hiwalay ang
+     estado (plansEffective/overrides dito ay para sa FEATURE_CATALOG
+     na themes/modules, HINDI Cloud Backup), at hiwalay ang mga
+     endpoint na tinatawag (/relay/admin/api/pricing/features, hindi
+     .../cloud-backup).
+     -------------------------------------------------------------- */
   :root {
     --bg: #05070d;
     --bg-raise: #101625;
@@ -64,16 +73,20 @@
   }
   #loginWrap button { margin-top: 12px; }
   #loginError { color: var(--red); font-size: .85rem; margin-top: 8px; min-height: 1.2em; }
-  main { max-width: 980px; margin: 0 auto; padding: 24px 20px 60px; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 20px 60px; }
   .intro { color: var(--muted); font-size: .92rem; line-height: 1.5; margin-bottom: 22px; }
   .intro code { font-family: var(--font-mono); color: var(--accent); }
-  .plans-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .section-label {
+    font-family: var(--font-heading); font-size: .82rem; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--muted-dim); margin: 26px 0 10px;
+  }
+  .plans-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
   .plan-card {
     background: var(--card); border: 1.5px solid var(--border); border-radius: var(--radius-lg);
-    padding: 18px; display: flex; flex-direction: column; gap: 12px;
+    padding: 16px; display: flex; flex-direction: column; gap: 10px;
   }
-  .plan-card h3 { margin: 0; font-family: var(--font-heading); font-size: 1rem; color: var(--accent); }
-  .plan-card .tier-id { color: var(--muted-dim); font-size: .75rem; text-transform: uppercase; letter-spacing: .08em; }
+  .plan-card h3 { margin: 0; font-family: var(--font-heading); font-size: .95rem; color: var(--accent); }
+  .plan-card .tier-id { color: var(--muted-dim); font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; }
   .field { display: flex; flex-direction: column; gap: 4px; }
   .field label { font-size: .78rem; color: var(--muted); }
   .field input {
@@ -81,13 +94,12 @@
     background: var(--bg-raise); color: var(--text); font-family: var(--font-mono); font-size: .95rem;
   }
   .field input:focus { outline: none; border-color: var(--accent); }
-  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .badge {
     display: inline-block; font-size: .68rem; padding: 2px 8px; border-radius: 999px;
     border: 1px solid var(--amber-line); background: var(--amber-bg); color: var(--amber); width: fit-content;
   }
   .badge.default { border-color: var(--line); background: transparent; color: var(--muted-dim); }
-  .actions { display: flex; gap: 8px; margin-top: 4px; }
+  .actions { display: flex; gap: 8px; margin-top: 2px; }
   .btn {
     flex: 1; padding: 9px 10px; border-radius: var(--radius); border: 1.5px solid var(--border);
     background: transparent; color: var(--text); cursor: pointer; font-family: var(--font-ui); font-size: .88rem;
@@ -110,7 +122,7 @@
 <body>
 
 <div id="loginWrap">
-  <div class="topbar-title" style="font-family:var(--font-heading);font-size:1.3rem;">Cloud Backup Pricing</div>
+  <div class="topbar-title" style="font-family:var(--font-heading);font-size:1.3rem;">Feature Pricing</div>
   <div class="topbar-sub">Enter the RELAY admin key to continue.</div>
   <input type="password" id="adminKeyInput" placeholder="Admin key" autocomplete="off">
   <button class="icon-btn" style="width:100%;justify-content:center;" onclick="login()">Log in</button>
@@ -121,27 +133,32 @@
   <div class="topbar">
     <div class="topbar-brand">
       <div>
-        <div class="topbar-title">💳 Cloud Backup Pricing</div>
-        <div class="topbar-sub">OmniPOS Unlock Relay — ground truth for pricing</div>
+        <div class="topbar-title">🎨 Feature Pricing</div>
+        <div class="topbar-sub">OmniPOS Unlock Relay — pricing for Pro Themes & Modules</div>
       </div>
     </div>
     <div class="topbar-actions" style="display:flex;gap:8px;">
       <button class="icon-btn" onclick="window.location.href='index.html'">← Devices</button>
-      <button class="icon-btn" onclick="window.location.href='feature-pricing.html'">🎨 Feature Pricing</button>
+      <button class="icon-btn" onclick="window.location.href='pricing.html'">💳 Cloud Backup Pricing</button>
       <button class="icon-btn" onclick="logout()">Log out</button>
     </div>
   </div>
 
   <main>
     <p class="intro">
-      This is the ONLY place Cloud Backup pricing lives. OmniPOS installations fetch it from
-      <code>GET /relay/pricing</code> on their own (with a local fallback cache in case this
-      RELAY is unreachable) — nothing about price is hardcoded in OmniPOS anymore. Changes here
-      take effect for every installation the next time they refresh (usually within the hour).
-      Looking to edit Pro Theme / Module pricing instead? That has its own
-      <a href="feature-pricing.html" style="color:var(--accent);">separate Feature Pricing page</a>.
+      This is where the price/name of every Pro Theme and Module (everything in the catalog
+      <em>except</em> Cloud Backup — that has its own <a href="pricing.html" style="color:var(--accent);">separate
+      subscription pricing page</a>) lives. OmniPOS installations fetch this from
+      <code>GET /relay/pricing</code> on their own (with a local fallback cache in case this RELAY
+      is unreachable), so a change here is picked up by every installation automatically — no
+      redeploy needed on either side.
     </p>
-    <div id="plansGrid" class="plans-grid"></div>
+
+    <div class="section-label">🎨 Pro Themes</div>
+    <div id="themesGrid" class="plans-grid"></div>
+
+    <div class="section-label">🧩 Modules</div>
+    <div id="modulesGrid" class="plans-grid"></div>
   </main>
 </div>
 
@@ -149,8 +166,8 @@
 
 <script>
 let adminKey = sessionStorage.getItem('relayAdminKey') || '';
-let plansBase = {};
-let plansEffective = {};
+let catalogBase = {};
+let catalogEffective = {};
 let overrides = {};
 
 function toast(msg, type) {
@@ -197,98 +214,92 @@ function logout() {
   document.getElementById('adminKeyInput').value = '';
 }
 
-function fieldIsCustom(tier, key) {
-  const ov = overrides[tier] || {};
-  if (key === 'monthly' || key === 'yearly') return !!(ov.price && ov.price[key] !== undefined);
+function fieldIsCustom(featureId, key) {
+  const ov = overrides[featureId] || {};
   return ov[key] !== undefined;
 }
 
-function renderPlans() {
-  const grid = document.getElementById('plansGrid');
-  grid.innerHTML = '';
-  const tierOrder = ['basic', 'standard', 'pro'];
-  tierOrder.forEach(tier => {
-    if (!plansEffective[tier]) return;
-    const plan = plansEffective[tier];
-    const card = document.createElement('div');
-    card.className = 'plan-card';
-    card.innerHTML = `
-      <div class="tier-id">${tier}</div>
-      <h3>${plan.name}</h3>
+function cardHtml(featureId, entry) {
+  return `
+    <div class="plan-card">
+      <div class="tier-id">${featureId}</div>
+      <h3>${entry.name}</h3>
       <div class="field">
-        <label>Plan name</label>
-        <input type="text" id="name-${tier}" value="${plan.name}">
-      </div>
-      <div class="row2">
-        <div class="field">
-          <label>Monthly price (₱) ${fieldIsCustom(tier, 'monthly') ? '<span class="badge">customized</span>' : '<span class="badge default">default</span>'}</label>
-          <input type="number" min="0" step="1" id="monthly-${tier}" value="${plan.price.monthly}">
-        </div>
-        <div class="field">
-          <label>Yearly price (₱) ${fieldIsCustom(tier, 'yearly') ? '<span class="badge">customized</span>' : '<span class="badge default">default</span>'}</label>
-          <input type="number" min="0" step="1" id="yearly-${tier}" value="${plan.price.yearly}">
-        </div>
+        <label>Name ${fieldIsCustom(featureId, 'name') ? '<span class="badge">customized</span>' : '<span class="badge default">default</span>'}</label>
+        <input type="text" id="name-${featureId}" value="${entry.name}">
       </div>
       <div class="field">
-        <label>Storage quota (MB) ${fieldIsCustom(tier, 'storageQuotaMB') ? '<span class="badge">customized</span>' : '<span class="badge default">default</span>'}</label>
-        <input type="number" min="1" step="1" id="quota-${tier}" value="${plan.storageQuotaMB}">
+        <label>Price (₱) ${fieldIsCustom(featureId, 'price') ? '<span class="badge">customized</span>' : '<span class="badge default">default</span>'}</label>
+        <input type="number" min="0" step="1" id="price-${featureId}" value="${entry.price}">
       </div>
       <div class="actions">
-        <button class="btn btn-save" onclick="savePlan('${tier}')">Save</button>
-        <button class="btn btn-reset" onclick="resetPlan('${tier}')">Reset to default</button>
+        <button class="btn btn-save" onclick="saveFeature('${featureId}')">Save</button>
+        <button class="btn btn-reset" onclick="resetFeature('${featureId}')">Reset to default</button>
       </div>
-    `;
-    grid.appendChild(card);
-  });
+    </div>
+  `;
 }
 
-async function savePlan(tier) {
-  const name = document.getElementById(`name-${tier}`).value.trim();
-  const monthly = Number(document.getElementById(`monthly-${tier}`).value);
-  const yearly = Number(document.getElementById(`yearly-${tier}`).value);
-  const storageQuotaMB = Number(document.getElementById(`quota-${tier}`).value);
-  try {
-    const data = await api('/relay/admin/api/pricing/cloud-backup', {
-      method: 'POST',
-      body: JSON.stringify({ tier, name, monthly, yearly, storageQuotaMB })
+function renderCatalog() {
+  const themesGrid = document.getElementById('themesGrid');
+  const modulesGrid = document.getElementById('modulesGrid');
+  themesGrid.innerHTML = '';
+  modulesGrid.innerHTML = '';
+  Object.entries(catalogEffective)
+    .sort(([, a], [, b]) => a.name.localeCompare(b.name))
+    .forEach(([featureId, entry]) => {
+      const html = cardHtml(featureId, entry);
+      if (entry.category === 'theme') themesGrid.insertAdjacentHTML('beforeend', html);
+      else modulesGrid.insertAdjacentHTML('beforeend', html);
     });
-    toast(`Saved "${data.plan.name}" pricing.`);
-    await loadPricing();
+  if (!themesGrid.innerHTML) themesGrid.innerHTML = '<div style="color:var(--muted);">No themes in the catalog.</div>';
+  if (!modulesGrid.innerHTML) modulesGrid.innerHTML = '<div style="color:var(--muted);">No modules in the catalog.</div>';
+}
+
+async function saveFeature(featureId) {
+  const name = document.getElementById(`name-${featureId}`).value.trim();
+  const price = Number(document.getElementById(`price-${featureId}`).value);
+  try {
+    const data = await api('/relay/admin/api/pricing/features', {
+      method: 'POST',
+      body: JSON.stringify({ featureId, name, price })
+    });
+    toast(`Saved "${data.feature.name}" pricing.`);
+    await loadCatalog();
   } catch (err) {
     toast(err.message, 'error');
   }
 }
 
-async function resetPlan(tier) {
-  if (!confirm(`Reset "${tier}" back to the default pricing? Any customization for this tier will be lost.`)) return;
+async function resetFeature(featureId) {
+  if (!confirm(`Reset "${featureId}" back to the default pricing? Any customization for this feature will be lost.`)) return;
   try {
-    const data = await api('/relay/admin/api/pricing/cloud-backup/reset', {
+    const data = await api('/relay/admin/api/pricing/features/reset', {
       method: 'POST',
-      body: JSON.stringify({ tier })
+      body: JSON.stringify({ featureId })
     });
-    toast(`Reset "${data.plan.name}" to default pricing.`);
-    await loadPricing();
+    toast(`Reset "${data.feature.name}" to default pricing.`);
+    await loadCatalog();
   } catch (err) {
     toast(err.message, 'error');
   }
 }
 
-async function loadPricing() {
-  const data = await api('/relay/admin/api/pricing');
-  plansBase = data.cloudBackupPlansBase;
-  plansEffective = data.cloudBackupPlans;
-  overrides = data.cloudBackupPlanOverrides || {};
-  renderPlans();
+async function loadCatalog() {
+  const data = await api('/relay/admin/api/pricing/features');
+  catalogBase = data.featureCatalogBase;
+  catalogEffective = data.featureCatalog;
+  overrides = data.featurePricingOverrides || {};
+  renderCatalog();
 }
 
 async function boot() {
   if (!adminKey) return;
   try {
-    await loadPricing();
+    await loadCatalog();
     document.getElementById('loginWrap').classList.add('hidden');
     document.getElementById('app').classList.remove('hidden');
   } catch (err) {
-    // api() already handles 403 (bad key); other errors just toast.
     if (err.message !== 'forbidden') toast(err.message, 'error');
   }
 }
