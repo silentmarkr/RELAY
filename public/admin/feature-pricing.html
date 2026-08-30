@@ -151,7 +151,8 @@
       subscription pricing page</a>) lives. OmniPOS installations fetch this from
       <code>GET /relay/pricing</code> on their own (with a local fallback cache in case this RELAY
       is unreachable), so a change here is picked up by every installation automatically — no
-      redeploy needed on either side.
+      redeploy needed on either side. The <strong>Upgrade Bundles</strong> section below works the
+      same way for the Basic/Standard/Pro bundle prices themselves.
     </p>
 
     <div class="section-label">🎨 Pro Themes</div>
@@ -159,6 +160,9 @@
 
     <div class="section-label">🧩 Modules</div>
     <div id="modulesGrid" class="plans-grid"></div>
+
+    <div class="section-label">📦 Upgrade Bundles</div>
+    <div id="tiersGrid" class="plans-grid"></div>
   </main>
 </div>
 
@@ -169,6 +173,8 @@ let adminKey = sessionStorage.getItem('relayAdminKey') || '';
 let catalogBase = {};
 let catalogEffective = {};
 let overrides = {};
+let tiersEffective = {};
+let tierOverrides = {};
 
 function toast(msg, type) {
   const el = document.getElementById('toast');
@@ -219,6 +225,11 @@ function fieldIsCustom(featureId, key) {
   return ov[key] !== undefined;
 }
 
+function tierFieldIsCustom(tierId, key) {
+  const ov = tierOverrides[tierId] || {};
+  return ov[key] !== undefined;
+}
+
 function cardHtml(featureId, entry) {
   return `
     <div class="plan-card">
@@ -240,11 +251,34 @@ function cardHtml(featureId, entry) {
   `;
 }
 
+function tierCardHtml(tierId, entry) {
+  return `
+    <div class="plan-card">
+      <div class="tier-id">${tierId}</div>
+      <h3>${entry.name}</h3>
+      <div class="field">
+        <label>Name ${tierFieldIsCustom(tierId, 'name') ? '<span class="badge">customized</span>' : '<span class="badge default">default</span>'}</label>
+        <input type="text" id="tier-name-${tierId}" value="${entry.name}">
+      </div>
+      <div class="field">
+        <label>Bundle Price (₱) ${tierFieldIsCustom(tierId, 'bundlePrice') ? '<span class="badge">customized</span>' : '<span class="badge default">default</span>'}</label>
+        <input type="number" min="0" step="1" id="tier-price-${tierId}" value="${entry.bundlePrice}">
+      </div>
+      <div class="actions">
+        <button class="btn btn-save" onclick="saveTier('${tierId}')">Save</button>
+        <button class="btn btn-reset" onclick="resetTier('${tierId}')">Reset to default</button>
+      </div>
+    </div>
+  `;
+}
+
 function renderCatalog() {
   const themesGrid = document.getElementById('themesGrid');
   const modulesGrid = document.getElementById('modulesGrid');
+  const tiersGrid = document.getElementById('tiersGrid');
   themesGrid.innerHTML = '';
   modulesGrid.innerHTML = '';
+  tiersGrid.innerHTML = '';
   Object.entries(catalogEffective)
     .sort(([, a], [, b]) => a.name.localeCompare(b.name))
     .forEach(([featureId, entry]) => {
@@ -254,6 +288,45 @@ function renderCatalog() {
     });
   if (!themesGrid.innerHTML) themesGrid.innerHTML = '<div style="color:var(--muted);">No themes in the catalog.</div>';
   if (!modulesGrid.innerHTML) modulesGrid.innerHTML = '<div style="color:var(--muted);">No modules in the catalog.</div>';
+
+  // Tier order is fixed (basic -> standard -> pro) rather than
+  // alphabetical, so the bundles read smallest-to-largest like the
+  // upgrade flow itself.
+  ['basic', 'standard', 'pro']
+    .filter(tierId => tiersEffective[tierId])
+    .forEach(tierId => {
+      tiersGrid.insertAdjacentHTML('beforeend', tierCardHtml(tierId, tiersEffective[tierId]));
+    });
+  if (!tiersGrid.innerHTML) tiersGrid.innerHTML = '<div style="color:var(--muted);">No upgrade bundles found.</div>';
+}
+
+async function saveTier(tierId) {
+  const name = document.getElementById(`tier-name-${tierId}`).value.trim();
+  const bundlePrice = Number(document.getElementById(`tier-price-${tierId}`).value);
+  try {
+    const data = await api('/relay/admin/api/pricing/tiers', {
+      method: 'POST',
+      body: JSON.stringify({ tierId, name, bundlePrice })
+    });
+    toast(`Saved "${data.tier.name}" bundle pricing.`);
+    await loadCatalog();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function resetTier(tierId) {
+  if (!confirm(`Reset "${tierId}" bundle back to the default price? Any customization for this bundle will be lost.`)) return;
+  try {
+    const data = await api('/relay/admin/api/pricing/tiers/reset', {
+      method: 'POST',
+      body: JSON.stringify({ tierId })
+    });
+    toast(`Reset "${data.tier.name}" to default bundle pricing.`);
+    await loadCatalog();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
 }
 
 async function saveFeature(featureId) {
@@ -286,10 +359,15 @@ async function resetFeature(featureId) {
 }
 
 async function loadCatalog() {
-  const data = await api('/relay/admin/api/pricing/features');
-  catalogBase = data.featureCatalogBase;
-  catalogEffective = data.featureCatalog;
-  overrides = data.featurePricingOverrides || {};
+  const [featureData, tierData] = await Promise.all([
+    api('/relay/admin/api/pricing/features'),
+    api('/relay/admin/api/pricing/tiers')
+  ]);
+  catalogBase = featureData.featureCatalogBase;
+  catalogEffective = featureData.featureCatalog;
+  overrides = featureData.featurePricingOverrides || {};
+  tiersEffective = tierData.upgradeTiers || {};
+  tierOverrides = tierData.upgradeTierPricingOverrides || {};
   renderCatalog();
 }
 

@@ -1201,6 +1201,64 @@ function saveFeaturePricingOverrides(obj) {
     }
 }
 
+// --------------------------------------------------------------
+// UPGRADE TIER (bundle) pricing — admin read + edit.
+//
+// Dati, ang bundlePrice ng basic/standard/pro (yung "buy everything
+// together" na presyo) ay FLAT NUMBER lang, hardcoded sa OMNIPOS/
+// server.js — kahit na ang mga INDIVIDUAL na feature sa loob ng bundle
+// (themes/modules) ay dynamic na mula RELAY (tingnan ang
+// FEATURE_CATALOG/featurePricingOverrides sa itaas). Ibig sabihin,
+// puwede mo palitan ang presyo ng isang module sa RELAY at agad itong
+// mag-a-apply, pero kung gusto mong baguhin ang bundle price mismo
+// (hal. i-adjust ang discount % ng Pro bundle), kailangan mo pa ring
+// mag-edit ng code sa OMNIPOS/server.js at mag-redeploy doon.
+//
+// Kapareho ito ngayon ng pattern ng featurePricingOverrides sa itaas —
+// PARTIAL na patch lang ang naka-imbak bawat tierId (hal.
+// { pro: { bundlePrice: 4999 } }), at ang OMNIPOS ang bahalang mag-
+// overlay nito sa sarili niyang UPGRADE_TIERS via getter (tingnan ang
+// tierBundlePrice() helper doon), kagaya ng ginagawa na niya ngayon
+// para sa Cloud Backup at sa ibang features.
+//
+// UPGRADE_TIER_BUNDLE_PRICE_BASE — ang default/fallback bundlePrice
+// bawat tier kung walang override. NOTE: ang 'pro' dati ay ₱6,499
+// (~9% off lang sa ala-carte total, mas MALIIT pa sa discount % ng
+// Basic (~23%) at Standard (~28.5%) — kabaligtaran ng inaasahan para
+// sa "pinakamalaking bundle"). Binaba ito sa ₱4,999 (~30% off) para
+// maging pinaka-malalim ang discount sa Pro, gaya ng dapat asahan sa
+// isang "buy everything" tier — puwede pa ring i-adjust ito anumang
+// oras sa Feature Pricing admin page nang hindi na kailangang mag-
+// redeploy.
+// --------------------------------------------------------------
+const UPGRADE_TIER_BUNDLE_PRICE_BASE = { basic: 999, standard: 1999, pro: 4999 };
+
+const UPGRADE_TIER_PRICING_OVERRIDES_PATH = path.join(__dirname, 'upgrade-tier-pricing-overrides.json');
+
+async function loadUpgradeTierPricingOverrides() {
+    const fromRedis = await redisGetJSON('upgrade-tier-pricing-overrides', null);
+    if (fromRedis !== null) return fromRedis;
+    try {
+        return JSON.parse(fs.readFileSync(UPGRADE_TIER_PRICING_OVERRIDES_PATH, 'utf8'));
+    } catch (err) {
+        return {};
+    }
+}
+
+function saveUpgradeTierPricingOverrides(obj) {
+    if (redisClient) {
+        redisSetJSON('upgrade-tier-pricing-overrides', obj);
+        return;
+    }
+    try {
+        fs.writeFileSync(UPGRADE_TIER_PRICING_OVERRIDES_PATH, JSON.stringify(obj, null, 2));
+    } catch (err) {
+        console.error('Hindi ma-save ang upgrade-tier-pricing-overrides.json:', err);
+    }
+}
+
+let upgradeTierPricingOverrides = {}; // pupunuin sa bootstrapStores()
+
 let featurePricingOverrides = {}; // pupunuin sa bootstrapStores()
 
 // Ang mismong FEATURE_CATALOG na ginagamit ng buong file (admin panel,
@@ -1230,26 +1288,41 @@ function recomputeFeatureCatalog() {
     recomputeProTierFeatureIds();
 }
 
-const UPGRADE_TIERS = [
-    { id: 'basic', name: 'Basic Upgrade', featureIds: ['advanced_reports', 'promo_codes'], bundlePrice: 999 },
-    { id: 'standard', name: 'Standard Upgrade', featureIds: ['advanced_reports', 'promo_codes', 'customer_crm', 'shift_management'], bundlePrice: 1999 },
+let UPGRADE_TIERS = [
+    { id: 'basic', name: 'Basic Upgrade', featureIds: ['advanced_reports', 'promo_codes'], bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.basic },
+    { id: 'standard', name: 'Standard Upgrade', featureIds: ['advanced_reports', 'promo_codes', 'customer_crm', 'shift_management'], bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.standard },
     // 'pro' ay laging LAHAT ng laman ng FEATURE_CATALOG sa oras na ito i-
     // resolve (tingnan ang recomputeProTierFeatureIds(), tinatawag sa
     // bootstrapStores() at muli sa tuwing may auto-add) — kaya kasama na
     // rito agad ang anumang bagong theme/module, manual man o auto-learned.
-    // bundlePrice: naka-sync sa OMNIPOS/server.js UPGRADE_TIERS 'pro'
-    // (6499, now including Multi-Branch Dashboard in this price).
     // NOTE: 'cloud_backup' is no longer included here — it's a
     // subscription now (Basic/Standard/Pro monthly/yearly), so it's
     // purchased SEPARATELY from the one-time Pro bundle, not part of this
     // bundlePrice.
-    { id: 'pro', name: 'Pro Upgrade (Complete)', featureIds: Object.keys(FEATURE_CATALOG).filter(id => id !== 'cloud_backup'), bundlePrice: 6499 }
+    { id: 'pro', name: 'Pro Upgrade (Complete)', featureIds: Object.keys(FEATURE_CATALOG).filter(id => id !== 'cloud_backup'), bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.pro }
 ];
 
 function recomputeProTierFeatureIds() {
     const proTier = UPGRADE_TIERS.find(t => t.id === 'pro');
     if (proTier) proTier.featureIds = Object.keys(FEATURE_CATALOG).filter(id => id !== 'cloud_backup');
 }
+
+// recomputeUpgradeTierPricing() — kapareho ng recomputeFeatureCatalog(),
+// pero para sa bundlePrice/name ng UPGRADE_TIERS mismo. In-place na
+// mina-mutate ang existing tier objects (hindi binabago ang array
+// reference) para hindi masira ang ibang code na naka-hawak na ng
+// reference sa UPGRADE_TIERS o sa isang partikular na tier object.
+function recomputeUpgradeTierPricing() {
+    for (const tier of UPGRADE_TIERS) {
+        const base = UPGRADE_TIER_BUNDLE_PRICE_BASE[tier.id];
+        const override = upgradeTierPricingOverrides[tier.id];
+        tier.bundlePrice = (override && typeof override.bundlePrice === 'number') ? override.bundlePrice : base;
+        if (override && typeof override.name === 'string' && override.name.trim()) {
+            tier.name = override.name.trim();
+        }
+    }
+}
+
 
 // Tinatawag sa sandaling AKTWAL nang na-isyu ang isang unlock token (hindi
 // sa simpleng pagdating pa lang ng request) para sa featureId na wala pa
@@ -2594,6 +2667,82 @@ app.post('/relay/admin/api/pricing/features/reset', requireAdminKey, (req, res) 
 });
 
 // --------------------------------------------------------------
+// UPGRADE TIER (bundle) pricing — admin read + edit. Kapareho ng
+// pattern ng Feature pricing sa itaas, pero para sa bundlePrice/name
+// ng basic/standard/pro bundles mismo (hindi sa individual na
+// theme/module presyo). Tingnan ang komento sa itaas ng
+// UPGRADE_TIER_BUNDLE_PRICE_BASE para sa buong konteksto.
+//
+// GET  /relay/admin/api/pricing/tiers        -> effective tiers (base +
+//        override) kasama ang raw base at ang mga override, para
+//        malaman ng admin page kung alin ang "default" vs "customized".
+// POST /relay/admin/api/pricing/tiers        -> i-patch ang
+//        name/bundlePrice ng IISANG tierId (basic/standard/pro).
+// POST /relay/admin/api/pricing/tiers/reset  -> alisin ang override ng
+//        IISANG tierId (babalik sa default/base).
+//
+// Ito ang pinagmumulan ng `upgradeTiers` field sa GET /relay/pricing sa
+// ibaba (client-facing, tinatawag ng OMNIPOS) — kaya anumang i-save
+// dito ay AGAD na makikita ng lahat ng OMNIPOS installation sa susunod
+// na fetch nila, kagaya na rin ng Cloud Backup/Feature pricing — walang
+// kailangang i-restart o i-deploy ulit ang RELAY o ang OMNIPOS.
+// --------------------------------------------------------------
+app.get('/relay/admin/api/pricing/tiers', requireAdminKey, (req, res) => {
+    const effective = {};
+    for (const tier of UPGRADE_TIERS) {
+        effective[tier.id] = { id: tier.id, name: tier.name, bundlePrice: tier.bundlePrice, featureIds: tier.featureIds };
+    }
+    const base = {};
+    for (const tierId of Object.keys(UPGRADE_TIER_BUNDLE_PRICE_BASE)) {
+        base[tierId] = { bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE[tierId] };
+    }
+    res.json({
+        success: true,
+        upgradeTiers: effective,
+        upgradeTiersBase: base,
+        upgradeTierPricingOverrides
+    });
+});
+
+app.post('/relay/admin/api/pricing/tiers', requireAdminKey, (req, res) => {
+    const { tierId, name, bundlePrice } = req.body || {};
+    if (!tierId || !UPGRADE_TIER_BUNDLE_PRICE_BASE[tierId]) {
+        return res.status(400).json({ success: false, message: 'Invalid o hindi kilalang tierId (basic/standard/pro).' });
+    }
+    if (bundlePrice !== undefined && (typeof bundlePrice !== 'number' || !isFinite(bundlePrice) || bundlePrice < 0)) {
+        return res.status(400).json({ success: false, message: 'Invalid bundlePrice.' });
+    }
+    if (name !== undefined && (typeof name !== 'string' || !name.trim())) {
+        return res.status(400).json({ success: false, message: 'Invalid name.' });
+    }
+
+    const existing = upgradeTierPricingOverrides[tierId] || {};
+    const updated = { ...existing };
+    if (typeof name === 'string' && name.trim()) updated.name = name.trim();
+    if (typeof bundlePrice === 'number') updated.bundlePrice = bundlePrice;
+
+    upgradeTierPricingOverrides[tierId] = updated;
+    saveUpgradeTierPricingOverrides(upgradeTierPricingOverrides);
+    recomputeUpgradeTierPricing();
+    console.log(`💳 Na-update ang bundle pricing override ng tier "${tierId}" via admin panel.`);
+    const tier = UPGRADE_TIERS.find(t => t.id === tierId);
+    res.json({ success: true, tier });
+});
+
+app.post('/relay/admin/api/pricing/tiers/reset', requireAdminKey, (req, res) => {
+    const { tierId } = req.body || {};
+    if (!tierId || !UPGRADE_TIER_BUNDLE_PRICE_BASE[tierId]) {
+        return res.status(400).json({ success: false, message: 'Invalid o hindi kilalang tierId (basic/standard/pro).' });
+    }
+    delete upgradeTierPricingOverrides[tierId];
+    saveUpgradeTierPricingOverrides(upgradeTierPricingOverrides);
+    recomputeUpgradeTierPricing();
+    console.log(`💳 Na-reset sa default ang bundle pricing ng tier "${tierId}" via admin panel.`);
+    const tier = UPGRADE_TIERS.find(t => t.id === tierId);
+    res.json({ success: true, tier });
+});
+
+// --------------------------------------------------------------
 // GET /relay/admin/api/analytics
 // USAGE ANALYTICS DASHBOARD — buod ng "kalusugan" ng buong relay: ilang
 // device ang aktibo/naka-allow, ilang pending approval, ilang lisensyang
@@ -3469,11 +3618,25 @@ app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 100
         if (featureId === 'cloud_backup') continue;
         featureCatalog[featureId] = { name: entry.name, price: entry.price, category: entry.category };
     }
+    // Kasama na rin dito ngayon ang `upgradeTiers` (id -> {name,
+    // bundlePrice}) — dati, ang bundlePrice ng basic/standard/pro ay
+    // FLAT NUMBER lang, hardcoded sa OMNIPOS/server.js mismo (tingnan
+    // ang komento sa UPGRADE_TIER_BUNDLE_PRICE_BASE sa itaas). Ito ang
+    // binabasa ng OMNIPOS para mag-overlay sa sarili nitong
+    // UPGRADE_TIERS bundlePrice, kagaya ng ginagawa na nito para sa
+    // featureCatalog sa itaas — kaya FULLY SYNCED na rin ang bundle
+    // pricing sa susunod na fetch ng OMNIPOS, walang kailangang
+    // i-deploy ulit doon.
+    const upgradeTiers = {};
+    for (const tier of UPGRADE_TIERS) {
+        upgradeTiers[tier.id] = { name: tier.name, bundlePrice: tier.bundlePrice };
+    }
     res.json({
         success: true,
         cloudBackupPlans: CLOUD_BACKUP_PLANS,
         billingDays: CLOUD_BACKUP_BILLING_DAYS,
         featureCatalog,
+        upgradeTiers,
         fetchedAt: new Date().toISOString()
     });
 });
@@ -7068,7 +7231,8 @@ async function bootstrapStores() {
         featureCatalogOverrides,
         branchSummaries,
         cloudBackupPlanOverrides,
-        featurePricingOverrides
+        featurePricingOverrides,
+        upgradeTierPricingOverrides
     ] = await Promise.all([
         loadAllowedDevices(),
         loadDeviceLabels(),
@@ -7086,7 +7250,8 @@ async function bootstrapStores() {
         loadFeatureCatalogOverrides(),
         loadBranchSummaries(),
         loadCloudBackupPlanOverrides(),
-        loadFeaturePricingOverrides()
+        loadFeaturePricingOverrides(),
+        loadUpgradeTierPricingOverrides()
     ]);
 
     // I-merge ang anumang dating naka-auto-learn na features AT anumang
@@ -7106,6 +7271,13 @@ async function bootstrapStores() {
     recomputeCloudBackupPlans();
     if (Object.keys(cloudBackupPlanOverrides).length > 0) {
         console.log(`💳 Na-load ang custom na Cloud Backup pricing override para sa: ${Object.keys(cloudBackupPlanOverrides).join(', ')}.`);
+    }
+
+    // Gayundin, i-apply ang anumang na-save nang Upgrade Tier (bundle)
+    // pricing override sa ibabaw ng UPGRADE_TIER_BUNDLE_PRICE_BASE.
+    recomputeUpgradeTierPricing();
+    if (Object.keys(upgradeTierPricingOverrides).length > 0) {
+        console.log(`💳 Na-load ang custom na Upgrade Tier bundle pricing override para sa: ${Object.keys(upgradeTierPricingOverrides).join(', ')}.`);
     }
 
     console.log(
