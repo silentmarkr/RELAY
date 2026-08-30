@@ -90,6 +90,7 @@
   .field { display: flex; flex-direction: column; gap: 4px; }
   .field label { font-size: .78rem; color: var(--muted); }
   .field input {
+    width: 100%;
     padding: 8px 10px; border-radius: var(--radius); border: 1.5px solid var(--border);
     background: var(--bg-raise); color: var(--text); font-family: var(--font-mono); font-size: .95rem;
   }
@@ -100,6 +101,15 @@
   }
   .badge.default { border-color: var(--line); background: transparent; color: var(--muted-dim); }
   .actions { display: flex; gap: 8px; margin-top: 2px; }
+  .feature-picker {
+    max-height: 160px; overflow-y: auto; border: 1.5px solid var(--border); border-radius: var(--radius);
+    background: var(--bg-raise); padding: 6px 8px; display: flex; flex-direction: column; gap: 2px;
+  }
+  .feature-picker label {
+    display: flex; align-items: center; gap: 6px; font-size: .8rem; color: var(--text);
+    padding: 3px 2px; cursor: pointer;
+  }
+  .feature-picker input[type="checkbox"] { accent-color: var(--accent); }
   .btn {
     flex: 1; padding: 9px 10px; border-radius: var(--radius); border: 1.5px solid var(--border);
     background: transparent; color: var(--text); cursor: pointer; font-family: var(--font-ui); font-size: .88rem;
@@ -175,6 +185,12 @@ let catalogEffective = {};
 let overrides = {};
 let tiersEffective = {};
 let tierOverrides = {};
+// selectableFeatureIds — every feature that is ALLOWED to be placed in a
+// bundle (excludes cloud_backup/rbac_management/multi_branch, which are
+// always purchased separately as their own subscriptions). Comes from
+// GET /relay/admin/api/pricing/tiers, since the server is the one that
+// knows which features are subscription-only.
+let selectableFeatureIds = [];
 
 function toast(msg, type) {
   const el = document.getElementById('toast');
@@ -252,6 +268,19 @@ function cardHtml(featureId, entry) {
 }
 
 function tierCardHtml(tierId, entry) {
+  const currentFeatureIds = new Set(entry.featureIds || []);
+  const checkboxes = selectableFeatureIds
+    .slice()
+    .sort((a, b) => {
+      const nameA = (catalogEffective[a] && catalogEffective[a].name) || a;
+      const nameB = (catalogEffective[b] && catalogEffective[b].name) || b;
+      return nameA.localeCompare(nameB);
+    })
+    .map(featureId => {
+      const label = (catalogEffective[featureId] && catalogEffective[featureId].name) || featureId;
+      const checked = currentFeatureIds.has(featureId) ? 'checked' : '';
+      return `<label><input type="checkbox" data-tier-feature="${tierId}" value="${featureId}" ${checked}> ${label}</label>`;
+    }).join('');
   return `
     <div class="plan-card">
       <div class="tier-id">${tierId}</div>
@@ -263,6 +292,10 @@ function tierCardHtml(tierId, entry) {
       <div class="field">
         <label>Bundle Price (₱) ${tierFieldIsCustom(tierId, 'bundlePrice') ? '<span class="badge">customized</span>' : '<span class="badge default">default</span>'}</label>
         <input type="number" min="0" step="1" id="tier-price-${tierId}" value="${entry.bundlePrice}">
+      </div>
+      <div class="field">
+        <label>Included features ${tierFieldIsCustom(tierId, 'featureIds') ? '<span class="badge">customized</span>' : '<span class="badge default">default</span>'}</label>
+        <div class="feature-picker" id="tier-features-${tierId}">${checkboxes || '<div style="color:var(--muted);font-size:.78rem;">No selectable features yet.</div>'}</div>
       </div>
       <div class="actions">
         <button class="btn btn-save" onclick="saveTier('${tierId}')">Save</button>
@@ -303,12 +336,18 @@ function renderCatalog() {
 async function saveTier(tierId) {
   const name = document.getElementById(`tier-name-${tierId}`).value.trim();
   const bundlePrice = Number(document.getElementById(`tier-price-${tierId}`).value);
+  const checkedBoxes = Array.from(document.querySelectorAll(`input[data-tier-feature="${tierId}"]:checked`));
+  const featureIds = checkedBoxes.map(box => box.value);
+  if (featureIds.length === 0) {
+    toast('A bundle must include at least one feature.', 'error');
+    return;
+  }
   try {
     const data = await api('/relay/admin/api/pricing/tiers', {
       method: 'POST',
-      body: JSON.stringify({ tierId, name, bundlePrice })
+      body: JSON.stringify({ tierId, name, bundlePrice, featureIds })
     });
-    toast(`Saved "${data.tier.name}" bundle pricing.`);
+    toast(`Saved "${data.tier.name}" bundle pricing/selection.`);
     await loadCatalog();
   } catch (err) {
     toast(err.message, 'error');
@@ -368,6 +407,7 @@ async function loadCatalog() {
   overrides = featureData.featurePricingOverrides || {};
   tiersEffective = tierData.upgradeTiers || {};
   tierOverrides = tierData.upgradeTierPricingOverrides || {};
+  selectableFeatureIds = tierData.selectableFeatureIds || [];
   renderCatalog();
 }
 

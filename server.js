@@ -1017,7 +1017,15 @@ const FEATURE_CATALOG_BASE = {
     promo_codes: { name: 'Promo Codes Module', price: 499, category: 'module' },
     advanced_reports: { name: 'Sales Analytics & Advanced Reports', price: 799, category: 'module' },
     shift_management: { name: 'Multi-Cashier Shift Oversight & Z-Reading Reports', price: 699, category: 'module' },
-    rbac_management: { name: 'Roles & Permissions (RBAC) Management', price: 999, category: 'module' },
+    // rbac_management / multi_branch: converted from one-time purchase
+    // (₱999 each) to a monthly/yearly SUBSCRIPTION — see
+    // MODULE_SUBSCRIPTION_PLANS below, which is now the GROUND TRUTH for
+    // their pricing (mirrors the cloud_backup pattern: price:null here,
+    // isSubscription:true, real pricing lives in its own plan object).
+    // Existing customers who already bought these as a one-time purchase
+    // BEFORE this conversion keep their perpetual (no-expiry) access for
+    // free — see the "GRANDFATHERING" note above issueSignedToken().
+    rbac_management: { name: 'Roles & Permissions (RBAC) Management', price: null, category: 'module', isSubscription: true },
     // BUG FIX: 'multi_branch' was missing from this mirror entirely. Since
     // this file is a MANUALLY-synced copy of OMNIPOS/server.js's
     // FEATURE_CATALOG, and the 'pro' tier below is built from
@@ -1028,7 +1036,7 @@ const FEATURE_CATALOG_BASE = {
     // activated (and, since it was never actually activated in the first
     // place, "Deactivate Pro"/"Deactivate All" has nothing to remove for
     // it either — it just remains locked either way).
-    multi_branch: { name: 'Multi-Branch Dashboard', price: 999, category: 'module' },
+    multi_branch: { name: 'Multi-Branch Dashboard', price: null, category: 'module', isSubscription: true },
     // 'cloud_backup': no longer has a single flat `price` here — it's a
     // subscription now (Basic/Standard/Pro, monthly/yearly). See
     // CLOUD_BACKUP_PLANS below, which is now the GROUND TRUTH for pricing
@@ -1115,6 +1123,118 @@ function recomputeCloudBackupPlans() {
 function getCloudBackupPlanPrice(tier, billingCycle) {
     const plan = CLOUD_BACKUP_PLANS[tier];
     if (!plan || !CLOUD_BACKUP_BILLING_DAYS[billingCycle]) return null;
+    return typeof plan.price[billingCycle] === 'number' ? plan.price[billingCycle] : null;
+}
+
+// ============================================================
+// MODULE SUBSCRIPTIONS — Roles & Permissions (RBAC) Management, and
+// Multi-Branch Dashboard
+// ============================================================
+// These two used to be one-time (perpetual) purchases (₱999 each). They
+// have been converted to a recurring monthly/yearly subscription, using
+// the SAME overall architecture as Cloud Backup above (RELAY is ground
+// truth for pricing, admin-editable overrides, synced to OMNIPOS via
+// GET /relay/pricing) — but kept as a fully SEPARATE, parallel code path
+// from Cloud Backup rather than merged into it, so none of the
+// already-working Cloud Backup billing logic has to be touched or risk
+// being destabilized by this change.
+//
+// Unlike Cloud Backup, these two are NOT tiered (no Basic/Standard/Pro
+// storage-quota style split) — there's no natural quota dimension for
+// "role management" or "branch dashboard", so each is just a single flat
+// plan with a monthly and a yearly price.
+//
+// GRANDFATHERING: customers who already bought rbac_management or
+// multi_branch as a one-time purchase BEFORE this conversion have an
+// existing signed token with NO `expiresAt` (perpetual). Nothing in this
+// subscription system ever touches or re-issues those old tokens — the
+// expiry/grace-period check below only ever applies to a token that
+// actually HAS an expiresAt, so legacy perpetual tokens keep working
+// forever, exactly as before, with zero code changes required for them.
+const MODULE_SUBSCRIPTION_FEATURE_IDS = ['rbac_management', 'multi_branch'];
+
+function isModuleSubscriptionFeature(featureId) {
+    return MODULE_SUBSCRIPTION_FEATURE_IDS.includes(featureId);
+}
+
+// A feature that is ALWAYS purchased separately as its own subscription,
+// never bundled into a one-time Upgrade Tier bundle price (cloud_backup
+// plus the two module subscriptions above).
+function isSubscriptionOnlyFeature(featureId) {
+    return featureId === 'cloud_backup' || isModuleSubscriptionFeature(featureId);
+}
+
+const MODULE_SUBSCRIPTION_PLANS_BASE = {
+    rbac_management: {
+        id: 'rbac_management',
+        name: 'Roles & Permissions (RBAC) Management',
+        price: { monthly: 149, yearly: 1490 } // yearly ≈ 2 months free vs monthly, same discount rate as Cloud Backup
+    },
+    multi_branch: {
+        id: 'multi_branch',
+        name: 'Multi-Branch Dashboard',
+        price: { monthly: 199, yearly: 1990 }
+    }
+};
+const MODULE_SUBSCRIPTION_BILLING_DAYS = { monthly: 30, yearly: 365 };
+
+// Grace period: unlike Cloud Backup (which hard-locks the instant a
+// subscription expires), these two are day-to-day OPERATIONAL features —
+// losing access to role permissions or the multi-branch dashboard
+// mid-shift can disrupt an actual store's operations, not just pause a
+// background sync. So there's a short buffer after expiry where access
+// still works (with a renewal warning shown to the user), before it
+// finally locks. This is intentionally more lenient than Cloud Backup —
+// keep it that way; do not silently reuse this constant for Cloud Backup
+// or any other feature.
+const MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS = 7;
+const MODULE_SUBSCRIPTION_GRACE_PERIOD_MS = MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS * 24 * 60 * 60 * 1000;
+
+const MODULE_SUBSCRIPTION_OVERRIDES_PATH = path.join(__dirname, 'module-subscription-overrides.json');
+
+async function loadModuleSubscriptionOverrides() {
+    const fromRedis = await redisGetJSON('module-subscription-overrides', null);
+    if (fromRedis !== null) return fromRedis;
+    try {
+        return JSON.parse(fs.readFileSync(MODULE_SUBSCRIPTION_OVERRIDES_PATH, 'utf8'));
+    } catch (err) {
+        return {};
+    }
+}
+
+function saveModuleSubscriptionOverrides(obj) {
+    if (redisClient) {
+        redisSetJSON('module-subscription-overrides', obj);
+        return;
+    }
+    try {
+        fs.writeFileSync(MODULE_SUBSCRIPTION_OVERRIDES_PATH, JSON.stringify(obj, null, 2));
+    } catch (err) {
+        console.error('Could not save module-subscription-overrides.json:', err);
+    }
+}
+
+let moduleSubscriptionOverrides = {}; // populated in bootstrapStores()
+
+let MODULE_SUBSCRIPTION_PLANS = { ...MODULE_SUBSCRIPTION_PLANS_BASE };
+
+function recomputeModuleSubscriptionPlans() {
+    const merged = {};
+    for (const featureId of MODULE_SUBSCRIPTION_FEATURE_IDS) {
+        const base = MODULE_SUBSCRIPTION_PLANS_BASE[featureId];
+        const override = moduleSubscriptionOverrides[featureId] || {};
+        merged[featureId] = {
+            ...base,
+            ...override,
+            price: { ...base.price, ...(override.price || {}) }
+        };
+    }
+    MODULE_SUBSCRIPTION_PLANS = merged;
+}
+
+function getModuleSubscriptionPrice(featureId, billingCycle) {
+    const plan = MODULE_SUBSCRIPTION_PLANS[featureId];
+    if (!plan || !MODULE_SUBSCRIPTION_BILLING_DAYS[billingCycle]) return null;
     return typeof plan.price[billingCycle] === 'number' ? plan.price[billingCycle] : null;
 }
 
@@ -1281,30 +1401,54 @@ function recomputeFeatureCatalog() {
         // ang 'cloud_backup' dito kahit paano (may sarili itong
         // subscription pricing editor; tingnan ang FEATURE_CATALOG_BASE
         // sa itaas kung saan `price: null` ito).
-        if (!merged[featureId] || featureId === 'cloud_backup') continue;
+        if (!merged[featureId] || isSubscriptionOnlyFeature(featureId)) continue;
         merged[featureId] = { ...merged[featureId], ...featurePricingOverrides[featureId] };
     }
     FEATURE_CATALOG = merged;
     recomputeProTierFeatureIds();
 }
 
+// UPGRADE_TIER_FEATURE_IDS_BASE — the default/fallback featureIds array
+// for the 'basic' and 'standard' tiers when no admin override has been
+// configured. ('pro' has no static base entry — it is always "every
+// FEATURE_CATALOG entry except subscription-only ones" by default, via
+// recomputeProTierFeatureIds() below, unless an admin explicitly
+// overrides it with a curated list too.)
+//
+// Selection is now admin-EDITABLE (see /relay/admin/api/pricing/tiers
+// POST below, which now also accepts an optional `featureIds` array) —
+// this array is only the fallback used when no override is saved.
+const UPGRADE_TIER_FEATURE_IDS_BASE = {
+    basic: ['advanced_reports', 'promo_codes'],
+    standard: ['advanced_reports', 'promo_codes', 'customer_crm', 'shift_management']
+};
+
 let UPGRADE_TIERS = [
-    { id: 'basic', name: 'Basic Upgrade', featureIds: ['advanced_reports', 'promo_codes'], bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.basic },
-    { id: 'standard', name: 'Standard Upgrade', featureIds: ['advanced_reports', 'promo_codes', 'customer_crm', 'shift_management'], bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.standard },
+    { id: 'basic', name: 'Basic Upgrade', featureIds: [...UPGRADE_TIER_FEATURE_IDS_BASE.basic], bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.basic },
+    { id: 'standard', name: 'Standard Upgrade', featureIds: [...UPGRADE_TIER_FEATURE_IDS_BASE.standard], bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.standard },
     // 'pro' ay laging LAHAT ng laman ng FEATURE_CATALOG sa oras na ito i-
     // resolve (tingnan ang recomputeProTierFeatureIds(), tinatawag sa
     // bootstrapStores() at muli sa tuwing may auto-add) — kaya kasama na
     // rito agad ang anumang bagong theme/module, manual man o auto-learned.
-    // NOTE: 'cloud_backup' is no longer included here — it's a
-    // subscription now (Basic/Standard/Pro monthly/yearly), so it's
-    // purchased SEPARATELY from the one-time Pro bundle, not part of this
-    // bundlePrice.
-    { id: 'pro', name: 'Pro Upgrade (Complete)', featureIds: Object.keys(FEATURE_CATALOG).filter(id => id !== 'cloud_backup'), bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.pro }
+    // NOTE: 'cloud_backup', 'rbac_management', and 'multi_branch' are no
+    // longer included here — they are subscriptions now (billed monthly/
+    // yearly), so they're purchased SEPARATELY from the one-time Pro
+    // bundle, not part of this bundlePrice. See isSubscriptionOnlyFeature().
+    { id: 'pro', name: 'Pro Upgrade (Complete)', featureIds: Object.keys(FEATURE_CATALOG).filter(id => !isSubscriptionOnlyFeature(id)), bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.pro }
 ];
 
 function recomputeProTierFeatureIds() {
     const proTier = UPGRADE_TIERS.find(t => t.id === 'pro');
-    if (proTier) proTier.featureIds = Object.keys(FEATURE_CATALOG).filter(id => id !== 'cloud_backup');
+    if (!proTier) return;
+    // An admin can optionally curate a custom featureIds list for 'pro'
+    // too (instead of the "everything" default) — same override store as
+    // basic/standard, see recomputeUpgradeTierPricing() below.
+    const override = upgradeTierPricingOverrides && upgradeTierPricingOverrides.pro;
+    if (override && Array.isArray(override.featureIds) && override.featureIds.length) {
+        proTier.featureIds = override.featureIds.filter(id => FEATURE_CATALOG[id] && !isSubscriptionOnlyFeature(id));
+    } else {
+        proTier.featureIds = Object.keys(FEATURE_CATALOG).filter(id => !isSubscriptionOnlyFeature(id));
+    }
 }
 
 // recomputeUpgradeTierPricing() — kapareho ng recomputeFeatureCatalog(),
@@ -1320,7 +1464,19 @@ function recomputeUpgradeTierPricing() {
         if (override && typeof override.name === 'string' && override.name.trim()) {
             tier.name = override.name.trim();
         }
+        // Bundle SELECTION (which features are included) is also
+        // admin-editable now — 'pro' is handled separately by
+        // recomputeProTierFeatureIds() below (called at the end of this
+        // function) since its default is "everything" rather than a
+        // static base list.
+        if (tier.id === 'pro') continue;
+        if (override && Array.isArray(override.featureIds) && override.featureIds.length) {
+            tier.featureIds = override.featureIds.filter(id => FEATURE_CATALOG[id] && !isSubscriptionOnlyFeature(id));
+        } else {
+            tier.featureIds = [...(UPGRADE_TIER_FEATURE_IDS_BASE[tier.id] || [])];
+        }
     }
+    recomputeProTierFeatureIds();
 }
 
 
@@ -2147,6 +2303,10 @@ app.post('/relay/admin/api/pending-otps/approve', requireAdminKey, (req, res) =>
         // yearly) — NOT the generic RELAY_DEFAULT_LICENSE_DAYS, since that
         // default means something different (for other features).
         pending.durationDays = CLOUD_BACKUP_BILLING_DAYS[pending.billingCycle];
+    } else if (isModuleSubscriptionFeature(pending.featureId) && pending.billingCycle && MODULE_SUBSCRIPTION_BILLING_DAYS[pending.billingCycle]) {
+        // Same idea, for the RBAC Management / Multi-Branch Dashboard
+        // module subscriptions.
+        pending.durationDays = MODULE_SUBSCRIPTION_BILLING_DAYS[pending.billingCycle];
     } else {
         pending.durationDays = RELAY_DEFAULT_LICENSE_DAYS;
     }
@@ -2535,7 +2695,12 @@ app.get('/relay/admin/api/pricing', requireAdminKey, (req, res) => {
         cloudBackupPlans: CLOUD_BACKUP_PLANS,
         cloudBackupPlansBase: CLOUD_BACKUP_PLANS_BASE,
         cloudBackupPlanOverrides,
-        billingDays: CLOUD_BACKUP_BILLING_DAYS
+        billingDays: CLOUD_BACKUP_BILLING_DAYS,
+        moduleSubscriptionPlans: MODULE_SUBSCRIPTION_PLANS,
+        moduleSubscriptionPlansBase: MODULE_SUBSCRIPTION_PLANS_BASE,
+        moduleSubscriptionOverrides,
+        moduleSubscriptionBillingDays: MODULE_SUBSCRIPTION_BILLING_DAYS,
+        moduleSubscriptionGracePeriodDays: MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS
     });
 });
 
@@ -2585,6 +2750,74 @@ app.post('/relay/admin/api/pricing/cloud-backup/reset', requireAdminKey, (req, r
 });
 
 // --------------------------------------------------------------
+// MODULE SUBSCRIPTION (RBAC Management / Multi-Branch Dashboard) pricing
+// — admin read + edit. Same pattern as the Cloud Backup pricing editor
+// above, but for the two flat (non-tiered) module subscriptions.
+//
+// GET  /relay/admin/api/pricing/module-subscriptions       -> effective
+//        plans (base + override), the raw base, the overrides, billing
+//        days, and the grace period.
+// POST /relay/admin/api/pricing/module-subscriptions       -> patch the
+//        name/monthly/yearly price of ONE module (featureId).
+// POST /relay/admin/api/pricing/module-subscriptions/reset -> remove the
+//        override for ONE module (reverts to base/default).
+// --------------------------------------------------------------
+app.get('/relay/admin/api/pricing/module-subscriptions', requireAdminKey, (req, res) => {
+    res.json({
+        success: true,
+        moduleSubscriptionPlans: MODULE_SUBSCRIPTION_PLANS,
+        moduleSubscriptionPlansBase: MODULE_SUBSCRIPTION_PLANS_BASE,
+        moduleSubscriptionOverrides,
+        billingDays: MODULE_SUBSCRIPTION_BILLING_DAYS,
+        gracePeriodDays: MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS
+    });
+});
+
+app.post('/relay/admin/api/pricing/module-subscriptions', requireAdminKey, (req, res) => {
+    const { featureId, name, monthly, yearly } = req.body || {};
+    if (!featureId || !MODULE_SUBSCRIPTION_PLANS_BASE[featureId]) {
+        return res.status(400).json({ success: false, message: 'Invalid or missing featureId (rbac_management/multi_branch).' });
+    }
+    if (monthly !== undefined && (typeof monthly !== 'number' || !isFinite(monthly) || monthly < 0)) {
+        return res.status(400).json({ success: false, message: 'Invalid monthly price.' });
+    }
+    if (yearly !== undefined && (typeof yearly !== 'number' || !isFinite(yearly) || yearly < 0)) {
+        return res.status(400).json({ success: false, message: 'Invalid yearly price.' });
+    }
+    if (name !== undefined && (typeof name !== 'string' || !name.trim())) {
+        return res.status(400).json({ success: false, message: 'Invalid name.' });
+    }
+
+    const existing = moduleSubscriptionOverrides[featureId] || {};
+    const updated = { ...existing };
+    if (typeof name === 'string' && name.trim()) updated.name = name.trim();
+    if (typeof monthly === 'number' || typeof yearly === 'number') {
+        const price = { ...(existing.price || {}) };
+        if (typeof monthly === 'number') price.monthly = monthly;
+        if (typeof yearly === 'number') price.yearly = yearly;
+        updated.price = price;
+    }
+
+    moduleSubscriptionOverrides[featureId] = updated;
+    saveModuleSubscriptionOverrides(moduleSubscriptionOverrides);
+    recomputeModuleSubscriptionPlans();
+    console.log(`💳 Updated module subscription pricing override for "${featureId}" via admin panel.`);
+    res.json({ success: true, plan: MODULE_SUBSCRIPTION_PLANS[featureId] });
+});
+
+app.post('/relay/admin/api/pricing/module-subscriptions/reset', requireAdminKey, (req, res) => {
+    const { featureId } = req.body || {};
+    if (!featureId || !MODULE_SUBSCRIPTION_PLANS_BASE[featureId]) {
+        return res.status(400).json({ success: false, message: 'Invalid or missing featureId (rbac_management/multi_branch).' });
+    }
+    delete moduleSubscriptionOverrides[featureId];
+    saveModuleSubscriptionOverrides(moduleSubscriptionOverrides);
+    recomputeModuleSubscriptionPlans();
+    console.log(`💳 Reset module subscription pricing for "${featureId}" to default via admin panel.`);
+    res.json({ success: true, plan: MODULE_SUBSCRIPTION_PLANS[featureId] });
+});
+
+// --------------------------------------------------------------
 // FEATURE (themes/modules) pricing — admin read + edit.
 //
 // HIWALAY na feature ito sa Cloud Backup pricing sa itaas — sadyang
@@ -2614,12 +2847,12 @@ app.post('/relay/admin/api/pricing/cloud-backup/reset', requireAdminKey, (req, r
 app.get('/relay/admin/api/pricing/features', requireAdminKey, (req, res) => {
     const editable = {};
     for (const [featureId, entry] of Object.entries(FEATURE_CATALOG)) {
-        if (featureId === 'cloud_backup') continue; // may sarili itong pricing editor sa itaas
+        if (isSubscriptionOnlyFeature(featureId)) continue; // may sarili itong pricing editor (Cloud Backup / Module Subscriptions sa itaas)
         editable[featureId] = entry;
     }
     const editableBase = {};
     for (const [featureId, entry] of Object.entries(FEATURE_CATALOG_BASE)) {
-        if (featureId === 'cloud_backup') continue;
+        if (isSubscriptionOnlyFeature(featureId)) continue;
         editableBase[featureId] = entry;
     }
     res.json({
@@ -2632,8 +2865,8 @@ app.get('/relay/admin/api/pricing/features', requireAdminKey, (req, res) => {
 
 app.post('/relay/admin/api/pricing/features', requireAdminKey, (req, res) => {
     const { featureId, name, price } = req.body || {};
-    if (!featureId || featureId === 'cloud_backup' || !FEATURE_CATALOG[featureId]) {
-        return res.status(400).json({ success: false, message: 'Invalid o hindi kilalang featureId (o ito ay "cloud_backup", na may sariling pricing editor).' });
+    if (!featureId || isSubscriptionOnlyFeature(featureId) || !FEATURE_CATALOG[featureId]) {
+        return res.status(400).json({ success: false, message: 'Invalid or unknown featureId (or it is a subscription feature — cloud_backup/rbac_management/multi_branch — which has its own dedicated pricing editor).' });
     }
     if (price !== undefined && (typeof price !== 'number' || !isFinite(price) || price < 0)) {
         return res.status(400).json({ success: false, message: 'Invalid price.' });
@@ -2656,8 +2889,8 @@ app.post('/relay/admin/api/pricing/features', requireAdminKey, (req, res) => {
 
 app.post('/relay/admin/api/pricing/features/reset', requireAdminKey, (req, res) => {
     const { featureId } = req.body || {};
-    if (!featureId || featureId === 'cloud_backup' || !FEATURE_CATALOG[featureId]) {
-        return res.status(400).json({ success: false, message: 'Invalid o hindi kilalang featureId.' });
+    if (!featureId || isSubscriptionOnlyFeature(featureId) || !FEATURE_CATALOG[featureId]) {
+        return res.status(400).json({ success: false, message: 'Invalid or unknown featureId.' });
     }
     delete featurePricingOverrides[featureId];
     saveFeaturePricingOverrides(featurePricingOverrides);
@@ -2694,18 +2927,30 @@ app.get('/relay/admin/api/pricing/tiers', requireAdminKey, (req, res) => {
     }
     const base = {};
     for (const tierId of Object.keys(UPGRADE_TIER_BUNDLE_PRICE_BASE)) {
-        base[tierId] = { bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE[tierId] };
+        base[tierId] = {
+            bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE[tierId],
+            // 'pro' has no static featureIds base (its default is
+            // "everything except subscription-only features") — omit the
+            // key rather than sending a stale/misleading empty array.
+            featureIds: UPGRADE_TIER_FEATURE_IDS_BASE[tierId] || undefined
+        };
     }
+    // All feature IDs that are ALLOWED to be picked for a bundle (i.e.
+    // NOT a subscription-only feature like cloud_backup, rbac_management,
+    // multi_branch — those are always purchased separately) — this is
+    // what the admin page's feature picker should offer as checkboxes.
+    const selectableFeatureIds = Object.keys(FEATURE_CATALOG).filter(id => !isSubscriptionOnlyFeature(id));
     res.json({
         success: true,
         upgradeTiers: effective,
         upgradeTiersBase: base,
-        upgradeTierPricingOverrides
+        upgradeTierPricingOverrides,
+        selectableFeatureIds
     });
 });
 
 app.post('/relay/admin/api/pricing/tiers', requireAdminKey, (req, res) => {
-    const { tierId, name, bundlePrice } = req.body || {};
+    const { tierId, name, bundlePrice, featureIds } = req.body || {};
     if (!tierId || !UPGRADE_TIER_BUNDLE_PRICE_BASE[tierId]) {
         return res.status(400).json({ success: false, message: 'Invalid o hindi kilalang tierId (basic/standard/pro).' });
     }
@@ -2715,16 +2960,29 @@ app.post('/relay/admin/api/pricing/tiers', requireAdminKey, (req, res) => {
     if (name !== undefined && (typeof name !== 'string' || !name.trim())) {
         return res.status(400).json({ success: false, message: 'Invalid name.' });
     }
+    // Bundle selection (which features are included in this tier) is now
+    // admin-editable — pass an explicit array of featureIds to customize
+    // it, or omit it entirely to leave the current selection untouched.
+    if (featureIds !== undefined) {
+        if (!Array.isArray(featureIds) || featureIds.length === 0) {
+            return res.status(400).json({ success: false, message: 'featureIds must be a non-empty array of feature IDs.' });
+        }
+        const invalid = featureIds.filter(id => !FEATURE_CATALOG[id] || isSubscriptionOnlyFeature(id));
+        if (invalid.length) {
+            return res.status(400).json({ success: false, message: `These feature IDs cannot be placed in a bundle (unknown, or a subscription-only feature that is always purchased separately): ${invalid.join(', ')}` });
+        }
+    }
 
     const existing = upgradeTierPricingOverrides[tierId] || {};
     const updated = { ...existing };
     if (typeof name === 'string' && name.trim()) updated.name = name.trim();
     if (typeof bundlePrice === 'number') updated.bundlePrice = bundlePrice;
+    if (Array.isArray(featureIds)) updated.featureIds = featureIds;
 
     upgradeTierPricingOverrides[tierId] = updated;
     saveUpgradeTierPricingOverrides(upgradeTierPricingOverrides);
     recomputeUpgradeTierPricing();
-    console.log(`💳 Na-update ang bundle pricing override ng tier "${tierId}" via admin panel.`);
+    console.log(`💳 Na-update ang bundle pricing/selection override ng tier "${tierId}" via admin panel.`);
     const tier = UPGRADE_TIERS.find(t => t.id === tierId);
     res.json({ success: true, tier });
 });
@@ -3063,6 +3321,16 @@ app.post('/relay/admin/api/devices/:installationId/activate', requireAdminKey, (
         cloudBackupPrice = getCloudBackupPlanPrice(tier, billingCycle);
     }
 
+    // Same idea as Cloud Backup above, for the RBAC Management /
+    // Multi-Branch Dashboard module subscriptions — flat plan, so only
+    // billingCycle is needed (no tier selection).
+    const includesModuleSubscription = idsToActivate.some(id => isModuleSubscriptionFeature(id));
+    if (includesModuleSubscription) {
+        if (!billingCycle || !MODULE_SUBSCRIPTION_BILLING_DAYS[billingCycle]) {
+            return res.status(400).json({ success: false, message: 'Missing or invalid billingCycle (monthly/yearly) for the module subscription feature(s).' });
+        }
+    }
+
     const resolvedDurationDays = (typeof durationDays === 'number' && durationDays > 0)
         ? durationDays
         : (durationDays === 0 ? null : RELAY_DEFAULT_LICENSE_DAYS);
@@ -3079,6 +3347,13 @@ app.post('/relay/admin/api/devices/:installationId/activate', requireAdminKey, (
         : null;
     const cloudBackupDurationDays = includesCloudBackup
         ? ((typeof durationDays === 'number' && durationDays > 0) ? resolvedDurationDays : CLOUD_BACKUP_BILLING_DAYS[billingCycle])
+        : null;
+    // Same idea, for the module subscriptions.
+    const moduleSubscriptionDurationMs = includesModuleSubscription
+        ? ((typeof durationDays === 'number' && durationDays > 0) ? durationMs : MODULE_SUBSCRIPTION_BILLING_DAYS[billingCycle] * 24 * 60 * 60 * 1000)
+        : null;
+    const moduleSubscriptionDurationDays = includesModuleSubscription
+        ? ((typeof durationDays === 'number' && durationDays > 0) ? resolvedDurationDays : MODULE_SUBSCRIPTION_BILLING_DAYS[billingCycle])
         : null;
 
     const tokens = {};
@@ -3116,29 +3391,36 @@ app.post('/relay/admin/api/devices/:installationId/activate', requireAdminKey, (
 
     for (const id of idsToActivate) {
         const isThisCloudBackup = id === 'cloud_backup';
-        const tokenDurationMs = isThisCloudBackup ? cloudBackupDurationMs : durationMs;
+        const isThisModuleSubscription = isModuleSubscriptionFeature(id);
+        const tokenDurationMs = isThisCloudBackup ? cloudBackupDurationMs : (isThisModuleSubscription ? moduleSubscriptionDurationMs : durationMs);
         const token = issueSignedToken(installationId, id, tokenDurationMs);
         tokens[id] = token;
         const priceForThisFeature = isThisCloudBackup
             ? cloudBackupPrice
-            : (Object.prototype.hasOwnProperty.call(perFeaturePrice, id) ? perFeaturePrice[id] : FEATURE_CATALOG[id].price);
-        const featureNameForThisFeature = isThisCloudBackup ? CLOUD_BACKUP_PLANS[tier].name : FEATURE_CATALOG[id].name;
+            : isThisModuleSubscription
+                ? getModuleSubscriptionPrice(id, billingCycle)
+                : (Object.prototype.hasOwnProperty.call(perFeaturePrice, id) ? perFeaturePrice[id] : FEATURE_CATALOG[id].price);
+        const featureNameForThisFeature = isThisCloudBackup
+            ? CLOUD_BACKUP_PLANS[tier].name
+            : isThisModuleSubscription
+                ? MODULE_SUBSCRIPTION_PLANS[id].name
+                : FEATURE_CATALOG[id].name;
         recordIssuedUnlock(installationId, id, token, {
             featureName: featureNameForThisFeature,
             price: priceForThisFeature,
             source: 'admin-direct',
             note: note || null,
             tier: isThisCloudBackup ? tier : null,
-            billingCycle: isThisCloudBackup ? billingCycle : null
+            billingCycle: (isThisCloudBackup || isThisModuleSubscription) ? billingCycle : null
         });
         logActivity(installationId, 'unlock_issued', {
             featureId: id,
             featureName: featureNameForThisFeature,
             source: 'admin-direct',
             note: note || null,
-            durationDays: isThisCloudBackup ? cloudBackupDurationDays : (resolvedDurationDays || null),
+            durationDays: isThisCloudBackup ? cloudBackupDurationDays : (isThisModuleSubscription ? moduleSubscriptionDurationDays : (resolvedDurationDays || null)),
             tier: isThisCloudBackup ? tier : null,
-            billingCycle: isThisCloudBackup ? billingCycle : null
+            billingCycle: (isThisCloudBackup || isThisModuleSubscription) ? billingCycle : null
         });
     }
 
@@ -3615,7 +3897,7 @@ app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 100
     // susunod na fetch ng OMNIPOS, walang kailangang i-deploy ulit doon.
     const featureCatalog = {};
     for (const [featureId, entry] of Object.entries(FEATURE_CATALOG)) {
-        if (featureId === 'cloud_backup') continue;
+        if (isSubscriptionOnlyFeature(featureId)) continue;
         featureCatalog[featureId] = { name: entry.name, price: entry.price, category: entry.category };
     }
     // Kasama na rin dito ngayon ang `upgradeTiers` (id -> {name,
@@ -3627,9 +3909,15 @@ app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 100
     // featureCatalog sa itaas — kaya FULLY SYNCED na rin ang bundle
     // pricing sa susunod na fetch ng OMNIPOS, walang kailangang
     // i-deploy ulit doon.
+    // featureIds is now included here too (previously only name/
+    // bundlePrice were synced — the featureIds SELECTION for
+    // basic/standard/pro was still hardcoded independently on the
+    // OMNIPOS side). This is what makes the admin-editable bundle
+    // selection above (POST /relay/admin/api/pricing/tiers) actually
+    // take effect on OMNIPOS without a redeploy.
     const upgradeTiers = {};
     for (const tier of UPGRADE_TIERS) {
-        upgradeTiers[tier.id] = { name: tier.name, bundlePrice: tier.bundlePrice };
+        upgradeTiers[tier.id] = { name: tier.name, bundlePrice: tier.bundlePrice, featureIds: tier.featureIds };
     }
     res.json({
         success: true,
@@ -3637,6 +3925,12 @@ app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 100
         billingDays: CLOUD_BACKUP_BILLING_DAYS,
         featureCatalog,
         upgradeTiers,
+        // Module subscriptions (RBAC Management / Multi-Branch Dashboard)
+        // — same "RELAY is ground truth" sync pattern as cloudBackupPlans
+        // above.
+        moduleSubscriptions: MODULE_SUBSCRIPTION_PLANS,
+        moduleSubscriptionBillingDays: MODULE_SUBSCRIPTION_BILLING_DAYS,
+        moduleSubscriptionGracePeriodDays: MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS,
         fetchedAt: new Date().toISOString()
     });
 });
@@ -4904,6 +5198,7 @@ app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit
     }
 
     const isCloudBackup = featureId === 'cloud_backup';
+    const isModuleSubscription = isModuleSubscriptionFeature(featureId);
     let groundTruthPrice = null;
 
     if (isCloudBackup) {
@@ -4913,6 +5208,15 @@ app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit
         groundTruthPrice = getCloudBackupPlanPrice(tier, billingCycle);
         if (groundTruthPrice === null) {
             return res.status(400).json({ success: false, message: 'Invalid Cloud Backup tier/billingCycle.' });
+        }
+    } else if (isModuleSubscription) {
+        // RBAC Management / Multi-Branch Dashboard — flat monthly/yearly
+        // subscription, no tier selection needed. Price is ground truth
+        // from RELAY's own MODULE_SUBSCRIPTION_PLANS, never trusted from
+        // the client body.
+        groundTruthPrice = getModuleSubscriptionPrice(featureId, billingCycle);
+        if (groundTruthPrice === null) {
+            return res.status(400).json({ success: false, message: 'Invalid billing cycle (monthly/yearly) for this subscription module.' });
         }
     }
 
@@ -4928,38 +5232,40 @@ app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit
         otpVerified: false,
         installationId,
         featureId,
-        featureName: isCloudBackup ? CLOUD_BACKUP_PLANS[tier].name : (featureName || featureId),
-        price: isCloudBackup ? groundTruthPrice : (price || null),
+        featureName: isCloudBackup ? CLOUD_BACKUP_PLANS[tier].name : isModuleSubscription ? MODULE_SUBSCRIPTION_PLANS[featureId].name : (featureName || featureId),
+        price: (isCloudBackup || isModuleSubscription) ? groundTruthPrice : (price || null),
         tier: isCloudBackup ? tier : null,
-        billingCycle: isCloudBackup ? billingCycle : null,
+        billingCycle: (isCloudBackup || isModuleSubscription) ? billingCycle : null,
         // durationDays is pre-set based on the chosen billing cycle — the
         // admin no longer needs to guess/type this manually on each
         // approval (see also /relay/admin/api/pending-otps/approve).
-        durationDays: isCloudBackup ? CLOUD_BACKUP_BILLING_DAYS[billingCycle] : undefined
+        durationDays: isCloudBackup ? CLOUD_BACKUP_BILLING_DAYS[billingCycle] : isModuleSubscription ? MODULE_SUBSCRIPTION_BILLING_DAYS[billingCycle] : undefined
     });
 
     try {
-        // Ground-truth from RELAY's OWN FEATURE_CATALOG/CLOUD_BACKUP_PLANS —
-        // we don't rely on the client-supplied featureName/price, since
-        // those just come from the request body (which can be altered).
-        // If there's a mismatch, explicitly flag it in the email to alert
-        // the admin before they Approve.
+        // Ground-truth from RELAY's OWN FEATURE_CATALOG/CLOUD_BACKUP_PLANS/
+        // MODULE_SUBSCRIPTION_PLANS — we don't rely on the client-supplied
+        // featureName/price, since those just come from the request body
+        // (which can be altered). If there's a mismatch, explicitly flag
+        // it in the email to alert the admin before they Approve.
         const catalogEntry = FEATURE_CATALOG[featureId] || null;
-        const displayPrice = isCloudBackup ? groundTruthPrice : price;
-        const displayName = isCloudBackup ? CLOUD_BACKUP_PLANS[tier].name : (featureName || featureId);
-        const priceMismatch = !isCloudBackup && catalogEntry && typeof price === 'number' && price !== catalogEntry.price;
-        const nameMismatch = !isCloudBackup && catalogEntry && featureName && featureName !== catalogEntry.name;
+        const isAnySubscription = isCloudBackup || isModuleSubscription;
+        const displayPrice = isAnySubscription ? groundTruthPrice : price;
+        const displayName = isCloudBackup ? CLOUD_BACKUP_PLANS[tier].name : isModuleSubscription ? MODULE_SUBSCRIPTION_PLANS[featureId].name : (featureName || featureId);
+        const priceMismatch = !isAnySubscription && catalogEntry && typeof price === 'number' && price !== catalogEntry.price;
+        const nameMismatch = !isAnySubscription && catalogEntry && featureName && featureName !== catalogEntry.name;
 
         await notifyUnlockRequest({
             subject: `🎨 Unlock Request — ${displayName}${displayPrice ? ` (₱${displayPrice})` : ''}`,
-            text: `Someone requested to ${isCloudBackup ? 'subscribe/renew Cloud Backup' : 'unlock a Pro theme'}.\n\n` +
+            text: `Someone requested to ${isCloudBackup ? 'subscribe/renew Cloud Backup' : isModuleSubscription ? `subscribe/renew ${displayName}` : 'unlock a Pro theme'}.\n\n` +
                   `Store: ${storeName || 'Not specified'}\n` +
                   `Installation ID: ${installationId}\n` +
                   `Feature: ${displayName}\n` +
                   (isCloudBackup ? `Plan: ${tier} (${billingCycle}) — ₱${groundTruthPrice}\n` : '') +
-                  (isCloudBackup ? `Access to be granted: ${CLOUD_BACKUP_BILLING_DAYS[billingCycle]} days from approval\n` : '') +
-                  (!isCloudBackup && price ? `Price (stated by client): ₱${price}\n` : '') +
-                  (!isCloudBackup && catalogEntry ? `Price per our price list: ₱${catalogEntry.price} (${catalogEntry.name})\n` : (!isCloudBackup ? `⚠️ featureId "${featureId}" was not found in our price list — be careful.\n` : '')) +
+                  (isModuleSubscription ? `Plan: ${billingCycle} — ₱${groundTruthPrice}\n` : '') +
+                  (isAnySubscription ? `Access to be granted: ${isCloudBackup ? CLOUD_BACKUP_BILLING_DAYS[billingCycle] : MODULE_SUBSCRIPTION_BILLING_DAYS[billingCycle]} days from approval\n` : '') +
+                  (!isAnySubscription && price ? `Price (stated by client): ₱${price}\n` : '') +
+                  (!isAnySubscription && catalogEntry ? `Price per our price list: ₱${catalogEntry.price} (${catalogEntry.name})\n` : (!isAnySubscription ? `⚠️ featureId "${featureId}" was not found in our price list — be careful.\n` : '')) +
                   ((priceMismatch || nameMismatch) ? `⚠️⚠️ THERE IS A DISCREPANCY in price/name — it does not match the official price list. DO NOT Approve until this is verified.\n` : '') +
                   `Requested by: ${username || 'Unknown'}\n` +
                   `OTP Code: ${otpCode}\n` +
@@ -5364,6 +5670,15 @@ app.post('/relay/request-unlock-bulk', requireApiKey, requireAllowedDevice, rate
 
     if (!installationId || !Array.isArray(featureIds) || featureIds.length === 0) {
         return res.status(400).json({ success: false, message: 'Kulang ang installationId o featureIds.' });
+    }
+    // This bulk/bundle path is for ONE-TIME (perpetual) purchases only —
+    // subscription features (cloud_backup, rbac_management, multi_branch)
+    // must go through their own dedicated subscribe/renew flow above
+    // (which needs a billingCycle and issues an auto-expiring token), not
+    // this one, which would otherwise grant them permanently for free.
+    const subscriptionIdsInBulk = featureIds.filter(id => isSubscriptionOnlyFeature(id));
+    if (subscriptionIdsInBulk.length) {
+        return res.status(400).json({ success: false, message: `These are subscription features and cannot be bundled into a one-time bulk unlock: ${subscriptionIdsInBulk.join(', ')}. Please use the subscribe/renew flow for each of them instead.` });
     }
 
     const otpCode = String(Math.floor(100000 + Math.random() * 900000));
@@ -7232,7 +7547,8 @@ async function bootstrapStores() {
         branchSummaries,
         cloudBackupPlanOverrides,
         featurePricingOverrides,
-        upgradeTierPricingOverrides
+        upgradeTierPricingOverrides,
+        moduleSubscriptionOverrides
     ] = await Promise.all([
         loadAllowedDevices(),
         loadDeviceLabels(),
@@ -7251,7 +7567,8 @@ async function bootstrapStores() {
         loadBranchSummaries(),
         loadCloudBackupPlanOverrides(),
         loadFeaturePricingOverrides(),
-        loadUpgradeTierPricingOverrides()
+        loadUpgradeTierPricingOverrides(),
+        loadModuleSubscriptionOverrides()
     ]);
 
     // I-merge ang anumang dating naka-auto-learn na features AT anumang
@@ -7273,8 +7590,18 @@ async function bootstrapStores() {
         console.log(`💳 Na-load ang custom na Cloud Backup pricing override para sa: ${Object.keys(cloudBackupPlanOverrides).join(', ')}.`);
     }
 
+    // Apply any saved Module Subscription (RBAC Management / Multi-Branch
+    // Dashboard) pricing override on top of MODULE_SUBSCRIPTION_PLANS_BASE.
+    recomputeModuleSubscriptionPlans();
+    if (Object.keys(moduleSubscriptionOverrides).length > 0) {
+        console.log(`💳 Loaded custom Module Subscription pricing override for: ${Object.keys(moduleSubscriptionOverrides).join(', ')}.`);
+    }
+
     // Gayundin, i-apply ang anumang na-save nang Upgrade Tier (bundle)
-    // pricing override sa ibabaw ng UPGRADE_TIER_BUNDLE_PRICE_BASE.
+    // pricing override sa ibabaw ng UPGRADE_TIER_BUNDLE_PRICE_BASE. Called
+    // AFTER the module subscription recompute above, since this also
+    // resolves each tier's featureIds (including 'pro', which must
+    // exclude subscription-only features — see isSubscriptionOnlyFeature()).
     recomputeUpgradeTierPricing();
     if (Object.keys(upgradeTierPricingOverrides).length > 0) {
         console.log(`💳 Na-load ang custom na Upgrade Tier bundle pricing override para sa: ${Object.keys(upgradeTierPricingOverrides).join(', ')}.`);

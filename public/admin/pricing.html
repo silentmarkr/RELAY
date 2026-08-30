@@ -77,6 +77,7 @@
   .field { display: flex; flex-direction: column; gap: 4px; }
   .field label { font-size: .78rem; color: var(--muted); }
   .field input {
+    width: 100%;
     padding: 8px 10px; border-radius: var(--radius); border: 1.5px solid var(--border);
     background: var(--bg-raise); color: var(--text); font-family: var(--font-mono); font-size: .95rem;
   }
@@ -142,6 +143,15 @@
       <a href="feature-pricing.html" style="color:var(--accent);">separate Feature Pricing page</a>.
     </p>
     <div id="plansGrid" class="plans-grid"></div>
+
+    <h2 style="font-family:var(--font-heading);font-size:1rem;color:var(--accent);margin:34px 0 6px;">Module Subscriptions</h2>
+    <p class="intro" style="margin-bottom:16px;">
+      RBAC Management and Multi-Branch Dashboard are subscriptions too (converted from a one-time
+      purchase) — flat monthly/yearly pricing, no tiers. A subscription that lapses stays working
+      for a <strong>7-day grace period</strong> before it locks (this buffer is not editable here —
+      it's intentionally the same for both, hardcoded server-side).
+    </p>
+    <div id="moduleSubGrid" class="plans-grid"></div>
   </main>
 </div>
 
@@ -152,6 +162,9 @@ let adminKey = sessionStorage.getItem('relayAdminKey') || '';
 let plansBase = {};
 let plansEffective = {};
 let overrides = {};
+let moduleSubPlansBase = {};
+let moduleSubPlansEffective = {};
+let moduleSubOverrides = {};
 
 function toast(msg, type) {
   const el = document.getElementById('toast');
@@ -279,6 +292,80 @@ async function loadPricing() {
   plansEffective = data.cloudBackupPlans;
   overrides = data.cloudBackupPlanOverrides || {};
   renderPlans();
+
+  moduleSubPlansBase = data.moduleSubscriptionPlansBase || {};
+  moduleSubPlansEffective = data.moduleSubscriptionPlans || {};
+  moduleSubOverrides = data.moduleSubscriptionOverrides || {};
+  renderModuleSubPlans();
+}
+
+function moduleSubFieldIsCustom(featureId, key) {
+  const ov = moduleSubOverrides[featureId] || {};
+  if (key === 'monthly' || key === 'yearly') return !!(ov.price && ov.price[key] !== undefined);
+  return ov[key] !== undefined;
+}
+
+function renderModuleSubPlans() {
+  const grid = document.getElementById('moduleSubGrid');
+  grid.innerHTML = '';
+  Object.keys(moduleSubPlansEffective).forEach(featureId => {
+    const plan = moduleSubPlansEffective[featureId];
+    const card = document.createElement('div');
+    card.className = 'plan-card';
+    card.innerHTML = `
+      <div class="tier-id">${featureId}</div>
+      <h3>${plan.name}</h3>
+      <div class="field">
+        <label>Plan name</label>
+        <input type="text" id="modsub-name-${featureId}" value="${plan.name}">
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label>Monthly price (₱) ${moduleSubFieldIsCustom(featureId, 'monthly') ? '<span class="badge">customized</span>' : '<span class="badge default">default</span>'}</label>
+          <input type="number" min="0" step="1" id="modsub-monthly-${featureId}" value="${plan.price.monthly}">
+        </div>
+        <div class="field">
+          <label>Yearly price (₱) ${moduleSubFieldIsCustom(featureId, 'yearly') ? '<span class="badge">customized</span>' : '<span class="badge default">default</span>'}</label>
+          <input type="number" min="0" step="1" id="modsub-yearly-${featureId}" value="${plan.price.yearly}">
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn btn-save" onclick="saveModuleSubPlan('${featureId}')">Save</button>
+        <button class="btn btn-reset" onclick="resetModuleSubPlan('${featureId}')">Reset to default</button>
+      </div>
+    `;
+    grid.appendChild(card);
+  });
+}
+
+async function saveModuleSubPlan(featureId) {
+  const name = document.getElementById(`modsub-name-${featureId}`).value.trim();
+  const monthly = Number(document.getElementById(`modsub-monthly-${featureId}`).value);
+  const yearly = Number(document.getElementById(`modsub-yearly-${featureId}`).value);
+  try {
+    const data = await api('/relay/admin/api/pricing/module-subscriptions', {
+      method: 'POST',
+      body: JSON.stringify({ featureId, name, monthly, yearly })
+    });
+    toast(`Saved "${data.plan.name}" pricing.`);
+    await loadPricing();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function resetModuleSubPlan(featureId) {
+  if (!confirm(`Reset "${featureId}" back to the default pricing? Any customization will be lost.`)) return;
+  try {
+    const data = await api('/relay/admin/api/pricing/module-subscriptions/reset', {
+      method: 'POST',
+      body: JSON.stringify({ featureId })
+    });
+    toast(`Reset "${data.plan.name}" to default pricing.`);
+    await loadPricing();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
 }
 
 async function boot() {
