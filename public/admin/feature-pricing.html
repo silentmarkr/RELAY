@@ -5,15 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Feature Pricing — RELAY Admin</title>
 <style>
-  /* --------------------------------------------------------------
-     HIWALAY na page ito sa pricing.html (Cloud Backup subscription
-     pricing). Parehong theme/CSS variables lang ang ginaya para
-     magkatugma ang itsura sa buong admin panel — pero hiwalay ang
-     estado (plansEffective/overrides dito ay para sa FEATURE_CATALOG
-     na themes/modules, HINDI Cloud Backup), at hiwalay ang mga
-     endpoint na tinatawag (/relay/admin/api/pricing/features, hindi
-     .../cloud-backup).
-     -------------------------------------------------------------- */
   :root {
     --bg: #05070d;
     --bg-raise: #101625;
@@ -150,7 +141,6 @@
 </style>
 </head>
 <body>
-
 <div id="loginWrap">
   <div class="topbar-title" style="font-family:var(--font-heading);font-size:1.3rem;">Feature Pricing</div>
   <div class="topbar-sub">Enter the RELAY admin key to continue.</div>
@@ -158,7 +148,6 @@
   <button class="icon-btn" style="width:100%;justify-content:center;" onclick="login()">Log in</button>
   <div id="loginError"></div>
 </div>
-
 <div id="app" class="hidden">
   <div class="topbar">
     <div class="topbar-brand">
@@ -173,7 +162,6 @@
       <button class="icon-btn" onclick="logout()">Log out</button>
     </div>
   </div>
-
   <main>
     <p class="intro">
       This is where the price/name of every Pro Theme and Module (everything in the catalog
@@ -184,34 +172,35 @@
       redeploy needed on either side. The <strong>Upgrade Bundles</strong> section below works the
       same way for the Basic/Standard/Pro bundle prices themselves.
     </p>
-
     <div class="tabs" id="filterTabs">
       <button class="tab-btn active" data-tab="all" onclick="setTab('all')">All</button>
       <button class="tab-btn" data-tab="themes" onclick="setTab('themes')">🎨 Pro Themes</button>
       <button class="tab-btn" data-tab="modules" onclick="setTab('modules')">🧩 Modules</button>
       <button class="tab-btn" data-tab="tiers" onclick="setTab('tiers')">📦 Bundle Price</button>
     </div>
-
     <div class="tab-section" id="section-themes">
       <div class="section-label">🎨 Pro Themes</div>
       <div id="themesGrid" class="plans-grid"></div>
     </div>
-
     <div class="tab-section" id="section-modules">
       <div class="section-label">🧩 Modules</div>
       <div id="modulesGrid" class="plans-grid"></div>
     </div>
-
     <div class="tab-section" id="section-tiers">
       <div class="section-label">📦 Upgrade Bundles</div>
+      <div style="font-size:.8rem;color:var(--muted);margin-bottom:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <span>Default "Suggested price" target discount:</span>
+        <input type="number" id="suggestedDiscountPercentInput" min="0" max="90" step="1" style="width:64px;">
+        <span>%</span>
+        <button type="button" class="btn btn-ghost" style="padding:2px 10px;font-size:.75rem;" onclick="saveSuggestedDiscountPercent()">Save</button>
+        <span id="suggestedDiscountPercentSavedNote" style="color:var(--success, #69db7c);display:none;">Saved ✓</span>
+      </div>
       <div id="tierWarnings"></div>
       <div id="tiersGrid" class="plans-grid"></div>
     </div>
   </main>
 </div>
-
 <div id="toast"></div>
-
 <script>
 let adminKey = sessionStorage.getItem('relayAdminKey') || '';
 let catalogBase = {};
@@ -220,13 +209,7 @@ let overrides = {};
 let tiersEffective = {};
 let tierWarnings = [];
 let tierOverrides = {};
-// selectableFeatureIds — every feature that is ALLOWED to be placed in a
-// bundle (excludes cloud_backup/rbac_management/multi_branch, which are
-// always purchased separately as their own subscriptions). Comes from
-// GET /relay/admin/api/pricing/tiers, since the server is the one that
-// knows which features are subscription-only.
 let selectableFeatureIds = [];
-
 function setTab(tab) {
   document.querySelectorAll('#filterTabs .tab-btn').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.tab === tab);
@@ -236,14 +219,12 @@ function setTab(tab) {
     document.getElementById(id).classList.toggle('hidden', !(tab === 'all' || tab === key));
   });
 }
-
 function toast(msg, type) {
   const el = document.getElementById('toast');
   el.textContent = msg;
   el.className = type === 'error' ? 'show error' : 'show';
   setTimeout(() => { el.className = ''; }, 2600);
 }
-
 async function api(path, opts = {}) {
   const res = await fetch(path, {
     ...opts,
@@ -264,7 +245,6 @@ async function api(path, opts = {}) {
   }
   return data;
 }
-
 function login() {
   const val = document.getElementById('adminKeyInput').value.trim();
   if (!val) return;
@@ -272,7 +252,6 @@ function login() {
   sessionStorage.setItem('relayAdminKey', adminKey);
   boot();
 }
-
 function logout() {
   adminKey = '';
   sessionStorage.removeItem('relayAdminKey');
@@ -280,17 +259,14 @@ function logout() {
   document.getElementById('loginWrap').classList.remove('hidden');
   document.getElementById('adminKeyInput').value = '';
 }
-
 function fieldIsCustom(featureId, key) {
   const ov = overrides[featureId] || {};
   return ov[key] !== undefined;
 }
-
 function tierFieldIsCustom(tierId, key) {
   const ov = tierOverrides[tierId] || {};
   return ov[key] !== undefined;
 }
-
 function cardHtml(featureId, entry) {
   return `
     <div class="plan-card">
@@ -311,7 +287,6 @@ function cardHtml(featureId, entry) {
     </div>
   `;
 }
-
 function tierCardHtml(tierId, entry) {
   const currentFeatureIds = new Set(entry.featureIds || []);
   const byName = (a, b) => {
@@ -324,17 +299,12 @@ function tierCardHtml(tierId, entry) {
     const checked = currentFeatureIds.has(featureId) ? 'checked' : '';
     return `<label><input type="checkbox" data-tier-feature="${tierId}" value="${featureId}" ${checked} onchange="updateTierDiscountPreview('${tierId}')"> ${label}</label>`;
   };
-
-  // Grupuhin ang mga selectable feature ayon sa category (themes muna,
-  // magkakasunod, tapos modules) — may divider line sa pagitan ng dalawang
-  // grupo para malinaw ang pagkakabukod, sa lahat ng tatlong bundle.
   const themeIds = selectableFeatureIds
     .filter(id => catalogEffective[id] && catalogEffective[id].category === 'theme')
     .sort(byName);
   const moduleIds = selectableFeatureIds
     .filter(id => !catalogEffective[id] || catalogEffective[id].category !== 'theme')
     .sort(byName);
-
   let checkboxes = '';
   if (themeIds.length) {
     checkboxes += `<div class="feature-group-label">🎨 Pro Themes</div>`;
@@ -347,7 +317,6 @@ function tierCardHtml(tierId, entry) {
     checkboxes += `<div class="feature-group-label">🧩 Modules</div>`;
     checkboxes += moduleIds.map(checkboxHtml).join('');
   }
-
   return `
     <div class="plan-card">
       <div class="tier-id">${tierId}</div>
@@ -377,7 +346,6 @@ function tierCardHtml(tierId, entry) {
     </div>
   `;
 }
-
 function renderCatalog() {
   const themesGrid = document.getElementById('themesGrid');
   const modulesGrid = document.getElementById('modulesGrid');
@@ -394,21 +362,12 @@ function renderCatalog() {
     });
   if (!themesGrid.innerHTML) themesGrid.innerHTML = '<div style="color:var(--muted);">No themes in the catalog.</div>';
   if (!modulesGrid.innerHTML) modulesGrid.innerHTML = '<div style="color:var(--muted);">No modules in the catalog.</div>';
-
-  // Tier order is fixed (basic -> standard -> pro) rather than
-  // alphabetical, so the bundles read smallest-to-largest like the
-  // upgrade flow itself.
   ['basic', 'standard', 'pro']
     .filter(tierId => tiersEffective[tierId])
     .forEach(tierId => {
       tiersGrid.insertAdjacentHTML('beforeend', tierCardHtml(tierId, tiersEffective[tierId]));
     });
   if (!tiersGrid.innerHTML) tiersGrid.innerHTML = '<div style="color:var(--muted);">No upgrade bundles found.</div>';
-
-  // "Buy more, save more" sanity check — flag when a bigger bundle has a
-  // SMALLER discount % than a smaller one (the exact drift that once hit
-  // the Pro tier: its price stayed the same while catalog prices moved,
-  // quietly eroding its discount to almost nothing).
   const warningsEl = document.getElementById('tierWarnings');
   if (warningsEl) {
     warningsEl.innerHTML = (tierWarnings || []).map(w =>
@@ -416,12 +375,6 @@ function renderCatalog() {
     ).join('');
   }
 }
-
-// Live "as-you-type" discount preview — recomputes the à la carte total
-// from whichever checkboxes are CURRENTLY checked (not just the saved
-// selection) and the price CURRENTLY typed into the field, so an admin
-// editing the bundle sees the real discount % update immediately,
-// before even hitting Save.
 function updateTierDiscountPreview(tierId) {
   const priceInput = document.getElementById(`tier-price-${tierId}`);
   const discountLabel = document.getElementById(`tier-discount-${tierId}`);
@@ -435,7 +388,6 @@ function updateTierDiscountPreview(tierId) {
   discountLabel.textContent = `${pct}%`;
   discountLabel.style.color = pct < 0 ? '#ff6b6b' : (pct < 15 ? '#ffb84d' : '#69db7c');
 }
-
 async function saveTier(tierId) {
   const name = document.getElementById(`tier-name-${tierId}`).value.trim();
   const bundlePrice = Number(document.getElementById(`tier-price-${tierId}`).value);
@@ -456,7 +408,6 @@ async function saveTier(tierId) {
     toast(err.message, 'error');
   }
 }
-
 async function resetTier(tierId) {
   if (!confirm(`Reset "${tierId}" bundle back to the default price? Any customization for this bundle will be lost.`)) return;
   try {
@@ -470,7 +421,6 @@ async function resetTier(tierId) {
     toast(err.message, 'error');
   }
 }
-
 async function saveFeature(featureId) {
   const name = document.getElementById(`name-${featureId}`).value.trim();
   const price = Number(document.getElementById(`price-${featureId}`).value);
@@ -485,7 +435,6 @@ async function saveFeature(featureId) {
     toast(err.message, 'error');
   }
 }
-
 async function resetFeature(featureId) {
   if (!confirm(`Reset "${featureId}" back to the default pricing? Any customization for this feature will be lost.`)) return;
   try {
@@ -499,11 +448,11 @@ async function resetFeature(featureId) {
     toast(err.message, 'error');
   }
 }
-
 async function loadCatalog() {
-  const [featureData, tierData] = await Promise.all([
+  const [featureData, tierData, discountData] = await Promise.all([
     api('/relay/admin/api/pricing/features'),
-    api('/relay/admin/api/pricing/tiers')
+    api('/relay/admin/api/pricing/tiers'),
+    api('/relay/admin/api/pricing/suggested-discount-percent').catch(() => ({ suggestedDiscountPercent: 30 }))
   ]);
   catalogBase = featureData.featureCatalogBase;
   catalogEffective = featureData.featureCatalog;
@@ -512,9 +461,31 @@ async function loadCatalog() {
   tierOverrides = tierData.upgradeTierPricingOverrides || {};
   selectableFeatureIds = tierData.selectableFeatureIds || [];
   tierWarnings = tierData.invertedDiscountWarnings || [];
+  const discountInput = document.getElementById('suggestedDiscountPercentInput');
+  if (discountInput && typeof discountData.suggestedDiscountPercent === 'number') {
+    discountInput.value = discountData.suggestedDiscountPercent;
+  }
   renderCatalog();
 }
-
+async function saveSuggestedDiscountPercent() {
+  const input = document.getElementById('suggestedDiscountPercentInput');
+  const percent = Number(input.value);
+  if (!Number.isFinite(percent) || percent < 0 || percent > 90) {
+    toast('Ang discount % ay dapat sa pagitan ng 0 at 90.', 'error');
+    return;
+  }
+  try {
+    await api('/relay/admin/api/pricing/suggested-discount-percent', { method: 'POST', body: JSON.stringify({ percent }) });
+    const note = document.getElementById('suggestedDiscountPercentSavedNote');
+    if (note) {
+      note.style.display = 'inline';
+      setTimeout(() => { note.style.display = 'none'; }, 2000);
+    }
+    await loadCatalog();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
 async function boot() {
   if (!adminKey) return;
   try {
@@ -525,11 +496,9 @@ async function boot() {
     if (err.message !== 'forbidden') toast(err.message, 'error');
   }
 }
-
 document.getElementById('adminKeyInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') login();
 });
-
 boot();
 </script>
 </body>

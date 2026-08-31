@@ -4,8 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OmniPOS Relay — Device Admin</title>
-
-<!-- PWA: makes this "installable" on Android/iOS/PC, just like the OMNIPOS client app -->
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#05070d">
 <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
@@ -16,30 +14,22 @@
 <meta name="mobile-web-app-capable" content="yes">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700;800&family=Space+Grotesk:wght@400;500;600;700&family=Rajdhani:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
-
 :root {
-  /* ===== Cyber Neon Pro palette — matched 1:1 to OmniPOS's official
-     "Cyber Neon Pro" theme (theme-cyber-pro.css): same base/surface/
-     border/text/accent values, same Orbitron+Rajdhani pairing, same
-     sharp "circuit board" corner language — then pushed further with
-     extra HUD/glow layers below. ===== */
-  --bg: #05070d;              /* = OmniPOS --dm-bg */
-  --bg-raise: #101625;        /* = OmniPOS --dm-surface-alt */
-  --card: rgba(11, 15, 26, 0.72);       /* OmniPOS --dm-surface, glassed */
-  --card-hover: rgba(16, 22, 37, 0.85); /* OmniPOS --dm-surface-alt, glassed */
-  --border: #1f2a44;          /* = OmniPOS --dm-border */
+  --bg: #05070d;               
+  --bg-raise: #101625;         
+  --card: rgba(11, 15, 26, 0.72);        
+  --card-hover: rgba(16, 22, 37, 0.85);  
+  --border: #1f2a44;           
   --border-soft: rgba(34, 229, 255, 0.28);
   --line: rgba(31, 42, 68, 0.7);
-  --text: #eafcff;            /* = OmniPOS --dm-text-primary */
-  --muted: #8ea3c9;           /* = OmniPOS --dm-text-secondary */
-  --muted-dim: #7186ab;       /* lightened from OmniPOS --dm-text-muted (#5a6a8c) for
-                                  readable contrast against the darker --bg here (#05070d
-                                  is deeper than OmniPOS's typical panel background) */
-  --accent: #22e5ff;          /* = OmniPOS --dm-accent */
+  --text: #eafcff;             
+  --muted: #8ea3c9;            
+  --muted-dim: #7186ab;       
+  --accent: #22e5ff;           
   --accent-bright: #7cf3ff;
-  --accent-hover: #ff2ee6;    /* = OmniPOS --dm-accent-hover */
+  --accent-hover: #ff2ee6;     
   --accent-dim: #123a47;
-  --accent-soft: rgba(34, 229, 255, 0.16); /* = OmniPOS --dm-accent-soft */
+  --accent-soft: rgba(34, 229, 255, 0.16);  
   --accent-text: #031014;
   --green: #3ddc84;
   --green-bg: rgba(61, 220, 132, 0.12);
@@ -50,13 +40,9 @@
   --amber: #ffb545;
   --amber-bg: rgba(255, 181, 69, 0.12);
   --amber-line: rgba(255, 181, 69, 0.32);
-  /* Font pairing — identical priority order to OmniPOS's --dm-font-heading
-     / --dm-font-body so headings and body text render the same family. */
   --font-ui: 'Rajdhani', 'Inter', 'Segoe UI', system-ui, -apple-system, Roboto, sans-serif;
   --font-heading: 'Orbitron', 'Space Grotesk', sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  /* Border language — sharp "circuit board" corners + thicker line
-     weight, matching OmniPOS --dm-radius / --dm-border-width exactly. */
   --radius: 6px;
   --radius-sm: 4px;
   --radius-lg: 8px;
@@ -64,8 +50,6 @@
   --ease: cubic-bezier(.16, 1, .3, 1);
   --shadow-ambient: 0 20px 44px -22px rgba(0,0,0,.7);
 }
-
-/* ===== Cyber Neon: soft glass panels, techy display type, restrained glow ===== */
 h1, .topbar-title, .otp-code { font-family: var(--font-heading); letter-spacing: .02em; }
 .card h2, .stat-num { font-family: var(--font-ui); font-weight: 700; letter-spacing: -.01em; }
 .card, .stat-card, .row, .sync-banner, .empty {
@@ -112,7 +96,6 @@ input[type=text]:focus, input[type=password]:focus {
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border-soft); border-radius: 999px; border: 2px solid transparent; }
-
 body {
   margin: 0;
   font-family: var(--font-ui);
@@ -148,8 +131,6 @@ code {
   font-size: 12px;
   color: var(--accent-bright);
 }
-
-/* ---------- TOPBAR ---------- */
 .topbar {
   display: flex;
   align-items: center;
@@ -164,13 +145,6 @@ code {
   top: 0;
   z-index: 50;
   box-shadow: 0 1px 0 0 rgba(255,255,255,.06), 0 12px 28px -18px rgba(0,0,0,.6);
-  /* FIX: the circuit-trace streak (::after, added later below) travels
-     from left:-30% to left:130% of this element. Without horizontal
-     clipping, that overshoot rendered past the real edge of the
-     screen, widening the whole document and causing a horizontal
-     scrollbar / sideways drift on mobile. overflow-y stays visible so
-     the box-shadow above still shows normally — only the X axis is
-     clipped. */
   overflow-x: hidden;
   overflow-y: visible;
 }
@@ -213,7 +187,6 @@ code {
 .icon-btn-matrix svg { width: 16px; height: 16px; display: block; }
 .icon-btn-matrix:hover { border-color: var(--accent-dim); background: var(--card-hover); color: var(--accent-bright); }
 .icon-btn-matrix.is-on { color: var(--accent-bright, #22e5ff); border-color: var(--accent-dim); }
-
 .idle-countdown {
   display: none;
   align-items: center;
@@ -234,13 +207,9 @@ code {
   background: var(--red-bg);
   border-color: var(--red-line);
 }
-
 .wrap { max-width: 640px; margin: 0 auto; padding: 16px; }
-
 h1 { font-family: var(--font-ui); font-size: 19px; font-weight: 700; margin: 0 0 4px; letter-spacing: -.01em; }
 .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
-
-/* ---------- STAT STRIP ---------- */
 .stat-strip {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -288,8 +257,6 @@ h1 { font-family: var(--font-ui); font-size: 19px; font-weight: 700; margin: 0 0
   color: var(--red);
   text-shadow: 0 0 18px rgba(255,92,114,.3);
 }
-
-/* ---------- ANALYTICS ---------- */
 .abar-row { margin-bottom: 10px; }
 .abar-row:last-child { margin-bottom: 0; }
 .abar-label {
@@ -331,7 +298,6 @@ h1 { font-family: var(--font-ui); font-size: 19px; font-weight: 700; margin: 0 0
 }
 .expiring-days.urgent { background: var(--red-bg); color: var(--red); border: 1px solid var(--red-line); }
 .expiring-days.soon { background: var(--amber-bg); color: var(--amber); border: 1px solid var(--amber-line); }
-
 .card {
   position: relative;
   background: var(--card);
@@ -360,13 +326,6 @@ h1 { font-family: var(--font-ui); font-size: 19px; font-weight: 700; margin: 0 0
   padding: 1px 8px;
   border-radius: 999px;
 }
-
-/* ---------------- COLLAPSIBLE CARDS ----------------
-   Ginagamit sa mga card na madalas mahaba ang laman (Cloud Backup,
-   Allowed devices, Recently seen, Unlocked, Still Locked) para hindi
-   sobrang haba ang pag-scroll sa page — pwedeng i-fold/collapse ang
-   bawat isa. Ina-alala ang bukas/sara na estado kada card (localStorage)
-   para pareho pa rin ang tingin sa susunod na pagbukas ng panel. */
 .card.collapsible h2 {
   cursor: pointer;
   user-select: none;
@@ -387,7 +346,6 @@ h1 { font-family: var(--font-ui); font-size: 19px; font-weight: 700; margin: 0 0
 .card.collapsible.collapsed .collapse-body {
   display: none;
 }
-
 input[type=text], input[type=password] {
   width: 100%;
   padding: 11px 13px;
@@ -421,9 +379,6 @@ button {
 button:hover { filter: brightness(1.12); transform: translateY(-1px); }
 button:active { transform: scale(0.97); }
 button:disabled { opacity: .5; cursor: not-allowed; filter: none; transform: none; }
-/* Keyboard focus — neon ring for Tab navigation, mirrors the text-input
-   focus glow so keyboard users get the same "powered on" feedback as
-   mouse hover (buttons previously had no visible focus state at all). */
 button:focus-visible,
 a:focus-visible,
 .icon-btn:focus-visible,
@@ -440,7 +395,6 @@ a:focus-visible,
   box-shadow: 0 0 0 1px rgba(34,229,255,.28), 0 10px 24px -10px rgba(34,229,255,.5);
 }
 .btn-ghost { background: rgba(255,255,255,.03); color: var(--text); border: 1px solid var(--border-soft) !important; }
-
 .row {
   display: flex;
   align-items: center;
@@ -490,9 +444,6 @@ a:focus-visible,
   padding: 6px 13px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--green-line);
-  /* Left accent tick in the theme's cyan/magenta — keeps green as the
-     semantic "valid code" color (matches .badge-allowed) while still
-     visually tying the OTP readout into the Cyber Neon Pro accent. */
   box-shadow: inset 3px 0 0 0 var(--accent);
 }
 .otp-code::after {
@@ -526,8 +477,6 @@ a:focus-visible,
   background: rgba(255,255,255,.015);
   overflow: hidden;
 }
-/* Idle scan-line sweep — a soft cyan band drifts through empty states so
-   they read as "listening/idle", not just a dead placeholder box. */
 .empty::after {
   content: '';
   position: absolute;
@@ -543,7 +492,6 @@ a:focus-visible,
   100% { transform: translateY(100%); }
 }
 @media (prefers-reduced-motion: reduce) { .empty::after { display: none; } }
-
 .status-line {
   font-family: var(--font-mono);
   font-size: 12.5px;
@@ -555,8 +503,6 @@ a:focus-visible,
 }
 .status-on { background: rgba(61,220,132,.1); color: var(--green); border-color: var(--green-line); }
 .status-off { background: rgba(255,181,69,.1); color: var(--amber); border-color: var(--amber-line); }
-
-/* ---------- BACKUP SYNC BANNER (dot blinker above "Allowed devices") ---------- */
 .sync-banner {
   display: flex;
   align-items: center;
@@ -643,8 +589,6 @@ a:focus-visible,
   padding: 22px;
   box-shadow: var(--shadow-ambient), 0 0 0 1px rgba(34,229,255,.08), inset 0 1px 0 0 rgba(255,255,255,.05);
 }
-
-/* ---------- CONFIRMATION MODAL (safety prompt) ---------- */
 .modal-backdrop {
   display: none;
   position: fixed;
@@ -675,18 +619,7 @@ a:focus-visible,
 .modal-box p { margin: 0 0 16px; font-size: 13px; color: var(--muted); line-height: 1.5; }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .modal-actions button { min-width: 88px; }
-/* BUG FIX: the safety-prompt confirm dialog (#confirmBackdrop) must
-   ALWAYS sit above other modals (e.g. #integrityBackdrop), because it
-   can appear WHILE another modal is still open (e.g. the "Clear flag"
-   button inside the integrity detail modal). Both used to share the
-   same z-index (998), so whichever modal came later in DOM order
-   (#integrityBackdrop) ended up on top, covering/blocking the confirm
-   dialog — "Yes, continue" wasn't clickable, making Clear look
-   "broken".
-   */
 #confirmBackdrop { z-index: 999; }
-
-/* ---------- TOASTS ---------- */
 #toastHost {
   position: fixed;
   top: 12px;
@@ -717,7 +650,6 @@ a:focus-visible,
   from { opacity: 0; transform: translateY(-10px) scale(.97); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
-
 .footer-note {
   text-align: center;
   font-family: var(--font-mono);
@@ -726,8 +658,6 @@ a:focus-visible,
   letter-spacing: .03em;
   margin-top: 24px;
 }
-
-/* ---------- FILTER BAR (main device list) ---------- */
 .filter-bar { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
 .filter-bar input[type=text] { flex: 1; min-width: 140px; margin: 0; }
 .filter-bar select {
@@ -735,15 +665,11 @@ a:focus-visible,
   border-radius: var(--radius-sm); padding: 10px; font-size: 13px; font-family: var(--font-ui);
 }
 .btn-export { background: var(--bg-raise); color: var(--text); border: 1px solid var(--border-soft); white-space: nowrap; }
-
 .btn-detail { background: var(--accent-soft); color: var(--accent-bright); border: 1px solid var(--accent-dim); }
-
-/* ---------- DEVICE DETAIL SCREEN ---------- */
 .detail-topbar { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
 .back-btn { background: var(--card); border: 1px solid var(--border-soft); color: var(--text); border-radius: var(--radius-sm); padding: 8px 12px; cursor: pointer; font-size: 13px; }
 .detail-id-row { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 13px; word-break: break-all; color: var(--accent-bright); }
 .btn-tiny-copy { background: var(--bg-raise); border: 1px solid var(--border-soft); color: var(--muted); border-radius: 6px; padding: 3px 8px; font-size: 11px; cursor: pointer; flex-shrink: 0; }
-
 .feature-item {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
   padding: 11px 0; border-bottom: 1px solid var(--line);
@@ -752,21 +678,11 @@ a:focus-visible,
 .feature-name { font-size: 13px; font-weight: 600; }
 .feature-meta { font-family: var(--font-mono); font-size: 11px; color: var(--muted); margin-top: 2px; }
 .feature-price { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
-/* Deactivate button inside each unlocked feature — used to "reset"
-   a device back to nothing unlocked (e.g. before selling/transferring
-   the unit to another customer). Small and red (like btn-revoke) to
-   make clear the action is destructive/removes access, but not so
-   large that it's easy to miss the rest of the row. */
 .btn-deactivate {
   background: var(--red-bg); color: var(--red);
   border: 1px solid var(--red-line); border-radius: 6px;
   padding: 6px 10px; font-size: 11px; font-weight: 600; cursor: pointer;
 }
-/* Renew button — same size/shape as Deactivate so they line up neatly
-   in one column (Renew on TOP, Deactivate on BOTTOM), but blue/accent
-   colored (like btn-tier) to make clear it's not destructive — it just
-   re-activates the same feature with a new duration (new expiresAt),
-   the same way "Renew / Change Duration" works for Demo Mode. */
 .btn-renew {
   background: var(--accent-soft); color: var(--accent-bright);
   border: 1px solid var(--accent-dim); border-radius: 6px;
@@ -777,29 +693,23 @@ a:focus-visible,
   border-radius: var(--radius-sm); padding: 9px 12px; font-size: 12px; font-weight: 700;
   cursor: pointer; width: 100%; margin-top: 10px;
 }
-/* Backup / Restore card */
 .backup-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 .backup-row .btn-primary, .backup-row .btn-ghost { flex: 1; min-width: 160px; }
 .backup-note { font-size: 12px; color: var(--muted); margin-top: 8px; line-height: 1.55; }
 .backup-lastexport { font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); margin-top: 6px; }
 .auto-backup-toggle { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-top: 12px; cursor: pointer; user-select: none; }
 .auto-backup-toggle input { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); }
-
 .tier-row { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
 .btn-tier {
   flex: 1; min-width: 100px; background: var(--accent-soft); color: var(--accent-bright);
   border: 1px solid var(--accent-dim); border-radius: var(--radius-sm); padding: 10px 8px; font-size: 12px; cursor: pointer;
 }
-/* Demo Mode card in Device Detail — amber-themed (matching the "DEMO"
-   badge) so it's immediately recognizable as TEMPORARY/TRIAL, distinct
-   from regular paid features (blue) or destructive actions (red). */
 .btn-demo {
   flex: 1; min-width: 160px; background: var(--amber-bg); color: var(--amber);
   border: 1px solid var(--amber-line); border-radius: var(--radius-sm); padding: 10px 12px;
   font-size: 12px; font-weight: 700; cursor: pointer;
 }
 .demo-status-line { font-size: 13px; margin-bottom: 12px; }
-
 .timeline { position: relative; padding-left: 18px; }
 .timeline-item { position: relative; padding-bottom: 15px; font-size: 12px; }
 .timeline-item:last-child { padding-bottom: 0; }
@@ -816,8 +726,6 @@ a:focus-visible,
 .timeline-type-device_revoked::before { background: var(--red); box-shadow: 0 0 0 3px var(--red-bg); }
 .timeline-type-restore_checkin::before { background: var(--amber); box-shadow: 0 0 0 3px var(--amber-bg); }
 .timeline-type-device_history_cleared::before { background: var(--muted); box-shadow: 0 0 0 3px rgba(148,163,184,0.2); }
-
-/* ---------- TAB NAVIGATION ---------- */
 .tab-nav {
   display: flex;
   gap: 3px;
@@ -897,17 +805,6 @@ a:focus-visible,
 }
 .footer-note a { color: var(--muted); text-decoration: underline; }
 .footer-note a:hover { color: var(--accent-bright); }
-
-/* ================================================================
-   CYBORG UPGRADE — HUD scanline, glitch readouts, targeting rings,
-   radar pulses, boot sequence. Layered on top of the existing "Cyber
-   Neon Pro" theme; everything here respects prefers-reduced-motion.
-   ================================================================ */
-
-/* Full-viewport "Advanced Pro Matrix" digital-rain overlay — replaces the
-   old HUD scanline sweep. Rendered on a <canvas> (#matrixCanvas) driven by
-   JS further down; this block only positions/blends it. Respects
-   prefers-reduced-motion (canvas simply stays empty/paused — see JS). */
 #matrixCanvas {
   position: fixed;
   inset: 0;
@@ -919,8 +816,6 @@ a:focus-visible,
 @media (prefers-reduced-motion: reduce) {
   #matrixCanvas { display: none; }
 }
-
-/* Targeting-frame corner brackets, fixed to the viewport */
 .hud-corner {
   position: fixed;
   width: 22px; height: 22px;
@@ -933,8 +828,6 @@ a:focus-visible,
 .hud-corner.tr { top: 8px; right: 8px; border-left: none; border-bottom: none; border-radius: 0 6px 0 0; }
 .hud-corner.bl { bottom: 8px; left: 8px; border-right: none; border-top: none; border-radius: 0 0 0 6px; }
 .hud-corner.br { bottom: 8px; right: 8px; border-left: none; border-top: none; border-radius: 0 0 6px 0; }
-
-/* Glitch text — brief RGB-split flicker for brand/title readouts */
 .glitch-text { position: relative; display: inline-block; }
 @media (prefers-reduced-motion: no-preference) {
   .glitch-text.glitch-active::before,
@@ -968,9 +861,6 @@ a:focus-visible,
   60%  { transform: translate(1px,-1px); }
   100% { transform: translate(0,0); }
 }
-
-/* Static "targeting lock" ring on card/stat-card hover — accent
-   outline fades in on hover, no longer rotates. */
 @media (prefers-reduced-motion: no-preference) {
   .card, .stat-card { isolation: isolate; }
   .card::after, .stat-card::after {
@@ -988,8 +878,6 @@ a:focus-visible,
   }
   .card:hover::after, .stat-card:hover::after { opacity: 1; }
 }
-
-/* Radar double-ring pulse — upgrades the existing sync-dot-blink */
 .sync-dot-blink { position: relative; }
 .sync-dot-blink::before {
   content: '';
@@ -1003,11 +891,7 @@ a:focus-visible,
   0%   { opacity: .6; transform: scale(.4); }
   100% { opacity: 0;  transform: scale(2.3); }
 }
-
-/* Tabular count-up glow (toggled by JS while a stat is animating) */
 .stat-num.counting { text-shadow: 0 0 14px rgba(34,229,255,.55); }
-
-/* HUD light-sweep on primary interactive controls */
 .btn-primary, .icon-btn, .btn-ghost, .tab-btn { position: relative; overflow: hidden; }
 .btn-primary::before, .icon-btn::before, .btn-ghost::before, .tab-btn::before {
   content: '';
@@ -1019,8 +903,6 @@ a:focus-visible,
   pointer-events: none;
 }
 .btn-primary:hover::before, .icon-btn:hover::before, .btn-ghost:hover::before, .tab-btn:hover::before { left: 130%; }
-
-/* ---------- BOOT SEQUENCE OVERLAY ---------- */
 #bootOverlay {
   position: fixed; inset: 0; z-index: 2000;
   background: var(--bg);
@@ -1031,8 +913,6 @@ a:focus-visible,
   overflow: hidden;
 }
 #bootOverlay.boot-hidden { opacity: 0; visibility: hidden; pointer-events: none; }
-/* Vivid "Advanced Pro Matrix" rain behind the boot readout — its own
-   brighter/faster canvas instance, only animated while booting. */
 #bootMatrixCanvas {
   position: absolute; inset: 0; z-index: 0;
 }
@@ -1074,18 +954,6 @@ a:focus-visible,
   .boot-logo { animation: none; }
   .boot-bar-fill { animation: none; width: 100%; }
 }
-
-/* ================================================================
-   CYBER NEON PRO — ADVANCED LAYER
-   Pushes the theme further than the base OmniPOS "Cyber Neon Pro"
-   palette: circuit-trace border animation, per-card HUD corner
-   brackets, and a neon power-on flicker for headings. Same
-   var(--accent)/var(--accent-hover) pair throughout, so it always
-   tracks the palette above. All respect prefers-reduced-motion.
-   ================================================================ */
-
-/* Circuit-trace: a thin light pulse that travels the topbar's bottom
-   border, like current running through a PCB trace. */
 .topbar::after {
   content: '';
   position: absolute;
@@ -1098,19 +966,9 @@ a:focus-visible,
 }
 @keyframes circuit-trace { to { left: 130%; } }
 @media (prefers-reduced-motion: reduce) { .topbar::after { display: none; } }
-/* On narrow/mobile widths the topbar is much shorter, so the same 30%
-   segment reads as a barely-visible sliver — widen it and boost the
-   glow a bit so the trace stays legible on phones too. */
 @media (max-width: 480px) {
   .topbar::after { width: 45%; filter: drop-shadow(0 0 8px var(--accent)); }
 }
-
-/* Per-card HUD corner brackets — small sci-fi tick marks that sharpen
-   into view on hover, reinforcing the "circuit board" border language
-   borrowed from OmniPOS's Cyber Neon Pro (sharp corners, --dm-border). */
-/* Note: only .card gets this — .stat-card already owns ::before for its
-   top accent bar and ::after for the HUD lock-ring, so we don't want to
-   clash with either. */
 .card { position: relative; }
 .card::before {
   content: '';
@@ -1131,10 +989,6 @@ a:focus-visible,
   pointer-events: none;
 }
 .card:hover::before { opacity: .85; }
-
-/* Neon power-on flicker for the brand title + section headings — a
-   one-shot "tube warming up" flicker on load, echoing the boot
-   sequence's own power-up feel. */
 @media (prefers-reduced-motion: no-preference) {
   h1, .topbar-title {
     animation: neon-power-on 1.6s var(--ease) 1;
@@ -1150,31 +1004,22 @@ a:focus-visible,
   16%  { opacity: 1; text-shadow: 0 0 12px rgba(34,229,255,.35); }
   100% { opacity: 1; text-shadow: 0 0 12px rgba(34,229,255,.35); }
 }
-
-/* stat-card corner brackets need overflow visible for the hover glow
-   from .card::before to read correctly against the top accent bar. */
 .stat-card { isolation: isolate; }
-
 </style>
 </head>
 <body>
-
 <canvas id="matrixCanvas"></canvas>
-
 <div class="hud-corner tl"></div>
 <div class="hud-corner tr"></div>
 <div class="hud-corner bl"></div>
 <div class="hud-corner br"></div>
-
 <div id="bootOverlay">
   <canvas id="bootMatrixCanvas"></canvas>
   <img src="icons/icon-192.png" alt="" class="boot-logo">
   <div class="boot-line" id="bootLine">INITIALIZING RELAY UPLINK<span class="boot-cursor"></span></div>
   <div class="boot-bar"><div class="boot-bar-fill"></div></div>
 </div>
-
 <div id="toastHost"></div>
-
 <div id="loginScreen">
   <div class="brand-badge">
     <img src="icons/icon-192.png" alt="OmniPOS">
@@ -1189,7 +1034,6 @@ a:focus-visible,
     <div id="loginError" style="color:var(--red); font-size:12px; margin-top:8px;"></div>
   </div>
 </div>
-
 <div id="mainScreen" style="display:none;">
   <div class="topbar">
     <div class="topbar-brand">
@@ -1218,7 +1062,6 @@ a:focus-visible,
       </button>
     </div>
   </div>
-
   <div class="tab-nav">
     <button class="tab-btn active" data-tab="home" onclick="switchTab('home')">
       <span class="tab-icon">🏠</span><span>Home</span>
@@ -1236,12 +1079,9 @@ a:focus-visible,
       <span class="tab-icon">📊</span><span>Analytics</span>
     </button>
   </div>
-
   <div class="wrap">
-
     <div class="tab-panel" id="tabPanel-home">
       <div id="restrictionStatus" class="status-line"></div>
-
       <div class="stat-strip">
         <div class="stat-card">
           <div class="stat-num" id="statAllowed">—</div>
@@ -1268,29 +1108,24 @@ a:focus-visible,
           <div class="stat-label">⚠️ Not actually checked (no baseline)</div>
         </div>
       </div>
-
       <div class="card">
         <h2>🔑 Pending OTP requests <span class="count-pill" id="otpCountPill">0</span></h2>
         <div id="otpList" class="empty">Loading...</div>
       </div>
-
       <div class="card">
         <h2>🔐 Pending Admin Password Resets <span class="count-pill" id="adminResetCountPill">0</span></h2>
         <div id="adminResetList" class="empty">Loading...</div>
       </div>
-
       <div class="card">
         <h2>🧾 Pending Receipt Customization Resets <span class="count-pill" id="receiptResetCountPill">0</span></h2>
         <div id="receiptResetList" class="empty">Loading...</div>
       </div>
-
       <div class="card">
         <h2>Manually add a device</h2>
         <input type="text" id="manualIdInput" placeholder="Paste installation ID here">
         <button class="btn-primary" onclick="manualAllow()">+ Allow</button>
       </div>
     </div>
-
     <div class="tab-panel" id="tabPanel-devices" style="display:none;">
       <div class="card collapsible collapsed" id="cardAllowedDevices" data-card-id="allowedDevices">
         <h2 onclick="toggleCardCollapse('cardAllowedDevices')">Allowed devices <span class="count-pill" id="allowedCountPill">0</span><span class="collapse-chevron">▾</span></h2>
@@ -1308,7 +1143,6 @@ a:focus-visible,
           <div id="allowedList" class="empty">Loading...</div>
         </div>
       </div>
-
       <div class="card collapsible collapsed" id="cardRecentlySeen" data-card-id="recentlySeen">
         <h2 onclick="toggleCardCollapse('cardRecentlySeen')">Recently seen (everyone who requested) <span class="count-pill" id="seenCountPill">0</span><span class="collapse-chevron">▾</span></h2>
         <div class="collapse-body">
@@ -1333,7 +1167,6 @@ a:focus-visible,
         </div>
       </div>
     </div>
-
     <div class="tab-panel" id="tabPanel-downloads" style="display:none;">
       <div id="backupSyncBanner" class="sync-banner sync-orange">
         <div class="sync-dot-blink sync-orange" id="backupSyncDot"></div>
@@ -1342,7 +1175,6 @@ a:focus-visible,
           <div class="sync-banner-sub" id="backupSyncSub">Database → Download/RELAY_BACKUP</div>
         </div>
       </div>
-
       <div class="card collapsible collapsed" id="cardBackupRestore" data-card-id="backupRestore">
         <h2 onclick="toggleCardCollapse('cardBackupRestore')">💾 Backup / Restore<span class="collapse-chevron">▾</span></h2>
         <div class="collapse-body">
@@ -1364,7 +1196,6 @@ a:focus-visible,
           </div>
         </div>
       </div>
-
       <div class="card collapsible collapsed" id="cardPublishUpdate" data-card-id="publishUpdate">
         <h2 onclick="toggleCardCollapse('cardPublishUpdate')">🚀 Publish a New Update <span style="font-size:11px; color:var(--muted); font-weight:normal;">(build + publish in one click — no Termux/curl required)</span><span class="collapse-chevron">▾</span></h2>
         <div class="collapse-body">
@@ -1409,7 +1240,6 @@ a:focus-visible,
           </div>
         </div>
       </div>
-
       <div class="card collapsible collapsed" id="cardDownloadPackage" data-card-id="downloadPackage">
         <h2 onclick="toggleCardCollapse('cardDownloadPackage')">📦 Download Client Package <span style="font-size:11px; color:var(--muted); font-weight:normal;">(offline setup for a new client)</span><span class="collapse-chevron">▾</span></h2>
         <div class="collapse-body">
@@ -1449,7 +1279,6 @@ a:focus-visible,
           <div id="downloadCodesList" class="empty" style="margin-top:12px;">Loading...</div>
         </div>
       </div>
-
       <div class="card collapsible collapsed" id="cardBuildHistory" data-card-id="buildHistory">
         <h2 onclick="toggleCardCollapse('cardBuildHistory')">🕘 Build History<span class="collapse-chevron">▾</span></h2>
         <div class="collapse-body">
@@ -1463,13 +1292,11 @@ a:focus-visible,
         </div>
       </div>
     </div>
-
     <div class="footer-note">
       Automatically logs out after 20 minutes of inactivity. A countdown will appear at the top before logout.
     </div>
   </div>
 </div>
-
 <div id="deviceDetailScreen" style="display:none;">
   <div class="topbar">
     <div class="topbar-brand">
@@ -1492,7 +1319,6 @@ a:focus-visible,
       <div class="meta" style="margin-top:6px;" id="detailMeta">—</div>
       <div style="margin-top:10px;" id="detailAllowedBadgeWrap"></div>
     </div>
-
     <div class="stat-strip">
       <div class="stat-card">
         <div class="stat-num" id="detailUnlockedCount">—</div>
@@ -1507,7 +1333,6 @@ a:focus-visible,
         <div class="stat-label">Demo mode</div>
       </div>
     </div>
-
     <div class="card">
       <h2>🕘 Demo Mode <span style="font-size:11px; color:var(--muted); font-weight:normal;">(activates instantly — no OTP, no waiting for a request)</span></h2>
       <div class="demo-status-line" id="demoModeStatusLine">Loading...</div>
@@ -1516,7 +1341,6 @@ a:focus-visible,
         <button class="btn-deactivate" id="demoStopBtn" style="display:none; font-size:12px; padding:10px 12px;" onclick="stopDemoMode(currentDetailId)">⏹ Stop Now</button>
       </div>
     </div>
-
     <div class="card collapsible collapsed" id="cardCloudBackup" data-card-id="cloudBackup">
       <h2 onclick="toggleCardCollapse('cardCloudBackup')">☁️ Cloud Backup <span style="font-size:11px; color:var(--muted); font-weight:normal;">(this device's full database, excluding user accounts)</span><span class="collapse-chevron">▾</span></h2>
       <div class="collapse-body">
@@ -1537,14 +1361,12 @@ a:focus-visible,
         </div>
       </div>
     </div>
-
     <div class="card collapsible collapsed" id="cardUnlocked" data-card-id="unlocked">
       <h2 onclick="toggleCardCollapse('cardUnlocked')">✅ Unlocked<span class="collapse-chevron">▾</span></h2>
       <div class="collapse-body">
         <div id="detailUnlockedList" class="empty">Loading...</div>
       </div>
     </div>
-
     <div class="card collapsible collapsed" id="cardLocked" data-card-id="locked">
       <h2 onclick="toggleCardCollapse('cardLocked')">🔒 Still Locked <span style="font-size:11px; color:var(--muted); font-weight:normal;">(already have a reference? activate right away)</span><span class="collapse-chevron">▾</span></h2>
       <div class="collapse-body">
@@ -1552,7 +1374,6 @@ a:focus-visible,
         <div id="detailLockedList" class="empty">Loading...</div>
       </div>
     </div>
-
     <div class="card">
       <h2>🕘 History for this device</h2>
       <button class="btn-revoke" onclick="clearDeviceHistory()" id="clearDeviceHistoryBtn" style="margin-bottom:12px;">🗑️ Clear History for this device</button>
@@ -1560,7 +1381,6 @@ a:focus-visible,
     </div>
   </div>
 </div>
-
 <div id="analyticsScreen" style="display:none;">
   <div class="topbar">
     <div class="topbar-brand">
@@ -1604,41 +1424,32 @@ a:focus-visible,
         <div class="stat-label">Revenue (active)</div>
       </div>
     </div>
-
     <div class="card">
       <h2>📈 Activity</h2>
       <div class="meta" id="anaActivitySummary">Loading...</div>
     </div>
-
     <div class="card">
       <h2>⏳ Expiring Soon <span class="count-pill" id="anaExpiringPill">0</span></h2>
       <div class="backup-note">Licenses expiring within 7 days — a good reminder to follow up with the customer before they get locked out.</div>
       <div id="anaExpiringList" class="empty" style="margin-top:10px;">Loading...</div>
     </div>
-
     <div class="card">
       <h2>🏆 Top Features <span style="font-size:11px; color:var(--muted); font-weight:normal;">(active licenses, count + revenue)</span></h2>
       <div id="anaTopFeatures" class="empty">Loading...</div>
     </div>
-
     <div class="card">
       <h2>☁️ Cloud Backup Plan Popularity <span style="font-size:11px; color:var(--muted); font-weight:normal;">(Basic vs Standard vs Pro)</span></h2>
       <div id="anaCloudBackupTiers" class="empty">Loading...</div>
     </div>
-
     <div class="card">
       <h2>💰 All-time</h2>
       <div class="meta" id="anaAllTimeSummary">Loading...</div>
     </div>
   </div>
 </div>
-
 <div id="photoLightbox" onclick="this.style.display='none'">
   <img id="photoLightboxImg" src="" alt="Requestor photo">
 </div>
-
-<!-- SAFETY PROMPT: shown before any "big" action (Allow, Revoke, Approve/Run)
-     is executed, so an accidental click can't break anything. -->
 <div id="confirmBackdrop" class="modal-backdrop">
   <div class="modal-box">
     <h3 id="confirmTitle">Are you sure?</h3>
@@ -1649,10 +1460,6 @@ a:focus-visible,
     </div>
   </div>
 </div>
-
-<!-- FILE INTEGRITY DETAIL: a "git status"-style list of modified/deleted/added
-     files for a device, with a button to clear/acknowledge the flag once
-     the developer has reviewed it. -->
 <div id="integrityBackdrop" class="modal-backdrop">
   <div class="modal-box" style="max-width:640px; max-height:80vh; overflow-y:auto;">
     <h3>🛠️ Integrity check — <span id="integrityDeviceLabel"></span></h3>
@@ -1665,66 +1472,32 @@ a:focus-visible,
     </div>
   </div>
 </div>
-
 <script>
 let adminKey = sessionStorage.getItem('relayAdminKey') || '';
 let lastLoadedDevices = [];
-const selectedForReset = new Set(); // installationIds checked in the "Allowed devices" list
-
-// FIX: "kusang bumabalik sa taas" / auto-scroll-to-top bug — the periodic
-// background refreshers (loadDevices every 8s, loadDeviceDetail every 8s,
-// loadAnalytics every 15s) rebuild list containers via innerHTML, which
-// can change the page's total height for a moment (fewer/more rows,
-// images loading, etc). When that happens while the page is scrolled
-// down, the browser clamps the scroll position to the new (shorter)
-// height — which reads as "the page blinked and jumped to the top",
-// even though nothing was actually wrong with your scrolling. This
-// wrapper simply remembers where you were and puts you back after the
-// refresh finishes, so background polling no longer moves your scroll
-// position at all.
+const selectedForReset = new Set(); 
 function withScrollPreserved(fn) {
   return async function (...args) {
     const scrollY = window.scrollY;
     const result = await fn.apply(this, args);
-    // Restore after the browser has applied the DOM changes (next paint),
-    // not synchronously — otherwise we'd restore before the layout that
-    // caused the jump has actually happened.
     requestAnimationFrame(() => {
       if (Math.abs(window.scrollY - scrollY) > 0) window.scrollTo(0, scrollY);
     });
     return result;
   };
 }
-
 function escapeAttr(str) {
   return String(str).replace(/'/g, "\\'").replace(/"/g, '&quot;');
 }
-
-// ---------------- COLLAPSIBLE CARDS ----------------
-// Toggle-fold ng mga card na "Cloud Backup", "Allowed devices",
-// "Recently seen", "Unlocked", "Still Locked", at ang mga card sa
-// Downloads tab. NAKA-DEFAULT COLLAPSED lahat ng card na ito kada
-// mag-login (tingnan ang login()sa ibaba, kung saan ini-clear ang mga
-// stored na estado) — pero habang nakalogin/naka-open ang tab, inaalala
-// pa rin kung alin ang binuksan/isinara ng admin (sessionStorage — awtomatikong
-// nawawala pag nag-logout o nagsara ng tab), para hindi mawala ang
-// pagkakabukas nito habang nagpapalipat-lipat lang ng tab/screen.
 const COLLAPSE_STORAGE_PREFIX = 'relay-admin-collapsed:';
-
 function toggleCardCollapse(cardId) {
   const card = document.getElementById(cardId);
   if (!card) return;
   const collapsed = card.classList.toggle('collapsed');
   try {
     sessionStorage.setItem(COLLAPSE_STORAGE_PREFIX + (card.dataset.cardId || cardId), collapsed ? '1' : '0');
-  } catch (err) { /* sessionStorage unavailable — okay lang, hindi mahalaga sa functionality */ }
+  } catch (err) {   }
 }
-
-// Tinatawag ito tuwing ipinapakita ang isang screen na may collapsible
-// card (Home/Devices tab, Device Detail, Downloads tab) para ma-apply
-// ang naka-save nang estado ngayong session (kung meron) sa bawat card —
-// kung wala pang naka-toggle ngayong session (bagong login lang), COLLAPSED
-// ang default.
 function applyStoredCardCollapse(cardIds) {
   cardIds.forEach(cardId => {
     const card = document.getElementById(cardId);
@@ -1733,16 +1506,9 @@ function applyStoredCardCollapse(cardIds) {
       const stored = sessionStorage.getItem(COLLAPSE_STORAGE_PREFIX + (card.dataset.cardId || cardId));
       if (stored === '1') card.classList.add('collapsed');
       else if (stored === '0') card.classList.remove('collapsed');
-      // kung wala pang stored value, iwan na lang ang default (collapsed) na
-      // galing sa HTML markup mismo.
-    } catch (err) { /* sessionStorage unavailable — okay lang, default na lang (collapsed) */ }
+    } catch (err) {   }
   });
 }
-
-// Binubura ang lahat ng "binukas/isinara" na estado ng mga collapsible
-// card ngayong session — tinatawag sa TUWING matagumpay na mag-login,
-// para laging NAKA-DEFAULT COLLAPSED ang lahat ng card kada bagong
-// pag-login (hindi na basta "naaalala" mula sa dating session).
 function resetCollapsedCardsOnLogin() {
   try {
     const keysToRemove = [];
@@ -1751,16 +1517,13 @@ function resetCollapsedCardsOnLogin() {
       if (key && key.startsWith(COLLAPSE_STORAGE_PREFIX)) keysToRemove.push(key);
     }
     keysToRemove.forEach(key => sessionStorage.removeItem(key));
-  } catch (err) { /* sessionStorage unavailable — okay lang */ }
+  } catch (err) {   }
 }
-
-
 function onDeviceCheckboxChange(id, checked) {
   if (checked) selectedForReset.add(id);
   else selectedForReset.delete(id);
   updateBulkResetUI();
 }
-
 function toggleSelectAllDevices(checkAll) {
   document.querySelectorAll('.device-select-checkbox').forEach((cb) => {
     cb.checked = checkAll;
@@ -1770,7 +1533,6 @@ function toggleSelectAllDevices(checkAll) {
   });
   updateBulkResetUI();
 }
-
 function updateBulkResetUI() {
   const count = selectedForReset.size;
   document.getElementById('selectedCountLabel').innerText = `${count} napili`;
@@ -1779,7 +1541,6 @@ function updateBulkResetUI() {
   const selectAllCb = document.getElementById('selectAllDevicesCheckbox');
   if (selectAllCb) selectAllCb.checked = allCbs.length > 0 && count === allCbs.length;
 }
-
 async function bulkResetSelected() {
   const ids = [...selectedForReset];
   if (ids.length === 0) return;
@@ -1794,14 +1555,12 @@ async function bulkResetSelected() {
     const res = await api('/relay/admin/api/devices/bulk-reset', { method: 'POST', body: JSON.stringify({ installationIds: ids }) });
     if (res.success) toast(`Reset ${res.resetCount} device(s).`, 'success');
     selectedForReset.clear();
-  } catch (err) { /* handled */ }
+  } catch (err) {   }
   loadDevices();
 }
 let pollTimer = null;
 let lastActivityAt = Date.now();
-const IDLE_LOGOUT_MS = 20 * 60 * 1000; // 20 minuto — auto-logout kapag tahimik masyado
-
-// ---------------- TOASTS ----------------
+const IDLE_LOGOUT_MS = 20 * 60 * 1000; 
 function toast(message, type = 'info') {
   const host = document.getElementById('toastHost');
   const el = document.createElement('div');
@@ -1814,21 +1573,16 @@ function toast(message, type = 'info') {
     setTimeout(() => el.remove(), 250);
   }, 3200);
 }
-
-// ---------------- SAFETY-PROMPT CONFIRM MODAL ----------------
 function confirmAction({ title, message, confirmLabel = 'Yes, continue', danger = false }) {
   return new Promise((resolve) => {
     const backdrop = document.getElementById('confirmBackdrop');
     const okBtn = document.getElementById('confirmActionBtn');
     const cancelBtn = document.getElementById('confirmCancelBtn');
-
     document.getElementById('confirmTitle').innerText = title;
     document.getElementById('confirmMessage').innerText = message;
     okBtn.innerText = confirmLabel;
     okBtn.className = danger ? 'btn-revoke' : 'btn-allow';
-
     backdrop.style.display = 'flex';
-
     function cleanup(result) {
       backdrop.style.display = 'none';
       okBtn.onclick = null;
@@ -1844,8 +1598,6 @@ document.getElementById('confirmBackdrop').addEventListener('click', (e) => {
     e.currentTarget.style.display = 'none';
   }
 });
-
-// ---------------- TAB NAVIGATION (Home / Devices / Downloads) ----------------
 function switchTab(name) {
   ['home', 'devices', 'downloads'].forEach(t => {
     const panel = document.getElementById('tabPanel-' + t);
@@ -1858,39 +1610,25 @@ function switchTab(name) {
     applyStoredCardCollapse(['cardBackupRestore', 'cardPublishUpdate', 'cardDownloadPackage', 'cardBuildHistory']);
   }
 }
-
-// Rolls the count of "needs attention" items (pending OTP, clone flagged,
-// backup not yet synced) into a badge/dot on each tab, so even if
-// the admin is on a different tab, they know right away where they need
-// to look, without having to click through each tab.
 function updateTabBadges() {
   const pending = parseInt(document.getElementById('otpCountPill').innerText, 10) || 0;
   const homeBadge = document.getElementById('tabBadgeHome');
   homeBadge.innerText = pending;
   homeBadge.style.display = pending > 0 ? 'flex' : 'none';
-
   const flagged = parseInt(document.getElementById('statCloneFlagged').innerText, 10) || 0;
   const devicesBadge = document.getElementById('tabBadgeDevices');
   devicesBadge.innerText = flagged;
   devicesBadge.style.display = flagged > 0 ? 'flex' : 'none';
-
   const syncBanner = document.getElementById('backupSyncBanner');
   const needsBackupAttention = syncBanner && syncBanner.classList.contains('sync-orange');
   document.getElementById('tabDotDownloads').style.display = needsBackupAttention ? 'block' : 'none';
 }
-
-// ---------------- MOBILE SWIPE (left/right) PARA MAGPALIT NG TAB ----------------
-// Only Home ↔ Devices ↔ Downloads are included (not Analytics, since it's a separate
-// it's a separate full screen, not part of the tab-nav cycle). Only works
-// only while mainScreen is open (not inside Device Detail / Analytics).
 (function () {
   const SWIPE_TAB_ORDER = ['home', 'devices', 'downloads'];
-  const SWIPE_MIN_DIST = 55;      // minimum distance (px) to be considered a swipe
-  const SWIPE_MAX_OFF_AXIS = 70;  // how vertical it can be before it's treated as a scroll, not a swipe
-  const SWIPE_MAX_TIME = 600;     // ms — if it takes longer than this, it's no longer treated as a swipe
-
+  const SWIPE_MIN_DIST = 55;      
+  const SWIPE_MAX_OFF_AXIS = 70;  
+  const SWIPE_MAX_TIME = 600;     
   let touchStartX = 0, touchStartY = 0, touchStartTime = 0;
-
   document.addEventListener('touchstart', (e) => {
     if (document.getElementById('mainScreen').style.display === 'none') return;
     if (e.touches.length !== 1) return;
@@ -1898,52 +1636,41 @@ function updateTabBadges() {
     touchStartY = e.touches[0].clientY;
     touchStartTime = Date.now();
   }, { passive: true });
-
   document.addEventListener('touchend', (e) => {
     if (!touchStartTime) return;
     if (document.getElementById('mainScreen').style.display === 'none') { touchStartTime = 0; return; }
-
     const touch = e.changedTouches[0];
     const dx = touch.clientX - touchStartX;
     const dy = touch.clientY - touchStartY;
     const dt = Date.now() - touchStartTime;
     touchStartTime = 0;
-
     if (dt > SWIPE_MAX_TIME) return;
     if (Math.abs(dx) < SWIPE_MIN_DIST) return;
     if (Math.abs(dy) > SWIPE_MAX_OFF_AXIS) return;
-
     const activeBtn = document.querySelector('.tab-btn.active[data-tab]');
     const current = activeBtn ? activeBtn.getAttribute('data-tab') : 'home';
     const idx = SWIPE_TAB_ORDER.indexOf(current);
     if (idx === -1) return;
-
     if (dx < 0 && idx < SWIPE_TAB_ORDER.length - 1) {
-      switchTab(SWIPE_TAB_ORDER[idx + 1]); // swipe left → next tab
+      switchTab(SWIPE_TAB_ORDER[idx + 1]); 
     } else if (dx > 0 && idx > 0) {
-      switchTab(SWIPE_TAB_ORDER[idx - 1]); // swipe right → nakaraang tab
+      switchTab(SWIPE_TAB_ORDER[idx - 1]); 
     }
   }, { passive: true });
 })();
-
-// ---------------- SESSION / IDLE HANDLING ----------------
-const IDLE_WARNING_MS = 2 * 60 * 1000; // show the countdown 2 minutes before logout
-const IDLE_DANGER_MS = 30 * 1000; // turn the countdown red in the last 30 seconds
-
+const IDLE_WARNING_MS = 2 * 60 * 1000; 
+const IDLE_DANGER_MS = 30 * 1000; 
 ['click', 'keydown', 'touchstart'].forEach(evt =>
   document.addEventListener(evt, () => { lastActivityAt = Date.now(); })
 );
-
 function updateIdleCountdown() {
   const pill = document.getElementById('idleCountdownPill');
   if (!adminKey) { pill.style.display = 'none'; return; }
-
   const remaining = IDLE_LOGOUT_MS - (Date.now() - lastActivityAt);
   if (remaining > IDLE_WARNING_MS) {
     pill.style.display = 'none';
     return;
   }
-
   const clamped = Math.max(0, remaining);
   const mins = Math.floor(clamped / 60000);
   const secs = Math.floor((clamped % 60000) / 1000);
@@ -1951,7 +1678,6 @@ function updateIdleCountdown() {
   pill.classList.toggle('idle-countdown-danger', clamped <= IDLE_DANGER_MS);
   pill.style.display = 'inline-flex';
 }
-
 setInterval(() => {
   if (adminKey && Date.now() - lastActivityAt > IDLE_LOGOUT_MS) {
     logout('You were logged out after 20 minutes of inactivity.');
@@ -1959,7 +1685,6 @@ setInterval(() => {
   }
   updateIdleCountdown();
 }, 1000);
-
 function login() {
   adminKey = document.getElementById('adminKeyInput').value.trim();
   if (!adminKey) return;
@@ -1970,7 +1695,6 @@ function login() {
   renderAutoBackupToggle();
   startPolling();
 }
-
 function logout(message) {
   sessionStorage.removeItem('relayAdminKey');
   adminKey = '';
@@ -1982,25 +1706,7 @@ function logout(message) {
   document.getElementById('idleCountdownPill').style.display = 'none';
   if (message) toast(message, 'info');
 }
-
 async function api(path, opts = {}) {
-  // BUG FIX (progress bar "0% -> 100% bigla" sa mabagal na internet):
-  // dating walang timeout ang fetch() dito, kaya sa mabagal/hindi
-  // matatag na koneksyon, ang isang poll request papuntang
-  // /relay/admin/api/build-progress ay pwedeng "sumabit"/tumagal nang
-  // ilang segundo (o higit pa) bago ma-resolve — sa panahong iyon,
-  // walang bagong "target" percent na dumarating sa progress-bar
-  // controller, kaya nakatigil lang ito sa lumang halaga. Kung
-  // matapos na ang build habang naka-sabit pa ang naturang request,
-  // pagbalik ng response nito ay maaaring "done: true" na agad — at
-  // dahil isang malaking tumbong ang narating (hal. mula 5% papuntang
-  // 100%), parang "bigla na lang nag-100%" ang itsura kahit tama
-  // naman talaga ang datos. Fix: bigyan ng sariling maikling timeout
-  // (opts.timeoutMs, default null = walang timeout/dating gawi
-  // maliban dito) ang bawat poll — kapag na-timeout, itinuturing na
-  // lang itong isang normal na "failed poll" (parehong pattern ng
-  // catch block sa pollOnce), susubukan ulit sa susunod na tick, sa
-  // halip na hintaying kumapit ito sa buong network delay.
   const controller = opts.timeoutMs ? new AbortController() : null;
   const timer = controller ? setTimeout(() => controller.abort(), opts.timeoutMs) : null;
   let res;
@@ -2028,17 +1734,6 @@ async function api(path, opts = {}) {
   }
   return res.json();
 }
-
-// --------------------------------------------------------------
-// BACKUP / RESTORE — manually downloading the full dataset
-// (allowed devices, unlocked features, history) as a single
-// .json file, and restoring from it. This is needed because there is no
-// persistent disk on the Render free tier — data is lost on every
-// redeploy, and ALL of it is lost if the service/domain is deleted.
-// `relayLastBackupAt` in localStorage (not sessionStorage — it should
-// not be lost when the tab/browser is closed) is only a reminder
-// of when the last download happened; it holds no sensitive data.
-// --------------------------------------------------------------
 function renderLastExportNote() {
   const el = document.getElementById('backupLastExport');
   if (!el) return;
@@ -2047,24 +1742,12 @@ function renderLastExportNote() {
     ? `Last downloaded: ${timeAgo(parseInt(last, 10))}`
     : 'You have not downloaded a backup yet.';
 }
-
-// `auto` = true when this was called automatically (e.g. after allowing
-// a device) instead of a manual click on the "Download Backup"
-// button. The content/endpoint are the same, but the filename differs:
-//   - MANUAL: relay-backup-2026-07-27.json (date only, YYYY-MM-DD).
-//   - AUTO:   relaybackup + MMDDHHmm (2-digit month, day, 24h hour,
-//     minute — the browser's LOCAL time, not UTC), e.g.
-//     relaybackup07260130.json = July 26, 1:30 AM. This is stamped
-//     on every auto-download (not a fixed/"latest" filename) so it's
-//     clear exactly WHEN each one was made, and so they also don't
-//     overwrite each other if they're a minute or more apart.
 function autoBackupFilename() {
   const now = new Date();
   const pad2 = (n) => String(n).padStart(2, '0');
   const stamp = `${pad2(now.getMonth() + 1)}${pad2(now.getDate())}${pad2(now.getHours())}${pad2(now.getMinutes())}`;
   return `relaybackup${stamp}.json`;
 }
-
 async function downloadBackup(auto = false) {
   let data;
   try {
@@ -2074,7 +1757,6 @@ async function downloadBackup(auto = false) {
     if (!auto) toast(data.message || 'Could not generate the backup.', 'error');
     return;
   }
-
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const dateStr = new Date().toISOString().slice(0, 10);
@@ -2085,7 +1767,6 @@ async function downloadBackup(auto = false) {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
-
   localStorage.setItem('relayLastBackupAt', String(Date.now()));
   renderLastExportNote();
   toast(
@@ -2095,97 +1776,21 @@ async function downloadBackup(auto = false) {
     'success'
   );
 }
-
-// --------------------------------------------------------------
-// DOWNLOAD CODES — offline client package distribution.
-// "Build Release" = git-clone the OMNIPOS repo on the RELAY server itself
-// (Render), clean it, zip it → release/omnipos-client.zip. This is only done
-// when there is a code update (not for every new customer).
-// "Create Download Link" = a one-time/limited-use code that
-// you send to a NEW client — they just visit the link to
-// download the zip.
-// --------------------------------------------------------------
 let lastLoadedDownloadCodes = [];
-
-// --------------------------------------------------------------
-// createProgressController(ids) — a hand-built progress-bar controller
-// that "smooths" the % climbing on screen, because the real
-// progress mula sa RELAY (GET /relay/admin/api/build-progress) ay
-// progress JUMPS in big steps on each 700ms poll — for example
-// from 10% (the "clone" step is done) straight to 32.5% (the "filter"
-// step is done too, since it is almost instant) — so if
-// each poll result were put directly into fill.style.width,
-// the number on screen would look like it "jumps"/has gaps instead of
-// dahan-dahang bumibilang.
-//
-// The fix: a separate "target" (from the real poll) and
-// "displayed" (what is actually seen on screen) percent. There is
-// its own faster tick loop (every 120ms) that gradually
-// increments displayed by +1 repeatedly toward the target
-// — so even if the real progress jumps a lot between
-// two polls, the UI keeps counting smoothly by 1% on every
-// tick, with NO gaps, until it reaches the real value — and once
-// the real build is "done" (100% or error), it snaps here immediately
-// instead of waiting for the animation to catch up step by step.
-// --------------------------------------------------------------
 function createProgressController(ids) {
   const wrap = document.getElementById(ids.wrap);
   const fill = document.getElementById(ids.fill);
   const label = document.getElementById(ids.label);
   const percentEl = document.getElementById(ids.percent);
   const etaEl = ids.eta ? document.getElementById(ids.eta) : null;
-
   let pollInterval = null;
   let animInterval = null;
   let displayed = 0;
   let target = { percent: 0, message: '', stage: 'idle', done: false, etaMs: null };
-  // ROOT CAUSE FIX (live progress "hindi gumagana"/namamatay agad):
-  // startPolling() ay tinatawag BAGO pa man maipadala ang aktwal na
-  // build/publish request (tingnan ang buildRelease()/publishRelease()) —
-  // kaya ang UNANG poll papuntang /relay/admin/api/build-progress ay
-  // madalas na UMAABOT sa server BAGO pa dumating doon ang totoong POST
-  // build-release/publish-release request (dalawang magkahiwalay ngunit
-  // halos magkasabay na fetch() mula sa parehong JS tick — walang
-  // garantiya kung alin ang mauunang ma-proseso ng server). Kapag
-  // nangyari ito, ang nakikita ng unang (o unang ilang) poll ay ang
-  // LUMANG buildProgressState — na "done: true" (idle state ng server,
-  // o natapos na ang isang NAKARAANG build) — kaya AGAD na tinatawag
-  // ang stopPolling() bago pa man magsimula ang totoong build,
-  // kahit hindi pa talaga ito nagsisimula/tapos. Ito ang dahilan kaya
-  // parang "namamatay"/hindi gumagalaw ang progress bar.
-  // FIX: huwag munang paniwalaan/i-apply ang isang "done: true" na
-  // resulta hangga't hindi pa nakikita ang build bilang AKTIBO
-  // (ibig sabihin, isang "done: false" na resulta muna mula sa
-  // TALAGANG tumatakbo nang build na ito) — ligtas na ipagpalagay na
-  // stale/luma pa lang ito, kaya patuloy lang mag-poll sa halip na
-  // itigil agad.
   let sawActive = false;
-  // Sariling "local clock" para sa ETA countdown — hindi na kailangang
-  // hintayin ang susunod na 700ms poll para bumaba nang isang segundo ang
-  // ipinapakitang "time remaining"; kada tick (120ms), bumababa ito nang
-  // katumbas na oras.
-  // BUG FIX ("minute:second na parang naglo-loop/umuulit" habang
-  // nag-oobfuscate): dati, kada dumarating ang bagong poll (700ms),
-  // DIRETSONG pinapalitan/ni-reresync ang `etaMsLocal` sa bagong raw na
-  // estimate mula sa server (walang smoothing) — tingnan ang
-  // estimateRemainingMs() sa server: iba't ibang oras ang inaabot ng
-  // pag-obfuscate ng bawat file (malaki vs. maliit na file), kaya
-  // lumulundag-lundag/hindi pantay ang bawat bagong estimate. Dahil
-  // basta pinapalitan agad ang buong displayed countdown sa bawat
-  // 700ms, ang itsura sa admin ay parang "tumatalbog"/umuulit ang
-  // minute:second (hal. 1m52s → 10s → 1m40s...) sa halip na tuluy-
-  // tuloy na bumababa. FIX: hiwalayin ang "raw target mula sa server"
-  // (etaTargetMs) sa "displayed na oras" (etaMsLocal) — patuloy pa ring
-  // bumababa ang displayed kada tick gaya ng dati, pero sa halip na
-  // basta i-snap papunta sa bagong etaTargetMs sa tuwing may bagong
-  // poll, dahan-dahan lang itong ihinahatak papunta doon (10% ng
-  // agwat kada tick) — kaya kahit lumundag ang totoong estimate,
-  // tuluy-tuloy pa ring bumababa ang nakikita ng admin, walang
-  // biglaang "pag-loop"/pagtalbog pabalik-balik.
   let etaTargetMs = null;
   let etaMsLocal = null;
   let etaLastTickAt = null;
-
   function formatEta(ms) {
     if (ms == null || ms <= 0) return '';
     const totalSec = Math.round(ms / 1000);
@@ -2194,12 +1799,10 @@ function createProgressController(ids) {
     const sec = totalSec % 60;
     return `~${min}m ${sec}s natitira`;
   }
-
   function renderPercent(p) {
     if (fill) fill.style.width = p + '%';
     if (percentEl) percentEl.innerText = p + '%';
   }
-
   function applyTarget(progress) {
     target = progress || target;
     if (label) label.innerText = target.message || 'Building...';
@@ -2210,9 +1813,6 @@ function createProgressController(ids) {
     }
     if (typeof target.etaMs === 'number') {
       etaTargetMs = target.etaMs;
-      // Kung wala pang displayed value (unang estimate ng build na ito),
-      // simulan dito nang direkta — walang dating countdown na dapat
-      // i-preserve pa.
       if (etaMsLocal == null) {
         etaMsLocal = etaTargetMs;
         etaLastTickAt = Date.now();
@@ -2220,50 +1820,22 @@ function createProgressController(ids) {
     }
     if (target.done && etaEl) etaEl.innerText = '';
   }
-
   function tick() {
     const targetPct = Math.max(0, Math.min(100, Math.round(target.percent || 0)));
     if (displayed > targetPct) {
-      // the target dropped (e.g. a new build/reset) — this is not a
-      // "climbing forward" case, snap immediately.
       displayed = targetPct;
     } else if (displayed < targetPct) {
-      // BUG FIX (progress bar "0% -> 100% bigla" sa mabagal na
-      // internet): dati, `target.done` ay basta nagpapa-snap agad ng
-      // `displayed` diretso sa targetPct, kahit malayo pa ito (hal.
-      // 5%) — nangyayari ito kapag ang mga poll papuntang
-      // /relay/admin/api/build-progress ay hindi nakakarating nang
-      // maayos/sa oras dahil sa mabagal/hindi matatag na koneksyon ng
-      // ADMIN, kaya walang nakikitang paunti-unting pag-akyat ang
-      // display — bigla na lang itong "100%" pagdating ng huling
-      // "done" na resulta. Fix: kahit tapos na ang totoong build,
-      // hayaang mag-"mabilis na catch-up climb" pa rin ang display sa
-      // halip na instant teleport — laging umaakyat nang tuluy-tuloy
-      // (kahit malaki ang agwat, tinatapos lang ito sa ~10 tick /
-      // ~1.2s sa halip na isang segundong jump), para laging
-      // "bumibilang" ang itsura nito imbes na biglang lumundag.
       const gap = targetPct - displayed;
       const step = target.done ? Math.max(1, Math.ceil(gap / 10)) : 1;
       displayed = Math.min(targetPct, displayed + step);
     }
     renderPercent(displayed);
-
     if (etaEl && !target.done) {
       if (etaMsLocal != null && etaLastTickAt != null) {
         const now = Date.now();
         const elapsedTick = now - etaLastTickAt;
         etaLastTickAt = now;
-        // Bumababa muna nang normal ayon sa totoong lumipas na oras
-        // (parang normal na countdown clock).
         etaMsLocal = Math.max(0, etaMsLocal - elapsedTick);
-        // Pagkatapos, dahan-dahan lang ihatak papunta sa pinakabagong
-        // totoong estimate ng server (etaTargetMs) — 10% ng natitirang
-        // agwat kada tick (120ms) — sa halip na basta i-snap papunta
-        // dito. Kaya kahit lumundag ang totoong estimate mula file
-        // patungo sa file (malaki vs. maliit), hindi ito biglang
-        // "tumatalbog"/naglo-loop sa mata ng admin — tuluy-tuloy pa
-        // ring bumababa, unti-unti na lang itong nahihila papunta sa
-        // tamang halaga sa paglipas ng ilang segundo.
         if (etaTargetMs != null) {
           const gap = etaTargetMs - etaMsLocal;
           etaMsLocal = Math.max(0, etaMsLocal + gap * 0.1);
@@ -2274,7 +1846,6 @@ function createProgressController(ids) {
       }
     }
   }
-
   function startAnim() {
     stopAnim();
     animInterval = setInterval(tick, 120);
@@ -2282,20 +1853,6 @@ function createProgressController(ids) {
   function stopAnim() {
     if (animInterval) { clearInterval(animInterval); animInterval = null; }
   }
-
-  // BUG FIX (biglang "nag-a-auto-scroll/parang nag-reload" ang page):
-  // buildProgressWrap/publishProgressWrap ay NASA normal na document
-  // flow (hindi position:fixed) — kaya tuwing show() (display:none ->
-  // block) o hide() (block -> none), biglang tumataas o bumababa ang
-  // KABUUANG height ng page. Kung naka-scroll pababa ang admin habang
-  // tumatakbo ang build/publish sa background (hal. tumitingin sa
-  // devices list), ang biglaang pagbabago ng height sa itaas ay
-  // nagdudulot ng biglaang paglundag ng scroll position — nakaka-
-  // distract, parang may auto-reload/refresh na nangyari kahit wala
-  // naman talagang binago ang laman ng ibang parte ng screen. Ayos:
-  // kunin ang scroll position BAGO baguhin ang display, at ibalik ito
-  // pagkatapos (sa susunod na paint, kagaya ng withScrollPreserved),
-  // para tuluyang "silent" ang buong transition sa mata ng admin.
   function withScrollHold(fn) {
     const scrollY = window.scrollY;
     fn();
@@ -2305,7 +1862,6 @@ function createProgressController(ids) {
       });
     });
   }
-
   function show() {
     withScrollHold(() => { if (wrap) wrap.style.display = 'block'; });
     displayed = 0;
@@ -2318,42 +1874,17 @@ function createProgressController(ids) {
     applyTarget({ percent: 0, message: 'Starting the build...', stage: 'idle', done: false, etaMs: null });
     startAnim();
   }
-
   function hide(delayMs) {
     if (!wrap) return;
     setTimeout(() => { withScrollHold(() => { wrap.style.display = 'none'; }); }, delayMs == null ? 1200 : delayMs);
   }
-
   function setTarget(progress) {
     applyTarget(progress);
   }
-
-  // Polls GET /relay/admin/api/build-progress periodically
-  // (700ms) while the build button is disabled — this is fast
-  // (reads an in-memory object on RELAY, no disk/DB access),
-  // so it doesn't slow down the actual build or other admin
-  // requests. Polling automatically stops once the progress is "done"
-  // (whether finished or errored) — the animation tick loop is
-  // responsible for finishing the climb to the final value.
   async function pollOnce() {
     try {
-      // BUG FIX: 5s timeout dito (tingnan ang komento sa api() at sa
-      // tick() para sa buong konteksto) — sa halip na hayaang sumabit
-      // nang matagal ang isang mabagal na poll bago pa lang natin ito
-      // matawag na "failed" at masubukang muli.
       const data = await api('/relay/admin/api/build-progress', { timeoutMs: 5000 });
       if (data && data.success && data.progress) {
-        // ROOT CAUSE FIX (tingnan ang malaking komento sa `sawActive`
-        // sa itaas): kung "done: true" pa ang nakikita natin dito
-        // pero hindi pa natin ito nakikitang "active" (hindi pa
-        // natin nakikita bilang done:false na galing mismo sa
-        // build na ito), ipagpalagay na LUMANG state pa lang ito
-        // (stale mula sa nakaraang build, o idle state ng server) —
-        // huwag itong i-apply sa progress bar (para hindi
-        // magpakita ng maling "Build finished."/"error" mula sa
-        // dati) at HUWAG munang itigil ang polling; hintayin na
-        // lang ang susunod na tick (700ms) hanggang aktwal na
-        // maproseso ng server ang totoong build/publish request.
         if (data.progress.done && !sawActive) {
           return;
         }
@@ -2362,11 +1893,8 @@ function createProgressController(ids) {
         if (data.progress.done) stopPolling();
       }
     } catch (err) {
-      // don't let one failed poll stop the whole build —
-      // it will just retry on the next tick (700ms later)
     }
   }
-
   function startPolling() {
     stopPolling();
     sawActive = false;
@@ -2376,18 +1904,12 @@ function createProgressController(ids) {
   function stopPolling() {
     if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
   }
-
   function stop() {
     stopPolling();
-    // give the animator ~2s more to reach/catch up to the final
-    // real value (e.g. 100%) before it fully stops outside,
-    // instead of the bar suddenly freezing mid-climb.
     setTimeout(stopAnim, 2000);
   }
-
   return { show, hide, setTarget, startPolling, stop };
 }
-
 const buildProgressCtl = createProgressController({
   wrap: 'buildProgressWrap', fill: 'buildProgressFill',
   label: 'buildProgressLabel', percent: 'buildProgressPercent', eta: 'buildProgressEta'
@@ -2396,15 +1918,11 @@ const publishProgressCtl = createProgressController({
   wrap: 'publishProgressWrap', fill: 'publishProgressFill',
   label: 'publishProgressLabel', percent: 'publishProgressPercent', eta: 'publishProgressEta'
 });
-
 async function buildRelease() {
   const btn = document.getElementById('buildReleaseBtn');
   const captionInput = document.getElementById('buildCaption');
   const caption = captionInput ? captionInput.value.trim() : '';
   const obfuscateCheckbox = document.getElementById('buildObfuscateCheckbox');
-  // Default TRUE kung nawawala ang checkbox sa DOM sa anumang dahilan —
-  // ito rin ang default ng backend kapag walang natanggap na "obfuscate"
-  // field, kaya walang pagbabago sa dating behavior.
   const obfuscate = obfuscateCheckbox ? !!obfuscateCheckbox.checked : true;
   btn.disabled = true;
   btn.innerText = '⏳ Ginagawa...';
@@ -2428,7 +1946,6 @@ async function buildRelease() {
       toast(data.message || 'The release could not be built.', 'error');
     }
   } catch (err) {
-    // api() already shows the toast for 403/429; other errors here
   } finally {
     buildProgressCtl.stop();
     buildProgressCtl.hide();
@@ -2436,18 +1953,6 @@ async function buildRelease() {
     btn.innerText = '🛠️ Build Release (git → zip)';
   }
 }
-
-// --------------------------------------------------------------
-// PUBLISH RELEASE — the "one click" version: build-release + publish
-// -version sa IISANG tawag papunta sa '/relay/admin/api/system
-// /publish-release'. Uses the same build-progress polling
-// (only one build ever runs on RELAY at a time)
-// but has separate progress-bar elements here (publishProgress*) — so it
-// uses its own `publishProgressCtl` instance (see
-// createProgressController above), so it does not conflict with
-// the "Build Release" card.
-// --------------------------------------------------------------
-
 async function publishRelease() {
   const btn = document.getElementById('publishReleaseBtn');
   const versionInput = document.getElementById('publishVersionInput');
@@ -2457,25 +1962,14 @@ async function publishRelease() {
   const refInput = document.getElementById('publishRefInput');
   const targetIdInput = document.getElementById('publishTargetIdInput');
   const obfuscateCheckbox = document.getElementById('publishObfuscateCheckbox');
-
   const version = versionInput ? versionInput.value.trim() : '';
   if (!version) {
     toast('A version is required (e.g. "1.0.43").', 'error');
     return;
   }
-
-  // Default TRUE kung nawawala ang checkbox sa DOM sa anumang dahilan —
-  // ito rin ang default ng backend kapag walang natanggap na "obfuscate"
-  // field, kaya walang pagbabago sa dating behavior.
   const obfuscate = obfuscateCheckbox ? !!obfuscateCheckbox.checked : true;
   const body = { version, obfuscate };
   const changelog = changelogInput ? changelogInput.value.trim() : '';
-  // FIX: the caption used to be missing from the body here — so it was always
-  // "(no caption)" in the History log whenever "Build & Publish" (one
-  // click) was used instead of the separate "Build Release"
-  // button (which has its own caption input and sends it). The
-  // backend (performBuildRelease) already accepts
-  // reqBody.caption — the frontend just wasn't sending it before.
   const caption = captionInput ? captionInput.value.trim() : '';
   const repoUrl = repoUrlInput ? repoUrlInput.value.trim() : '';
   const ref = refInput ? refInput.value.trim() : '';
@@ -2485,7 +1979,6 @@ async function publishRelease() {
   if (repoUrl) body.repoUrl = repoUrl;
   if (ref) body.ref = ref;
   if (targetId) body.installationId = targetId;
-
   btn.disabled = true;
   btn.innerText = '⏳ Ginagawa...';
   publishProgressCtl.show();
@@ -2513,7 +2006,6 @@ async function publishRelease() {
       toast(data.message || 'The release could not be published.', 'error');
     }
   } catch (err) {
-    // api() already shows the toast for 403/429; other errors here
   } finally {
     publishProgressCtl.stop();
     publishProgressCtl.hide();
@@ -2521,17 +2013,11 @@ async function publishRelease() {
     btn.innerText = '🚀 I-build at I-publish';
   }
 }
-
-// --------------------------------------------------------------
-// BUILD HISTORY — just a log of recorded "Build Release" runs.
-// Newest entry first (the server does the ordering).
-// --------------------------------------------------------------
 function formatBuildTimestamp(ms) {
   if (!ms) return '—';
   const d = new Date(ms);
   return d.toLocaleString('en-PH', { dateStyle: 'medium', timeStyle: 'short' });
 }
-
 async function loadBuildHistory() {
   const container = document.getElementById('buildHistoryList');
   if (!container) return;
@@ -2558,13 +2044,6 @@ async function loadBuildHistory() {
     container.innerText = 'Could not load the build history.';
   }
 }
-
-// Clears the ENTIRE build history log (caption/version/date per entry).
-// This is just a LOG — it has no effect on the actual omnipos-client.zip package
-// or on published versions/targeted releases, so it is safe to
-// clear at any time. There is a safety prompt first (the same modal
-// used for Revoke/Approve) before it is actually deleted, since it can no
-// this can be undone afterward.
 async function clearBuildHistory() {
   const ok = await confirmAction({
     title: 'Clear Build History?',
@@ -2573,7 +2052,6 @@ async function clearBuildHistory() {
     danger: true
   });
   if (!ok) return;
-
   const btn = document.getElementById('clearBuildHistoryBtn');
   if (btn) { btn.disabled = true; btn.innerText = '⏳ Kina-clear...'; }
   try {
@@ -2585,22 +2063,18 @@ async function clearBuildHistory() {
       toast(data.message || 'Could not clear the build history.', 'error');
     }
   } catch (err) {
-    // api() already shows the toast for 403/429; other errors here
   } finally {
     if (btn) { btn.disabled = false; btn.innerText = '🗑️ Clear History'; }
   }
 }
-
 async function generateDownloadCode() {
   const label = document.getElementById('newCodeLabel').value.trim();
   const maxUsesRaw = document.getElementById('newCodeMaxUses').value.trim();
   const expiresRaw = document.getElementById('newCodeExpiresHours').value.trim();
-
   const body = {};
   if (label) body.label = label;
   if (maxUsesRaw) body.maxUses = parseInt(maxUsesRaw, 10);
   if (expiresRaw) body.expiresInHours = parseInt(expiresRaw, 10);
-
   let data;
   try {
     data = await api('/relay/admin/api/download-codes/generate', {
@@ -2608,21 +2082,17 @@ async function generateDownloadCode() {
       body: JSON.stringify(body)
     });
   } catch (err) { return; }
-
   if (!data.success) {
     toast(data.message || 'Could not create the download code.', 'error');
     return;
   }
-
   document.getElementById('newCodeLabel').value = '';
   document.getElementById('newCodeMaxUses').value = '';
   document.getElementById('newCodeExpiresHours').value = '';
-
   await navigator.clipboard.writeText(data.downloadUrl).catch(() => {});
   toast('✅ Link created and copied to clipboard: ' + data.downloadUrl, 'success');
   loadDownloadCodes();
 }
-
 async function loadDownloadCodes() {
   let data;
   try {
@@ -2632,7 +2102,6 @@ async function loadDownloadCodes() {
   lastLoadedDownloadCodes = data.codes || [];
   renderDownloadCodesList();
 }
-
 function renderDownloadCodesList() {
   const el = document.getElementById('downloadCodesList');
   if (lastLoadedDownloadCodes.length === 0) {
@@ -2663,7 +2132,6 @@ function renderDownloadCodesList() {
     </div>`;
   }).join('');
 }
-
 async function revokeDownloadCode(code, label) {
   const ok = await confirmAction({
     title: 'Revoke this download link?',
@@ -2677,7 +2145,6 @@ async function revokeDownloadCode(code, label) {
   toast('Download link revoked.', 'success');
   loadDownloadCodes();
 }
-
 function downloadCodesJSON() {
   const blob = new Blob([JSON.stringify(lastLoadedDownloadCodes, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
@@ -2689,33 +2156,15 @@ function downloadCodesJSON() {
   a.remove();
   URL.revokeObjectURL(url);
 }
-
-// --------------------------------------------------------------
-// AUTO-BACKUP KAPAG MAY BAGONG NA-ALLOW NA DEVICE
-// --------------------------------------------------------------
-// This toggle ("Automatically download a backup whenever a
-// new device is allowed") is separate from the 24-hour RELAY_BACKUP
-// auto-sync from the OMNIPOS client (see runRelayBackupSync in
-// OMNIPOS server.js) — this is for the ADMIN PANEL itself: every successful
-// "Allow" (whether new, or from the pending OTP list, manual ID, or the device
-// detail screen) also automatically DOWNLOADS (timestamped,
-// see autoBackupFilename() above) a full backup to the same
-// browser/device where the admin panel is open — so there is no need to
-// manually click "Download Backup" every time there's a
-// new device coming in.
-// ON by DEFAULT (opt-out rather than opt-in) — but the preference is
-// still saved in localStorage if you want to turn it off.
 function isAutoBackupOnAllowEnabled() {
   const saved = localStorage.getItem('relayAutoBackupOnAllow');
   return saved === null ? true : saved === 'true';
 }
-
 function renderAutoBackupToggle() {
   const el = document.getElementById('autoBackupOnAllowToggle');
   if (!el) return;
   el.checked = isAutoBackupOnAllowEnabled();
 }
-
 function onAutoBackupToggleChange() {
   const el = document.getElementById('autoBackupOnAllowToggle');
   if (!el) return;
@@ -2727,21 +2176,14 @@ function onAutoBackupToggleChange() {
     'success'
   );
 }
-
-// Only called when an "allow" action is SUCCESSFUL (not on
-// revoke) — this is deliberately not blocking/awaited within the allow()
-// flow (fire-and-forget), so it doesn't slow down the toast/UI feedback of
-// the allow action itself if the /backup endpoint happens to be slow.
 function autoBackupAfterAllow() {
   if (!isAutoBackupOnAllowEnabled()) return;
   downloadBackup(true);
 }
-
 async function restoreBackupFromFile(event) {
   const file = event.target.files && event.target.files[0];
-  event.target.value = ''; // so the same file can be picked again next time
+  event.target.value = ''; 
   if (!file) return;
-
   let parsed;
   try {
     const text = await file.text();
@@ -2750,12 +2192,10 @@ async function restoreBackupFromFile(event) {
     toast('Could not read the file — make sure this is a valid backup .json.', 'error');
     return;
   }
-
   if (!Array.isArray(parsed.allowedDevices) || typeof parsed.issuedUnlocks !== 'object' || !Array.isArray(parsed.activityLog)) {
     toast('This does not look like a valid Relay backup file.', 'error');
     return;
   }
-
   const exportedNote = parsed.exportedAt ? ` (ginawa noong ${new Date(parsed.exportedAt).toLocaleString('en-PH')})` : '';
   const ok = await confirmAction({
     title: 'Restore this backup?',
@@ -2764,7 +2204,6 @@ async function restoreBackupFromFile(event) {
     danger: true
   });
   if (!ok) return;
-
   try {
     const res = await api('/relay/admin/api/restore', {
       method: 'POST',
@@ -2772,10 +2211,9 @@ async function restoreBackupFromFile(event) {
     });
     if (res.success) toast(res.message || 'Backup restored.', 'success');
     else toast(res.message || 'Could not restore the backup.', 'error');
-  } catch (err) { /* handled */ }
+  } catch (err) {   }
   loadDevices();
 }
-
 function timeAgo(ts) {
   const diff = Math.floor((Date.now() - ts) / 1000);
   if (diff < 60) return diff + 's ago';
@@ -2783,11 +2221,6 @@ function timeAgo(ts) {
   if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
   return Math.floor(diff / 86400) + 'd ago';
 }
-
-// Ginagamit ito ng Cloud Backup section (detail view + list table) para
-// ipakita kung ilang MB/GB na ang NA-CONSUME ng isang installation sa
-// Postgres storage. Bumabalik sa GB kapag >= 1024 MB para hindi masyadong
-// mahabang bilang ang lumalabas sa maliliit na screen.
 function formatStorageSize(bytes) {
   const n = Number(bytes) || 0;
   const mb = n / (1024 * 1024);
@@ -2795,33 +2228,19 @@ function formatStorageSize(bytes) {
   if (mb < 0.01 && n > 0) return '<0.01 MB';
   return mb.toFixed(2) + ' MB';
 }
-
-// Blinking dot + notification above "Allowed devices":
-// GREEN  = may successful auto-backup check-in (Download/RELAY_BACKUP)
-//          from any device within the last ~26 hours
-//          (in line with the OMNIPOS client's 24-hour auto-backup schedule
-//          + konting buffer).
-// ORANGE = nothing has ever checked in, or the last
-//          successful sync is stale (>26h) — same pattern as the "connection-dot"
-//          sa OMNIPOS login screen (orange = waiting/pending, green =
-//          already synced/updated).
 const BACKUP_SYNC_STALE_MS = 26 * 60 * 60 * 1000;
-
 function renderBackupSyncBanner(data) {
   const banner = document.getElementById('backupSyncBanner');
   const dot = document.getElementById('backupSyncDot');
   const main = document.getElementById('backupSyncMain');
   const sub = document.getElementById('backupSyncSub');
-
   const lastSync = data.lastBackupSyncAt || null;
   const isFresh = lastSync && (Date.now() - lastSync) < BACKUP_SYNC_STALE_MS;
   const state = isFresh ? 'green' : 'orange';
-
   banner.classList.remove('sync-green', 'sync-orange');
   banner.classList.add(state === 'green' ? 'sync-green' : 'sync-orange');
   dot.classList.remove('sync-green', 'sync-orange');
   dot.classList.add(state === 'green' ? 'sync-green' : 'sync-orange');
-
   if (state === 'green') {
     main.innerText = `Synced — last successful backup: ${timeAgo(lastSync)}`;
   } else if (lastSync) {
@@ -2831,11 +2250,9 @@ function renderBackupSyncBanner(data) {
   }
   sub.innerText = `Database → Download/RELAY_BACKUP${data.backupAutoAllowEnabled ? ' · auto-allow naka-ON' : ''}`;
 }
-
 async function loadDevices() {
   document.getElementById('loginScreen').style.display = 'none';
   document.getElementById('mainScreen').style.display = 'block';
-
   let data, otpData, adminResetData, receiptResetData;
   try {
     data = await api('/relay/admin/api/devices');
@@ -2843,16 +2260,12 @@ async function loadDevices() {
     adminResetData = await api('/relay/admin/api/pending-admin-resets');
     receiptResetData = await api('/relay/admin/api/pending-receipt-resets');
   } catch (err) {
-    // return; // logout() or toast in api() already handles this
   }
-
   renderOtps(otpData.pendingOtps);
   document.getElementById('otpCountPill').innerText = otpData.pendingOtps.length;
   document.getElementById('statPending').innerText = otpData.pendingOtps.length;
-
   renderAdminResets(adminResetData ? adminResetData.pending : []);
   document.getElementById('adminResetCountPill').innerText = adminResetData ? adminResetData.pending.length : 0;
-
   renderReceiptResets(receiptResetData ? receiptResetData.pending : []);
   document.getElementById('receiptResetCountPill').innerText = receiptResetData ? receiptResetData.pending.length : 0;
   document.getElementById('statAllowed').innerText = data.allowedDevices.length;
@@ -2861,25 +2274,16 @@ async function loadDevices() {
   document.getElementById('statIntegrityFlagged').innerText = data.integrityFlaggedCount || 0;
   document.getElementById('statIntegrityNoBaseline').innerText = data.integrityNoBaselineCount || 0;
   document.getElementById('allowedCountPill').innerText = data.allowedDevices.length;
-
   renderBackupSyncBanner(data);
-
   const statusEl = document.getElementById('restrictionStatus');
   statusEl.className = 'status-line status-on';
   statusEl.innerText = '🔒 Restriction is always ON — only ' + data.allowedDevices.length + ' device(s) are allowed. You must Allow a new device here before it can log in.';
-
   const allowedEl = document.getElementById('allowedList');
   if (data.allowedDevices.length === 0) {
     allowedEl.innerHTML = '<div class="empty">No devices allowed yet. (So NO ONE can log in until you Allow a device here.)</div>';
   } else {
     allowedEl.innerHTML = data.allowedDevices.map(id => {
       const seen = data.seenDevices.find(d => d.installationId === id);
-      // FIX: kunin muna ang label mula sa PERSISTENT na data.deviceLabels
-      // (laging buo ito kahit offline ang device o kahit pa mag-restart
-      // ang server), bago mag-fallback sa seen.label — dati, seen.label
-      // lang ang pinagmumulan, kaya nawawala/lumalabas lang ang label
-      // pag online lang ang device (dahil doon lang siya nagiging bahagi
-      // ng in-memory seenDevices list).
       const devLabel = (data.deviceLabels && data.deviceLabels[id]) || (seen ? seen.label : null);
       const fallback = seen ? (seen.storeName || 'No name') : 'No requests seen yet';
       const displayName = devLabel ? `🏷️ ${devLabel}` : fallback;
@@ -2902,30 +2306,23 @@ async function loadDevices() {
       </div>`;
     }).join('');
   }
-  // Remove from selection any IDs no longer in the current list
-  // (e.g. already revoked, or filtered/searched out) — avoids wrongly assuming
-  // a device is still selected when it is no longer in view.
   const currentIds = new Set(data.allowedDevices);
   for (const id of [...selectedForReset]) {
     if (!currentIds.has(id)) selectedForReset.delete(id);
   }
   updateBulkResetUI();
-
   lastLoadedDevices = data.seenDevices;
   document.getElementById('seenCountPill').innerText = data.seenDevices.length;
   renderSeenList();
   updateTabBadges();
   applyStoredCardCollapse(['cardAllowedDevices', 'cardRecentlySeen']);
 }
-
 function renderSeenList() {
   const seenEl = document.getElementById('seenList');
   const query = (document.getElementById('seenFilterInput').value || '').trim().toLowerCase();
   const statusFilter = document.getElementById('seenFilterStatus').value;
   const sortBy = document.getElementById('seenSortBy').value;
-
   let list = [...lastLoadedDevices];
-
   if (query) {
     list = list.filter(d =>
       (d.storeName || '').toLowerCase().includes(query) ||
@@ -2938,7 +2335,6 @@ function renderSeenList() {
   if (statusFilter === 'flagged') list = list.filter(d => d.cloneFlagged);
   if (statusFilter === 'integrity') list = list.filter(d => d.integrityFlagged);
   if (statusFilter === 'noBaseline') list = list.filter(d => d.integrityHasBaseline === false);
-
   if (sortBy === 'mostUnlocked') {
     list.sort((a, b) => (b.unlockedCount || 0) - (a.unlockedCount || 0));
   } else if (sortBy === 'storeName') {
@@ -2946,12 +2342,10 @@ function renderSeenList() {
   } else {
     list.sort((a, b) => b.lastSeenAt - a.lastSeenAt);
   }
-
   if (list.length === 0) {
     seenEl.innerHTML = '<div class="empty">Nothing matches the filter.</div>';
     return;
   }
-
   seenEl.innerHTML = list.map(d => `
     <div class="row" ${(d.cloneFlagged || d.integrityFlagged) ? 'style="border:1px solid var(--red);"' : ''}>
       <div class="row-info">
@@ -2984,7 +2378,6 @@ function renderSeenList() {
     </div>
   `).join('');
 }
-
 function exportDevicesCSV() {
   if (!lastLoadedDevices || lastLoadedDevices.length === 0) {
     toast('No data to export.', 'info');
@@ -3007,7 +2400,6 @@ function exportDevicesCSV() {
   a.remove();
   URL.revokeObjectURL(url);
 }
-
 function copyText(text, btn) {
   navigator.clipboard.writeText(text).then(() => {
     const original = btn.innerText;
@@ -3015,14 +2407,12 @@ function copyText(text, btn) {
     setTimeout(() => { btn.innerText = original; }, 1500);
   });
 }
-
 function minsLeft(expiresAt) {
   const secs = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
   const m = Math.floor(secs / 60);
   const s = secs % 60;
   return `${m}:${String(s).padStart(2, '0')} left`;
 }
-
 function renderOtps(list) {
   const el = document.getElementById('otpList');
   if (!list || list.length === 0) {
@@ -3033,7 +2423,6 @@ function renderOtps(list) {
     const label = o.featureNames
       ? (Array.isArray(o.featureNames) ? o.featureNames.join(', ') : o.featureNames)
       : o.featureName;
-
     let statusHtml;
     if (o.approved) {
       statusHtml = '<span class="badge badge-allowed">APPROVED — waiting for client to retry</span>';
@@ -3042,7 +2431,6 @@ function renderOtps(list) {
     } else {
       statusHtml = '<span class="badge" style="background:#30363d;color:#8b949e;">Waiting for OTP entry</span>';
     }
-
     return `<div class="row" style="align-items:flex-start;">
       ${o.photo
         ? `<img src="${o.photo}" class="requestor-photo" onclick="viewPhotoFullSize('${o.photo}')" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'requestor-photo-placeholder',innerText:'⚠️'}))">`
@@ -3063,7 +2451,6 @@ function renderOtps(list) {
     </div>`;
   }).join('');
 }
-
 async function approveOtp(key, featureLabel, storeName, featureId, presetDurationDays) {
   const isDemo = featureId === '__demo__';
   const isCloudBackup = featureId === 'cloud_backup';
@@ -3075,25 +2462,20 @@ async function approveOtp(key, featureLabel, storeName, featureId, presetDuratio
     confirmLabel: '✓ Allow / Run'
   });
   if (!ok) return;
-  // For Cloud Backup subscriptions, presetDurationDays comes from the
-  // billing cycle the CUSTOMER CHOSE (30 = Monthly, 365 = Yearly) — it's
-  // just pre-selected in the duration dropdown, but the admin can still
-  // change it (e.g. if giving a promo/extension).
   const durationDays = isDemo
     ? await promptForDemoDuration(`How long should Demo Mode run before it expires?`)
     : await promptForDuration(
         isCloudBackup ? `Confirm the Cloud Backup subscription length (pre-filled based on the customer's chosen billing cycle):` : `How long until "${featureLabel}" expires and needs renewal?`,
         (isCloudBackup && typeof presetDurationDays === 'number') ? String(presetDurationDays) : undefined
       );
-  if (durationDays === null) return; // kinansela
+  if (durationDays === null) return; 
   try {
     const res = await api('/relay/admin/api/pending-otps/approve', { method: 'POST', body: JSON.stringify({ key, durationDays }) });
     if (res.success) toast('Approved. Waiting for the client to retry.', 'success');
     else toast(res.message || 'Could not approve.', 'error');
-  } catch (err) { /* toast already handled in api() */ }
+  } catch (err) {   }
   loadDevices();
 }
-
 function renderAdminResets(list) {
   const el = document.getElementById('adminResetList');
   if (!list || list.length === 0) {
@@ -3109,7 +2491,6 @@ function renderAdminResets(list) {
     } else {
       statusHtml = '<span class="badge" style="background:#30363d;color:#8b949e;">Waiting for OTP entry</span>';
     }
-
     return `<div class="row" style="align-items:flex-start;">
       <div class="row-info">
         <div><strong>${r.storeName || 'No store name'}</strong></div>
@@ -3127,7 +2508,6 @@ function renderAdminResets(list) {
     </div>`;
   }).join('');
 }
-
 async function approveAdminReset(installationId, storeName) {
   const ok = await confirmAction({
     title: 'Approve the admin password reset?',
@@ -3139,10 +2519,9 @@ async function approveAdminReset(installationId, storeName) {
     const res = await api('/relay/admin/api/pending-admin-resets/approve', { method: 'POST', body: JSON.stringify({ installationId }) });
     if (res.success) toast('Approved. Waiting for the client to enter the OTP + new password.', 'success');
     else toast(res.message || 'Could not approve.', 'error');
-  } catch (err) { /* toast already handled in api() */ }
+  } catch (err) {   }
   loadDevices();
 }
-
 function renderReceiptResets(list) {
   const el = document.getElementById('receiptResetList');
   if (!list || list.length === 0) {
@@ -3158,7 +2537,6 @@ function renderReceiptResets(list) {
     } else {
       statusHtml = '<span class="badge" style="background:#30363d;color:#8b949e;">Waiting for OTP entry</span>';
     }
-
     return `<div class="row" style="align-items:flex-start;">
       <div class="row-info">
         <div><strong>${r.storeName || 'No store name'}</strong></div>
@@ -3176,7 +2554,6 @@ function renderReceiptResets(list) {
     </div>`;
   }).join('');
 }
-
 async function approveReceiptReset(installationId, storeName) {
   const ok = await confirmAction({
     title: 'Approve the receipt customization reset?',
@@ -3188,10 +2565,9 @@ async function approveReceiptReset(installationId, storeName) {
     const res = await api('/relay/admin/api/pending-receipt-resets/approve', { method: 'POST', body: JSON.stringify({ installationId }) });
     if (res.success) toast('Approved. Waiting for the client to finish the reset.', 'success');
     else toast(res.message || 'Could not approve.', 'error');
-  } catch (err) { /* toast already handled in api() */ }
+  } catch (err) {   }
   loadDevices();
 }
-
 function copyCode(code, btn) {
   navigator.clipboard.writeText(code).then(() => {
     const original = btn.innerText;
@@ -3199,12 +2575,10 @@ function copyCode(code, btn) {
     setTimeout(() => { btn.innerText = original; }, 1500);
   });
 }
-
 function viewPhotoFullSize(dataUrl) {
   document.getElementById('photoLightboxImg').src = dataUrl;
   document.getElementById('photoLightbox').style.display = 'flex';
 }
-
 async function allow(id, storeName) {
   const ok = await confirmAction({
     title: 'Allow this device?',
@@ -3215,10 +2589,9 @@ async function allow(id, storeName) {
   try {
     const res = await api('/relay/admin/api/devices/allow', { method: 'POST', body: JSON.stringify({ installationId: id }) });
     if (res.success) { toast('Device allowed.', 'success'); autoBackupAfterAllow(); }
-  } catch (err) { /* handled */ }
+  } catch (err) {   }
   loadDevices();
 }
-
 async function revoke(id, storeName) {
   const ok = await confirmAction({
     title: 'Remove this device?',
@@ -3230,10 +2603,9 @@ async function revoke(id, storeName) {
   try {
     const res = await api('/relay/admin/api/devices/revoke', { method: 'POST', body: JSON.stringify({ installationId: id }) });
     if (res.success) toast('Device removed.', 'success');
-  } catch (err) { /* handled */ }
+  } catch (err) {   }
   loadDevices();
 }
-
 async function resetCloneFlag(id, storeName) {
   const ok = await confirmAction({
     title: 'Reset the clone flag?',
@@ -3245,10 +2617,9 @@ async function resetCloneFlag(id, storeName) {
   try {
     const res = await api('/relay/admin/api/devices/clone-reset', { method: 'POST', body: JSON.stringify({ installationId: id }) });
     if (res.success) toast('Clone flag cleared.', 'success');
-  } catch (err) { /* handled */ }
+  } catch (err) {   }
   loadDevices();
 }
-
 async function splitClone(id, storeName) {
   const ok = await confirmAction({
     title: 'Split as a new device?',
@@ -3263,13 +2634,10 @@ async function splitClone(id, storeName) {
       toast(`Separate device created.`, 'success');
       alert(`New installationId:\n\n${res.newInstallationId}\n\nThis will appear in the list the next time the clone device verifies online. Don't forget to manually activate whatever features were actually paid for on its Details page.`);
     }
-  } catch (err) { /* handled */ }
+  } catch (err) {   }
   loadDevices();
 }
-
-// ---------------- FILE INTEGRITY DETAIL MODAL ----------------
 let currentIntegrityId = null;
-
 function fileListHtml(title, files, color, emptyNote) {
   if (!files || files.length === 0) return '';
   const items = files.map(f => `<li style="font-family:monospace; font-size:13px; word-break:break-all;">${f.replace(/</g, '&lt;')}</li>`).join('');
@@ -3278,30 +2646,25 @@ function fileListHtml(title, files, color, emptyNote) {
     <ul style="margin:0 0 0 18px; padding:0;">${items}</ul>
   </div>`;
 }
-
 async function showIntegrityDetail(installationId, label) {
   currentIntegrityId = installationId;
   document.getElementById('integrityDeviceLabel').innerText = label || installationId;
   document.getElementById('integrityBody').innerHTML = '<div class="empty">Loading...</div>';
   document.getElementById('integrityMeta').innerText = '';
   document.getElementById('integrityBackdrop').style.display = 'flex';
-
   let data;
   try {
     data = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/integrity`);
   } catch (err) { return; }
-
   const record = data.record;
   if (!record) {
     document.getElementById('integrityBody').innerHTML = '<div class="empty">No integrity check-in recorded for this device yet.</div>';
     document.getElementById('integrityClearBtn').style.display = 'none';
     return;
   }
-
   document.getElementById('integrityMeta').innerText =
     `Version: ${record.baselineVersion || '—'} · Last checked: ${timeAgo(record.checkedAt)}` +
     (record.clearedAt ? ` · Na-clear noong ${timeAgo(record.clearedAt)}${record.clearedNote ? ' (' + record.clearedNote + ')' : ''}` : '');
-
   const body = document.getElementById('integrityBody');
   if (!record.hasBaseline) {
     body.innerHTML = '<div class="empty">No stored baseline for this version — it has not been compared yet.</div>';
@@ -3313,37 +2676,24 @@ async function showIntegrityDetail(installationId, label) {
       fileListHtml('🗑️ Nabura (deleted)', record.deleted, 'var(--red)') +
       fileListHtml('➕ New file (not part of the release)', record.added, 'var(--red)');
   }
-
   document.getElementById('integrityClearBtn').style.display = record.flagged && !record.clearedAt ? 'inline-block' : 'none';
 }
-
 function closeIntegrityModal() {
   document.getElementById('integrityBackdrop').style.display = 'none';
   currentIntegrityId = null;
 }
-
 async function requestIntegrityCheckNow(installationId, label) {
   try {
     const res = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/integrity/check-now`, { method: 'POST' });
     if (res.success) {
       toast(`Waiting for the next online check-in from ${label || installationId} (usually a few seconds up to ~30s if it's online now).`, 'success');
     }
-  } catch (err) { /* handled */ }
+  } catch (err) {   }
 }
-
 async function clearIntegrityFlag() {
   if (!currentIntegrityId) return;
-  // BUG FIX: confirmAction() used to be called WHILE the
-  // integrity modal (#integrityBackdrop) was still open — even though both are
-  // fixed-position overlays, the integrity modal
-  // covered the confirm dialog in some browser/zoom states, so
-  // Yes/Continue became unclickable. The integrity modal is now closed HERE first
-  // (the id is stashed in a local variable first, since
-  // closeIntegrityModal() resets currentIntegrityId) before
-  // showing the confirm dialog — no two overlapping modals.
   const targetId = currentIntegrityId;
   closeIntegrityModal();
-
   const ok = await confirmAction({
     title: 'Clear the integrity flag?',
     message: 'Only do this if you have reviewed the modified/deleted files and confirmed it is LEGITIMATE/intentional (e.g. the client\'s own customization). If these files are still changed on the next check-in, it will be flagged again.',
@@ -3354,24 +2704,22 @@ async function clearIntegrityFlag() {
   try {
     const res = await api(`/relay/admin/api/devices/${encodeURIComponent(targetId)}/integrity/clear`, { method: 'POST' });
     if (res.success) toast('Integrity flag cleared.', 'success');
-  } catch (err) { /* handled */ }
+  } catch (err) {   }
   loadDevices();
 }
-
 async function editLabel(id, currentLabel) {
   const label = await promptForLabel(currentLabel);
-  if (label === null) return; // kinansela
+  if (label === null) return; 
   try {
     const res = await api(`/relay/admin/api/devices/${encodeURIComponent(id)}/label`, {
       method: 'POST',
       body: JSON.stringify({ label })
     });
     if (res.success) toast(label ? 'Label saved.' : 'Label removed.', 'success');
-  } catch (err) { /* handled */ }
+  } catch (err) {   }
   loadDevices();
   if (currentDetailId === id) loadDeviceDetail();
 }
-
 async function manualAllow() {
   const id = document.getElementById('manualIdInput').value.trim();
   if (!id) return;
@@ -3384,12 +2732,10 @@ async function manualAllow() {
   try {
     const res = await api('/relay/admin/api/devices/allow', { method: 'POST', body: JSON.stringify({ installationId: id }) });
     if (res.success) { toast('Naidagdag sa allowlist.', 'success'); autoBackupAfterAllow(); }
-  } catch (err) { /* handled */ }
+  } catch (err) {   }
   document.getElementById('manualIdInput').value = '';
   loadDevices();
 }
-
-// ---------------- DEVICE DETAIL SCREEN ----------------
 const ACTIVITY_LABELS = {
   otp_requested: '🔑 Requested OTP',
   otp_cancelled: '❌ OTP cancelled by client (closed/cancelled the modal, or ran out of attempts)',
@@ -3405,7 +2751,6 @@ const ACTIVITY_LABELS = {
   feature_status_checked: '📡 Status checked (client synced with Relay)',
   device_history_cleared: '🗑️ History cleared for this device'
 };
-
 function activityDescription(entry) {
   const d = entry.details || {};
   const durationSuffix = (typeof d.durationDays === 'number' && d.durationDays > 0)
@@ -3425,10 +2770,8 @@ function activityDescription(entry) {
   if (entry.type === 'device_history_cleared') return `${d.clearedCount || 0} old entries cleared`;
   return '';
 }
-
 let detailPollTimer = null;
 let currentDetailId = null;
-
 async function openDeviceDetail(installationId) {
   currentDetailId = installationId;
   document.getElementById('mainScreen').style.display = 'none';
@@ -3440,17 +2783,12 @@ async function openDeviceDetail(installationId) {
   detailPollTimer = setInterval(withScrollPreserved(loadDeviceDetail), 8000);
   applyStoredCardCollapse(['cardCloudBackup', 'cardUnlocked', 'cardLocked']);
 }
-
 function closeDeviceDetail() {
   if (detailPollTimer) { clearInterval(detailPollTimer); detailPollTimer = null; }
   document.getElementById('deviceDetailScreen').style.display = 'none';
   document.getElementById('mainScreen').style.display = 'block';
   startPolling();
 }
-
-// ONLY clears this device's activity-log entries (the ones
-// shown in the "History for this device" timeline above) — it does
-// not touch the device's allowed/unlocked/label/fingerprint status.
 async function clearDeviceHistory() {
   if (!currentDetailId) return;
   const ok = await confirmAction({
@@ -3460,7 +2798,6 @@ async function clearDeviceHistory() {
     danger: true
   });
   if (!ok) return;
-
   const btn = document.getElementById('clearDeviceHistoryBtn');
   if (btn) { btn.disabled = true; btn.innerText = '⏳ Kina-clear...'; }
   try {
@@ -3472,15 +2809,11 @@ async function clearDeviceHistory() {
       toast(data.message || 'Could not clear the history.', 'error');
     }
   } catch (err) {
-    // api() already shows the toast for 403/429; other errors here
   } finally {
     if (btn) { btn.disabled = false; btn.innerText = '🗑️ Clear History for this device'; }
   }
 }
-
-// ---------------- ANALYTICS SCREEN ----------------
 let analyticsPollTimer = null;
-
 async function openAnalytics() {
   document.getElementById('mainScreen').style.display = 'none';
   document.getElementById('analyticsScreen').style.display = 'block';
@@ -3489,14 +2822,12 @@ async function openAnalytics() {
   if (analyticsPollTimer) clearInterval(analyticsPollTimer);
   analyticsPollTimer = setInterval(withScrollPreserved(loadAnalytics), 15000);
 }
-
 function closeAnalytics() {
   if (analyticsPollTimer) { clearInterval(analyticsPollTimer); analyticsPollTimer = null; }
   document.getElementById('analyticsScreen').style.display = 'none';
   document.getElementById('mainScreen').style.display = 'block';
   startPolling();
 }
-
 async function loadAnalytics() {
   let data;
   try {
@@ -3505,13 +2836,6 @@ async function loadAnalytics() {
   if (!data.success) { toast(data.message || 'Could not load analytics.', 'error'); return; }
   renderAnalytics(data.analytics);
 }
-
-// Ito ay BUBURA LANG ng buong activity log (ang pinagmumulan ng "Activity"
-// 7d/30d na bilang, at ng History timeline ng BAWAT device sa Device
-// Detail page). HINDI nito ginagalaw ang mga naka-unlock na features
-// (issuedUnlocks) o ang naka-save na customer/device database (allowed
-// devices, labels, backup check-ins) — kaya safe itong i-reset kahit may
-// mga aktibong lisensya at customer records.
 async function resetAnalytics() {
   const ok = await confirmAction({
     title: 'Reset Analytics?',
@@ -3520,7 +2844,6 @@ async function resetAnalytics() {
     danger: true
   });
   if (!ok) return;
-
   const btn = document.getElementById('resetAnalyticsBtn');
   if (btn) { btn.disabled = true; btn.innerText = '⏳ Ni-reresetan...'; }
   try {
@@ -3532,12 +2855,10 @@ async function resetAnalytics() {
       toast(data.message || 'Could not reset analytics.', 'error');
     }
   } catch (err) {
-    // api() already shows the toast for 403/429; other errors here
   } finally {
     if (btn) { btn.disabled = false; btn.innerText = '🔄 Reset Analytics'; }
   }
 }
-
 function renderAnalytics(a) {
   document.getElementById('anaAllowed').innerText = a.allowedCount;
   document.getElementById('anaPending').innerText = a.pendingCount;
@@ -3545,13 +2866,10 @@ function renderAnalytics(a) {
   document.getElementById('anaActiveUnlocks').innerText = a.activeUnlocksCount;
   document.getElementById('anaDemoActive').innerText = a.demoActiveCount;
   document.getElementById('anaRevenue').innerText = '₱' + a.activeRevenue.toLocaleString('en-PH');
-
   document.getElementById('anaActivitySummary').innerText =
     `${a.unlocksLast7d} new unlocks in the last 7 days · ${a.unlocksLast30d} in the last 30 days.`;
-
   document.getElementById('anaAllTimeSummary').innerText =
     `${a.allTimeUnlocksCount} feature unlock(s) issued all-time (including expired/deactivated) · ₱${a.allTimeRevenue.toLocaleString('en-PH')} total revenue.`;
-
   const expiringEl = document.getElementById('anaExpiringList');
   document.getElementById('anaExpiringPill').innerText = a.expiringSoon.length;
   expiringEl.innerHTML = a.expiringSoon.length === 0
@@ -3567,7 +2885,6 @@ function renderAnalytics(a) {
           <div class="expiring-days ${urgency}">${daysLeft <= 0 ? 'today' : daysLeft + ' day(s) left'}</div>
         </div>`;
       }).join('');
-
   const topEl = document.getElementById('anaTopFeatures');
   if (a.topFeatures.length === 0) {
     topEl.innerHTML = '<div class="empty">No active licenses yet.</div>';
@@ -3580,11 +2897,6 @@ function renderAnalytics(a) {
       </div>
     `).join('');
   }
-
-  // Cloud Backup tier popularity — which plan (Basic/Standard/Pro)
-  // customers actually pick. Reuses the same card if present in the
-  // markup; if this admin build predates the card, silently skip
-  // rendering instead of throwing.
   const cbTierEl = document.getElementById('anaCloudBackupTiers');
   if (cbTierEl) {
     const tiers = a.cloudBackupTierPopularity || [];
@@ -3601,8 +2913,6 @@ function renderAnalytics(a) {
     }
   }
 }
-
-
 async function loadDeviceDetail() {
   if (!currentDetailId) return;
   let detail;
@@ -3612,9 +2922,7 @@ async function loadDeviceDetail() {
   if (!detail.success) { toast(detail.message || 'Could not load the details.', 'error'); return; }
   renderDeviceDetail(detail);
 }
-
 let lastCloudBackupDetail = null;
-
 async function loadCloudBackupDetail(installationId) {
   const lineEl = document.getElementById('cloudBackupStatusLine');
   const listEl = document.getElementById('cloudBackupModuleList');
@@ -3624,32 +2932,25 @@ async function loadCloudBackupDetail(installationId) {
   const barLabel = document.getElementById('cloudBackupStorageLabel');
   const barRemaining = document.getElementById('cloudBackupStorageRemaining');
   if (!lineEl || !listEl) return;
-
   lineEl.innerText = 'Loading...';
   listEl.innerHTML = '';
   downloadBtn.style.display = 'none';
   if (barWrap) barWrap.style.display = 'none';
   lastCloudBackupDetail = null;
-
   let data;
   try {
     data = await api(`/relay/admin/api/cloud-backup/${encodeURIComponent(installationId)}`);
   } catch (err) { return; }
-
   if (!data.success) {
     lineEl.innerHTML = data.message === 'No cloud backup found for this installationId.'
       ? '⚪ This device has not synced a cloud backup yet.'
       : `⚠️ ${data.message || 'Could not load the cloud backup.'}`;
     return;
   }
-
   lastCloudBackupDetail = data;
   const meta = data.meta;
   const metaSizeLabel = formatStorageSize(meta.size_bytes);
   lineEl.innerHTML = `🟢 <strong>${meta.total_records ?? '—'} records</strong> across ${meta.module_count ?? (data.modules || []).length} module(s) · <strong>${metaSizeLabel}</strong> consumed · last sync ${timeAgo(new Date(meta.last_sync_at).getTime())} · synced ${meta.sync_count} time(s)`;
-
-  // Storage progress bar — kung ilan (%) na ang na-consume laban sa
-  // quota ng kasalukuyang naka-record na tier (Basic/Standard/Pro).
   if (barWrap && barFill && barLabel && barRemaining && typeof meta.quota_mb === 'number' && meta.quota_mb > 0) {
     const pct = typeof meta.percent_used === 'number' ? meta.percent_used : 0;
     const remainingMB = Math.max(0, Math.round((meta.quota_mb - (meta.size_mb || 0)) * 100) / 100);
@@ -3660,7 +2961,6 @@ async function loadCloudBackupDetail(installationId) {
     barLabel.textContent = `${tierName} plan · ${meta.size_mb ?? 0} MB / ${meta.quota_mb} MB (${pct}%)`;
     barRemaining.textContent = `${remainingMB} MB left`;
   }
-
   listEl.innerHTML = (data.modules || []).map(m => `
     <div class="feature-item">
       <div>
@@ -3669,10 +2969,8 @@ async function loadCloudBackupDetail(installationId) {
       </div>
     </div>
   `).join('') || '<div class="empty">Walang laman.</div>';
-
   downloadBtn.style.display = 'inline-flex';
 }
-
 function downloadCloudBackup(installationId) {
   if (!lastCloudBackupDetail || !lastCloudBackupDetail.success) {
     toast('No cloud backup loaded yet. Refresh first.', 'error');
@@ -3680,7 +2978,6 @@ function downloadCloudBackup(installationId) {
   }
   const payload = {};
   (lastCloudBackupDetail.modules || []).forEach(m => { payload[m.module] = m.data; });
-
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -3692,7 +2989,6 @@ function downloadCloudBackup(installationId) {
   URL.revokeObjectURL(url);
   toast('Cloud backup JSON downloaded.', 'success');
 }
-
 function renderDeviceDetail(detail) {
   document.getElementById('detailInstallationId').innerText = detail.installationId;
   const meta = detail.meta;
@@ -3703,11 +2999,9 @@ function renderDeviceDetail(detail) {
   document.getElementById('detailAllowedBadgeWrap').innerHTML = `<span class="badge ${detail.allowed ? 'badge-allowed' : 'badge-blocked'}">${detail.allowed ? 'ALLOWED' : 'BLOCKED'}</span>` +
     `<button class="icon-btn" style="margin-left:8px;" onclick="toggleAllowFromDetail('${detail.installationId}', ${detail.allowed})">${detail.allowed ? 'Alisin' : 'Allow'}</button>` +
     `<button class="icon-btn" style="margin-left:8px;" onclick="editLabel('${detail.installationId}', '${(detail.label || '').replace(/'/g, "\\'")}')">🏷️ Label</button>`;
-
   document.getElementById('detailUnlockedCount').innerText = detail.unlocked.length;
   document.getElementById('detailLockedCount').innerText = detail.locked.length;
   document.getElementById('detailDemoStatus').innerText = detail.demo.active ? 'Active' : 'None';
-
   const demoStatusLineEl = document.getElementById('demoModeStatusLine');
   const demoActivateBtnEl = document.getElementById('demoActivateBtn');
   const demoStopBtnEl = document.getElementById('demoStopBtn');
@@ -3720,7 +3014,6 @@ function renderDeviceDetail(detail) {
     demoActivateBtnEl.innerText = '▶ Activate Demo Mode';
     demoStopBtnEl.style.display = 'none';
   }
-
   const unlockedEl = document.getElementById('detailUnlockedList');
   unlockedEl.innerHTML = detail.unlocked.length === 0
     ? '<div class="empty">Nothing unlocked yet.</div>'
@@ -3741,12 +3034,10 @@ function renderDeviceDetail(detail) {
     `).join('') + (detail.unlocked.length > 0
       ? `<button class="btn-deactivate-all" onclick="deactivateAllFeatures('${detail.installationId}')">🗑️ Reset Device (Deactivate ALL Features)</button>`
       : '');
-
   const tierRowEl = document.getElementById('detailTierRow');
   tierRowEl.innerHTML = detail.tiers.map(t => `
     <button class="btn-tier" onclick="activateTier('${detail.installationId}', '${t.id}', '${t.name.replace(/'/g, "\\'")}')">📦 ${t.name}</button>
   `).join('');
-
   const lockedEl = document.getElementById('detailLockedList');
   lockedEl.innerHTML = detail.locked.length === 0
     ? '<div class="empty">Nothing locked — everything is unlocked!</div>'
@@ -3762,7 +3053,6 @@ function renderDeviceDetail(detail) {
         </div>
       </div>
     `).join('');
-
   const historyEl = document.getElementById('detailHistoryList');
   historyEl.innerHTML = detail.history.length === 0
     ? '<div class="empty">Walang history pa.</div>'
@@ -3774,7 +3064,6 @@ function renderDeviceDetail(detail) {
         </div>
       `).join('') + `</div>`;
 }
-
 async function toggleAllowFromDetail(installationId, currentlyAllowed) {
   const ok = await confirmAction({
     title: currentlyAllowed ? 'Remove this device?' : 'Allow this device?',
@@ -3792,40 +3081,27 @@ async function toggleAllowFromDetail(installationId, currentlyAllowed) {
     });
     toast(currentlyAllowed ? 'Device removed.' : 'Device allowed.', 'success');
     if (!currentlyAllowed) autoBackupAfterAllow();
-  } catch (err) { /* handled */ }
+  } catch (err) {   }
   loadDeviceDetail();
 }
-
-// BUG FIX: 'cloud_backup' ay isang SUBSCRIPTION (Basic/Standard/Pro x
-// monthly/yearly), hindi flat-price na à la carte item — kaya kailangan
-// muna nito ng tier + billingCycle selection (konektado sa aktwal na
-// pricing mula sa RELAY) bago ito i-activate/i-renew dito, kagaya na ng
-// meron na ang OTP approval flow (tingnan ang approveOtp() sa itaas).
-// Dati, dumadaan lang ito sa parehong generic na durationDays prompt
-// gaya ng ibang feature — walang plan/pricing na napipili, kaya
-// null/maling presyo at maling expiry ang naitatala (tingnan ang
-// comment sa /relay/admin/api/devices/:installationId/activate sa
-// server.js para sa buong detalye ng bug na ito).
 async function activateFeature(installationId, featureId, featureName, presetTier, presetBillingCycle) {
   const isCloudBackup = featureId === 'cloud_backup';
   const note = await promptForNote(`Activate "${featureName}" for this device right now — no OTP needed. Only use this if you ALREADY HAVE A REFERENCE (already paid/previously unlocked).`);
-  if (note === null) return; // kinansela
-
+  if (note === null) return; 
   let tier = null, billingCycle = null, durationDays;
   if (isCloudBackup) {
     const plan = await promptForCloudBackupPlan(
       `Select the Cloud Backup plan + billing cycle to activate/renew for this device (pricing is pulled live from the current RELAY pricing):`,
       presetTier, presetBillingCycle
     );
-    if (plan === null) return; // kinansela
+    if (plan === null) return; 
     tier = plan.tier;
     billingCycle = plan.billingCycle;
-    durationDays = 0; // walang custom override dito — gagamitin ng server ang tamang bilang ng araw ng billingCycle
+    durationDays = 0; 
   } else {
     durationDays = await promptForDuration(`How long until "${featureName}" should expire? (Also use this to RENEW — just activate the same feature again with a new duration.)`);
-    if (durationDays === null) return; // kinansela
+    if (durationDays === null) return; 
   }
-
   try {
     const res = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/activate`, {
       method: 'POST',
@@ -3833,16 +3109,9 @@ async function activateFeature(installationId, featureId, featureName, presetTie
     });
     if (res.success) toast(`${featureName} activated.`, 'success');
     else toast(res.message || 'Could not activate.', 'error');
-  } catch (err) { /* handled */ }
+  } catch (err) {   }
   loadDeviceDetail();
 }
-
-// Modal para pumili ng Cloud Backup tier (basic/standard/pro) +
-// billingCycle (monthly/yearly) bago mag-Activate/Renew ng Cloud Backup
-// dito sa Device Detail page — kinukuha ang KASALUKUYANG effective
-// pricing mula GET /relay/admin/api/pricing (parehong endpoint na
-// binabasa ng pricing.html) para laging tumpak ang ipinapakitang presyo,
-// kahit pa na-customize ito sa Cloud Backup Pricing editor.
 async function promptForCloudBackupPlan(message, presetTier, presetBillingCycle) {
   let plans;
   try {
@@ -3852,12 +3121,10 @@ async function promptForCloudBackupPlan(message, presetTier, presetBillingCycle)
     toast('Could not load Cloud Backup pricing — try again.', 'error');
     return null;
   }
-
   return new Promise((resolve) => {
     const backdrop = document.getElementById('confirmBackdrop');
     const okBtn = document.getElementById('confirmActionBtn');
     const cancelBtn = document.getElementById('confirmCancelBtn');
-
     const tierOrder = ['basic', 'standard', 'pro'];
     document.getElementById('confirmTitle').innerText = 'Cloud Backup plan';
     document.getElementById('confirmMessage').innerHTML = `${message}<br><br>` +
@@ -3871,15 +3138,12 @@ async function promptForCloudBackupPlan(message, presetTier, presetBillingCycle)
       `<div id="cbPlanPriceLine" style="margin-top:8px; color:var(--muted); font-size:.85rem;"></div>`;
     okBtn.innerText = '✓ Tuloy';
     okBtn.className = 'btn-allow';
-
     backdrop.style.display = 'flex';
-
     const tierSelect = document.getElementById('cbTierSelect');
     const billingSelect = document.getElementById('cbBillingSelect');
     const priceLine = document.getElementById('cbPlanPriceLine');
     if (presetTier && plans[presetTier]) tierSelect.value = presetTier;
     if (presetBillingCycle) billingSelect.value = presetBillingCycle;
-
     function updatePriceLine() {
       const plan = plans[tierSelect.value];
       const price = plan.price[billingSelect.value];
@@ -3888,7 +3152,6 @@ async function promptForCloudBackupPlan(message, presetTier, presetBillingCycle)
     updatePriceLine();
     tierSelect.onchange = updatePriceLine;
     billingSelect.onchange = updatePriceLine;
-
     function cleanup(result) {
       backdrop.style.display = 'none';
       okBtn.onclick = null;
@@ -3901,12 +3164,6 @@ async function promptForCloudBackupPlan(message, presetTier, presetBillingCycle)
     cancelBtn.onclick = () => cleanup(null);
   });
 }
-
-// Removes an unlocked feature from this device — it does not
-// issue a refund and does not change billing; it is only a "local" removal
-// on the RELAY side, so the feature goes back to locked on the device.
-// Use this when: (1) it was activated by mistake, or (2) you are unbundling
-// a feature before selling/transferring the device to another customer.
 async function deactivateFeature(installationId, featureId, featureName) {
   const ok = await confirmAction({
     title: `Deactivate "${featureName}"?`,
@@ -3922,15 +3179,9 @@ async function deactivateFeature(installationId, featureId, featureName) {
     });
     if (res.success) toast(`${featureName} deactivated.`, 'success');
     else toast(res.message || 'Could not deactivate.', 'error');
-  } catch (err) { /* handled */ }
+  } catch (err) {   }
   loadDeviceDetail();
 }
-
-// A full "factory reset" of this device's feature unlocks — removes
-// EVERYTHING unlocked (including demo, if any) so it goes back to the
-// default of nothing unlocked. This is for when the device/unit is being sold or
-// transferred to someone else/another store and you don't want
-// previously paid features to carry over with it.
 async function deactivateAllFeatures(installationId) {
   const ok = await confirmAction({
     title: 'Reset this device?',
@@ -3945,22 +3196,13 @@ async function deactivateAllFeatures(installationId) {
     });
     if (res.success) toast(res.message || 'Device reset.', 'success');
     else toast(res.message || 'Could not reset.', 'error');
-  } catch (err) { /* handled */ }
+  } catch (err) {   }
   loadDeviceDetail();
 }
-
-// Directly grants FULL DEMO MODE (all features, temporary
-// only) to this device — NO OTP required, and there is NO need to
-// wait for the customer/device itself to request it (request-demo)
-// before it can be Allowed/Approved. Use this when you want to PROACTIVELY
-// give a device a trial (e.g. a new prospect, demo booth,
-// following up with a still-Locked store). Uses the same
-// hour-based duration picker (promptForDemoDuration) that is also
-// used in the Approve-with-duration flow, for a consistent UX.
 async function activateDemoMode(installationId) {
   if (!installationId) return;
   const durationDays = await promptForDemoDuration('Choose how long the Full Demo Mode you are granting right now should run for this device — no OTP needed, it activates immediately.');
-  if (durationDays === null) return; // kinansela
+  if (durationDays === null) return; 
   try {
     const res = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/activate-demo`, {
       method: 'POST',
@@ -3968,14 +3210,9 @@ async function activateDemoMode(installationId) {
     });
     if (res.success) toast(res.message || 'Demo Mode activated.', 'success');
     else toast(res.message || 'Could not activate Demo Mode.', 'error');
-  } catch (err) { /* handled */ }
+  } catch (err) {   }
   loadDeviceDetail();
 }
-
-// Stops Demo Mode BEFORE it expires on its own — essentially
-// deactivateFeature() above, but featureId is always '__demo__'.
-// Use this if it is still too early (e.g. it was triggered accidentally,
-// or you want it to end right away before the originally set duration).
 async function stopDemoMode(installationId) {
   if (!installationId) return;
   const ok = await confirmAction({
@@ -3992,10 +3229,9 @@ async function stopDemoMode(installationId) {
     });
     if (res.success) toast(res.message || 'Demo Mode stopped.', 'success');
     else toast(res.message || 'Could not stop Demo Mode.', 'error');
-  } catch (err) { /* handled */ }
+  } catch (err) {   }
   loadDeviceDetail();
 }
-
 async function activateTier(installationId, tierId, tierName) {
   const note = await promptForNote(`Activate the ENTIRE "${tierName}" tier (all included features) for this device right now — no OTP needed.`);
   if (note === null) return;
@@ -4008,26 +3244,19 @@ async function activateTier(installationId, tierId, tierName) {
     });
     if (res.success) toast(`${tierName} activated.`, 'success');
     else toast(res.message || 'Could not activate.', 'error');
-  } catch (err) { /* handled */ }
+  } catch (err) {   }
   loadDeviceDetail();
 }
-
-// Uses the same confirm-modal pattern (not the native prompt(), for a
-// consistent look), but adds a text input for an optional
-// "note/reference" (e.g. invoice #, reason for the restore).
 function promptForNote(message) {
   return new Promise((resolve) => {
     const backdrop = document.getElementById('confirmBackdrop');
     const okBtn = document.getElementById('confirmActionBtn');
     const cancelBtn = document.getElementById('confirmCancelBtn');
-
     document.getElementById('confirmTitle').innerText = 'Confirm Activate';
     document.getElementById('confirmMessage').innerHTML = `${message}<br><br><input type="text" id="activateNoteInput" placeholder="Optional reference/note (e.g. invoice #)" style="margin-top:4px;">`;
     okBtn.innerText = '✓ I-activate';
     okBtn.className = 'btn-allow';
-
     backdrop.style.display = 'flex';
-
     function cleanup(result) {
       backdrop.style.display = 'none';
       okBtn.onclick = null;
@@ -4041,18 +3270,11 @@ function promptForNote(message) {
     cancelBtn.onclick = () => cleanup(null);
   });
 }
-
-// Uses the same confirm-modal pattern — lets the admin
-// choose the NUMBER OF DAYS before a license expires (or "Permanent"
-// for the old no-expiry behavior). This is used before Allowing
-// an OTP (approveOtp) and before a direct Activate (activateFeature /
-// activateTier). Resolves to an integer (days) or `0` (permanent).
 function promptForDuration(message, defaultLabel) {
   return new Promise((resolve) => {
     const backdrop = document.getElementById('confirmBackdrop');
     const okBtn = document.getElementById('confirmActionBtn');
     const cancelBtn = document.getElementById('confirmCancelBtn');
-
     document.getElementById('confirmTitle').innerText = 'How long should the license run?';
     document.getElementById('confirmMessage').innerHTML = `${message}<br><br>` +
       `<select id="durationSelect" style="width:100%; padding:10px; border-radius:8px; border:1px solid var(--border-soft); background:var(--bg); color:var(--text); margin-top:4px;">` +
@@ -4067,9 +3289,7 @@ function promptForDuration(message, defaultLabel) {
       `<input type="text" id="durationCustomInput" placeholder="Number of days" style="margin-top:8px; display:none;" inputmode="numeric">`;
     okBtn.innerText = '✓ Tuloy';
     okBtn.className = 'btn-allow';
-
     backdrop.style.display = 'flex';
-
     const select = document.getElementById('durationSelect');
     const customInput = document.getElementById('durationCustomInput');
     if (defaultLabel) select.value = defaultLabel;
@@ -4077,7 +3297,6 @@ function promptForDuration(message, defaultLabel) {
       customInput.style.display = select.value === 'custom' ? 'block' : 'none';
       if (select.value === 'custom') customInput.focus();
     };
-
     function cleanup(result) {
       backdrop.style.display = 'none';
       okBtn.onclick = null;
@@ -4093,25 +3312,16 @@ function promptForDuration(message, defaultLabel) {
       } else {
         days = parseInt(select.value, 10);
       }
-      cleanup(days); // 0 = permanente
+      cleanup(days); 
     };
-    cancelBtn.onclick = () => cleanup(null); // null = kinansela
+    cancelBtn.onclick = () => cleanup(null); 
   });
 }
-
-// Similar to promptForDuration() above, but the unit is HOURS instead
-// of months/years — better suited to a TEMPORARY trial (Demo
-// Mode) than the 7/30/90/365-day presets meant for long-term
-// licenses. It also resolves to a FRACTIONAL number of days (e.g. 0.25
-// = 6 hours) since this is the same unit expected by
-// /relay/admin/api/pending-otps/approve (durationDays), or `0` for
-// "Permanent" (if the admin deliberately wants no expiry).
 function promptForDemoDuration(message) {
   return new Promise((resolve) => {
     const backdrop = document.getElementById('confirmBackdrop');
     const okBtn = document.getElementById('confirmActionBtn');
     const cancelBtn = document.getElementById('confirmCancelBtn');
-
     document.getElementById('confirmTitle').innerText = 'How long should Demo Mode run?';
     document.getElementById('confirmMessage').innerHTML = `${message}<br><br>` +
       `<select id="demoDurationSelect" style="width:100%; padding:10px; border-radius:8px; border:1px solid var(--border-soft); background:var(--bg); color:var(--text); margin-top:4px;">` +
@@ -4126,16 +3336,13 @@ function promptForDemoDuration(message) {
       `<input type="text" id="demoDurationCustomInput" placeholder="Number of hours" style="margin-top:8px; display:none;" inputmode="numeric">`;
     okBtn.innerText = '✓ Tuloy';
     okBtn.className = 'btn-allow';
-
     backdrop.style.display = 'flex';
-
     const select = document.getElementById('demoDurationSelect');
     const customInput = document.getElementById('demoDurationCustomInput');
     select.onchange = () => {
       customInput.style.display = select.value === 'custom' ? 'block' : 'none';
       if (select.value === 'custom') customInput.focus();
     };
-
     function cleanup(result) {
       backdrop.style.display = 'none';
       okBtn.onclick = null;
@@ -4152,33 +3359,24 @@ function promptForDemoDuration(message) {
       } else {
         days = parseFloat(select.value);
       }
-      cleanup(days); // 0 = permanente
+      cleanup(days); 
     };
-    cancelBtn.onclick = () => cleanup(null); // null = kinansela
+    cancelBtn.onclick = () => cleanup(null); 
   });
 }
-
-// Uses the same confirm-modal pattern — lets the admin
-// set their OWN nickname/label for a device (e.g. "Aling
-// Nena — Sari-sari Store, Cubao"), DIFFERENT from the device's own
-// self-reported storeName. Used to EASILY IDENTIFY/REMEMBER the customer,
-// even while it is still only "Recently Seen" (before being Allowed).
 function promptForLabel(currentLabel) {
   return new Promise((resolve) => {
     const backdrop = document.getElementById('confirmBackdrop');
     const okBtn = document.getElementById('confirmActionBtn');
     const cancelBtn = document.getElementById('confirmCancelBtn');
-
     document.getElementById('confirmTitle').innerText = 'Label the Device';
     document.getElementById('confirmMessage').innerHTML =
       'A nickname/name for YOU only (not visible to the customer) so you can easily recognize this device — e.g. store or customer name.' +
       `<br><br><input type="text" id="deviceLabelInput" placeholder="e.g. Aling Nena — Sari-sari Store, Cubao" maxlength="120" value="${(currentLabel || '').replace(/"/g, '&quot;')}" style="margin-top:4px;">`;
     okBtn.innerText = '💾 Save';
     okBtn.className = 'btn-allow';
-
     backdrop.style.display = 'flex';
     setTimeout(() => document.getElementById('deviceLabelInput')?.focus(), 50);
-
     function cleanup(result) {
       backdrop.style.display = 'none';
       okBtn.onclick = null;
@@ -4192,7 +3390,6 @@ function promptForLabel(currentLabel) {
     cancelBtn.onclick = () => cleanup(null);
   });
 }
-
 function startPolling() {
   loadDevices();
   loadDownloadCodes();
@@ -4201,16 +3398,7 @@ function startPolling() {
   const loadDevicesNoJump = withScrollPreserved(loadDevices);
   pollTimer = setInterval(() => { if (adminKey) loadDevicesNoJump(); }, 8000);
 }
-
 if (adminKey) { renderLastExportNote(); renderAutoBackupToggle(); startPolling(); }
-
-// ---------------- PWA: INSTALL SUPPORT (Android + PC) ----------------
-// On Android, the install banner usually appears automatically once
-// the manifest/service-worker match the criteria. On DESKTOP (Chrome/
-// Edge), an explicit button that calls prompt() is needed — so
-// here, we capture the "beforeinstallprompt" event and only show
-// the button once it is ACTUALLY installable (not always/unconditionally
-// nakalagay lang).
 let deferredInstallPrompt = null;
 window.addEventListener('beforeinstallprompt', (e) => {
   e.preventDefault();
@@ -4229,52 +3417,38 @@ async function installApp() {
   deferredInstallPrompt = null;
   document.getElementById('installBtn').style.display = 'none';
 }
-
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('service-worker.js')
       .catch((err) => console.warn('[Admin] SW registration failed:', err));
   });
 }
-
-// ================= ADVANCED PRO MATRIX — digital-rain canvas engine =================
-// Reusable renderer used both as the always-on ambient background
-// (#matrixCanvas) and as the vivid boot-screen backdrop (#bootMatrixCanvas).
-// Cyber Neon Pro palette: cyan primary digits, magenta "glitch" heads.
-// Binary-only glyphs (0/1), tiny 5px lines, a handful of streaks moving
-// both vertically (top-to-bottom) and horizontally (left-to-right) — kept
-// sparse on purpose so it reads as an accent, not a wall of text.
 function createMatrixRain(canvas, opts) {
   if (!canvas) return { stop() {} };
   const prefersReduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   if (prefersReduced) return { stop() {} };
-
   const ctx = canvas.getContext('2d');
   const settings = Object.assign({
     fontSize: 5,
     speedMin: 0.6,
     speedMax: 2.2,
-    fade: 0.10,        // trail persistence (lower = longer streaks)
+    fade: 0.10,        
     headColor: '#eafcff',
-    bodyColors: ['#22e5ff', '#7cf3ff', '#22e5ff', '#ff2ee6'], // mostly cyan, rare magenta glitch line
+    bodyColors: ['#22e5ff', '#7cf3ff', '#22e5ff', '#ff2ee6'], 
     glow: 1.5,
-    lineCount: 16,      // total number of streaks on screen (few, not a wall of text)
+    lineCount: 16,      
     lineLenMin: 8,
     lineLenMax: 16
   }, opts || {});
-
-  const glyphs = ['0', '1']; // binary only, no kanji/katakana
-
+  const glyphs = ['0', '1']; 
   let lines = [], w = 0, h = 0, raf = null;
-
   function randomText(len) {
     let s = '';
     for (let i = 0; i < len; i++) s += glyphs[(Math.random() * 2) | 0];
     return s;
   }
-
   function makeLine() {
-    const dir = Math.random() < 0.5 ? 'v' : 'h'; // mix of vertical + horizontal streaks
+    const dir = Math.random() < 0.5 ? 'v' : 'h'; 
     const len = (settings.lineLenMin + Math.random() * (settings.lineLenMax - settings.lineLenMin)) | 0;
     const speed = settings.speedMin + Math.random() * (settings.speedMax - settings.speedMin);
     const color = settings.bodyColors[(Math.random() * settings.bodyColors.length) | 0];
@@ -4283,26 +3457,9 @@ function createMatrixRain(canvas, opts) {
     }
     return { dir, cross: Math.random() * h, progress: -len * settings.fontSize - Math.random() * w, speed, color, text: randomText(len), len };
   }
-
-  // BUG FIX (biglang kumikislap/nag-re-reset ang matrix rain background
-  // habang nag-sscroll sa MOBILE — isa pang sanhi ng "parang may
-  // auto-reload/refresh" na distraction): dati, bawat 'resize' event ay
-  // agad na binubura AT nire-regenerate (lines = new Array(...).map(
-  // makeLine)) ang lahat ng streaks, at walang debounce. Sa mobile
-  // Chrome/Safari, ang pag-scroll ay nagpapa-collapse/expand ng address
-  // bar, na nag-fi-fire ng 'resize' event dahil sa pagbabago ng viewport
-  // HEIGHT lang (hindi naman talaga "nag-resize" ang screen) — kaya
-  // bawat scroll, kumikislap/nagre-reset ang buong ambient animation sa
-  // likod ng panel. Ayos: (1) i-debounce ang resize handler (150ms) para
-  // hindi ito paulit-ulit tumakbo habang tuloy-tuloy pa ang scroll
-  // gesture, at (2) huwag munang galawin ang canvas/lines kung HEIGHT
-  // LANG ang nagbago nang MALIIT (< 120px — tipikal na sukat ng
-  // mobile browser address bar) — tunay na resize/orientation change
-  // lang (malaking pagbabago sa width o height) ang magre-regenerate.
   let resizeDebounceTimer = null;
   let lastResizeW = 0, lastResizeH = 0;
   const RESIZE_HEIGHT_IGNORE_THRESHOLD = 120;
-
   function doResize() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     w = canvas.clientWidth || canvas.parentElement.clientWidth;
@@ -4314,7 +3471,6 @@ function createMatrixRain(canvas, opts) {
     lastResizeW = w;
     lastResizeH = h;
   }
-
   function resize() {
     if (resizeDebounceTimer) clearTimeout(resizeDebounceTimer);
     resizeDebounceTimer = setTimeout(() => {
@@ -4324,24 +3480,16 @@ function createMatrixRain(canvas, opts) {
       const widthChanged = lastResizeW > 0 && newW !== lastResizeW;
       const heightChangedALot = lastResizeH > 0 && Math.abs(newH - lastResizeH) >= RESIZE_HEIGHT_IGNORE_THRESHOLD;
       if (!widthChanged && !heightChangedALot && lastResizeW > 0) {
-        // Mobile address-bar show/hide lang ito habang nag-sscroll —
-        // huwag munang buburahin/i-reset ang animation.
         return;
       }
       doResize();
     }, 150);
   }
-
   function frame() {
     ctx.fillStyle = `rgba(5, 7, 13, ${settings.fade})`;
     ctx.fillRect(0, 0, w, h);
-    // NOTE: canvas 2D `font` does not resolve CSS custom properties
-    // (var(--font-mono)) — must be a concrete font stack or it silently
-    // falls back to a much larger default font and renders as an
-    // unreadable blurry smear instead of crisp small digits.
     ctx.font = `${settings.fontSize}px 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace`;
     ctx.textBaseline = 'top';
-
     for (const ln of lines) {
       const bound = ln.dir === 'v' ? h : w;
       for (let i = 0; i < ln.len; i++) {
@@ -4356,7 +3504,6 @@ function createMatrixRain(canvas, opts) {
         else ctx.fillText(ch, p, ln.cross);
       }
       ctx.shadowBlur = 0;
-
       ln.progress += ln.speed;
       if (ln.progress - ln.len * settings.fontSize > bound) {
         Object.assign(ln, makeLine(), { progress: -ln.len * settings.fontSize });
@@ -4364,13 +3511,11 @@ function createMatrixRain(canvas, opts) {
     }
     raf = requestAnimationFrame(frame);
   }
-
   doResize();
   ctx.fillStyle = '#05070d';
   ctx.fillRect(0, 0, w, h);
   raf = requestAnimationFrame(frame);
   window.addEventListener('resize', resize);
-
   return {
     stop() {
       if (raf) cancelAnimationFrame(raf);
@@ -4379,9 +3524,6 @@ function createMatrixRain(canvas, opts) {
     }
   };
 }
-
-// Ambient matrix rain — subtle, sits behind the whole admin UI at all times.
-// Toggleable via the button next to Logout; preference persists in localStorage.
 const AMBIENT_MATRIX_OPTS = {
   fontSize: 5,
   speedMin: 0.5,
@@ -4392,55 +3534,42 @@ const AMBIENT_MATRIX_OPTS = {
 };
 let ambientMatrixRain = null;
 let matrixRainEnabled = localStorage.getItem('relayMatrixRainOff') !== '1';
-
 function startAmbientMatrixRain() {
   const canvas = document.getElementById('matrixCanvas');
   if (!canvas || ambientMatrixRain) return;
   canvas.style.display = '';
   ambientMatrixRain = createMatrixRain(canvas, AMBIENT_MATRIX_OPTS);
 }
-
 function stopAmbientMatrixRain() {
   const canvas = document.getElementById('matrixCanvas');
   if (ambientMatrixRain) { ambientMatrixRain.stop(); ambientMatrixRain = null; }
   if (canvas) canvas.style.display = 'none';
 }
-
 function updateMatrixToggleBtn() {
   const btn = document.getElementById('matrixToggleBtn');
   if (!btn) return;
   btn.classList.toggle('is-on', matrixRainEnabled);
   btn.title = matrixRainEnabled ? 'Matrix animation: ON (click to turn off)' : 'Matrix animation: OFF (click to turn on)';
 }
-
 function toggleMatrixRain() {
   matrixRainEnabled = !matrixRainEnabled;
   localStorage.setItem('relayMatrixRainOff', matrixRainEnabled ? '0' : '1');
   if (matrixRainEnabled) startAmbientMatrixRain(); else stopAmbientMatrixRain();
   updateMatrixToggleBtn();
 }
-
 if (matrixRainEnabled) startAmbientMatrixRain();
 updateMatrixToggleBtn();
-
-// ================= CYBORG UPGRADE: boot sequence, glitch, HUD count-up =================
 (function cyborgBootSequence() {
   const overlay = document.getElementById('bootOverlay');
   const line = document.getElementById('bootLine');
   if (!overlay) return;
-
   const prefersReduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const alreadyBooted = sessionStorage.getItem('relayBooted') === '1';
-
   const steps = [
     'INITIALIZING RELAY UPLINK',
     'VERIFYING DEVICE FINGERPRINTS',
     'SYSTEM ONLINE'
   ];
-
-  // Vivid, fast "Advanced Pro Matrix" rain just for the boot screen —
-  // stopped as soon as the overlay finishes hiding to save CPU.
-  // Respects the same on/off preference as the ambient matrix toggle.
   const bootRain = matrixRainEnabled ? createMatrixRain(document.getElementById('bootMatrixCanvas'), {
     fontSize: 5,
     speedMin: 1.2,
@@ -4449,19 +3578,16 @@ updateMatrixToggleBtn();
     lineCount: 22,
     glow: 2
   }) : { stop() {} };
-
   function hideOverlay() {
     overlay.classList.add('boot-hidden');
     sessionStorage.setItem('relayBooted', '1');
     setTimeout(() => { bootRain.stop(); overlay.remove(); }, 450);
   }
-
   if (prefersReduced || alreadyBooted) {
     bootRain.stop();
     hideOverlay();
     return;
   }
-
   let i = 0;
   if (line) line.innerHTML = steps[0] + '<span class="boot-cursor"></span>';
   const stepTimer = setInterval(() => {
@@ -4472,36 +3598,30 @@ updateMatrixToggleBtn();
       clearInterval(stepTimer);
     }
   }, 380);
-
   setTimeout(hideOverlay, 1200);
 })();
-
 (function cyborgGlitchTitles() {
   if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   const targets = ['topbarTitle', 'loginTitle'].map((id) => document.getElementById(id)).filter(Boolean);
   if (targets.length === 0) return;
   setInterval(() => {
     const el = targets[Math.floor(Math.random() * targets.length)];
-    if (el.offsetParent === null) return; // hidden/not visible right now
+    if (el.offsetParent === null) return; 
     el.classList.add('glitch-active');
     setTimeout(() => el.classList.remove('glitch-active'), 480);
   }, 6500);
 })();
-
 (function cyborgStatCountUp() {
   if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-
   function animateStatNum(el, targetText) {
     const newVal = parseInt(String(targetText).replace(/[^0-9-]/g, ''), 10);
     if (isNaN(newVal)) { el.textContent = targetText; return; }
     let oldVal = parseInt(el.getAttribute('data-cyborg-val') || '0', 10);
     if (isNaN(oldVal)) oldVal = 0;
     if (oldVal === newVal) { el.setAttribute('data-cyborg-val', String(newVal)); return; }
-
     const duration = 500;
     let start = null;
     el.classList.add('counting');
-
     function step(ts) {
       if (!start) start = ts;
       const p = Math.min(1, (ts - start) / duration);
@@ -4518,11 +3638,9 @@ updateMatrixToggleBtn();
     }
     requestAnimationFrame(step);
   }
-
   document.querySelectorAll('.stat-num').forEach((el) => {
     const initial = parseInt(el.textContent, 10);
     el.setAttribute('data-cyborg-val', String(isNaN(initial) ? 0 : initial));
-
     const observer = new MutationObserver(() => {
       const target = el.textContent;
       observer.disconnect();
@@ -4534,8 +3652,6 @@ updateMatrixToggleBtn();
     observer.observe(el, { childList: true, characterData: true, subtree: true });
   });
 })();
-
 </script>
-
 </body>
 </html>
