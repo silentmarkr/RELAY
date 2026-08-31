@@ -1617,8 +1617,13 @@ a:focus-visible,
     </div>
 
     <div class="card">
-      <h2>🏆 Top Features <span style="font-size:11px; color:var(--muted); font-weight:normal;">(active licenses only)</span></h2>
+      <h2>🏆 Top Features <span style="font-size:11px; color:var(--muted); font-weight:normal;">(active licenses, count + revenue)</span></h2>
       <div id="anaTopFeatures" class="empty">Loading...</div>
+    </div>
+
+    <div class="card">
+      <h2>☁️ Cloud Backup Plan Popularity <span style="font-size:11px; color:var(--muted); font-weight:normal;">(Basic vs Standard vs Pro)</span></h2>
+      <div id="anaCloudBackupTiers" class="empty">Loading...</div>
     </div>
 
     <div class="card">
@@ -3570,10 +3575,30 @@ function renderAnalytics(a) {
     const maxCount = Math.max(...a.topFeatures.map(f => f.count));
     topEl.innerHTML = a.topFeatures.map(f => `
       <div class="abar-row">
-        <div class="abar-label"><span class="name">${f.featureName}</span><span class="count">${f.count}</span></div>
+        <div class="abar-label"><span class="name">${f.featureName}</span><span class="count">${f.count} active · ₱${(f.revenue || 0).toLocaleString('en-PH')}</span></div>
         <div class="abar-track"><div class="abar-fill" style="width:${Math.max(6, Math.round((f.count / maxCount) * 100))}%;"></div></div>
       </div>
     `).join('');
+  }
+
+  // Cloud Backup tier popularity — which plan (Basic/Standard/Pro)
+  // customers actually pick. Reuses the same card if present in the
+  // markup; if this admin build predates the card, silently skip
+  // rendering instead of throwing.
+  const cbTierEl = document.getElementById('anaCloudBackupTiers');
+  if (cbTierEl) {
+    const tiers = a.cloudBackupTierPopularity || [];
+    if (tiers.length === 0) {
+      cbTierEl.innerHTML = '<div class="empty">No active Cloud Backup subscriptions yet.</div>';
+    } else {
+      const maxTierCount = Math.max(...tiers.map(t => t.count));
+      cbTierEl.innerHTML = tiers.map(t => `
+        <div class="abar-row">
+          <div class="abar-label"><span class="name">${t.name}</span><span class="count">${t.count}</span></div>
+          <div class="abar-track"><div class="abar-fill" style="width:${Math.max(6, Math.round((t.count / maxTierCount) * 100))}%;"></div></div>
+        </div>
+      `).join('');
+    }
   }
 }
 

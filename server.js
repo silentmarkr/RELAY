@@ -2934,10 +2934,53 @@ app.post('/relay/admin/api/pricing/features/reset', requireAdminKey, (req, res) 
 // na fetch nila, kagaya na rin ng Cloud Backup/Feature pricing — walang
 // kailangang i-restart o i-deploy ulit ang RELAY o ang OMNIPOS.
 // --------------------------------------------------------------
+// AUTO-SUGGESTED PRICING — nire-recompute ang ala-carte total ng bawat
+// tier's kasalukuyang featureIds selection laban sa LIVE FEATURE_CATALOG
+// (hindi hardcoded), para awtomatikong mahuli kapag "gumuho" na naman
+// ang % off ng isang tier dahil sa isang presyo ng theme/module na
+// nabago pagkatapos i-set ang bundlePrice — ito mismo ang uri ng bug na
+// nangyari dati sa Pro tier (₱4,999 na naka-set noon batay sa lumang
+// presyo, pero ~2.7% off na lang sa kasalukuyang catalog). Ang
+// suggestedBundlePrice ay ~30% off sa ala-carte total, ROUNDED sa
+// pinakamalapit na ₱50 (mas "presentable" na presyo kaysa random na
+// numero), floor sa ₱1 kung 0 ang ala-carte total.
+const SUGGESTED_DISCOUNT_PERCENT = 30;
+function computeTierPricingSuggestion(tier) {
+    const alaCarteTotal = tier.featureIds.reduce((sum, id) => sum + ((FEATURE_CATALOG[id] && FEATURE_CATALOG[id].price) || 0), 0);
+    const discountPercent = alaCarteTotal > 0
+        ? Math.round(((alaCarteTotal - tier.bundlePrice) / alaCarteTotal) * 100)
+        : 0;
+    const rawSuggested = alaCarteTotal * (1 - SUGGESTED_DISCOUNT_PERCENT / 100);
+    const suggestedBundlePrice = alaCarteTotal > 0 ? Math.max(1, Math.round(rawSuggested / 50) * 50) : tier.bundlePrice;
+    return { alaCarteTotal, discountPercent, suggestedBundlePrice };
+}
+
 app.get('/relay/admin/api/pricing/tiers', requireAdminKey, (req, res) => {
     const effective = {};
     for (const tier of UPGRADE_TIERS) {
-        effective[tier.id] = { id: tier.id, name: tier.name, bundlePrice: tier.bundlePrice, featureIds: tier.featureIds };
+        const suggestion = computeTierPricingSuggestion(tier);
+        effective[tier.id] = {
+            id: tier.id,
+            name: tier.name,
+            bundlePrice: tier.bundlePrice,
+            featureIds: tier.featureIds,
+            alaCarteTotal: suggestion.alaCarteTotal,
+            discountPercent: suggestion.discountPercent,
+            suggestedBundlePrice: suggestion.suggestedBundlePrice
+        };
+    }
+    // "Inverted discount" warning — kapag ang isang MAS MALAKING tier
+    // (mas maraming featureIds) ay may MAS MABABANG discount % kaysa sa
+    // isang mas maliit na tier, backwards ito sa dapat asahan ("buy
+    // more, save more") at malamang bug/drift, hindi sadyang desisyon.
+    const tierOrder = ['basic', 'standard', 'pro'];
+    const invertedDiscountWarnings = [];
+    for (let i = 1; i < tierOrder.length; i++) {
+        const bigger = effective[tierOrder[i]];
+        const smaller = effective[tierOrder[i - 1]];
+        if (bigger && smaller && bigger.discountPercent < smaller.discountPercent) {
+            invertedDiscountWarnings.push(`"${bigger.name}" (${bigger.discountPercent}% off) has a SMALLER discount than "${smaller.name}" (${smaller.discountPercent}% off) — consider lowering its bundle price.`);
+        }
     }
     const base = {};
     for (const tierId of Object.keys(UPGRADE_TIER_BUNDLE_PRICE_BASE)) {
@@ -2959,7 +3002,8 @@ app.get('/relay/admin/api/pricing/tiers', requireAdminKey, (req, res) => {
         upgradeTiers: effective,
         upgradeTiersBase: base,
         upgradeTierPricingOverrides,
-        selectableFeatureIds
+        selectableFeatureIds,
+        invertedDiscountWarnings
     });
 });
 
@@ -3034,6 +3078,12 @@ app.get('/relay/admin/api/analytics', requireAdminKey, (req, res) => {
     let allTimeRevenue = 0;
     let demoActiveCount = 0;
     const featureCounts = {};
+    const featureRevenue = {};
+    // Which Cloud Backup subscription tier (basic/standard/pro) customers
+    // actually pick, so the admin can see if e.g. everyone picks Basic and
+    // Pro is overpriced/underused — same idea as topFeatures below, but
+    // for the subscription tier CHOICE within a single feature.
+    const cloudBackupTierCounts = {};
     const expiringSoon = [];
 
     for (const [installationId, record] of Object.entries(issuedUnlocks)) {
@@ -3064,6 +3114,11 @@ app.get('/relay/admin/api/analytics', requireAdminKey, (req, res) => {
                 activeUnlocksCount++;
                 activeRevenue += entry.price || 0;
                 featureCounts[featureId] = (featureCounts[featureId] || 0) + 1;
+                featureRevenue[featureId] = (featureRevenue[featureId] || 0) + (entry.price || 0);
+
+                if (featureId === 'cloud_backup' && entry.tier) {
+                    cloudBackupTierCounts[entry.tier] = (cloudBackupTierCounts[entry.tier] || 0) + 1;
+                }
 
                 if (typeof entry.expiresAt === 'number' && entry.expiresAt - now <= SOON_MS) {
                     const meta = seenDevices.get(installationId);
@@ -3084,10 +3139,15 @@ app.get('/relay/admin/api/analytics', requireAdminKey, (req, res) => {
         .map(([featureId, count]) => ({
             featureId,
             featureName: (FEATURE_CATALOG[featureId] && FEATURE_CATALOG[featureId].name) || featureId,
-            count
+            count,
+            revenue: featureRevenue[featureId] || 0
         }))
         .sort((a, b) => b.count - a.count)
         .slice(0, 8);
+
+    const cloudBackupTierPopularity = Object.entries(cloudBackupTierCounts)
+        .map(([tier, count]) => ({ tier, name: (CLOUD_BACKUP_PLANS[tier] && CLOUD_BACKUP_PLANS[tier].name) || tier, count }))
+        .sort((a, b) => b.count - a.count);
 
     const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
     const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
@@ -3110,6 +3170,7 @@ app.get('/relay/admin/api/analytics', requireAdminKey, (req, res) => {
             unlocksLast7d,
             unlocksLast30d,
             topFeatures,
+            cloudBackupTierPopularity,
             expiringSoon: expiringSoon.slice(0, 20)
         }
     });
@@ -4212,6 +4273,69 @@ app.get('/relay/branch-summary', requireApiKey, requireAllowedDevice, rateLimit(
     }, {});
 
     res.json({ success: true, branchCount: branches.length, branches, combined });
+});
+
+// --------------------------------------------------------------
+// MULTI-TERMINAL / MULTI-BRANCH DISCOUNT — bagong feature (Aug 2026).
+// Kapag maraming device ng IISANG negosyo (parehong Business Group Code,
+// i.e. parehong branchGroupKeyHash sa branchSummaries — mas maaasahan
+// ito kaysa sa self-reported storeName, dahil sinasadyang i-configure
+// ito ng merchant bilang shared secret, hindi basta free-text), bigyan
+// sila ng discount sa presyo ng one-time Upgrade Tier bundles (Basic/
+// Standard/Pro) — reward para sa "buying at scale" sa maraming
+// terminal, kagaya ng ginagawa ng maraming SaaS na may per-seat/per-
+// location na pricing.
+//
+// Ang groupKeyHash ay ang parehong grouping key na ginagamit na ng
+// Multi-Branch Dashboard widget (branch-checkin/branch-summary sa
+// itaas) — kaya gumagana ito kahit hindi pa binibili ang multi_branch
+// subscription (ang pag-configure lang ng Business Group Code sa Store
+// & Sales Settings ang kailangan, hiwalay ito sa pagbili ng widget
+// mismo).
+// --------------------------------------------------------------
+const MULTI_TERMINAL_DISCOUNT_TIERS_BASE = [
+    { minDevices: 7, percent: 15 },
+    { minDevices: 4, percent: 10 },
+    { minDevices: 2, percent: 5 }
+]; // dapat naka-sort DESCENDING sa minDevices — unang tumugma ang ginagamit
+
+function getGroupDeviceCount(installationId) {
+    for (const hash of Object.keys(branchSummaries)) {
+        const group = branchSummaries[hash];
+        if (group && Object.prototype.hasOwnProperty.call(group, installationId)) {
+            return Object.keys(group).length;
+        }
+    }
+    return 1; // walang group na nakita — iisang device lang
+}
+
+function getMultiTerminalDiscountPercent(deviceCount) {
+    for (const t of MULTI_TERMINAL_DISCOUNT_TIERS_BASE) {
+        if (deviceCount >= t.minDevices) return t.percent;
+    }
+    return 0;
+}
+
+// --------------------------------------------------------------
+// GET /relay/pricing/group-discount?installationId=<id>
+// Tinatawag ito ng OMNIPOS client server (parehong "keep last known
+// good, retry sa susunod" na pattern gaya ng Cloud Backup pricing)
+// kapag binubuksan ang upgrade/bundle catalog, para malaman kung
+// dapat ipakita ang multi-terminal discount na ito bago pa man
+// mag-request ng OTP. Hindi ito nagbabago ng anumang billing record —
+// preview/reference lang ito, ang aktwal na presyo ay tinutukoy pa
+// rin sa oras ng /relay/confirm-unlock-bulk (totalPrice na sinabi ng
+// OMNIPOS client, na dapat isama na ang discount na ito sa
+// pagkalkula).
+// --------------------------------------------------------------
+app.get('/relay/pricing/group-discount', requireApiKey, requireAllowedDevice, rateLimit('group-discount', 120, 60 * 60 * 1000, (req) => req.query?.installationId), (req, res) => {
+    const installationId = String(req.query.installationId || '');
+    if (!installationId) {
+        return res.status(400).json({ success: false, message: 'Kulang ang installationId query param.' });
+    }
+    const deviceCount = getGroupDeviceCount(installationId);
+    const discountPercent = getMultiTerminalDiscountPercent(deviceCount);
+    res.json({ success: true, deviceCount, discountPercent });
 });
 
 // --------------------------------------------------------------

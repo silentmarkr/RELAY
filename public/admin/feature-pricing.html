@@ -204,6 +204,7 @@
 
     <div class="tab-section" id="section-tiers">
       <div class="section-label">📦 Upgrade Bundles</div>
+      <div id="tierWarnings"></div>
       <div id="tiersGrid" class="plans-grid"></div>
     </div>
   </main>
@@ -217,6 +218,7 @@ let catalogBase = {};
 let catalogEffective = {};
 let overrides = {};
 let tiersEffective = {};
+let tierWarnings = [];
 let tierOverrides = {};
 // selectableFeatureIds — every feature that is ALLOWED to be placed in a
 // bundle (excludes cloud_backup/rbac_management/multi_branch, which are
@@ -320,7 +322,7 @@ function tierCardHtml(tierId, entry) {
   const checkboxHtml = featureId => {
     const label = (catalogEffective[featureId] && catalogEffective[featureId].name) || featureId;
     const checked = currentFeatureIds.has(featureId) ? 'checked' : '';
-    return `<label><input type="checkbox" data-tier-feature="${tierId}" value="${featureId}" ${checked}> ${label}</label>`;
+    return `<label><input type="checkbox" data-tier-feature="${tierId}" value="${featureId}" ${checked} onchange="updateTierDiscountPreview('${tierId}')"> ${label}</label>`;
   };
 
   // Grupuhin ang mga selectable feature ayon sa category (themes muna,
@@ -356,7 +358,13 @@ function tierCardHtml(tierId, entry) {
       </div>
       <div class="field">
         <label>Bundle Price (₱) ${tierFieldIsCustom(tierId, 'bundlePrice') ? '<span class="badge">customized</span>' : '<span class="badge default">default</span>'}</label>
-        <input type="number" min="0" step="1" id="tier-price-${tierId}" value="${entry.bundlePrice}">
+        <input type="number" min="0" step="1" id="tier-price-${tierId}" value="${entry.bundlePrice}" oninput="updateTierDiscountPreview('${tierId}')">
+      </div>
+      <div class="field" style="font-size:.78rem;color:var(--muted);">
+        À la carte total of the features checked below: <strong id="tier-alacarte-${tierId}">₱${(entry.alaCarteTotal || 0).toLocaleString('en-PH')}</strong><br>
+        Current discount: <strong id="tier-discount-${tierId}">${entry.discountPercent}%</strong> off &nbsp;·&nbsp;
+        Suggested price (~30% off): <strong>₱${(entry.suggestedBundlePrice || 0).toLocaleString('en-PH')}</strong>
+        <button type="button" class="btn btn-ghost" style="padding:2px 8px;font-size:.72rem;margin-left:6px;" onclick="document.getElementById('tier-price-${tierId}').value=${entry.suggestedBundlePrice || 0}; updateTierDiscountPreview('${tierId}');">Use suggested</button>
       </div>
       <div class="field">
         <label>Included features ${tierFieldIsCustom(tierId, 'featureIds') ? '<span class="badge">customized</span>' : '<span class="badge default">default</span>'}</label>
@@ -396,6 +404,36 @@ function renderCatalog() {
       tiersGrid.insertAdjacentHTML('beforeend', tierCardHtml(tierId, tiersEffective[tierId]));
     });
   if (!tiersGrid.innerHTML) tiersGrid.innerHTML = '<div style="color:var(--muted);">No upgrade bundles found.</div>';
+
+  // "Buy more, save more" sanity check — flag when a bigger bundle has a
+  // SMALLER discount % than a smaller one (the exact drift that once hit
+  // the Pro tier: its price stayed the same while catalog prices moved,
+  // quietly eroding its discount to almost nothing).
+  const warningsEl = document.getElementById('tierWarnings');
+  if (warningsEl) {
+    warningsEl.innerHTML = (tierWarnings || []).map(w =>
+      `<div class="warning-banner" style="background:#4a2a10;border:1px solid #c77b2a;color:#ffd8a8;padding:10px 14px;border-radius:8px;margin-bottom:12px;font-size:.82rem;">⚠️ ${w}</div>`
+    ).join('');
+  }
+}
+
+// Live "as-you-type" discount preview — recomputes the à la carte total
+// from whichever checkboxes are CURRENTLY checked (not just the saved
+// selection) and the price CURRENTLY typed into the field, so an admin
+// editing the bundle sees the real discount % update immediately,
+// before even hitting Save.
+function updateTierDiscountPreview(tierId) {
+  const priceInput = document.getElementById(`tier-price-${tierId}`);
+  const discountLabel = document.getElementById(`tier-discount-${tierId}`);
+  const alaCarteLabel = document.getElementById(`tier-alacarte-${tierId}`);
+  if (!priceInput || !discountLabel) return;
+  const price = Number(priceInput.value) || 0;
+  const checkedIds = Array.from(document.querySelectorAll(`input[data-tier-feature="${tierId}"]:checked`)).map(b => b.value);
+  const alaCarteTotal = checkedIds.reduce((sum, id) => sum + ((catalogEffective[id] && catalogEffective[id].price) || 0), 0);
+  if (alaCarteLabel) alaCarteLabel.textContent = '₱' + alaCarteTotal.toLocaleString('en-PH');
+  const pct = alaCarteTotal > 0 ? Math.round(((alaCarteTotal - price) / alaCarteTotal) * 100) : 0;
+  discountLabel.textContent = `${pct}%`;
+  discountLabel.style.color = pct < 0 ? '#ff6b6b' : (pct < 15 ? '#ffb84d' : '#69db7c');
 }
 
 async function saveTier(tierId) {
@@ -473,6 +511,7 @@ async function loadCatalog() {
   tiersEffective = tierData.upgradeTiers || {};
   tierOverrides = tierData.upgradeTierPricingOverrides || {};
   selectableFeatureIds = tierData.selectableFeatureIds || [];
+  tierWarnings = tierData.invertedDiscountWarnings || [];
   renderCatalog();
 }
 
