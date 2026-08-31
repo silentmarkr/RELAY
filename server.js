@@ -143,9 +143,6 @@ async function ensureCloudBackupSchema() {
     await pgPool.query(`ALTER TABLE cloud_backup_meta ADD COLUMN IF NOT EXISTS size_bytes BIGINT NOT NULL DEFAULT 0;`);
     console.log('✅ Cloud backup Postgres schema ready (cloud_backup_modules, cloud_backup_meta).');
 }
-ensureCloudBackupSchema().catch((err) => {
-    console.error('⚠️  Hindi na-prepare ang Postgres schema para sa cloud backup:', err.message);
-});
 async function ensureDeviceLicenseSchema() {
     if (!pgPool) return;
     await pgPool.query(`
@@ -181,9 +178,6 @@ async function ensureDeviceLicenseSchema() {
     `);
     console.log('✅ Device/license Postgres schema ready (relay_devices, relay_device_fingerprints, relay_clone_splits).');
 }
-ensureDeviceLicenseSchema().catch((err) => {
-    console.error('⚠️  Hindi na-prepare ang Postgres schema para sa device/license data:', err.message);
-});
 async function redisGetJSON(key, fallback) {
     if (!redisClient) return fallback;
     try {
