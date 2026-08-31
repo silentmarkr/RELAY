@@ -5,8 +5,12 @@
 // clone-splits) papunta sa bagong Postgres (Neon) tables.
 //
 // PAANO GAMITIN:
-//   1. Siguraduhing naka-set ang REDIS_URL (lumang data) AT DATABASE_URL (Neon)
-//      sa parehong .env o environment kung saan mo ito papatakbuhin.
+//   1. Siguraduhing naka-set ang REDIS_URL (lumang data) AT
+//      RELAY_DEVICES_DATABASE_URL (Neon — ang HIWALAY na database ng
+//      Device/License data, hindi ang Cloud Backup DATABASE_URL) sa
+//      parehong .env o environment kung saan mo ito papatakbuhin.
+//      Kung wala pang RELAY_DEVICES_DATABASE_URL na naka-set, babalik ito
+//      sa DATABASE_URL (backward-compatible sa mga hindi pa naghihiwalay).
 //   2. node migrate-redis-to-postgres.js
 //   3. Kapag "Migration complete" na, i-deploy mo na ang bagong server.js.
 //      Pwede mo nang tanggalin ang REDIS_URL kung ayaw mo nang gamitin pa
@@ -20,14 +24,14 @@ const Redis = require('ioredis');
 const { Pool } = require('pg');
 
 const REDIS_URL = process.env.REDIS_URL;
-const DATABASE_URL = process.env.DATABASE_URL;
+const DATABASE_URL = process.env.RELAY_DEVICES_DATABASE_URL || process.env.DATABASE_URL;
 
 if (!REDIS_URL) {
     console.error('❌ Walang REDIS_URL na naka-set. Kailangan ito para mabasa ang lumang data.');
     process.exit(1);
 }
 if (!DATABASE_URL) {
-    console.error('❌ Walang DATABASE_URL na naka-set. Kailangan ito para sa Neon Postgres connection string.');
+    console.error('❌ Walang RELAY_DEVICES_DATABASE_URL/DATABASE_URL na naka-set. Kailangan ito para sa Neon Postgres connection string ng Device/License database.');
     process.exit(1);
 }
 

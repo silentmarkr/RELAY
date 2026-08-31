@@ -32,10 +32,26 @@ if (redisClient) {
 }
 const REDIS_KEY_PREFIX = 'omnipos-relay:';
 const { Pool } = require('pg');
+// AYOS: dating IISANG DATABASE_URL/pgPool lang ang ginagamit PAREHO ng
+// (1) Cloud Backup (cloud_backup_modules/cloud_backup_meta) AT (2) Device/
+// license data (relay_devices/relay_device_fingerprints/relay_clone_splits),
+// kaya iisa lang ang Neon database na tumatanggap ng dalawang klase ng data.
+// Ngayon, hiwalay na ang dalawang Postgres connection:
+//   - DATABASE_URL                -> Cloud Backup pool (pgPool)
+//   - RELAY_DEVICES_DATABASE_URL  -> Device/license pool (pgPoolDevices)
+// Kung walang naka-set na RELAY_DEVICES_DATABASE_URL, babalik muna ito sa
+// DATABASE_URL (backward-compatible, hindi masisira ang existing deployments
+// na iisa pa lang ang naka-configure na URL) — pero para TUNAY na mahiwalay
+// ang dalawang database gaya ng gusto, kailangang lagyan ng SARILI at
+// IBANG Neon connection string ang RELAY_DEVICES_DATABASE_URL.
 const DATABASE_URL = process.env.DATABASE_URL || null;
-const pgPool = DATABASE_URL
-    ? new Pool({
-        connectionString: DATABASE_URL,
+const DEVICES_DATABASE_URL = process.env.RELAY_DEVICES_DATABASE_URL || DATABASE_URL || null;
+const DEVICES_DB_IS_SEPARATE = !!(process.env.RELAY_DEVICES_DATABASE_URL && process.env.RELAY_DEVICES_DATABASE_URL !== DATABASE_URL);
+
+function makePgPool(connectionString) {
+    if (!connectionString) return null;
+    return new Pool({
+        connectionString,
         ssl: process.env.PGSSL === 'false' ? false : { rejectUnauthorized: false },
         keepAlive: true,
         keepAliveInitialDelayMillis: 10000,
@@ -43,14 +59,30 @@ const pgPool = DATABASE_URL
         query_timeout: 0,
         idle_in_transaction_session_timeout: 0,
         connectionTimeoutMillis: 15000
-    })
-    : null;
+    });
+}
+
+const pgPool = makePgPool(DATABASE_URL);
 if (pgPool) {
     pgPool.on('error', (err) => {
         console.error('⚠️  Postgres pool error (cloud backup storage):', err.message);
     });
 } else {
     console.warn('⚠️  Walang DATABASE_URL na naka-set — hindi gagana ang Cloud Backup (Postgres) feature hangga\'t hindi ito nalagyan.');
+}
+
+// Kung magkapareho ang connection string, muling gamitin ang parehong Pool
+// instance (huwag gumawa ng dobleng koneksyon papunta sa iisang database).
+const pgPoolDevices = DEVICES_DB_IS_SEPARATE ? makePgPool(DEVICES_DATABASE_URL) : pgPool;
+if (DEVICES_DB_IS_SEPARATE && pgPoolDevices) {
+    pgPoolDevices.on('error', (err) => {
+        console.error('⚠️  Postgres pool error (device/license storage):', err.message);
+    });
+    console.log('✅ Hiwalay na Neon database ang ginagamit para sa Device/License data (RELAY_DEVICES_DATABASE_URL) mula sa Cloud Backup (DATABASE_URL).');
+} else if (!pgPoolDevices) {
+    console.warn('⚠️  Walang DATABASE_URL/RELAY_DEVICES_DATABASE_URL na naka-set — hindi gagana ang Device/License (Postgres) feature hangga\'t hindi ito nalagyan.');
+} else {
+    console.warn('ℹ️  Walang hiwalay na RELAY_DEVICES_DATABASE_URL na naka-set — GINAGAMIT PA RIN ang parehong DATABASE_URL para sa Device/License data at Cloud Backup. Para tunay na mahiwalay, magtakda ng ibang Neon connection string sa RELAY_DEVICES_DATABASE_URL.');
 }
 function isTransientPgConnectionError(err) {
     if (!err) return false;
@@ -69,12 +101,16 @@ function isTransientPgConnectionError(err) {
     );
 }
 const PG_WRITE_RETRY_DELAYS_MS = [2000, 5000, 10000, 20000];
-async function runCloudBackupWrite(writeFn, { maxAttempts = 5 } = {}) {
+// NOTE: tumatanggap na ito ng `pool` bilang unang argumento (pgPool para sa
+// Cloud Backup, pgPoolDevices para sa device/license data) — dating pgPool
+// lang ang direktang ginagamit dito, kaya nagsasalo ang dalawang klase ng
+// data sa parehong connection.
+async function runPgWriteTx(pool, writeFn, { maxAttempts = 5 } = {}) {
     let lastErr = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        const client = await pgPool.connect();
+        const client = await pool.connect();
         client.on('error', (err) => {
-            console.warn(`⚠️  CLOUD_BACKUP: checked-out Postgres client emitted an error while idle between queries (${err.message}) — this attempt will fail and retry below instead of crashing the server.`);
+            console.warn(`⚠️  PG_WRITE_TX: checked-out Postgres client emitted an error while idle between queries (${err.message}) — this attempt will fail and retry below instead of crashing the server.`);
         });
         try {
             await client.query('BEGIN');
@@ -88,7 +124,7 @@ async function runCloudBackupWrite(writeFn, { maxAttempts = 5 } = {}) {
                 throw err;
             }
             const delayMs = PG_WRITE_RETRY_DELAYS_MS[attempt - 1] || PG_WRITE_RETRY_DELAYS_MS[PG_WRITE_RETRY_DELAYS_MS.length - 1];
-            console.warn(`⚠️  CLOUD_BACKUP: transient Postgres connection error on attempt ${attempt}/${maxAttempts} (${err.message}) — waiting ${delayMs}ms then retrying with a fresh connection (database may be waking up from idle)…`);
+            console.warn(`⚠️  PG_WRITE_TX: transient Postgres connection error on attempt ${attempt}/${maxAttempts} (${err.message}) — waiting ${delayMs}ms then retrying with a fresh connection (database may be waking up from idle)…`);
         } finally {
             client.release();
         }
@@ -98,18 +134,18 @@ async function runCloudBackupWrite(writeFn, { maxAttempts = 5 } = {}) {
     throw lastErr;
 }
 const READ_RETRY_DELAYS_MS = [2000, 5000];
-async function queryWithRetry(text, params, { maxAttempts = 3 } = {}) {
+async function queryWithRetry(pool, text, params, { maxAttempts = 3 } = {}) {
     let lastErr = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
-            return await pgPool.query(text, params);
+            return await pool.query(text, params);
         } catch (err) {
             lastErr = err;
             if (!isTransientPgConnectionError(err) || attempt === maxAttempts) {
                 throw err;
             }
             const delayMs = READ_RETRY_DELAYS_MS[attempt - 1] || READ_RETRY_DELAYS_MS[READ_RETRY_DELAYS_MS.length - 1];
-            console.warn(`⚠️  CLOUD_BACKUP: transient Postgres connection error on read attempt ${attempt}/${maxAttempts} (${err.message}) — waiting ${delayMs}ms then retrying with a fresh connection…`);
+            console.warn(`⚠️  PG_READ: transient Postgres connection error on read attempt ${attempt}/${maxAttempts} (${err.message}) — waiting ${delayMs}ms then retrying with a fresh connection…`);
             await new Promise(r => setTimeout(r, delayMs));
         }
     }
@@ -144,8 +180,8 @@ async function ensureCloudBackupSchema() {
     console.log('✅ Cloud backup Postgres schema ready (cloud_backup_modules, cloud_backup_meta).');
 }
 async function ensureDeviceLicenseSchema() {
-    if (!pgPool) return;
-    await pgPool.query(`
+    if (!pgPoolDevices) return;
+    await pgPoolDevices.query(`
         CREATE TABLE IF NOT EXISTS relay_devices (
             installation_id TEXT PRIMARY KEY,
             allowed         BOOLEAN NOT NULL DEFAULT true,
@@ -154,7 +190,7 @@ async function ensureDeviceLicenseSchema() {
             updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
         );
     `);
-    await pgPool.query(`
+    await pgPoolDevices.query(`
         CREATE TABLE IF NOT EXISTS relay_device_fingerprints (
             installation_id     TEXT PRIMARY KEY,
             fingerprint         TEXT,
@@ -167,7 +203,7 @@ async function ensureDeviceLicenseSchema() {
             updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
         );
     `);
-    await pgPool.query(`
+    await pgPoolDevices.query(`
         CREATE TABLE IF NOT EXISTS relay_clone_splits (
             split_key           TEXT PRIMARY KEY,
             installation_id     TEXT NOT NULL,
@@ -343,9 +379,9 @@ async function notifyUnlockRequest({ subject, text }) {
 }
 const DEVICE_STORE_PATH = path.join(__dirname, 'allowed-devices.json');
 async function loadAllowedDevices() {
-    if (pgPool) {
+    if (pgPoolDevices) {
         try {
-            const result = await queryWithRetry('SELECT installation_id FROM relay_devices WHERE allowed = true', []);
+            const result = await queryWithRetry(pgPoolDevices, 'SELECT installation_id FROM relay_devices WHERE allowed = true', []);
             return new Set(result.rows.map(r => r.installation_id));
         } catch (err) {
             console.error('⚠️  Hindi mabasa sa Postgres ang allowed-devices, babalik sa lokal na file:', err.message);
@@ -363,9 +399,9 @@ async function loadAllowedDevices() {
     }
 }
 function saveAllowedDevices(set) {
-    if (pgPool) {
+    if (pgPoolDevices) {
         const ids = [...set];
-        runCloudBackupWrite(async (client) => {
+        runPgWriteTx(pgPoolDevices, async (client) => {
             await client.query('UPDATE relay_devices SET allowed = false, updated_at = now() WHERE allowed = true');
             for (const id of ids) {
                 await client.query(
@@ -389,9 +425,9 @@ function saveAllowedDevices(set) {
 let allowedDevices = new Set(); 
 const DEVICE_LABELS_PATH = path.join(__dirname, 'device-labels.json');
 async function loadDeviceLabels() {
-    if (pgPool) {
+    if (pgPoolDevices) {
         try {
-            const result = await queryWithRetry('SELECT installation_id, label FROM relay_devices WHERE label IS NOT NULL', []);
+            const result = await queryWithRetry(pgPoolDevices, 'SELECT installation_id, label FROM relay_devices WHERE label IS NOT NULL', []);
             return new Map(result.rows.map(r => [r.installation_id, r.label]));
         } catch (err) {
             console.error('⚠️  Hindi mabasa sa Postgres ang device-labels, babalik sa lokal na file:', err.message);
@@ -405,9 +441,9 @@ async function loadDeviceLabels() {
     }
 }
 function saveDeviceLabels(map) {
-    if (pgPool) {
+    if (pgPoolDevices) {
         const entries = [...map.entries()];
-        runCloudBackupWrite(async (client) => {
+        runPgWriteTx(pgPoolDevices, async (client) => {
             await client.query('UPDATE relay_devices SET label = NULL, updated_at = now() WHERE label IS NOT NULL');
             for (const [id, label] of entries) {
                 await client.query(
@@ -442,9 +478,9 @@ function fingerprintRowToRecord(r) {
     };
 }
 async function loadDeviceFingerprints() {
-    if (pgPool) {
+    if (pgPoolDevices) {
         try {
-            const result = await queryWithRetry('SELECT * FROM relay_device_fingerprints', []);
+            const result = await queryWithRetry(pgPoolDevices, 'SELECT * FROM relay_device_fingerprints', []);
             return new Map(result.rows.map(r => [r.installation_id, fingerprintRowToRecord(r)]));
         } catch (err) {
             console.error('⚠️  Hindi mabasa sa Postgres ang device-fingerprints, babalik sa lokal na file:', err.message);
@@ -458,9 +494,9 @@ async function loadDeviceFingerprints() {
     }
 }
 function saveDeviceFingerprints(map) {
-    if (pgPool) {
+    if (pgPoolDevices) {
         const entries = [...map.entries()];
-        runCloudBackupWrite(async (client) => {
+        runPgWriteTx(pgPoolDevices, async (client) => {
             await client.query('DELETE FROM relay_device_fingerprints WHERE installation_id != ALL($1::text[])', [entries.map(([id]) => id)]);
             for (const [id, rec] of entries) {
                 await client.query(
@@ -491,9 +527,9 @@ function saveDeviceFingerprints(map) {
 let deviceFingerprints = new Map(); 
 const CLONE_SPLITS_PATH = path.join(__dirname, 'clone-splits.json');
 async function loadCloneSplits() {
-    if (pgPool) {
+    if (pgPoolDevices) {
         try {
-            const result = await queryWithRetry('SELECT * FROM relay_clone_splits', []);
+            const result = await queryWithRetry(pgPoolDevices, 'SELECT * FROM relay_clone_splits', []);
             return new Map(result.rows.map(r => [r.split_key, {
                 newInstallationId: r.new_installation_id,
                 splitAt: r.split_at ? new Date(r.split_at).getTime() : undefined
@@ -510,9 +546,9 @@ async function loadCloneSplits() {
     }
 }
 function saveCloneSplits(map) {
-    if (pgPool) {
+    if (pgPoolDevices) {
         const entries = [...map.entries()];
-        runCloudBackupWrite(async (client) => {
+        runPgWriteTx(pgPoolDevices, async (client) => {
             await client.query('DELETE FROM relay_clone_splits WHERE split_key != ALL($1::text[])', [entries.map(([key]) => key)]);
             for (const [key, rec] of entries) {
                 const [installationId, fingerprint] = key.split('::');
@@ -2646,7 +2682,7 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
         for (const [moduleName, entry] of Object.entries(serializedModules)) {
             const sizeBytes = Buffer.byteLength(entry.serialized, 'utf8');
             try {
-                await runCloudBackupWrite(async (client) => {
+                await runPgWriteTx(pgPool, async (client) => {
                     await client.query(
                         `INSERT INTO cloud_backup_modules (installation_id, module, data, record_count, size_bytes, updated_at)
                          VALUES ($1, $2, $3, $4, $5, now())
@@ -2675,7 +2711,7 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
                 : `An error occurred while saving ${failedList} to Postgres: ${failedModules[0].message}`;
             return res.status(500).json({ success: false, message: friendlyMessage, failedModules: failedModules.map(f => f.module) });
         }
-        await runCloudBackupWrite(async (client) => {
+        await runPgWriteTx(pgPool, async (client) => {
             await client.query(
                 `INSERT INTO cloud_backup_meta (installation_id, store_name, total_records, module_count, size_bytes, last_sync_at, sync_count)
                  VALUES ($1, $2, $3, $4, $5, now(), 1)
@@ -2729,6 +2765,7 @@ app.get('/relay/cloud-backup/usage', requireApiKey, requireAllowedDevice, rateLi
     const quotaMB = CLOUD_BACKUP_PLANS[tier].storageQuotaMB;
     try {
         const result = await queryWithRetry(
+            pgPool,
             'SELECT total_records, module_count, size_bytes, last_sync_at, sync_count FROM cloud_backup_meta WHERE installation_id = $1',
             [installationId]
         );
@@ -2761,7 +2798,7 @@ app.get('/relay/cloud-backup/usage', requireApiKey, requireAllowedDevice, rateLi
 app.get('/relay/admin/api/cloud-backup', requireAdminKey, async (req, res) => {
     if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
     try {
-        const result = await queryWithRetry('SELECT installation_id, store_name, total_records, module_count, size_bytes, last_sync_at, sync_count FROM cloud_backup_meta ORDER BY last_sync_at DESC NULLS LAST');
+        const result = await queryWithRetry(pgPool, 'SELECT installation_id, store_name, total_records, module_count, size_bytes, last_sync_at, sync_count FROM cloud_backup_meta ORDER BY last_sync_at DESC NULLS LAST');
         const backups = result.rows.map((r) => ({
             ...r,
             size_mb: Math.round((Number(r.size_bytes || 0) / (1024 * 1024)) * 100) / 100
@@ -2775,8 +2812,8 @@ app.get('/relay/admin/api/cloud-backup/:installationId', requireAdminKey, async 
     if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
     try {
         const { installationId } = req.params;
-        const metaResult = await queryWithRetry('SELECT * FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
-        const modulesResult = await queryWithRetry('SELECT module, data, record_count, size_bytes, updated_at FROM cloud_backup_modules WHERE installation_id = $1 ORDER BY module', [installationId]);
+        const metaResult = await queryWithRetry(pgPool, 'SELECT * FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
+        const modulesResult = await queryWithRetry(pgPool, 'SELECT module, data, record_count, size_bytes, updated_at FROM cloud_backup_modules WHERE installation_id = $1 ORDER BY module', [installationId]);
         if (!metaResult.rows[0]) {
             return res.status(404).json({ success: false, message: 'Walang cloud backup na nakita para sa installationId na ito.' });
         }
@@ -2805,7 +2842,7 @@ app.get('/relay/admin/api/cloud-backup/:installationId/download', requireAdminKe
     if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
     try {
         const { installationId } = req.params;
-        const modulesResult = await queryWithRetry('SELECT module, data FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
+        const modulesResult = await queryWithRetry(pgPool, 'SELECT module, data FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
         if (modulesResult.rows.length === 0) {
             return res.status(404).json({ success: false, message: 'Walang cloud backup na nakita para sa installationId na ito.' });
         }
@@ -2862,11 +2899,11 @@ app.post('/relay/cloud-backup/restore', requireApiKey, requireAllowedDevice, rat
         return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
     }
     try {
-        const metaResult = await queryWithRetry('SELECT * FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
+        const metaResult = await queryWithRetry(pgPool, 'SELECT * FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
         if (!metaResult.rows[0]) {
             return res.status(404).json({ success: false, message: 'Walang cloud backup na nakita para sa installation na ito.' });
         }
-        const modulesResult = await queryWithRetry('SELECT module, data, record_count FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
+        const modulesResult = await queryWithRetry(pgPool, 'SELECT module, data, record_count FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
         const modules = {};
         modulesResult.rows.forEach((r) => { modules[r.module] = r.data; });
         logActivity(installationId, 'cloud_backup_restored', {
@@ -4447,7 +4484,7 @@ async function bootstrapStores() {
         console.log(`💳 Na-load ang custom na Upgrade Tier bundle pricing override para sa: ${Object.keys(upgradeTierPricingOverrides).join(', ')}.`);
     }
     console.log(
-        pgPool
+        pgPoolDevices
             ? `✅ Na-load mula sa Postgres (Neon): ${allowedDevices.size} allowed device(s), ${Object.keys(issuedUnlocks).length} device(s) may naka-unlock.`
             : `ℹ️  Na-load mula sa lokal na JSON files: ${allowedDevices.size} allowed device(s), ${Object.keys(issuedUnlocks).length} device(s) may naka-unlock.`
     );
