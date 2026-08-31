@@ -146,6 +146,44 @@ async function ensureCloudBackupSchema() {
 ensureCloudBackupSchema().catch((err) => {
     console.error('⚠️  Hindi na-prepare ang Postgres schema para sa cloud backup:', err.message);
 });
+async function ensureDeviceLicenseSchema() {
+    if (!pgPool) return;
+    await pgPool.query(`
+        CREATE TABLE IF NOT EXISTS relay_devices (
+            installation_id TEXT PRIMARY KEY,
+            allowed         BOOLEAN NOT NULL DEFAULT true,
+            label           TEXT,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+    `);
+    await pgPool.query(`
+        CREATE TABLE IF NOT EXISTS relay_device_fingerprints (
+            installation_id     TEXT PRIMARY KEY,
+            fingerprint         TEXT,
+            flagged             BOOLEAN NOT NULL DEFAULT false,
+            flagged_fingerprint TEXT,
+            flagged_at          TIMESTAMPTZ,
+            first_verified_at   TIMESTAMPTZ,
+            last_verified_at    TIMESTAMPTZ,
+            verify_count        INTEGER NOT NULL DEFAULT 0,
+            updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+    `);
+    await pgPool.query(`
+        CREATE TABLE IF NOT EXISTS relay_clone_splits (
+            split_key           TEXT PRIMARY KEY,
+            installation_id     TEXT NOT NULL,
+            fingerprint         TEXT NOT NULL,
+            new_installation_id TEXT NOT NULL,
+            split_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+    `);
+    console.log('✅ Device/license Postgres schema ready (relay_devices, relay_device_fingerprints, relay_clone_splits).');
+}
+ensureDeviceLicenseSchema().catch((err) => {
+    console.error('⚠️  Hindi na-prepare ang Postgres schema para sa device/license data:', err.message);
+});
 async function redisGetJSON(key, fallback) {
     if (!redisClient) return fallback;
     try {
@@ -311,8 +349,14 @@ async function notifyUnlockRequest({ subject, text }) {
 }
 const DEVICE_STORE_PATH = path.join(__dirname, 'allowed-devices.json');
 async function loadAllowedDevices() {
-    const fromRedis = await redisGetJSON('allowed-devices', null);
-    if (fromRedis !== null) return new Set(fromRedis);
+    if (pgPool) {
+        try {
+            const result = await queryWithRetry('SELECT installation_id FROM relay_devices WHERE allowed = true', []);
+            return new Set(result.rows.map(r => r.installation_id));
+        } catch (err) {
+            console.error('⚠️  Hindi mabasa sa Postgres ang allowed-devices, babalik sa lokal na file:', err.message);
+        }
+    }
     try {
         const raw = fs.readFileSync(DEVICE_STORE_PATH, 'utf8');
         return new Set(JSON.parse(raw));
@@ -325,8 +369,21 @@ async function loadAllowedDevices() {
     }
 }
 function saveAllowedDevices(set) {
-    if (redisClient) {
-        redisSetJSON('allowed-devices', [...set]);
+    if (pgPool) {
+        const ids = [...set];
+        runCloudBackupWrite(async (client) => {
+            await client.query('UPDATE relay_devices SET allowed = false, updated_at = now() WHERE allowed = true');
+            for (const id of ids) {
+                await client.query(
+                    `INSERT INTO relay_devices (installation_id, allowed, updated_at)
+                     VALUES ($1, true, now())
+                     ON CONFLICT (installation_id) DO UPDATE SET allowed = true, updated_at = now()`,
+                    [id]
+                );
+            }
+        }).catch((err) => {
+            console.error('⚠️  Hindi ma-save sa Postgres ang allowed-devices:', err.message);
+        });
         return;
     }
     try {
@@ -338,8 +395,14 @@ function saveAllowedDevices(set) {
 let allowedDevices = new Set(); 
 const DEVICE_LABELS_PATH = path.join(__dirname, 'device-labels.json');
 async function loadDeviceLabels() {
-    const fromRedis = await redisGetJSON('device-labels', null);
-    if (fromRedis !== null) return new Map(Object.entries(fromRedis));
+    if (pgPool) {
+        try {
+            const result = await queryWithRetry('SELECT installation_id, label FROM relay_devices WHERE label IS NOT NULL', []);
+            return new Map(result.rows.map(r => [r.installation_id, r.label]));
+        } catch (err) {
+            console.error('⚠️  Hindi mabasa sa Postgres ang device-labels, babalik sa lokal na file:', err.message);
+        }
+    }
     try {
         const raw = fs.readFileSync(DEVICE_LABELS_PATH, 'utf8');
         return new Map(Object.entries(JSON.parse(raw)));
@@ -348,8 +411,21 @@ async function loadDeviceLabels() {
     }
 }
 function saveDeviceLabels(map) {
-    if (redisClient) {
-        redisSetJSON('device-labels', Object.fromEntries(map));
+    if (pgPool) {
+        const entries = [...map.entries()];
+        runCloudBackupWrite(async (client) => {
+            await client.query('UPDATE relay_devices SET label = NULL, updated_at = now() WHERE label IS NOT NULL');
+            for (const [id, label] of entries) {
+                await client.query(
+                    `INSERT INTO relay_devices (installation_id, allowed, label, updated_at)
+                     VALUES ($1, false, $2, now())
+                     ON CONFLICT (installation_id) DO UPDATE SET label = $2, updated_at = now()`,
+                    [id, label]
+                );
+            }
+        }).catch((err) => {
+            console.error('⚠️  Hindi ma-save sa Postgres ang device-labels:', err.message);
+        });
         return;
     }
     try {
@@ -360,9 +436,26 @@ function saveDeviceLabels(map) {
 }
 let deviceLabels = new Map(); 
 const DEVICE_FINGERPRINTS_PATH = path.join(__dirname, 'device-fingerprints.json');
+function fingerprintRowToRecord(r) {
+    return {
+        fingerprint: r.fingerprint,
+        flagged: r.flagged,
+        flaggedFingerprint: r.flagged_fingerprint || undefined,
+        flaggedAt: r.flagged_at ? new Date(r.flagged_at).getTime() : undefined,
+        firstVerifiedAt: r.first_verified_at ? new Date(r.first_verified_at).getTime() : undefined,
+        lastVerifiedAt: r.last_verified_at ? new Date(r.last_verified_at).getTime() : undefined,
+        verifyCount: r.verify_count || 0
+    };
+}
 async function loadDeviceFingerprints() {
-    const fromRedis = await redisGetJSON('device-fingerprints', null);
-    if (fromRedis !== null) return new Map(Object.entries(fromRedis));
+    if (pgPool) {
+        try {
+            const result = await queryWithRetry('SELECT * FROM relay_device_fingerprints', []);
+            return new Map(result.rows.map(r => [r.installation_id, fingerprintRowToRecord(r)]));
+        } catch (err) {
+            console.error('⚠️  Hindi mabasa sa Postgres ang device-fingerprints, babalik sa lokal na file:', err.message);
+        }
+    }
     try {
         const raw = fs.readFileSync(DEVICE_FINGERPRINTS_PATH, 'utf8');
         return new Map(Object.entries(JSON.parse(raw)));
@@ -371,8 +464,28 @@ async function loadDeviceFingerprints() {
     }
 }
 function saveDeviceFingerprints(map) {
-    if (redisClient) {
-        redisSetJSON('device-fingerprints', Object.fromEntries(map));
+    if (pgPool) {
+        const entries = [...map.entries()];
+        runCloudBackupWrite(async (client) => {
+            await client.query('DELETE FROM relay_device_fingerprints WHERE installation_id != ALL($1::text[])', [entries.map(([id]) => id)]);
+            for (const [id, rec] of entries) {
+                await client.query(
+                    `INSERT INTO relay_device_fingerprints
+                        (installation_id, fingerprint, flagged, flagged_fingerprint, flagged_at, first_verified_at, last_verified_at, verify_count, updated_at)
+                     VALUES ($1, $2, $3, $4, to_timestamp($5::double precision / 1000.0), to_timestamp($6::double precision / 1000.0), to_timestamp($7::double precision / 1000.0), $8, now())
+                     ON CONFLICT (installation_id) DO UPDATE SET
+                        fingerprint = $2, flagged = $3, flagged_fingerprint = $4,
+                        flagged_at = to_timestamp($5::double precision / 1000.0),
+                        first_verified_at = to_timestamp($6::double precision / 1000.0),
+                        last_verified_at = to_timestamp($7::double precision / 1000.0),
+                        verify_count = $8, updated_at = now()`,
+                    [id, rec.fingerprint || null, !!rec.flagged, rec.flaggedFingerprint || null,
+                     rec.flaggedAt || null, rec.firstVerifiedAt || null, rec.lastVerifiedAt || null, rec.verifyCount || 0]
+                );
+            }
+        }).catch((err) => {
+            console.error('⚠️  Hindi ma-save sa Postgres ang device-fingerprints:', err.message);
+        });
         return;
     }
     try {
@@ -384,8 +497,17 @@ function saveDeviceFingerprints(map) {
 let deviceFingerprints = new Map(); 
 const CLONE_SPLITS_PATH = path.join(__dirname, 'clone-splits.json');
 async function loadCloneSplits() {
-    const fromRedis = await redisGetJSON('clone-splits', null);
-    if (fromRedis !== null) return new Map(Object.entries(fromRedis));
+    if (pgPool) {
+        try {
+            const result = await queryWithRetry('SELECT * FROM relay_clone_splits', []);
+            return new Map(result.rows.map(r => [r.split_key, {
+                newInstallationId: r.new_installation_id,
+                splitAt: r.split_at ? new Date(r.split_at).getTime() : undefined
+            }]));
+        } catch (err) {
+            console.error('⚠️  Hindi mabasa sa Postgres ang clone-splits, babalik sa lokal na file:', err.message);
+        }
+    }
     try {
         const raw = fs.readFileSync(CLONE_SPLITS_PATH, 'utf8');
         return new Map(Object.entries(JSON.parse(raw)));
@@ -394,8 +516,22 @@ async function loadCloneSplits() {
     }
 }
 function saveCloneSplits(map) {
-    if (redisClient) {
-        redisSetJSON('clone-splits', Object.fromEntries(map));
+    if (pgPool) {
+        const entries = [...map.entries()];
+        runCloudBackupWrite(async (client) => {
+            await client.query('DELETE FROM relay_clone_splits WHERE split_key != ALL($1::text[])', [entries.map(([key]) => key)]);
+            for (const [key, rec] of entries) {
+                const [installationId, fingerprint] = key.split('::');
+                await client.query(
+                    `INSERT INTO relay_clone_splits (split_key, installation_id, fingerprint, new_installation_id, split_at)
+                     VALUES ($1, $2, $3, $4, to_timestamp($5::double precision / 1000.0))
+                     ON CONFLICT (split_key) DO UPDATE SET new_installation_id = $4, split_at = to_timestamp($5::double precision / 1000.0)`,
+                    [key, installationId, fingerprint, rec.newInstallationId, rec.splitAt || Date.now()]
+                );
+            }
+        }).catch((err) => {
+            console.error('⚠️  Hindi ma-save sa Postgres ang clone-splits:', err.message);
+        });
         return;
     }
     try {
@@ -4311,8 +4447,8 @@ async function bootstrapStores() {
         console.log(`💳 Na-load ang custom na Upgrade Tier bundle pricing override para sa: ${Object.keys(upgradeTierPricingOverrides).join(', ')}.`);
     }
     console.log(
-        redisClient
-            ? `✅ Na-load mula sa Redis: ${allowedDevices.size} allowed device(s), ${Object.keys(issuedUnlocks).length} device(s) may naka-unlock.`
+        pgPool
+            ? `✅ Na-load mula sa Postgres (Neon): ${allowedDevices.size} allowed device(s), ${Object.keys(issuedUnlocks).length} device(s) may naka-unlock.`
             : `ℹ️  Na-load mula sa lokal na JSON files: ${allowedDevices.size} allowed device(s), ${Object.keys(issuedUnlocks).length} device(s) may naka-unlock.`
     );
 }
