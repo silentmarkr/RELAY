@@ -1342,16 +1342,30 @@ function saveFeaturePricingOverrides(obj) {
 // para sa Cloud Backup at sa ibang features.
 //
 // UPGRADE_TIER_BUNDLE_PRICE_BASE — ang default/fallback bundlePrice
-// bawat tier kung walang override. NOTE: ang 'pro' dati ay ₱6,499
-// (~9% off lang sa ala-carte total, mas MALIIT pa sa discount % ng
-// Basic (~23%) at Standard (~28.5%) — kabaligtaran ng inaasahan para
-// sa "pinakamalaking bundle"). Binaba ito sa ₱4,999 (~30% off) para
-// maging pinaka-malalim ang discount sa Pro, gaya ng dapat asahan sa
-// isang "buy everything" tier — puwede pa ring i-adjust ito anumang
-// oras sa Feature Pricing admin page nang hindi na kailangang mag-
-// redeploy.
+// bawat tier kung walang override.
+//
+// NOTE (bug found + refixed, Aug 2026): ang ₱4,999 na naka-set dito
+// dati ay INAKALANG ~30% off na sa ala-carte total, pero na-compute
+// pala 'yon laban sa LUMANG FEATURE_CATALOG_BASE prices — nang tumaas
+// ang mga presyo ng ilang module (hal. purchase_orders -> ₱999,
+// customer_crm -> ₱799), hindi na na-recompute ang bundlePrice na ito
+// kasabay noon. Resulta: sa AKTWAL na kasalukuyang ala-carte total
+// (9 theme x ₱149 = ₱1,341 + 5 module = ₱3,795 => ₱5,136), ang ₱4,999
+// ay ~2.7% off LANG — mas MALIIT pa sa discount % ng Basic (~23%) at
+// Standard (~28.5%), kabaligtaran ng inaasahan para sa "pinakamalaking
+// bundle". Masahol pa: mas MURA pa ang bumili na lang ng Standard
+// (₱1,999) + purchase_orders (₱999) + lahat ng theme (₱1,341) =
+// ₱4,339 SEPARATELY — parehong-pareho ang makukuha, pero ₱660 na
+// mas mura kaysa bumili ng "Pro Upgrade (Complete)" mismo.
+//
+// Naitama sa ₱3,599 (~30% off sa kasalukuyang ₱5,136 ala-carte total,
+// at ₱740 pa ring mas mura kaysa sa Standard+purchase_orders+themes
+// combo sa itaas). Kung babaguhin pa ang presyo ng alinmang theme/
+// module sa FEATURE_CATALOG_BASE sa hinaharap, i-recompute ulit ang
+// ala-carte total at i-adjust ang value na ito (o gamitin ang Feature
+// Pricing admin page — hindi na kailangang mag-redeploy).
 // --------------------------------------------------------------
-const UPGRADE_TIER_BUNDLE_PRICE_BASE = { basic: 999, standard: 1999, pro: 4999 };
+const UPGRADE_TIER_BUNDLE_PRICE_BASE = { basic: 999, standard: 1999, pro: 3599 };
 
 const UPGRADE_TIER_PRICING_OVERRIDES_PATH = path.join(__dirname, 'upgrade-tier-pricing-overrides.json');
 
