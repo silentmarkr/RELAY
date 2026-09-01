@@ -2161,6 +2161,30 @@ function renderDbHealthEntry(dbKey, entry, phpRate) {
         Storage cost sa "${cur.name}": ${fmtUsdPhp(cur.storageCostUSD, phpRate)}/buwan (walang hard cap sa paid plan)
       </div>`;
   }
+  let realUsageBlock = '';
+  if (entry.realUsage) {
+    const rc = entry.realCost;
+    const usdPart = (label, usd) => usd !== null ? `${label}: ${fmtUsdPhp(usd, phpRate)}` : `${label}: —`;
+    const planNote = rc
+      ? (rc.usedFallbackPlan
+          ? `<span style="color:var(--amber,#f5a623);">⚠️ Hindi ma-detect ang plan mula sa Neon ("${rc.rawPlanId || '—'}") — gumamit ng "${rc.tierUsedForRates}" (yung naka-set sa dropdown sa ibaba) bilang rates. I-verify sa Neon dashboard kung tama ito.</span>`
+          : `Detected na Neon plan: <strong>${rc.tierUsedForRates}</strong> (mula mismo sa Neon API — ginamit ito bilang batayan ng rates, hindi ang dropdown sa ibaba)`)
+      : '';
+    realUsageBlock = `
+      <div style="margin-top:8px; padding:8px 10px; border-radius:8px; background:var(--accent-bg,#12293b); border:1px solid var(--accent-line,#1f4a63);">
+        <div style="font-size:12px; font-weight:600; color:var(--accent,#6cf);">📡 REAL na usage (Neon account API — kasalukuyang billing period${rc && rc.consumptionPeriodStart ? ', simula ' + new Date(rc.consumptionPeriodStart).toLocaleDateString() : ''})</div>
+        <div style="font-size:11px; color:var(--muted); margin-top:2px;">${planNote}</div>
+        <div style="font-size:12px; margin-top:4px; display:flex; flex-wrap:wrap; gap:10px;">
+          <span>Compute: ${rc && rc.cuHours !== null ? rc.cuHours + ' CU-hr' : '—'}${rc && rc.avgComputeCUs !== null ? ` (avg ~${rc.avgComputeCUs} CU)` : ''}</span>
+          <span>Storage: ${rc && rc.storageGBMonths !== null ? rc.storageGBMonths + ' GB-mo' : '—'}</span>
+          <span>Transfer: ${rc && rc.dataTransferGB !== null ? rc.dataTransferGB + ' GB' : '—'}</span>
+        </div>
+        <div style="font-size:12px; margin-top:4px;">
+          ${rc ? usdPart('Compute cost', rc.computeCostUSD) : ''} · ${rc ? usdPart('Storage cost', rc.storageCostUSD) : ''}
+          ${rc && rc.totalMonthlyCostUSD !== null ? `<br><strong>Kabuuan (period-to-date): ${fmtUsdPhp(rc.totalMonthlyCostUSD, phpRate)}</strong>` : ''}
+        </div>
+      </div>`;
+  }
   const rowsHtml = entry.tierComparison.map(t => {
     if (t.customPricing) {
       return `<tr><td>${t.name}</td><td colspan="3" style="color:var(--muted); font-size:12px;">${t.notes}</td></tr>`;
@@ -2195,6 +2219,7 @@ function renderDbHealthEntry(dbKey, entry, phpRate) {
         </select>
       </div>
       ${allowanceLine}
+      ${realUsageBlock}
       <table style="width:100%; margin-top:8px; border-collapse:collapse; font-size:12px;">
         <thead><tr style="text-align:left; color:var(--muted); font-size:11px;"><th>Tier</th><th>Storage cost</th><th>Compute rate</th><th>Est. total*</th></tr></thead>
         <tbody>${rowsHtml}</tbody>
@@ -2236,7 +2261,8 @@ async function loadDbHealth(force) {
         `💱 USD→PHP: ₱${phpRate.toFixed(4)} (${data.exchangeRate.source})<br>` +
         `🗓️ Neon pricing verified: ${data.pricingMeta.verifiedAt} — <a href="${NEON_PRICING_SOURCE_URL_JS}" target="_blank" rel="noopener" style="color:var(--accent,#6cf);">source</a>` +
         `${data.pricingMeta.hasOverrides ? ' (may custom override na naka-apply)' : ''}<br>` +
-        `<span style="font-size:11px;">*Ang "example compute" at "Est. total" ay ILUSTRATIBONG halimbawa lang (0.25 CU × 8 oras/araw × 30 araw) — hindi ito aktwal na gamit niyo, dahil hindi ito nasusubaybayan nang hindi kumokonekta sa Neon account API. Ang storage cost lang ang base sa TUNAY na kasalukuyang laki ng database. I-verify pa rin sa Neon dashboard mo ang aktwal na bill.</span>`;
+        `${data.pricingMeta.hasNeonApiKey ? '🔌 Nakakonekta sa Neon account API — real usage.<br>' : ''}` +
+        `<span style="font-size:11px;">*${data.pricingMeta.exampleComputeAssumptionNote}</span>`;
     }
   } catch (err) {
     container.className = 'empty';

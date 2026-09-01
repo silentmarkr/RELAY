@@ -928,6 +928,119 @@ async function getUsdToPhpRate() {
         fetchedAt: null
     };
 }
+// ===================================================================
+// NEON ACCOUNT API — kunin ang TUNAY na compute/storage usage ng
+// kasalukuyang billing period direkta mula sa Neon account (GET
+// /projects/{project_id}), sa halip na yung "illustrative" na compute
+// estimate lang. Gumagana ito kahit sa Free plan (walang bayad ang
+// endpoint na ito), kaya ito ang ginamit dito imbes na yung
+// consumption_history endpoint na Scale-plan-and-up lang.
+// Reference: https://neon.com/docs/introduction/usage-calculations
+// ===================================================================
+const NEON_API_KEY = process.env.NEON_API_KEY || '';
+const NEON_CLOUD_BACKUP_PROJECT_ID = process.env.NEON_CLOUD_BACKUP_PROJECT_ID || '';
+const NEON_DEVICES_PROJECT_ID = process.env.NEON_DEVICES_PROJECT_ID || NEON_CLOUD_BACKUP_PROJECT_ID;
+const NEON_API_CONFIGURED = !!(NEON_API_KEY && (NEON_CLOUD_BACKUP_PROJECT_ID || NEON_DEVICES_PROJECT_ID));
+const NEON_USAGE_CACHE_MS = 5 * 60 * 1000; // 5 min — huwag masyadong tawagin, kahit safe naman ang endpoint na ito (hindi ito gumigising ng suspended compute).
+let neonUsageCache = {}; // keyed by projectId -> { at, data }
+// Kung magkaparehong projectId ang cloud backup at devices (walang hiwalay
+// na NEON_DEVICES_PROJECT_ID na naka-set), pareho silang tatawag dito
+// nang sabay-sabay via Promise.all BAGO pa man mag-populate ang cache —
+// kaya dini-dedupe dito gamit ang isang shared in-flight promise, para
+// isa lang ang aktwal na HTTP request sa Neon sa parehong sandali.
+let neonUsageInFlight = {}; // keyed by projectId -> Promise
+async function getNeonProjectUsage(projectId) {
+    if (!NEON_API_KEY || !projectId) return null;
+    const cached = neonUsageCache[projectId];
+    if (cached && (Date.now() - cached.at) < NEON_USAGE_CACHE_MS) return cached.data;
+    if (neonUsageInFlight[projectId]) return neonUsageInFlight[projectId];
+    const fetchPromise = (async () => {
+        try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 8000);
+            const resp = await fetch(`https://console.neon.tech/api/v2/projects/${projectId}`, {
+                headers: { 'Authorization': `Bearer ${NEON_API_KEY}`, 'Accept': 'application/json' },
+                signal: controller.signal
+            });
+            clearTimeout(timeout);
+            if (!resp.ok) {
+                console.warn(`⚠️  Neon API error (HTTP ${resp.status}) para sa project "${projectId}" — baka mali ang NEON_API_KEY o project ID.`);
+                return cached ? cached.data : null;
+            }
+            const body = await resp.json();
+            const p = (body && body.project) || {};
+            const usage = {
+                projectId,
+                // Halimbawa ng aktwal na format nito mula sa Neon: "free_v2",
+                // "launch_v2", "scale_v2" — may suffix, kaya kailangang
+                // i-normalize muna (tingnan ang normalizeNeonPlanId) bago
+                // itugma sa NEON_PRICING_TIER_IDS ("free"/"launch"/"scale").
+                planId: p.plan_id || p.pending_plan_id || null,
+                consumptionPeriodStart: p.consumption_period_start || null,
+                computeTimeSeconds: typeof p.compute_time_seconds === 'number' ? p.compute_time_seconds : null,
+                activeTimeSeconds: typeof p.active_time_seconds === 'number' ? p.active_time_seconds : null,
+                dataStorageBytesHour: typeof p.data_storage_bytes_hour === 'number' ? p.data_storage_bytes_hour : null,
+                dataTransferBytes: typeof p.data_transfer_bytes === 'number' ? p.data_transfer_bytes : null
+            };
+            neonUsageCache[projectId] = { at: Date.now(), data: usage };
+            return usage;
+        } catch (err) {
+            console.warn(`⚠️  Hindi ma-fetch ang Neon usage ng project "${projectId}":`, err.message);
+            return cached ? cached.data : null;
+        } finally {
+            delete neonUsageInFlight[projectId];
+        }
+    })();
+    neonUsageInFlight[projectId] = fetchPromise;
+    return fetchPromise;
+}
+// I-tugma ang raw plan_id na ibinabalik ng Neon API (hal. "free_v2",
+// "launch_v2", "scale_v2") papunta sa mga tier id na ginagamit ng
+// NEON_PRICING sa itaas ("free"/"launch"/"scale"/"enterprise"). Nagbabalik
+// ng null kung walang tumugma, para malinaw na hindi ito basta-basta
+// ipipilit na "free" (na siyang magiging SANHI ng maling $0 na cost).
+function normalizeNeonPlanId(rawPlanId) {
+    if (!rawPlanId) return null;
+    const cleaned = String(rawPlanId).toLowerCase().replace(/_v\d+$/, '').trim();
+    return NEON_PRICING_TIER_IDS.includes(cleaned) ? cleaned : null;
+}
+// I-convert ang raw Neon API usage papuntang totoong cost (USD). MAHALAGA:
+// ang RATES na ginagamit dito ay dapat batay sa AKTWAL na plan na sinasabi
+// ng Neon API mismo (usage.planId, na-normalize) — HINDI sa "configured
+// plan" dropdown ng admin panel (na para lang sa illustrative tier
+// comparison table). Kung mali/luma ang dropdown value (hal. naka-"Free"
+// pa rin kahit Launch/Scale na pala ang totoong account), pero ginamit pa
+// rin ito bilang batayan ng rate, LALABAS na $0 ang cost kahit may
+// totoong gastos na — ito mismo ang dating bug dito. Ang dropdown ay
+// ginagamit na lang bilang FALLBACK kapag hindi na-detect/na-recognize
+// ang plan_id na ibinalik ng Neon (hal. bagong plan name sa hinaharap).
+function computeNeonRealCost(usage, fallbackConfiguredPlan) {
+    if (!usage) return null;
+    const detectedTierId = normalizeNeonPlanId(usage.planId);
+    const tierId = detectedTierId || fallbackConfiguredPlan;
+    const usedFallback = !detectedTierId;
+    const tier = NEON_PRICING[tierId];
+    if (!tier || tier.customPricing) return null;
+    const cuHours = usage.computeTimeSeconds !== null ? usage.computeTimeSeconds / 3600 : null;
+    const storageGBMonths = usage.dataStorageBytesHour !== null ? usage.dataStorageBytesHour / 744 / 1e9 : null;
+    const avgComputeCUs = (usage.computeTimeSeconds !== null && usage.activeTimeSeconds) ? usage.computeTimeSeconds / usage.activeTimeSeconds : null;
+    const computeCostUSD = (cuHours !== null && typeof tier.computeRatePerCUHourUSD === 'number') ? cuHours * tier.computeRatePerCUHourUSD : null;
+    const storageCostUSD = (storageGBMonths !== null && typeof tier.storageRatePerGBMonthUSD === 'number') ? storageGBMonths * tier.storageRatePerGBMonthUSD : null;
+    const totalUSD = (computeCostUSD !== null && storageCostUSD !== null) ? computeCostUSD + storageCostUSD : null;
+    return {
+        cuHours: cuHours !== null ? Math.round(cuHours * 100) / 100 : null,
+        avgComputeCUs: avgComputeCUs !== null ? Math.round(avgComputeCUs * 1000) / 1000 : null,
+        storageGBMonths: storageGBMonths !== null ? Math.round(storageGBMonths * 10000) / 10000 : null,
+        dataTransferGB: usage.dataTransferBytes !== null ? Math.round((usage.dataTransferBytes / 1e9) * 1000) / 1000 : null,
+        computeCostUSD: computeCostUSD !== null ? Math.round(computeCostUSD * 100) / 100 : null,
+        storageCostUSD: storageCostUSD !== null ? Math.round(storageCostUSD * 100) / 100 : null,
+        totalMonthlyCostUSD: totalUSD !== null ? Math.round(totalUSD * 100) / 100 : null,
+        tierUsedForRates: tierId,
+        usedFallbackPlan: usedFallback,
+        rawPlanId: usage.planId,
+        consumptionPeriodStart: usage.consumptionPeriodStart
+    };
+}
 const FEATURE_CATALOG_OVERRIDES_PATH = path.join(__dirname, 'feature-catalog-overrides.json');
 async function loadFeatureCatalogOverrides() {
     const fromRedis = await redisGetJSON('feature-catalog-overrides', null);
@@ -4163,18 +4276,20 @@ app.get('/relay/admin/api/db-health', requireAdminKey, async (req, res) => {
         if (dbHealthCache.payload && (Date.now() - dbHealthCache.at) < DB_HEALTH_CACHE_MS && req.query.force !== '1') {
             return res.json({ ...dbHealthCache.payload, cached: true });
         }
-        const [cloudBackupBytes, devicesBytes, cloudBackupTables, devicesTables, exchangeRate] = await Promise.all([
+        const [cloudBackupBytes, devicesBytes, cloudBackupTables, devicesTables, exchangeRate, cloudBackupNeonUsage, devicesNeonUsage] = await Promise.all([
             getPgDatabaseSizeBytes(pgPool),
             getPgDatabaseSizeBytes(pgPoolDevices),
             getTopTableSizes(pgPool),
             getTopTableSizes(pgPoolDevices),
-            getUsdToPhpRate()
+            getUsdToPhpRate(),
+            getNeonProjectUsage(NEON_CLOUD_BACKUP_PROJECT_ID),
+            getNeonProjectUsage(NEON_DEVICES_PROJECT_ID)
         ]);
         // Halimbawang compute assumption para lang sa "illustrative" na
         // tier comparison (hindi ito aktwal na gamit) — katumbas ng
         // 0.25 CU na tumatakbo nang 8 oras/araw sa loob ng 30 araw.
         const EXAMPLE_COMPUTE_CU_HOURS = 0.25 * 8 * 30;
-        function buildDbEntry(label, bytes, tables, configuredPlan) {
+        function buildDbEntry(label, bytes, tables, configuredPlan, neonUsage) {
             const gb = bytesToGB(bytes);
             const tierEstimates = NEON_PRICING_TIER_IDS.map(t => computeNeonTierEstimate(t, gb === null ? 0 : gb, EXAMPLE_COMPUTE_CU_HOURS));
             return {
@@ -4185,7 +4300,11 @@ app.get('/relay/admin/api/db-health', requireAdminKey, async (req, res) => {
                 gb: gb !== null ? Math.round(gb * 10000) / 10000 : null,
                 topTables: tables,
                 currentTierEstimate: tierEstimates.find(t => t.tier === configuredPlan) || null,
-                tierComparison: tierEstimates
+                tierComparison: tierEstimates,
+                // REAL na usage/cost mula sa Neon account API (kung naka-configure
+                // ang NEON_API_KEY + project ID) — null kung wala pang naka-set.
+                realUsage: neonUsage,
+                realCost: neonUsage ? computeNeonRealCost(neonUsage, configuredPlan) : null
             };
         }
         const payload = {
@@ -4201,11 +4320,14 @@ app.get('/relay/admin/api/db-health', requireAdminKey, async (req, res) => {
                 sourceUrl: NEON_PRICING_SOURCE_URL,
                 hasOverrides: Object.keys(neonPricingOverrides).length > 0,
                 exampleComputeCUHoursAssumed: EXAMPLE_COMPUTE_CU_HOURS,
-                exampleComputeAssumptionNote: 'Ang exampleComputeCostUSD/estimatedMonthlyTotalUSD ay HALIMBAWA LANG (0.25 CU × 8 oras/araw × 30 araw) — hindi ito aktwal na compute usage niyo, dahil hindi ito nasusubaybayan ng RELAY nang hindi kumokonekta sa Neon account API. Ang storageCostUSD lang ang base sa TUNAY na kasalukuyang laki ng database.'
+                hasNeonApiKey: NEON_API_CONFIGURED,
+                exampleComputeAssumptionNote: NEON_API_CONFIGURED
+                    ? 'May naka-configure nang Neon account API — ang "realUsage"/"realCost" bawat database ay TUNAY na compute/storage niyo para sa kasalukuyang billing period (mula sa Neon account API). Ang "example compute"/"Est. total" sa tier comparison table sa ibaba ay HALIMBAWA pa rin para sa PAGKUMPARA ng ibang tiers (0.25 CU × 8 oras/araw × 30 araw), hindi para sa kasalukuyang tier niyo — gamitin ang realCost para dun.'
+                    : 'Ang exampleComputeCostUSD/estimatedMonthlyTotalUSD ay HALIMBAWA LANG (0.25 CU × 8 oras/araw × 30 araw) — hindi ito aktwal na compute usage niyo. Para makita ang TUNAY na usage, i-set ang NEON_API_KEY + NEON_CLOUD_BACKUP_PROJECT_ID (at NEON_DEVICES_PROJECT_ID kung hiwalay) sa .env. Ang storageCostUSD lang ang base sa TUNAY na kasalukuyang laki ng database sa ngayon.'
             },
             databases: {
-                cloudBackup: buildDbEntry('Cloud Backup (DATABASE_URL)', cloudBackupBytes, cloudBackupTables, neonConfiguredPlans.cloudBackup || 'free'),
-                devices: buildDbEntry('Devices / License' + (DEVICES_DB_IS_SEPARATE ? ' (RELAY_DEVICES_DATABASE_URL)' : ' (shared sa DATABASE_URL)'), devicesBytes, devicesTables, neonConfiguredPlans.devices || 'free')
+                cloudBackup: buildDbEntry('Cloud Backup (DATABASE_URL)', cloudBackupBytes, cloudBackupTables, neonConfiguredPlans.cloudBackup || 'free', cloudBackupNeonUsage),
+                devices: buildDbEntry('Devices / License' + (DEVICES_DB_IS_SEPARATE ? ' (RELAY_DEVICES_DATABASE_URL)' : ' (shared sa DATABASE_URL)'), devicesBytes, devicesTables, neonConfiguredPlans.devices || 'free', devicesNeonUsage)
             },
             neonPricing: NEON_PRICING
         };
