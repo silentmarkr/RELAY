@@ -1045,6 +1045,36 @@ function computeNeonRealCost(usage, fallbackConfiguredPlan) {
         consumptionPeriodStart: usage.consumptionPeriodStart
     };
 }
+// I-project ang TUNAY na average compute usage (mula sa Neon API) papuntang
+// buong 744-oras (31-araw) na billing period ni Neon, para magamit ito sa
+// tier comparison table sa halip na yung generic na "0.25 CU × 8 oras/araw
+// × 30 araw" na canned example. Halimbawa: kung 2.57 CU-hr na ang nagamit
+// sa loob lang ng 10 oras mula nag-reset ang period, ang average rate na
+// iyon (~0.257 CU-hr bawat oras) ang ipoproject papuntang 744 oras.
+// Sinasadyang ibinabalik na null kung wala pang isang oras na lumipas sa
+// period (masyadong maaga pa para maging stable/makatotohanan ang
+// projection — isang spike lang sa unang minuto ay pwedeng lumabas na
+// parang libu-libong pesos bawat buwan kung i-extrapolate agad).
+const NEON_BILLING_PERIOD_HOURS = 744; // parehong constant na ginagamit ni Neon mismo — 31 araw x 24 oras
+const PROJECTION_MIN_ELAPSED_HOURS = 1;
+function projectFullPeriodCUHours(usage) {
+    if (!usage || usage.computeTimeSeconds === null || !usage.consumptionPeriodStart) return null;
+    const periodStartMs = new Date(usage.consumptionPeriodStart).getTime();
+    if (!Number.isFinite(periodStartMs)) return null;
+    const elapsedHours = (Date.now() - periodStartMs) / (60 * 60 * 1000);
+    if (elapsedHours < PROJECTION_MIN_ELAPSED_HOURS) return null;
+    const cuHoursSoFar = usage.computeTimeSeconds / 3600;
+    const projectedCUHoursFullPeriod = cuHoursSoFar * (NEON_BILLING_PERIOD_HOURS / elapsedHours);
+    return {
+        elapsedHours: Math.round(elapsedHours * 100) / 100,
+        cuHoursSoFar: Math.round(cuHoursSoFar * 100) / 100,
+        projectedCUHoursFullPeriod: Math.round(projectedCUHoursFullPeriod * 100) / 100,
+        // Kung bago pa lang ang datos (konting oras pa lang), mahina ang
+        // batayan ng projection — ipinapaalam ito sa UI para malinaw na
+        // magbabago pa ito habang tumatagal ang billing period.
+        lowConfidence: elapsedHours < 24
+    };
+}
 const FEATURE_CATALOG_OVERRIDES_PATH = path.join(__dirname, 'feature-catalog-overrides.json');
 async function loadFeatureCatalogOverrides() {
     const fromRedis = await redisGetJSON('feature-catalog-overrides', null);
@@ -4289,13 +4319,20 @@ app.get('/relay/admin/api/db-health', requireAdminKey, async (req, res) => {
             getNeonProjectUsage(NEON_CLOUD_BACKUP_PROJECT_ID),
             getNeonProjectUsage(NEON_DEVICES_PROJECT_ID)
         ]);
-        // Halimbawang compute assumption para lang sa "illustrative" na
-        // tier comparison (hindi ito aktwal na gamit) — katumbas ng
-        // 0.25 CU na tumatakbo nang 8 oras/araw sa loob ng 30 araw.
+        // Halimbawang compute assumption — ito na lang ang FALLBACK kapag
+        // wala pang totoong Neon usage data (o wala pang isang oras na
+        // lumipas sa billing period, kaya hindi pa stable ang projection).
+        // Katumbas ng 0.25 CU na tumatakbo nang 8 oras/araw sa loob ng 30 araw.
         const EXAMPLE_COMPUTE_CU_HOURS = 0.25 * 8 * 30;
         function buildDbEntry(label, bytes, tables, configuredPlan, neonUsage) {
             const gb = bytesToGB(bytes);
-            const tierEstimates = NEON_PRICING_TIER_IDS.map(t => computeNeonTierEstimate(t, gb === null ? 0 : gb, EXAMPLE_COMPUTE_CU_HOURS));
+            // Kung may totoong Neon usage na, i-project ang TUNAY na average
+            // papuntang buong billing period — ito ang gagamitin sa tier
+            // comparison table imbes na yung generic na canned example, para
+            // consistent ang numero dito sa REAL usage box sa itaas.
+            const projection = neonUsage ? projectFullPeriodCUHours(neonUsage) : null;
+            const computeCUHoursForComparison = projection ? projection.projectedCUHoursFullPeriod : EXAMPLE_COMPUTE_CU_HOURS;
+            const tierEstimates = NEON_PRICING_TIER_IDS.map(t => computeNeonTierEstimate(t, gb === null ? 0 : gb, computeCUHoursForComparison));
             return {
                 label,
                 configuredPlan,
@@ -4305,6 +4342,12 @@ app.get('/relay/admin/api/db-health', requireAdminKey, async (req, res) => {
                 topTables: tables,
                 currentTierEstimate: tierEstimates.find(t => t.tier === configuredPlan) || null,
                 tierComparison: tierEstimates,
+                // Ipinapakita kung saan galing ang compute assumption na ginamit
+                // sa tierComparison sa itaas — para malinaw sa UI (at sa
+                // sinumang gumagamit ng API na ito) kung TUNAY na projection
+                // ba ito o canned example lang pa rin.
+                tierComparisonBasis: projection ? 'real-projection' : 'illustrative-example',
+                usageProjection: projection,
                 // REAL na usage/cost mula sa Neon account API (kung naka-configure
                 // ang NEON_API_KEY + project ID) — null kung wala pang naka-set.
                 realUsage: neonUsage,
@@ -4326,7 +4369,7 @@ app.get('/relay/admin/api/db-health', requireAdminKey, async (req, res) => {
                 exampleComputeCUHoursAssumed: EXAMPLE_COMPUTE_CU_HOURS,
                 hasNeonApiKey: NEON_API_CONFIGURED,
                 exampleComputeAssumptionNote: NEON_API_CONFIGURED
-                    ? 'May naka-configure nang Neon account API — ang "realUsage"/"realCost" bawat database ay TUNAY na compute/storage niyo para sa kasalukuyang billing period (mula sa Neon account API). Ang "example compute"/"Est. total" sa tier comparison table sa ibaba ay HALIMBAWA pa rin para sa PAGKUMPARA ng ibang tiers (0.25 CU × 8 oras/araw × 30 araw), hindi para sa kasalukuyang tier niyo — gamitin ang realCost para dun.'
+                    ? 'May naka-configure nang Neon account API. Ang "realUsage"/"realCost" bawat database ay TUNAY na compute/storage sa kasalukuyang billing period. Sa tier comparison table sa ibaba, kung may sapat nang datos (>1 oras mula nag-reset ang period), ang "Est. total" ay PROJECTION na mula sa totoong average usage niyo (tingnan ang "tierComparisonBasis": "real-projection" bawat database) — hindi na canned example. Kung bagong-bago pa lang ang period, pansamantalang canned example muna ("illustrative-example") habang wala pang sapat na datos.'
                     : 'Ang exampleComputeCostUSD/estimatedMonthlyTotalUSD ay HALIMBAWA LANG (0.25 CU × 8 oras/araw × 30 araw) — hindi ito aktwal na compute usage niyo. Para makita ang TUNAY na usage, i-set ang NEON_API_KEY + NEON_CLOUD_BACKUP_PROJECT_ID (at NEON_DEVICES_PROJECT_ID kung hiwalay) sa .env. Ang storageCostUSD lang ang base sa TUNAY na kasalukuyang laki ng database sa ngayon.'
             },
             databases: {

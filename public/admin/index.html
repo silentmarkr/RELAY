@@ -2199,9 +2199,9 @@ function renderDbHealthEntry(dbKey, entry, phpRate) {
     }
     return `<tr${entry.configuredPlan === t.tier ? ' style="background:var(--accent-bg,#12293b);"' : ''}>
       <td>${t.name}</td>
-      <td>${fmtUsdPhp(t.storageCostUSD, phpRate)} storage${t.exampleComputeCostUSD !== null ? `<br><span style="font-size:11px; color:var(--muted);">+ ${fmtUsdPhp(t.exampleComputeCostUSD, phpRate)} example compute*</span>` : ''}</td>
+      <td>${fmtUsdPhp(t.storageCostUSD, phpRate)} storage${t.exampleComputeCostUSD !== null ? `<br><span style="font-size:11px; color:var(--muted);">+ ${fmtUsdPhp(t.exampleComputeCostUSD, phpRate)} ${entry.tierComparisonBasis === 'real-projection' ? 'projected compute†' : 'example compute*'}</span>` : ''}</td>
       <td>$${t.computeRatePerCUHourUSD}/CU-hr</td>
-      <td>${t.estimatedMonthlyTotalUSD !== null ? fmtUsdPhp(t.estimatedMonthlyTotalUSD, phpRate) + '*' : '—'}</td>
+      <td>${t.estimatedMonthlyTotalUSD !== null ? fmtUsdPhp(t.estimatedMonthlyTotalUSD, phpRate) + (entry.tierComparisonBasis === 'real-projection' ? '†' : '*') : '—'}</td>
     </tr>`;
   }).join('');
   return `
@@ -2221,9 +2221,14 @@ function renderDbHealthEntry(dbKey, entry, phpRate) {
       ${allowanceLine}
       ${realUsageBlock}
       <table style="width:100%; margin-top:8px; border-collapse:collapse; font-size:12px;">
-        <thead><tr style="text-align:left; color:var(--muted); font-size:11px;"><th>Tier</th><th>Storage cost</th><th>Compute rate</th><th>Est. total*</th></tr></thead>
+        <thead><tr style="text-align:left; color:var(--muted); font-size:11px;"><th>Tier</th><th>Storage cost</th><th>Compute rate</th><th>Est. total</th></tr></thead>
         <tbody>${rowsHtml}</tbody>
       </table>
+      <div style="font-size:11px; color:var(--muted); margin-top:4px;">
+        ${entry.tierComparisonBasis === 'real-projection'
+          ? `† Projection base sa TUNAY na average compute niyo ngayong billing period (${entry.usageProjection ? entry.usageProjection.cuHoursSoFar + ' CU-hr sa loob ng ' + entry.usageProjection.elapsedHours + ' oras, i-nproject papuntang buong buwan' : ''})${entry.usageProjection && entry.usageProjection.lowConfidence ? ' — <span style="color:var(--amber,#f5a623);">⚠️ bago pa lang ang datos (&lt;24 oras), maaaring magbago pa habang tumatagal ang buwan</span>' : ''}.`
+          : '* Halimbawang senaryo lang (0.25 CU × 8 oras/araw × 30 araw), hindi pa batay sa totoong average niyo.'}
+      </div>
     </div>`;
 }
 async function setDbHealthPlan(database, tier) {
@@ -2262,7 +2267,7 @@ async function loadDbHealth(force) {
         `🗓️ Neon pricing verified: ${data.pricingMeta.verifiedAt} — <a href="${NEON_PRICING_SOURCE_URL_JS}" target="_blank" rel="noopener" style="color:var(--accent,#6cf);">source</a>` +
         `${data.pricingMeta.hasOverrides ? ' (may custom override na naka-apply)' : ''}<br>` +
         `${data.pricingMeta.hasNeonApiKey ? '🔌 Nakakonekta sa Neon account API — real usage.<br>' : ''}` +
-        `<span style="font-size:11px;">*${data.pricingMeta.exampleComputeAssumptionNote}</span>`;
+        `<span style="font-size:11px;">${data.pricingMeta.exampleComputeAssumptionNote}</span>`;
     }
   } catch (err) {
     container.className = 'empty';
