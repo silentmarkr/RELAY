@@ -65,8 +65,15 @@
   #loginWrap button { margin-top: 12px; }
   #loginError { color: var(--red); font-size: .85rem; margin-top: 8px; min-height: 1.2em; }
   main { max-width: 1180px; margin: 0 auto; padding: 24px 20px 60px; }
-  .intro { color: var(--muted); font-size: .92rem; line-height: 1.5; margin-bottom: 22px; }
+  .intro { color: var(--muted); font-size: .92rem; line-height: 1.5; margin-top: 10px; margin-bottom: 22px; }
   .intro code { font-family: var(--font-mono); color: var(--accent); }
+  .intro-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .intro-summary { color: var(--muted); font-size: .92rem; margin: 0; }
+  .intro-toggle {
+    flex: none; background: transparent; border: 1.5px solid var(--border); color: var(--muted);
+    border-radius: var(--radius); padding: 6px 12px; font-family: var(--font-ui); font-size: .8rem; cursor: pointer;
+  }
+  .intro-toggle:hover { border-color: var(--border-soft); color: var(--accent); background: var(--card-hover); }
 
   .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-bottom: 22px; }
   .stat-card {
@@ -167,9 +174,34 @@
   }
   .client-card-total .total-price { color: var(--accent); font-family: var(--font-heading); font-size: 1.1rem; }
 
+  /* ---- Client list toolbar (search + sort) and pagination — keeps the
+     page usable when there are many clients instead of one giant scroll. ---- */
+  .client-toolbar {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    margin-bottom: 14px;
+  }
+  .client-toolbar .search-field { flex: 1 1 220px; min-width: 0; }
+  .client-toolbar input[type="search"] {
+    width: 100%; padding: 9px 12px; border-radius: var(--radius); border: 1.5px solid var(--border);
+    background: var(--bg-raise); color: var(--text); font-family: var(--font-ui); font-size: .88rem;
+  }
+  .client-toolbar input[type="search"]:focus { outline: none; border-color: var(--accent); }
+  .client-toolbar select {
+    padding: 9px 10px; border-radius: var(--radius); border: 1.5px solid var(--border);
+    background: var(--bg-raise); color: var(--text); font-family: var(--font-ui); font-size: .85rem;
+    flex: 0 0 auto;
+  }
+  .client-toolbar select:focus { outline: none; border-color: var(--accent); }
+  .client-count-note { flex-basis: 100%; font-size: .75rem; color: var(--muted-dim); }
+  .load-more-wrap { display: flex; justify-content: center; margin-top: 16px; }
+  .load-more-wrap .btn { min-width: 220px; }
+
   @media (max-width: 720px) {
     main { padding: 18px 14px 60px; }
     .intro { font-size: .88rem; margin-bottom: 18px; }
+    .intro-summary { font-size: .85rem; flex: 1 1 100%; }
+    .intro-row { gap: 10px; }
+    .intro-toggle { width: 100%; justify-content: center; text-align: center; }
     .topbar { padding: 12px 14px; flex-wrap: wrap; gap: 10px; }
     .topbar-actions { flex-wrap: wrap; width: 100%; gap: 8px; }
     .topbar-actions .icon-btn { flex: 1 1 auto; justify-content: center; font-size: .82rem; padding: 9px 10px; }
@@ -184,6 +216,9 @@
     .client-grid { grid-template-columns: 1fr; gap: 12px; }
     .client-card { padding: 14px; }
     .client-fee-edit input.fee-input { font-size: 16px; width: 84px; }
+    .client-toolbar { flex-direction: column; align-items: stretch; gap: 10px; }
+    .client-toolbar input[type="search"] { font-size: 16px; }
+    .client-toolbar select { width: 100%; font-size: 16px; }
   }
   #toast {
     position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
@@ -228,7 +263,11 @@
   </div>
 
   <main>
-    <p class="intro">
+    <div class="intro-row">
+      <p class="intro-summary">How the Neon bill is split fairly across clients.</p>
+      <button type="button" class="intro-toggle" id="introToggleBtn" onclick="toggleIntroInfo()">ℹ️ Show info</button>
+    </div>
+    <p class="intro hidden" id="introFull">
       The Cloud Backup Neon project is <strong>shared across every client</strong> — Neon only
       sends one bill for the whole project. This page splits that single bill fairly: each
       client's <strong>storage cost</strong> is weighted by their share of total stored data
@@ -286,8 +325,25 @@
     </div>
 
     <div id="clientsWrap">
+      <div class="client-toolbar hidden" id="clientToolbar">
+        <div class="search-field">
+          <input type="search" id="clientSearchInput" placeholder="Search by installation ID…" oninput="onClientSearchChange(this.value)">
+        </div>
+        <select id="clientSortSelect" onchange="onClientSortChange(this.value)">
+          <option value="totalDesc" selected>Total / month (high → low)</option>
+          <option value="totalAsc">Total / month (low → high)</option>
+          <option value="storageDesc">Storage (high → low)</option>
+          <option value="computeDesc">Compute share (high → low)</option>
+          <option value="syncsDesc">Syncs (high → low)</option>
+        </select>
+        <div class="client-count-note" id="clientCountNote"></div>
+      </div>
       <div class="client-grid" id="clientGrid"></div>
       <div class="empty-state hidden" id="emptyState">No Cloud Backup client activity recorded yet for the current billing period.</div>
+      <div class="empty-state hidden" id="filterEmptyState">No clients match your search.</div>
+      <div class="load-more-wrap hidden" id="loadMoreWrap">
+        <button class="btn btn-ghost" id="loadMoreBtn" onclick="loadMoreClients()">Show more</button>
+      </div>
     </div>
   </main>
 </div>
@@ -298,6 +354,10 @@
 let adminKey = sessionStorage.getItem('relayAdminKey') || '';
 let lastAllocation = null;
 const dirtyFees = {}; // installationId -> pending fee value (string from input) not yet saved
+let clientSearchQuery = '';
+let clientSortKey = 'totalDesc';
+const CLIENT_PAGE_SIZE = 20; // how many client cards to render at a time — avoids one giant scroll at scale
+let clientVisibleCount = CLIENT_PAGE_SIZE;
 
 function toast(msg, type) {
   const el = document.getElementById('toast');
@@ -325,6 +385,14 @@ async function api(path, opts = {}) {
     throw new Error(data.message || `Request failed (${res.status})`);
   }
   return data;
+}
+
+function toggleIntroInfo() {
+  const full = document.getElementById('introFull');
+  const btn = document.getElementById('introToggleBtn');
+  const nowHidden = !full.classList.contains('hidden');
+  full.classList.toggle('hidden');
+  btn.textContent = nowHidden ? 'ℹ️ Show info' : '✕ Hide info';
 }
 
 function login() {
@@ -421,71 +489,147 @@ function renderAllocation(data) {
 
   const grid = document.getElementById('clientGrid');
   const emptyState = document.getElementById('emptyState');
+  const toolbar = document.getElementById('clientToolbar');
   const clients = Array.isArray(data.clients) ? data.clients : [];
 
   if (clients.length === 0) {
     grid.innerHTML = '';
+    toolbar.classList.add('hidden');
+    document.getElementById('filterEmptyState').classList.add('hidden');
+    document.getElementById('loadMoreWrap').classList.add('hidden');
+    document.getElementById('clientCountNote').textContent = '';
     emptyState.classList.remove('hidden');
     return;
   }
   emptyState.classList.add('hidden');
+  toolbar.classList.remove('hidden');
+  clientVisibleCount = CLIENT_PAGE_SIZE; // fresh data (e.g. after Refresh) — start back at page 1
+  renderClientGrid();
+}
 
-  grid.innerHTML = clients.map((c) => {
-    const isOverridden = data.defaultMaintenanceFeePHP != null && c.maintenanceFeePHP !== data.defaultMaintenanceFeePHP;
-    const feeValue = Object.prototype.hasOwnProperty.call(dirtyFees, c.installationId)
-      ? dirtyFees[c.installationId]
-      : c.maintenanceFeePHP;
-    const safeId = escapeHtml(c.installationId);
-    return `
-      <div class="client-card" data-installation-id="${safeId}">
-        <div>
-          <div class="mono client-card-id">${safeId}</div>
-          <div class="client-card-sub">${c.syncCount != null ? c.syncCount : 0} syncs · ${c.totalRecords != null ? c.totalRecords : 0} records</div>
+function getFilteredSortedClients() {
+  const clients = (lastAllocation && Array.isArray(lastAllocation.clients)) ? lastAllocation.clients : [];
+  const q = clientSearchQuery.trim().toLowerCase();
+  const filtered = q
+    ? clients.filter((c) => String(c.installationId || '').toLowerCase().includes(q))
+    : clients.slice();
+  const sorters = {
+    totalDesc: (a, b) => (b.finalPricePHP || 0) - (a.finalPricePHP || 0),
+    totalAsc: (a, b) => (a.finalPricePHP || 0) - (b.finalPricePHP || 0),
+    storageDesc: (a, b) => (b.sizeBytes || 0) - (a.sizeBytes || 0),
+    computeDesc: (a, b) => (b.computeSharePercent || 0) - (a.computeSharePercent || 0),
+    syncsDesc: (a, b) => (b.syncCount || 0) - (a.syncCount || 0)
+  };
+  filtered.sort(sorters[clientSortKey] || sorters.totalDesc);
+  return filtered;
+}
+
+function renderClientCard(c) {
+  const isOverridden = lastAllocation.defaultMaintenanceFeePHP != null && c.maintenanceFeePHP !== lastAllocation.defaultMaintenanceFeePHP;
+  const feeValue = Object.prototype.hasOwnProperty.call(dirtyFees, c.installationId)
+    ? dirtyFees[c.installationId]
+    : c.maintenanceFeePHP;
+  const safeId = escapeHtml(c.installationId);
+  return `
+    <div class="client-card" data-installation-id="${safeId}">
+      <div>
+        <div class="mono client-card-id">${safeId}</div>
+        <div class="client-card-sub">${c.syncCount != null ? c.syncCount : 0} syncs · ${c.totalRecords != null ? c.totalRecords : 0} records</div>
+      </div>
+
+      <div>
+        <div class="client-metric-head">
+          <span class="client-metric-label">Storage</span>
+          <span class="client-metric-value">${formatBytes(c.sizeBytes)}</span>
         </div>
+        ${renderShareBar(c.storageSharePercent)}
+      </div>
 
-        <div>
-          <div class="client-metric-head">
-            <span class="client-metric-label">Storage</span>
-            <span class="client-metric-value">${formatBytes(c.sizeBytes)}</span>
-          </div>
-          ${renderShareBar(c.storageSharePercent)}
+      <div>
+        <div class="client-metric-head">
+          <span class="client-metric-label">Compute share</span>
         </div>
+        ${renderShareBar(c.computeSharePercent)}
+      </div>
 
-        <div>
-          <div class="client-metric-head">
-            <span class="client-metric-label">Compute share</span>
-          </div>
-          ${renderShareBar(c.computeSharePercent)}
-        </div>
+      <div class="client-card-divider"></div>
 
-        <div class="client-card-divider"></div>
+      <div class="client-card-line">
+        <span class="client-card-line-label">Neon cost share</span>
+        <span class="mono">${formatPHP(c.baseCostPHP)}</span>
+      </div>
 
-        <div class="client-card-line">
-          <span class="client-card-line-label">Neon cost share</span>
-          <span class="mono">${formatPHP(c.baseCostPHP)}</span>
-        </div>
-
-        <div class="client-card-line">
-          <span class="client-card-line-label">Maintenance fee</span>
-          <div class="client-fee-edit">
-            <input
-              type="number" min="0" step="1"
-              class="fee-input${isOverridden ? ' overridden' : ''}"
-              id="fee-${safeId}"
-              value="${feeValue}"
-              oninput="markFeeDirty('${safeId}', this.value)"
-            >
-            <button class="row-save-btn" id="save-${safeId}" onclick="saveClientFee('${safeId}')">Save</button>
-          </div>
-        </div>
-
-        <div class="client-card-total">
-          <span>Total / month</span>
-          <span class="total-price">${formatPHP(c.finalPricePHP)}</span>
+      <div class="client-card-line">
+        <span class="client-card-line-label">Maintenance fee</span>
+        <div class="client-fee-edit">
+          <input
+            type="number" min="0" step="1"
+            class="fee-input${isOverridden ? ' overridden' : ''}"
+            id="fee-${safeId}"
+            value="${feeValue}"
+            oninput="markFeeDirty('${safeId}', this.value)"
+          >
+          <button class="row-save-btn" id="save-${safeId}" onclick="saveClientFee('${safeId}')">Save</button>
         </div>
       </div>
-    `;
-  }).join('');
+
+      <div class="client-card-total">
+        <span>Total / month</span>
+        <span class="total-price">${formatPHP(c.finalPricePHP)}</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderClientGrid() {
+  const grid = document.getElementById('clientGrid');
+  const filterEmptyState = document.getElementById('filterEmptyState');
+  const loadMoreWrap = document.getElementById('loadMoreWrap');
+  const loadMoreBtn = document.getElementById('loadMoreBtn');
+  const countNote = document.getElementById('clientCountNote');
+
+  const totalCount = (lastAllocation && Array.isArray(lastAllocation.clients)) ? lastAllocation.clients.length : 0;
+  const matched = getFilteredSortedClients();
+
+  if (matched.length === 0) {
+    grid.innerHTML = '';
+    filterEmptyState.classList.remove('hidden');
+    loadMoreWrap.classList.add('hidden');
+    countNote.textContent = clientSearchQuery ? `0 of ${totalCount} clients match "${clientSearchQuery}"` : '';
+    return;
+  }
+  filterEmptyState.classList.add('hidden');
+
+  const visible = matched.slice(0, clientVisibleCount);
+  grid.innerHTML = visible.map(renderClientCard).join('');
+
+  if (matched.length > visible.length) {
+    loadMoreWrap.classList.remove('hidden');
+    loadMoreBtn.textContent = `Show more (${visible.length} of ${matched.length})`;
+  } else {
+    loadMoreWrap.classList.add('hidden');
+  }
+
+  countNote.textContent = clientSearchQuery
+    ? `Showing ${visible.length} of ${matched.length} matching clients (${totalCount} total)`
+    : `Showing ${visible.length} of ${matched.length} clients`;
+}
+
+function onClientSearchChange(value) {
+  clientSearchQuery = value;
+  clientVisibleCount = CLIENT_PAGE_SIZE;
+  renderClientGrid();
+}
+
+function onClientSortChange(value) {
+  clientSortKey = value;
+  clientVisibleCount = CLIENT_PAGE_SIZE;
+  renderClientGrid();
+}
+
+function loadMoreClients() {
+  clientVisibleCount += CLIENT_PAGE_SIZE;
+  renderClientGrid();
 }
 
 function markFeeDirty(installationId, value) {
