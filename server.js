@@ -971,11 +971,15 @@ async function getNeonProjectUsage(projectId) {
             const p = (body && body.project) || {};
             const usage = {
                 projectId,
-                // Halimbawa ng aktwal na format nito mula sa Neon: "free_v2",
-                // "launch_v2", "scale_v2" — may suffix, kaya kailangang
-                // i-normalize muna (tingnan ang normalizeNeonPlanId) bago
-                // itugma sa NEON_PRICING_TIER_IDS ("free"/"launch"/"scale").
-                planId: p.plan_id || p.pending_plan_id || null,
+                // MAHALAGA: WALANG top-level "plan_id" field sa GET
+                // /projects/{project_id} response ng Neon (kaya laging
+                // null/"—" ang lumalabas dati). Ang totoong lokasyon nito
+                // ay nested sa project.owner.subscription_type (hal.
+                // "free_v2", "scale_v3" — may version suffix, kaya
+                // kailangan pa rin ng normalizeNeonPlanId sa ibaba).
+                // Verified laban sa opisyal na schema (2026-09):
+                // https://neon.com/docs/reference/api/projects/get-project
+                planId: (p.owner && p.owner.subscription_type) || p.plan_id || p.pending_plan_id || null,
                 consumptionPeriodStart: p.consumption_period_start || null,
                 computeTimeSeconds: typeof p.compute_time_seconds === 'number' ? p.compute_time_seconds : null,
                 activeTimeSeconds: typeof p.active_time_seconds === 'number' ? p.active_time_seconds : null,
