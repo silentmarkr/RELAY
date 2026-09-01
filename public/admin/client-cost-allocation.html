@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Client Cost Allocation — RELAY Admin</title>
+<style>
+  :root {
+    --bg: #05070d;
+    --bg-raise: #101625;
+    --card: rgba(11, 15, 26, 0.72);
+    --card-hover: rgba(16, 22, 37, 0.85);
+    --border: #1f2a44;
+    --border-soft: rgba(34, 229, 255, 0.28);
+    --line: rgba(31, 42, 68, 0.7);
+    --text: #eafcff;
+    --muted: #8ea3c9;
+    --muted-dim: #7186ab;
+    --accent: #22e5ff;
+    --accent-hover: #ff2ee6;
+    --accent-soft: rgba(34, 229, 255, 0.16);
+    --accent-text: #031014;
+    --green: #3ddc84;
+    --green-bg: rgba(61, 220, 132, 0.12);
+    --green-line: rgba(61, 220, 132, 0.32);
+    --red: #ff5c72;
+    --red-bg: rgba(255, 92, 114, 0.12);
+    --red-line: rgba(255, 92, 114, 0.32);
+    --amber: #ffb545;
+    --amber-bg: rgba(255, 181, 69, 0.12);
+    --amber-line: rgba(255, 181, 69, 0.32);
+    --font-ui: 'Rajdhani', 'Inter', 'Segoe UI', system-ui, -apple-system, Roboto, sans-serif;
+    --font-heading: 'Orbitron', 'Space Grotesk', sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --radius: 6px;
+    --radius-lg: 8px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-ui);
+    min-height: 100vh;
+  }
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 20px; border-bottom: 1.5px solid var(--border);
+    background: var(--bg-raise);
+  }
+  .topbar-brand { display: flex; align-items: center; gap: 10px; }
+  .topbar-title { font-family: var(--font-heading); font-size: 1.1rem; letter-spacing: .02em; }
+  .topbar-sub { color: var(--muted); font-size: .8rem; }
+  .icon-btn {
+    background: transparent; border: 1.5px solid var(--border); color: var(--text);
+    border-radius: var(--radius); padding: 8px 12px; cursor: pointer; font-family: var(--font-ui);
+    font-size: .9rem; display: inline-flex; align-items: center; gap: 6px;
+  }
+  .icon-btn:hover { border-color: var(--border-soft); background: var(--card-hover); }
+  #loginWrap { max-width: 360px; margin: 90px auto; text-align: center; }
+  #loginWrap input {
+    width: 100%; padding: 10px 12px; margin-top: 14px; border-radius: var(--radius);
+    border: 1.5px solid var(--border); background: var(--bg-raise); color: var(--text); font-family: var(--font-mono);
+  }
+  #loginWrap button { margin-top: 12px; }
+  #loginError { color: var(--red); font-size: .85rem; margin-top: 8px; min-height: 1.2em; }
+  main { max-width: 1180px; margin: 0 auto; padding: 24px 20px 60px; }
+  .intro { color: var(--muted); font-size: .92rem; line-height: 1.5; margin-bottom: 22px; }
+  .intro code { font-family: var(--font-mono); color: var(--accent); }
+
+  .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-bottom: 22px; }
+  .stat-card {
+    background: var(--card); border: 1.5px solid var(--border); border-radius: var(--radius-lg);
+    padding: 16px; position: relative; overflow: hidden;
+  }
+  .stat-card::before {
+    content: ''; position: absolute; inset: 0 0 auto 0; height: 2px;
+    background: linear-gradient(90deg, var(--accent), transparent);
+  }
+  .stat-label { font-size: .72rem; color: var(--muted-dim); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 6px; }
+  .stat-value { font-family: var(--font-heading); font-size: 1.5rem; color: var(--text); }
+  .stat-value.accent { color: var(--accent); }
+  .stat-sub { font-size: .75rem; color: var(--muted); margin-top: 4px; }
+
+  .warning-banner {
+    display: none; align-items: flex-start; gap: 10px; margin-bottom: 22px; padding: 12px 16px;
+    border-radius: var(--radius-lg); border: 1.5px solid var(--amber-line); background: var(--amber-bg);
+    color: var(--amber); font-size: .85rem; line-height: 1.5;
+  }
+  .warning-banner.show { display: flex; }
+  .error-banner {
+    display: none; align-items: flex-start; gap: 10px; margin-bottom: 22px; padding: 12px 16px;
+    border-radius: var(--radius-lg); border: 1.5px solid var(--red-line); background: var(--red-bg);
+    color: var(--red); font-size: .85rem; line-height: 1.5;
+  }
+  .error-banner.show { display: flex; }
+
+  .fee-bar {
+    display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap; margin-bottom: 24px;
+    background: var(--card); border: 1.5px solid var(--border); border-radius: var(--radius-lg); padding: 16px;
+  }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: .78rem; color: var(--muted); }
+  .field input {
+    width: 160px;
+    padding: 8px 10px; border-radius: var(--radius); border: 1.5px solid var(--border);
+    background: var(--bg-raise); color: var(--text); font-family: var(--font-mono); font-size: .95rem;
+  }
+  .field input:focus { outline: none; border-color: var(--accent); }
+  .btn {
+    padding: 9px 16px; border-radius: var(--radius); border: 1.5px solid var(--border);
+    background: transparent; color: var(--text); cursor: pointer; font-family: var(--font-ui); font-size: .9rem;
+  }
+  .btn-save { background: var(--accent-soft); border-color: var(--border-soft); color: var(--accent); }
+  .btn-save:hover { background: var(--accent); color: var(--accent-text); }
+  .btn-ghost:hover { border-color: var(--border-soft); background: var(--card-hover); }
+
+  table { width: 100%; border-collapse: collapse; background: var(--card); border: 1.5px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
+  thead th {
+    text-align: left; font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted-dim);
+    padding: 12px 14px; border-bottom: 1.5px solid var(--border); background: var(--bg-raise);
+  }
+  tbody td { padding: 12px 14px; border-bottom: 1px solid var(--line); font-size: .88rem; vertical-align: middle; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: var(--card-hover); }
+  .mono { font-family: var(--font-mono); font-size: .82rem; color: var(--muted); }
+  .share-bar-wrap { display: flex; align-items: center; gap: 8px; min-width: 120px; }
+  .share-bar-track { flex: 1; height: 6px; border-radius: 999px; background: var(--bg-raise); overflow: hidden; }
+  .share-bar-fill { height: 100%; border-radius: 999px; background: var(--accent); }
+  .fee-input {
+    width: 90px; padding: 6px 8px; border-radius: var(--radius); border: 1.5px solid var(--border);
+    background: var(--bg-raise); color: var(--text); font-family: var(--font-mono); font-size: .85rem;
+  }
+  .fee-input:focus { outline: none; border-color: var(--accent); }
+  .fee-input.overridden { border-color: var(--border-soft); color: var(--accent); }
+  .total-price { font-weight: 700; color: var(--text); }
+  .row-save-btn {
+    padding: 6px 12px; border-radius: var(--radius); border: 1.5px solid var(--border);
+    background: transparent; color: var(--muted); cursor: pointer; font-size: .78rem;
+  }
+  .row-save-btn:hover { border-color: var(--border-soft); color: var(--accent); }
+  .row-save-btn.dirty { border-color: var(--border-soft); color: var(--accent); background: var(--accent-soft); }
+  .empty-state { text-align: center; padding: 40px 20px; color: var(--muted); font-size: .9rem; }
+  #toast {
+    position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+    background: var(--bg-raise); border: 1.5px solid var(--border-soft); color: var(--text);
+    padding: 10px 18px; border-radius: var(--radius); font-size: .88rem; opacity: 0; pointer-events: none;
+    transition: opacity .2s ease; z-index: 50;
+  }
+  #toast.show { opacity: 1; }
+  #toast.error { border-color: var(--red-line); color: var(--red); }
+  .hidden { display: none !important; }
+  .basis-badge {
+    display: inline-block; font-size: .68rem; padding: 2px 8px; border-radius: 999px;
+    border: 1px solid var(--border-soft); background: var(--accent-soft); color: var(--accent);
+  }
+  .basis-badge.unstable { border-color: var(--amber-line); background: var(--amber-bg); color: var(--amber); }
+</style>
+</head>
+<body>
+
+<div id="loginWrap">
+  <div class="topbar-title" style="font-family:var(--font-heading);font-size:1.3rem;">Client Cost Allocation</div>
+  <div class="topbar-sub">Enter the RELAY admin key to continue.</div>
+  <input type="password" id="adminKeyInput" placeholder="Admin key" autocomplete="off">
+  <button class="icon-btn" style="width:100%;justify-content:center;" onclick="login()">Log in</button>
+  <div id="loginError"></div>
+</div>
+
+<div id="app" class="hidden">
+  <div class="topbar">
+    <div class="topbar-brand">
+      <div>
+        <div class="topbar-title">📊 Client Cost Allocation</div>
+        <div class="topbar-sub">Actual Neon usage, split proportionally per client</div>
+      </div>
+    </div>
+    <div class="topbar-actions" style="display:flex;gap:8px;">
+      <button class="icon-btn" onclick="window.location.href='index.html'">← Devices</button>
+      <button class="icon-btn" onclick="window.location.href='pricing.html'">💳 Cloud Backup Pricing</button>
+      <button class="icon-btn" id="refreshBtn" onclick="loadAllocation()">⟳ Refresh</button>
+      <button class="icon-btn" onclick="logout()">Log out</button>
+    </div>
+  </div>
+
+  <main>
+    <p class="intro">
+      The Cloud Backup Neon project is <strong>shared across every client</strong> — Neon only
+      sends one bill for the whole project. This page splits that single bill fairly: each
+      client's <strong>storage cost</strong> is weighted by their share of total stored data
+      (<code>size_bytes</code>), and their <strong>compute cost</strong> is weighted by their
+      share of total sync activity (<code>sync_count</code>) — so a bigger, busier store pays
+      more of the real Neon cost, and a small quiet one pays less. The rounded shares always add
+      back up to the exact total Neon cost. A flat <strong>maintenance fee</strong> (your own
+      markup for monitoring/support — not a Neon charge) is added on top per client, and can be
+      overridden individually below.
+    </p>
+
+    <div class="error-banner" id="errorBanner"></div>
+    <div class="warning-banner" id="warningBanner"></div>
+
+    <div class="summary-grid">
+      <div class="stat-card">
+        <div class="stat-label">Total Neon Cost <span class="basis-badge" id="basisBadge">—</span></div>
+        <div class="stat-value accent" id="statTotalCost">₱—</div>
+        <div class="stat-sub" id="statExchangeRate">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Compute Share</div>
+        <div class="stat-value" id="statCompute">₱—</div>
+        <div class="stat-sub">Split by sync activity</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Storage Share</div>
+        <div class="stat-value" id="statStorage">₱—</div>
+        <div class="stat-sub">Split by data size</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Clients Billed</div>
+        <div class="stat-value" id="statClientCount">—</div>
+        <div class="stat-sub" id="statLastChecked">—</div>
+      </div>
+    </div>
+
+    <div class="fee-bar">
+      <div class="field">
+        <label>Default maintenance fee (₱ / client / month)</label>
+        <input type="number" min="0" step="1" id="defaultFeeInput">
+      </div>
+      <button class="btn btn-save" onclick="saveDefaultFee()">Save default</button>
+      <div class="stat-sub" style="align-self:center;">Applies to every client without an individual override below.</div>
+    </div>
+
+    <div id="tableWrap">
+      <table id="clientsTable">
+        <thead>
+          <tr>
+            <th>Installation</th>
+            <th>Storage</th>
+            <th>Compute</th>
+            <th>Neon cost share</th>
+            <th>Maintenance fee</th>
+            <th>Total / month</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="clientsTbody"></tbody>
+      </table>
+      <div class="empty-state hidden" id="emptyState">No Cloud Backup client activity recorded yet for the current billing period.</div>
+    </div>
+  </main>
+</div>
+
+<div id="toast"></div>
+
+<script>
+let adminKey = sessionStorage.getItem('relayAdminKey') || '';
+let lastAllocation = null;
+const dirtyFees = {}; // installationId -> pending fee value (string from input) not yet saved
+
+function toast(msg, type) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = type === 'error' ? 'show error' : 'show';
+  setTimeout(() => { el.className = ''; }, 2600);
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: {
+      'Content-Type': 'application/json',
+      'x-relay-admin-key': adminKey,
+      ...(opts.headers || {})
+    }
+  });
+  if (res.status === 403) {
+    document.getElementById('loginError').innerText = 'Incorrect admin key.';
+    logout();
+    throw new Error('forbidden');
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.success === false) {
+    throw new Error(data.message || `Request failed (${res.status})`);
+  }
+  return data;
+}
+
+function login() {
+  const val = document.getElementById('adminKeyInput').value.trim();
+  if (!val) return;
+  adminKey = val;
+  sessionStorage.setItem('relayAdminKey', adminKey);
+  boot();
+}
+
+function logout() {
+  adminKey = '';
+  sessionStorage.removeItem('relayAdminKey');
+  document.getElementById('app').classList.add('hidden');
+  document.getElementById('loginWrap').classList.remove('hidden');
+  document.getElementById('adminKeyInput').value = '';
+}
+
+function formatPHP(n) {
+  if (typeof n !== 'number' || !isFinite(n)) return '₱—';
+  return '₱' + n.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function formatBytes(bytes) {
+  if (typeof bytes !== 'number' || !isFinite(bytes)) return '—';
+  const mb = bytes / (1024 * 1024);
+  return mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(1)} MB`;
+}
+
+function escapeHtml(str) {
+  return String(str == null ? '' : str).replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+function renderShareBar(pct) {
+  const clamped = Math.max(0, Math.min(100, Number(pct) || 0));
+  return `
+    <div class="share-bar-wrap">
+      <div class="share-bar-track"><div class="share-bar-fill" style="width:${clamped}%;"></div></div>
+      <span class="mono">${clamped.toFixed(1)}%</span>
+    </div>
+  `;
+}
+
+function renderAllocation(data) {
+  lastAllocation = data;
+
+  const errorBanner = document.getElementById('errorBanner');
+  const warningBanner = document.getElementById('warningBanner');
+
+  if (!data.success) {
+    errorBanner.classList.add('show');
+    errorBanner.textContent = '⚠️ ' + (data.message || 'Could not load cost allocation.');
+    warningBanner.classList.remove('show');
+    document.getElementById('tableWrap').classList.add('hidden');
+    document.getElementById('statTotalCost').textContent = '₱—';
+    return;
+  }
+  errorBanner.classList.remove('show');
+  document.getElementById('tableWrap').classList.remove('hidden');
+
+  if (data.warning) {
+    warningBanner.classList.add('show');
+    warningBanner.textContent = data.warning;
+  } else {
+    warningBanner.classList.remove('show');
+  }
+
+  const basisBadge = document.getElementById('basisBadge');
+  if (data.costBasis === 'projected-full-period') {
+    basisBadge.textContent = 'Projected (stable)';
+    basisBadge.className = 'basis-badge';
+  } else {
+    basisBadge.textContent = 'Sample (<24h)';
+    basisBadge.className = 'basis-badge unstable';
+  }
+
+  document.getElementById('statTotalCost').textContent = formatPHP(data.totalCostPHP);
+  document.getElementById('statExchangeRate').textContent = data.exchangeRate
+    ? `@ ₱${Number(data.exchangeRate.usdToPhp).toFixed(2)}/USD (${data.exchangeRate.source})`
+    : '—';
+  document.getElementById('statCompute').textContent = formatPHP(data.totalComputeCostPHP);
+  document.getElementById('statStorage').textContent = formatPHP(data.totalStorageCostPHP);
+  document.getElementById('statClientCount').textContent = data.clientCount != null ? data.clientCount : '—';
+  document.getElementById('statLastChecked').textContent = data.checkedAt
+    ? 'as of ' + new Date(data.checkedAt).toLocaleString()
+    : '—';
+
+  const defaultFeeInput = document.getElementById('defaultFeeInput');
+  if (document.activeElement !== defaultFeeInput) {
+    defaultFeeInput.value = data.defaultMaintenanceFeePHP != null ? data.defaultMaintenanceFeePHP : 0;
+  }
+
+  const tbody = document.getElementById('clientsTbody');
+  const emptyState = document.getElementById('emptyState');
+  const clients = Array.isArray(data.clients) ? data.clients : [];
+
+  if (clients.length === 0) {
+    tbody.innerHTML = '';
+    emptyState.classList.remove('hidden');
+    return;
+  }
+  emptyState.classList.add('hidden');
+
+  tbody.innerHTML = clients.map((c) => {
+    const isOverridden = data.defaultMaintenanceFeePHP != null && c.maintenanceFeePHP !== data.defaultMaintenanceFeePHP;
+    const feeValue = Object.prototype.hasOwnProperty.call(dirtyFees, c.installationId)
+      ? dirtyFees[c.installationId]
+      : c.maintenanceFeePHP;
+    return `
+      <tr data-installation-id="${escapeHtml(c.installationId)}">
+        <td>
+          <div class="mono">${escapeHtml(c.installationId)}</div>
+          <div class="stat-sub">${c.syncCount != null ? c.syncCount : 0} syncs · ${c.totalRecords != null ? c.totalRecords : 0} records</div>
+        </td>
+        <td>
+          <div>${formatBytes(c.sizeBytes)}</div>
+          ${renderShareBar(c.storageSharePercent)}
+        </td>
+        <td>
+          ${renderShareBar(c.computeSharePercent)}
+        </td>
+        <td class="mono">${formatPHP(c.baseCostPHP)}</td>
+        <td>
+          <input
+            type="number" min="0" step="1"
+            class="fee-input${isOverridden ? ' overridden' : ''}"
+            id="fee-${escapeHtml(c.installationId)}"
+            value="${feeValue}"
+            oninput="markFeeDirty('${escapeHtml(c.installationId)}', this.value)"
+          >
+        </td>
+        <td class="total-price">${formatPHP(c.finalPricePHP)}</td>
+        <td>
+          <button class="row-save-btn" id="save-${escapeHtml(c.installationId)}" onclick="saveClientFee('${escapeHtml(c.installationId)}')">Save</button>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function markFeeDirty(installationId, value) {
+  dirtyFees[installationId] = value;
+  const btn = document.getElementById(`save-${installationId}`);
+  if (btn) btn.classList.add('dirty');
+}
+
+async function saveClientFee(installationId) {
+  const input = document.getElementById(`fee-${installationId}`);
+  if (!input) return;
+  const feePHP = Number(input.value);
+  if (!isFinite(feePHP) || feePHP < 0) {
+    toast('Maintenance fee must be a non-negative number.', 'error');
+    return;
+  }
+  try {
+    await api('/relay/admin/api/client-cost-allocation/maintenance-fee', {
+      method: 'POST',
+      body: JSON.stringify({ installationId, feePHP })
+    });
+    delete dirtyFees[installationId];
+    toast(`Saved maintenance fee for ${installationId}.`);
+    await loadAllocation();
+  } catch (err) {
+    if (err.message !== 'forbidden') toast(err.message, 'error');
+  }
+}
+
+async function saveDefaultFee() {
+  const val = Number(document.getElementById('defaultFeeInput').value);
+  if (!isFinite(val) || val < 0) {
+    toast('Default fee must be a non-negative number.', 'error');
+    return;
+  }
+  try {
+    await api('/relay/admin/api/client-cost-allocation/maintenance-fee', {
+      method: 'POST',
+      body: JSON.stringify({ defaultFeePHP: val })
+    });
+    toast('Saved default maintenance fee.');
+    await loadAllocation();
+  } catch (err) {
+    if (err.message !== 'forbidden') toast(err.message, 'error');
+  }
+}
+
+async function loadAllocation() {
+  const refreshBtn = document.getElementById('refreshBtn');
+  if (refreshBtn) refreshBtn.disabled = true;
+  try {
+    const data = await api('/relay/admin/api/client-cost-allocation');
+    renderAllocation(data);
+  } catch (err) {
+    if (err.message !== 'forbidden') {
+      renderAllocation({ success: false, message: err.message });
+    }
+  } finally {
+    if (refreshBtn) refreshBtn.disabled = false;
+  }
+}
+
+async function boot() {
+  if (!adminKey) return;
+  try {
+    await loadAllocation();
+    document.getElementById('loginWrap').classList.add('hidden');
+    document.getElementById('app').classList.remove('hidden');
+  } catch (err) {
+    if (err.message !== 'forbidden') toast(err.message, 'error');
+  }
+}
+
+document.getElementById('adminKeyInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') login();
+});
+
+boot();
+</script>
+</body>
+</html>

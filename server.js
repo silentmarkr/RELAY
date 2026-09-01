@@ -886,6 +886,44 @@ function saveNeonConfiguredPlans(obj) {
 }
 let neonConfiguredPlans = { cloudBackup: 'free', devices: 'free' };
 // ===================================================================
+// PER-CLIENT COST ALLOCATION (Cloud Backup Neon project lang)
+// ===================================================================
+// Iisang Neon project ang Cloud Backup para sa LAHAT ng client (bawat
+// installationId), kaya iisang bill lang ang lumalabas kay Neon —
+// pinaghahalu-halo ang storage/compute ng lahat. Ang "maintenance fee"
+// dito ay ang FLAT na dagdag bayad bawat client (para sa monitoring/
+// pagpapanatili, HINDI Neon consumption) na idinadagdag PAGKATAPOS
+// hatiin ang aktwal na Neon cost ayon sa proporsyon ng gamit ng bawat
+// client — global default + pwedeng i-override bawat installationId.
+const CLIENT_MAINTENANCE_FEE_PATH = path.join(__dirname, 'client-maintenance-fee.json');
+const CLIENT_MAINTENANCE_FEE_DEFAULT = { defaultFeePHP: 150, perClientOverridePHP: {} };
+async function loadClientMaintenanceFeeConfig() {
+    const fromRedis = await redisGetJSON('client-maintenance-fee', null);
+    if (fromRedis !== null) return fromRedis;
+    try {
+        return JSON.parse(fs.readFileSync(CLIENT_MAINTENANCE_FEE_PATH, 'utf8'));
+    } catch (err) {
+        return JSON.parse(JSON.stringify(CLIENT_MAINTENANCE_FEE_DEFAULT));
+    }
+}
+function saveClientMaintenanceFeeConfig(obj) {
+    if (redisClient) {
+        redisSetJSON('client-maintenance-fee', obj);
+        return;
+    }
+    try {
+        fs.writeFileSync(CLIENT_MAINTENANCE_FEE_PATH, JSON.stringify(obj, null, 2));
+    } catch (err) {
+        console.error('Hindi ma-save ang client-maintenance-fee.json:', err);
+    }
+}
+let clientMaintenanceFeeConfig = JSON.parse(JSON.stringify(CLIENT_MAINTENANCE_FEE_DEFAULT));
+function getMaintenanceFeeForClient(installationId) {
+    const override = clientMaintenanceFeeConfig.perClientOverridePHP || {};
+    const v = override[installationId];
+    return typeof v === 'number' && isFinite(v) ? v : (clientMaintenanceFeeConfig.defaultFeePHP || 0);
+}
+// ===================================================================
 // USD -> PHP exchange rate (live, may cache + fallback)
 // ===================================================================
 // Gumagamit ng open.er-api.com (walang API key na kailangan). May
@@ -1073,6 +1111,131 @@ function projectFullPeriodCUHours(usage) {
         // batayan ng projection — ipinapaalam ito sa UI para malinaw na
         // magbabago pa ito habang tumatagal ang billing period.
         lowConfidence: elapsedHours < 24
+    };
+}
+// ===================================================================
+// Hatiin ang TOTAL na Neon cost ng Cloud Backup project sa bawat client
+// (installationId), ayon sa ACTUAL na proporsyon ng ginamit ng bawat isa
+// — HINDI pantay-pantay na hati (hal. total/10), dahil magkakaiba ang
+// laki ng database at dalas ng backup ng bawat client:
+//   - storage cost  -> hinahati ayon sa share ng size_bytes bawat client
+//     (mas malaking naka-store na data = mas malaking share ng storage cost)
+//   - compute cost   -> hinahati ayon sa share ng sync_count bawat client
+//     (mas madalas mag-backup/mag-poke sa admin panel = mas malaking share
+//     ng compute cost, dahil bawat sync/health-check ay gumagamit ng
+//     compute time)
+// Ang kabuuan ng lahat ng client na baseCostPHP ay dapat === sa totoong
+// Neon cost (walang extra, walang kulang) — sinisiguro ito sa pamamagitan
+// ng pag-assign ng anumang centavo na natitira (rounding remainder) sa
+// client na may pinakamalaking share, imbes na basta i-drop.
+// Kada client, dinadagdag pa ang maintenanceFeePHP (flat, HINDI Neon
+// consumption — bayad para sa monitoring/pagpapanatili) para sa
+// finalPricePHP na ipapakita sa OMNIPOS admin panel ng client na iyon.
+async function computeClientCostAllocation() {
+    if (!pgPool) {
+        return { success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL) para sa Cloud Backup.' };
+    }
+    const [exchangeRate, neonUsage] = await Promise.all([
+        getUsdToPhpRate(),
+        getNeonProjectUsage(NEON_CLOUD_BACKUP_PROJECT_ID)
+    ]);
+    if (!neonUsage) {
+        return {
+            success: false,
+            message: 'Walang Neon account API na naka-configure (NEON_API_KEY/NEON_CLOUD_BACKUP_PROJECT_ID) — hindi makukuha ang totoong consumption para hatiin sa mga client.'
+        };
+    }
+    const realCost = computeNeonRealCost(neonUsage, neonConfiguredPlans.cloudBackup || 'free');
+    const projection = projectFullPeriodCUHours(neonUsage);
+    // Piliin ang batayan ng total cost na hahatiin: gamitin ang PROJECTED
+    // full-period compute (mas makatotohanan bilang "monthly figure") kung
+    // may sapat nang datos (hindi lowConfidence); kung wala, gamitin na
+    // lang ang aktwal na cost-so-far ng elapsed period at ilagay ang
+    // ⚠️ warning na "unstable, sample pa lang" — kaparehong pattern ng
+    // /relay/admin/api/db-health.
+    const tier = NEON_PRICING[normalizeNeonPlanId(neonUsage.planId) || (neonConfiguredPlans.cloudBackup || 'free')];
+    let totalComputeCostUSD = realCost ? realCost.computeCostUSD : null;
+    let totalStorageCostUSD = realCost ? realCost.storageCostUSD : null;
+    const usingProjection = !!(projection && !projection.lowConfidence && tier && typeof tier.computeRatePerCUHourUSD === 'number');
+    if (usingProjection) {
+        totalComputeCostUSD = Math.round(projection.projectedCUHoursFullPeriod * tier.computeRatePerCUHourUSD * 100) / 100;
+        // storage cost hindi na-project pa dahil kadalasan mas stable na
+        // ito (hindi biglang tumataas/bumaba tulad ng compute), gagamitin
+        // pa rin ang aktwal na kasalukuyang storage cost.
+    }
+    if (totalComputeCostUSD === null || totalStorageCostUSD === null) {
+        return { success: false, message: 'Hindi makuha ang cost breakdown (baka hindi pa naka-detect/naka-configure ang tamang Neon pricing tier).' };
+    }
+    const rate = exchangeRate.rate || EXCHANGE_RATE_FALLBACK_USD_TO_PHP;
+    const totalComputeCostPHP = totalComputeCostUSD * rate;
+    const totalStorageCostPHP = totalStorageCostUSD * rate;
+    const totalCostPHP = totalComputeCostPHP + totalStorageCostPHP;
+
+    const { rows } = await queryWithRetry(
+        pgPool,
+        'SELECT installation_id, size_bytes, sync_count, total_records, last_sync_at FROM cloud_backup_meta ORDER BY size_bytes DESC',
+        []
+    );
+    const totalSizeBytes = rows.reduce((sum, r) => sum + (Number(r.size_bytes) || 0), 0);
+    const totalSyncCount = rows.reduce((sum, r) => sum + (Number(r.sync_count) || 0), 0);
+    const n = rows.length;
+
+    let clients = rows.map((r) => {
+        const sizeBytes = Number(r.size_bytes) || 0;
+        const syncCount = Number(r.sync_count) || 0;
+        const storageShare = totalSizeBytes > 0 ? sizeBytes / totalSizeBytes : (n > 0 ? 1 / n : 0);
+        const computeShare = totalSyncCount > 0 ? syncCount / totalSyncCount : (n > 0 ? 1 / n : 0);
+        const storageCostPHP = totalStorageCostPHP * storageShare;
+        const computeCostPHP = totalComputeCostPHP * computeShare;
+        const baseCostPHP = storageCostPHP + computeCostPHP;
+        const maintenanceFeePHP = getMaintenanceFeeForClient(r.installation_id);
+        return {
+            installationId: r.installation_id,
+            sizeBytes,
+            sizeMB: Math.round((sizeBytes / (1024 * 1024)) * 100) / 100,
+            syncCount,
+            totalRecords: r.total_records,
+            lastSyncAt: r.last_sync_at,
+            storageSharePercent: Math.round(storageShare * 10000) / 100,
+            computeSharePercent: Math.round(computeShare * 10000) / 100,
+            storageCostPHP,
+            computeCostPHP,
+            baseCostPHP,
+            maintenanceFeePHP,
+            finalPricePHP: baseCostPHP + maintenanceFeePHP
+        };
+    });
+    // I-round PAGKATAPOS mag-compute (hindi bago), at ibigay ang anumang
+    // centavo na "nawala" sa rounding papunta sa client na may
+    // pinakamalaking baseCostPHP, para ang SUM ng lahat ng naka-round na
+    // baseCostPHP ay TAMANG-TAMA na katumbas ng naka-round na totalCostPHP
+    // — walang sobra, walang kulang.
+    const roundedTotal = Math.round(totalCostPHP * 100) / 100;
+    clients = clients.map(c => ({ ...c, baseCostPHP: Math.round(c.baseCostPHP * 100) / 100, storageCostPHP: Math.round(c.storageCostPHP * 100) / 100, computeCostPHP: Math.round(c.computeCostPHP * 100) / 100 }));
+    if (clients.length > 0) {
+        const sumRounded = clients.reduce((s, c) => s + c.baseCostPHP, 0);
+        const remainder = Math.round((roundedTotal - sumRounded) * 100) / 100;
+        if (Math.abs(remainder) >= 0.01) {
+            const biggest = clients.reduce((a, b) => (b.baseCostPHP > a.baseCostPHP ? b : a), clients[0]);
+            biggest.baseCostPHP = Math.round((biggest.baseCostPHP + remainder) * 100) / 100;
+        }
+    }
+    clients = clients.map(c => ({ ...c, finalPricePHP: Math.round((c.baseCostPHP + c.maintenanceFeePHP) * 100) / 100 }));
+
+    return {
+        success: true,
+        checkedAt: Date.now(),
+        exchangeRate: { usdToPhp: rate, source: exchangeRate.source, fetchedAt: exchangeRate.fetchedAt },
+        costBasis: usingProjection ? 'projected-full-period' : 'elapsed-period-actual',
+        warning: usingProjection
+            ? null
+            : '⚠️ Sample pa lang ang datos ng kasalukuyang billing period (di pa 24 oras) — posibleng magbago pa ang totoong buwanang figure. Huwag munang gamitin bilang pinal na batayan ng pricing hangga\'t hindi stable ang average.',
+        totalComputeCostPHP: Math.round(totalComputeCostPHP * 100) / 100,
+        totalStorageCostPHP: Math.round(totalStorageCostPHP * 100) / 100,
+        totalCostPHP: roundedTotal,
+        clientCount: clients.length,
+        defaultMaintenanceFeePHP: clientMaintenanceFeeConfig.defaultFeePHP || 0,
+        clients: clients.sort((a, b) => b.finalPricePHP - a.finalPricePHP)
     };
 }
 const FEATURE_CATALOG_OVERRIDES_PATH = path.join(__dirname, 'feature-catalog-overrides.json');
@@ -3127,6 +3290,71 @@ app.get('/relay/cloud-backup/usage', requireApiKey, requireAllowedDevice, rateLi
         res.status(500).json({ success: false, message: err.message });
     }
 });
+// Ang bahaging ito lang ang makikita ng isang OMNIPOS installation sa
+// sarili niyang admin panel: kanya-kanyang share sa TOTAL na Neon cost
+// (base sa proporsyon ng laki ng data at dalas ng backup), dagdag ang
+// maintenance fee, para malaman ng may-ari kung magkano ang dapat niyang
+// bayaran ngayong buwan — hindi niya makikita ang breakdown ng ibang client.
+app.get('/relay/cloud-backup/cost-allocation', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-cost-allocation', 30, 60 * 60 * 1000, (req) => req.query?.installationId), async (req, res) => {
+    const installationId = String(req.query.installationId || '').trim();
+    if (!installationId) {
+        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+    }
+    try {
+        const allocation = await computeClientCostAllocation();
+        if (!allocation.success) {
+            return res.status(503).json(allocation);
+        }
+        const mine = allocation.clients.find(c => c.installationId === installationId);
+        if (!mine) {
+            return res.json({
+                success: true,
+                hasUsage: false,
+                message: 'Wala pang naitalang Cloud Backup usage para sa installation na ito sa loob ng kasalukuyang billing period.',
+                costBasis: allocation.costBasis,
+                warning: allocation.warning
+            });
+        }
+        res.json({
+            success: true,
+            hasUsage: true,
+            checkedAt: allocation.checkedAt,
+            costBasis: allocation.costBasis,
+            warning: allocation.warning,
+            clientCount: allocation.clientCount,
+            totalCostPHP: allocation.totalCostPHP,
+            yourShare: mine
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+app.get('/relay/admin/api/client-cost-allocation', requireAdminKey, async (req, res) => {
+    try {
+        const allocation = await computeClientCostAllocation();
+        res.json(allocation);
+    } catch (err) {
+        console.error('⚠️  /relay/admin/api/client-cost-allocation error:', err.message);
+        res.status(500).json({ success: false, message: 'Could not compute client cost allocation.' });
+    }
+});
+app.post('/relay/admin/api/client-cost-allocation/maintenance-fee', requireAdminKey, (req, res) => {
+    const { defaultFeePHP, installationId, feePHP } = req.body || {};
+    if (typeof defaultFeePHP === 'number' && isFinite(defaultFeePHP) && defaultFeePHP >= 0) {
+        clientMaintenanceFeeConfig.defaultFeePHP = defaultFeePHP;
+    }
+    if (installationId) {
+        if (feePHP === null) {
+            delete clientMaintenanceFeeConfig.perClientOverridePHP[installationId];
+        } else if (typeof feePHP === 'number' && isFinite(feePHP) && feePHP >= 0) {
+            clientMaintenanceFeeConfig.perClientOverridePHP[installationId] = feePHP;
+        } else {
+            return res.status(400).json({ success: false, message: 'Invalid feePHP — must be a non-negative number, or null to clear the override.' });
+        }
+    }
+    saveClientMaintenanceFeeConfig(clientMaintenanceFeeConfig);
+    res.json({ success: true, clientMaintenanceFeeConfig });
+});
 app.get('/relay/admin/api/cloud-backup', requireAdminKey, async (req, res) => {
     if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
     try {
@@ -5066,7 +5294,8 @@ async function bootstrapStores() {
         moduleSubscriptionOverrides,
         SUGGESTED_DISCOUNT_PERCENT,
         neonPricingOverrides,
-        neonConfiguredPlans
+        neonConfiguredPlans,
+        clientMaintenanceFeeConfig
     ] = await Promise.all([
         loadAllowedDevices(),
         loadDeviceLabels(),
@@ -5089,7 +5318,8 @@ async function bootstrapStores() {
         loadModuleSubscriptionOverrides(),
         loadSuggestedDiscountPercent(),
         loadNeonPricingOverrides(),
-        loadNeonConfiguredPlans()
+        loadNeonConfiguredPlans(),
+        loadClientMaintenanceFeeConfig()
     ]);
     recomputeFeatureCatalog();
     if (Object.keys(featureCatalogOverrides).length > 0) {
@@ -5115,6 +5345,8 @@ async function bootstrapStores() {
         console.log(`🗄️  Na-load ang custom na Neon pricing override para sa: ${Object.keys(neonPricingOverrides).join(', ')}.`);
     }
     if (!neonConfiguredPlans || typeof neonConfiguredPlans !== 'object') neonConfiguredPlans = { cloudBackup: 'free', devices: 'free' };
+    if (!clientMaintenanceFeeConfig || typeof clientMaintenanceFeeConfig !== 'object') clientMaintenanceFeeConfig = JSON.parse(JSON.stringify(CLIENT_MAINTENANCE_FEE_DEFAULT));
+    if (!clientMaintenanceFeeConfig.perClientOverridePHP || typeof clientMaintenanceFeeConfig.perClientOverridePHP !== 'object') clientMaintenanceFeeConfig.perClientOverridePHP = {};
     console.log(
         pgPoolDevices
             ? `✅ Na-load mula sa Postgres (Neon): ${allowedDevices.size} allowed device(s), ${Object.keys(issuedUnlocks).length} device(s) may naka-unlock.`
