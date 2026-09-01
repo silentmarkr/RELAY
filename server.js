@@ -1229,7 +1229,7 @@ async function computeClientCostAllocation() {
         costBasis: usingProjection ? 'projected-full-period' : 'elapsed-period-actual',
         warning: usingProjection
             ? null
-            : '⚠️ Sample pa lang ang datos ng kasalukuyang billing period (di pa 24 oras) — posibleng magbago pa ang totoong buwanang figure. Huwag munang gamitin bilang pinal na batayan ng pricing hangga\'t hindi stable ang average.',
+            : 'Preliminary data — this billing period started less than 24 hours ago, so these figures are still an early sample and may shift before the monthly average stabilizes. Please don\'t treat this as the final basis for pricing yet.',
         totalComputeCostPHP: Math.round(totalComputeCostPHP * 100) / 100,
         totalStorageCostPHP: Math.round(totalStorageCostPHP * 100) / 100,
         totalCostPHP: roundedTotal,
@@ -3310,7 +3310,7 @@ app.get('/relay/cloud-backup/cost-allocation', requireApiKey, requireAllowedDevi
             return res.json({
                 success: true,
                 hasUsage: false,
-                message: 'Wala pang naitalang Cloud Backup usage para sa installation na ito sa loob ng kasalukuyang billing period.',
+                message: 'No Cloud Backup usage recorded yet for this installation in the current billing period.',
                 costBasis: allocation.costBasis,
                 warning: allocation.warning
             });

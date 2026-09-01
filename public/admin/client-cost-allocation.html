@@ -82,6 +82,9 @@
   .stat-value.accent { color: var(--accent); }
   .stat-sub { font-size: .75rem; color: var(--muted); margin-top: 4px; }
 
+  .banner-icon { flex: none; width: 18px; height: 18px; margin-top: 1px; }
+  .banner-icon svg { width: 100%; height: 100%; display: block; }
+  .banner-text { flex: 1; min-width: 0; }
   .warning-banner {
     display: none; align-items: flex-start; gap: 10px; margin-bottom: 22px; padding: 12px 16px;
     border-radius: var(--radius-lg); border: 1.5px solid var(--amber-line); background: var(--amber-bg);
@@ -115,32 +118,73 @@
   .btn-save:hover { background: var(--accent); color: var(--accent-text); }
   .btn-ghost:hover { border-color: var(--border-soft); background: var(--card-hover); }
 
-  table { width: 100%; border-collapse: collapse; background: var(--card); border: 1.5px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
-  thead th {
-    text-align: left; font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted-dim);
-    padding: 12px 14px; border-bottom: 1.5px solid var(--border); background: var(--bg-raise);
-  }
-  tbody td { padding: 12px 14px; border-bottom: 1px solid var(--line); font-size: .88rem; vertical-align: middle; }
-  tbody tr:last-child td { border-bottom: none; }
-  tbody tr:hover { background: var(--card-hover); }
   .mono { font-family: var(--font-mono); font-size: .82rem; color: var(--muted); }
-  .share-bar-wrap { display: flex; align-items: center; gap: 8px; min-width: 120px; }
+  .share-bar-wrap { display: flex; align-items: center; gap: 8px; }
   .share-bar-track { flex: 1; height: 6px; border-radius: 999px; background: var(--bg-raise); overflow: hidden; }
   .share-bar-fill { height: 100%; border-radius: 999px; background: var(--accent); }
   .fee-input {
-    width: 90px; padding: 6px 8px; border-radius: var(--radius); border: 1.5px solid var(--border);
-    background: var(--bg-raise); color: var(--text); font-family: var(--font-mono); font-size: .85rem;
+    width: 90px; padding: 8px 8px; border-radius: var(--radius); border: 1.5px solid var(--border);
+    background: var(--bg-raise); color: var(--text); font-family: var(--font-mono); font-size: .9rem;
   }
   .fee-input:focus { outline: none; border-color: var(--accent); }
   .fee-input.overridden { border-color: var(--border-soft); color: var(--accent); }
   .total-price { font-weight: 700; color: var(--text); }
   .row-save-btn {
-    padding: 6px 12px; border-radius: var(--radius); border: 1.5px solid var(--border);
-    background: transparent; color: var(--muted); cursor: pointer; font-size: .78rem;
+    padding: 7px 14px; border-radius: var(--radius); border: 1.5px solid var(--border);
+    background: transparent; color: var(--muted); cursor: pointer; font-size: .8rem; flex: none;
   }
   .row-save-btn:hover { border-color: var(--border-soft); color: var(--accent); }
   .row-save-btn.dirty { border-color: var(--border-soft); color: var(--accent); background: var(--accent-soft); }
   .empty-state { text-align: center; padding: 40px 20px; color: var(--muted); font-size: .9rem; }
+
+  /* ---- Client cards (used at every width — a card grid that reflows
+     from a multi-column desktop layout down to one column on mobile,
+     styled to match the app's own storage-usage cards: rounded bordered
+     boxes, uppercase labels, and inline progress bars). ---- */
+  .client-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+  .client-card {
+    background: var(--card); border: 1.5px solid var(--border); border-radius: var(--radius-lg);
+    padding: 16px; position: relative; overflow: hidden; display: flex; flex-direction: column; gap: 12px;
+  }
+  .client-card::before {
+    content: ''; position: absolute; inset: 0 0 auto 0; height: 2px;
+    background: linear-gradient(90deg, var(--accent), transparent);
+  }
+  .client-card-id { font-size: .82rem; color: var(--text); word-break: break-all; line-height: 1.4; }
+  .client-card-sub { font-size: .75rem; color: var(--muted); margin-top: 2px; }
+  .client-metric-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+  .client-metric-label { font-size: .7rem; text-transform: uppercase; letter-spacing: .07em; color: var(--muted-dim); }
+  .client-metric-value { font-family: var(--font-mono); font-size: .82rem; color: var(--text); }
+  .client-card-divider { height: 1px; background: var(--line); margin: 2px 0; }
+  .client-card-line {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: .85rem;
+  }
+  .client-card-line-label { color: var(--muted); }
+  .client-fee-edit { display: flex; align-items: center; gap: 8px; }
+  .client-card-total {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding-top: 10px; border-top: 1px solid var(--line); font-size: .95rem;
+  }
+  .client-card-total .total-price { color: var(--accent); font-family: var(--font-heading); font-size: 1.1rem; }
+
+  @media (max-width: 720px) {
+    main { padding: 18px 14px 60px; }
+    .intro { font-size: .88rem; margin-bottom: 18px; }
+    .topbar { padding: 12px 14px; flex-wrap: wrap; gap: 10px; }
+    .topbar-actions { flex-wrap: wrap; width: 100%; gap: 8px; }
+    .topbar-actions .icon-btn { flex: 1 1 auto; justify-content: center; font-size: .82rem; padding: 9px 10px; }
+    .summary-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 18px; }
+    .stat-card { padding: 12px; }
+    .stat-value { font-size: 1.25rem; }
+    .fee-bar { flex-direction: column; align-items: stretch; gap: 12px; padding: 14px; margin-bottom: 18px; }
+    .fee-bar .field { width: 100%; }
+    .fee-bar .field input { width: 100%; font-size: 16px; }
+    .fee-bar .btn { width: 100%; justify-content: center; }
+    .fee-bar .stat-sub { align-self: flex-start; }
+    .client-grid { grid-template-columns: 1fr; gap: 12px; }
+    .client-card { padding: 14px; }
+    .client-fee-edit input.fee-input { font-size: 16px; width: 84px; }
+  }
   #toast {
     position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
     background: var(--bg-raise); border: 1.5px solid var(--border-soft); color: var(--text);
@@ -196,8 +240,18 @@
       overridden individually below.
     </p>
 
-    <div class="error-banner" id="errorBanner"></div>
-    <div class="warning-banner" id="warningBanner"></div>
+    <div class="error-banner" id="errorBanner">
+      <span class="banner-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/></svg>
+      </span>
+      <span class="banner-text" id="errorBannerText"></span>
+    </div>
+    <div class="warning-banner" id="warningBanner">
+      <span class="banner-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/></svg>
+      </span>
+      <span class="banner-text" id="warningBannerText"></span>
+    </div>
 
     <div class="summary-grid">
       <div class="stat-card">
@@ -231,21 +285,8 @@
       <div class="stat-sub" style="align-self:center;">Applies to every client without an individual override below.</div>
     </div>
 
-    <div id="tableWrap">
-      <table id="clientsTable">
-        <thead>
-          <tr>
-            <th>Installation</th>
-            <th>Storage</th>
-            <th>Compute</th>
-            <th>Neon cost share</th>
-            <th>Maintenance fee</th>
-            <th>Total / month</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody id="clientsTbody"></tbody>
-      </table>
+    <div id="clientsWrap">
+      <div class="client-grid" id="clientGrid"></div>
       <div class="empty-state hidden" id="emptyState">No Cloud Backup client activity recorded yet for the current billing period.</div>
     </div>
   </main>
@@ -337,18 +378,18 @@ function renderAllocation(data) {
 
   if (!data.success) {
     errorBanner.classList.add('show');
-    errorBanner.textContent = '⚠️ ' + (data.message || 'Could not load cost allocation.');
+    document.getElementById('errorBannerText').textContent = data.message || 'Could not load cost allocation.';
     warningBanner.classList.remove('show');
-    document.getElementById('tableWrap').classList.add('hidden');
+    document.getElementById('clientsWrap').classList.add('hidden');
     document.getElementById('statTotalCost').textContent = '₱—';
     return;
   }
   errorBanner.classList.remove('show');
-  document.getElementById('tableWrap').classList.remove('hidden');
+  document.getElementById('clientsWrap').classList.remove('hidden');
 
   if (data.warning) {
     warningBanner.classList.add('show');
-    warningBanner.textContent = data.warning;
+    document.getElementById('warningBannerText').textContent = data.warning;
   } else {
     warningBanner.classList.remove('show');
   }
@@ -378,50 +419,71 @@ function renderAllocation(data) {
     defaultFeeInput.value = data.defaultMaintenanceFeePHP != null ? data.defaultMaintenanceFeePHP : 0;
   }
 
-  const tbody = document.getElementById('clientsTbody');
+  const grid = document.getElementById('clientGrid');
   const emptyState = document.getElementById('emptyState');
   const clients = Array.isArray(data.clients) ? data.clients : [];
 
   if (clients.length === 0) {
-    tbody.innerHTML = '';
+    grid.innerHTML = '';
     emptyState.classList.remove('hidden');
     return;
   }
   emptyState.classList.add('hidden');
 
-  tbody.innerHTML = clients.map((c) => {
+  grid.innerHTML = clients.map((c) => {
     const isOverridden = data.defaultMaintenanceFeePHP != null && c.maintenanceFeePHP !== data.defaultMaintenanceFeePHP;
     const feeValue = Object.prototype.hasOwnProperty.call(dirtyFees, c.installationId)
       ? dirtyFees[c.installationId]
       : c.maintenanceFeePHP;
+    const safeId = escapeHtml(c.installationId);
     return `
-      <tr data-installation-id="${escapeHtml(c.installationId)}">
-        <td>
-          <div class="mono">${escapeHtml(c.installationId)}</div>
-          <div class="stat-sub">${c.syncCount != null ? c.syncCount : 0} syncs · ${c.totalRecords != null ? c.totalRecords : 0} records</div>
-        </td>
-        <td>
-          <div>${formatBytes(c.sizeBytes)}</div>
+      <div class="client-card" data-installation-id="${safeId}">
+        <div>
+          <div class="mono client-card-id">${safeId}</div>
+          <div class="client-card-sub">${c.syncCount != null ? c.syncCount : 0} syncs · ${c.totalRecords != null ? c.totalRecords : 0} records</div>
+        </div>
+
+        <div>
+          <div class="client-metric-head">
+            <span class="client-metric-label">Storage</span>
+            <span class="client-metric-value">${formatBytes(c.sizeBytes)}</span>
+          </div>
           ${renderShareBar(c.storageSharePercent)}
-        </td>
-        <td>
+        </div>
+
+        <div>
+          <div class="client-metric-head">
+            <span class="client-metric-label">Compute share</span>
+          </div>
           ${renderShareBar(c.computeSharePercent)}
-        </td>
-        <td class="mono">${formatPHP(c.baseCostPHP)}</td>
-        <td>
-          <input
-            type="number" min="0" step="1"
-            class="fee-input${isOverridden ? ' overridden' : ''}"
-            id="fee-${escapeHtml(c.installationId)}"
-            value="${feeValue}"
-            oninput="markFeeDirty('${escapeHtml(c.installationId)}', this.value)"
-          >
-        </td>
-        <td class="total-price">${formatPHP(c.finalPricePHP)}</td>
-        <td>
-          <button class="row-save-btn" id="save-${escapeHtml(c.installationId)}" onclick="saveClientFee('${escapeHtml(c.installationId)}')">Save</button>
-        </td>
-      </tr>
+        </div>
+
+        <div class="client-card-divider"></div>
+
+        <div class="client-card-line">
+          <span class="client-card-line-label">Neon cost share</span>
+          <span class="mono">${formatPHP(c.baseCostPHP)}</span>
+        </div>
+
+        <div class="client-card-line">
+          <span class="client-card-line-label">Maintenance fee</span>
+          <div class="client-fee-edit">
+            <input
+              type="number" min="0" step="1"
+              class="fee-input${isOverridden ? ' overridden' : ''}"
+              id="fee-${safeId}"
+              value="${feeValue}"
+              oninput="markFeeDirty('${safeId}', this.value)"
+            >
+            <button class="row-save-btn" id="save-${safeId}" onclick="saveClientFee('${safeId}')">Save</button>
+          </div>
+        </div>
+
+        <div class="client-card-total">
+          <span>Total / month</span>
+          <span class="total-price">${formatPHP(c.finalPricePHP)}</span>
+        </div>
+      </div>
     `;
   }).join('');
 }
