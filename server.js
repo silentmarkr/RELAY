@@ -3821,6 +3821,59 @@ app.post('/relay/admin/api/system/publish-version', requireAdminKey, (req, res) 
 app.get('/relay/admin/api/system/version', requireAdminKey, (req, res) => {
     res.json({ success: true, systemVersionInfo });
 });
+// Ligtas at read-only lang ito — hindi nito binabago ang anumang data, hindi
+// rin nito inilalantad ang buong connection string (username/password), para
+// ma-verify lang sa admin dashboard kung talagang hiwalay na ang Cloud Backup
+// database sa Device/License database.
+function maskDatabaseUrlForDisplay(urlStr) {
+    if (!urlStr) return null;
+    try {
+        const parsed = new URL(urlStr);
+        return {
+            host: parsed.hostname || null,
+            database: parsed.pathname ? parsed.pathname.replace(/^\//, '') || null : null
+        };
+    } catch (err) {
+        return { host: null, database: null };
+    }
+}
+async function checkPgPoolReachable(pool, timeoutMs = 5000) {
+    if (!pool) return { configured: false, reachable: false, error: null };
+    try {
+        await Promise.race([
+            pool.query('SELECT 1'),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Timed out while checking this database.')), timeoutMs))
+        ]);
+        return { configured: true, reachable: true, error: null };
+    } catch (err) {
+        return { configured: true, reachable: false, error: err.message };
+    }
+}
+app.get('/relay/admin/api/db-status', requireAdminKey, async (req, res) => {
+    try {
+        const [cloudBackupCheck, devicesCheck] = await Promise.all([
+            checkPgPoolReachable(pgPool),
+            checkPgPoolReachable(pgPoolDevices)
+        ]);
+        res.json({
+            success: true,
+            isSeparateDatabase: DEVICES_DB_IS_SEPARATE,
+            cloudBackup: {
+                ...cloudBackupCheck,
+                envVar: 'DATABASE_URL',
+                connection: maskDatabaseUrlForDisplay(DATABASE_URL)
+            },
+            devices: {
+                ...devicesCheck,
+                envVar: process.env.RELAY_DEVICES_DATABASE_URL ? 'RELAY_DEVICES_DATABASE_URL' : 'DATABASE_URL (fallback — RELAY_DEVICES_DATABASE_URL not set)',
+                connection: maskDatabaseUrlForDisplay(DEVICES_DATABASE_URL)
+            }
+        });
+    } catch (err) {
+        console.error('⚠️  /relay/admin/api/db-status error:', err.message);
+        res.status(500).json({ success: false, message: 'Could not determine database status.' });
+    }
+});
 const BUILD_EXCLUDE_NAMES = new Set([
     '.git', 'node_modules', 'database', 'release', 'uploads_tmp',
     '.start.sh.lock', '.self-update-backup', 'package-lock.json',
