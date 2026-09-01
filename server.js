@@ -649,10 +649,22 @@ const FEATURE_CATALOG_BASE = {
     cloud_backup: { name: 'Cloud Backup (Postgres)', price: null, category: 'module', isSubscription: true }
 };
 const CLOUD_BACKUP_PLANS_BASE = {
-    basic: { id: 'basic', name: 'Cloud Backup — Basic', price: { monthly: 129, yearly: 1290 }, storageQuotaMB: 250 },
-    standard: { id: 'standard', name: 'Cloud Backup — Standard', price: { monthly: 249, yearly: 2490 }, storageQuotaMB: 1024 },
-    pro: { id: 'pro', name: 'Cloud Backup — Pro', price: { monthly: 399, yearly: 3990 }, storageQuotaMB: 5120 }
+    // AYOS: idinagdag ang autoBackupIntervalMs bilang bahagi ng plan config
+    // mismo dito sa RELAY (dating naka-hardcode lang sa OMNIPOS client),
+    // para admin-editable na ito via /relay/admin/api/pricing/cloud-backup
+    // (kasabay ng price/storageQuotaMB) at awtomatikong nasusundan ng
+    // OMNIPOS sa susunod na pricing refresh nito (tingnan ang
+    // applyCloudBackupPricingOverlay sa OMNIPOS server.js).
+    basic: { id: 'basic', name: 'Cloud Backup — Basic', price: { monthly: 129, yearly: 1290 }, storageQuotaMB: 250, autoBackupIntervalMs: 24 * 60 * 60 * 1000 },
+    standard: { id: 'standard', name: 'Cloud Backup — Standard', price: { monthly: 249, yearly: 2490 }, storageQuotaMB: 1024, autoBackupIntervalMs: 6 * 60 * 60 * 1000 },
+    pro: { id: 'pro', name: 'Cloud Backup — Pro', price: { monthly: 399, yearly: 3990 }, storageQuotaMB: 5120, autoBackupIntervalMs: 60 * 60 * 1000 }
 };
+// Sanity bounds para sa autoBackupIntervalMs override — mas mababa pa sa
+// heartbeat ng OMNIPOS client (15 min) ay walang epekto (mag-a-update pa
+// rin ito kada heartbeat lang), at mas mataas sa 30 araw ay malamang mali
+// nang pagkaka-type.
+const CLOUD_BACKUP_MIN_AUTO_BACKUP_INTERVAL_MS = 15 * 60 * 1000;
+const CLOUD_BACKUP_MAX_AUTO_BACKUP_INTERVAL_MS = 30 * 24 * 60 * 60 * 1000;
 const CLOUD_BACKUP_BILLING_DAYS = { monthly: 30, yearly: 365 };
 const CLOUD_BACKUP_PLAN_OVERRIDES_PATH = path.join(__dirname, 'cloud-backup-plan-overrides.json');
 async function loadCloudBackupPlanOverrides() {
@@ -1529,7 +1541,7 @@ app.get('/relay/admin/api/pricing', requireAdminKey, (req, res) => {
     });
 });
 app.post('/relay/admin/api/pricing/cloud-backup', requireAdminKey, (req, res) => {
-    const { tier, name, monthly, yearly, storageQuotaMB } = req.body || {};
+    const { tier, name, monthly, yearly, storageQuotaMB, autoBackupIntervalHours } = req.body || {};
     if (!tier || !CLOUD_BACKUP_PLANS_BASE[tier]) {
         return res.status(400).json({ success: false, message: 'Invalid o walang tier (basic/standard/pro).' });
     }
@@ -1542,10 +1554,25 @@ app.post('/relay/admin/api/pricing/cloud-backup', requireAdminKey, (req, res) =>
     if (storageQuotaMB !== undefined && (typeof storageQuotaMB !== 'number' || !isFinite(storageQuotaMB) || storageQuotaMB <= 0)) {
         return res.status(400).json({ success: false, message: 'Invalid storageQuotaMB.' });
     }
+    let autoBackupIntervalMs;
+    if (autoBackupIntervalHours !== undefined) {
+        const hours = Number(autoBackupIntervalHours);
+        if (!isFinite(hours) || hours <= 0) {
+            return res.status(400).json({ success: false, message: 'Invalid autoBackupIntervalHours.' });
+        }
+        autoBackupIntervalMs = Math.round(hours * 60 * 60 * 1000);
+        if (autoBackupIntervalMs < CLOUD_BACKUP_MIN_AUTO_BACKUP_INTERVAL_MS || autoBackupIntervalMs > CLOUD_BACKUP_MAX_AUTO_BACKUP_INTERVAL_MS) {
+            return res.status(400).json({
+                success: false,
+                message: `Ang autoBackupIntervalHours ay dapat nasa pagitan ng ${CLOUD_BACKUP_MIN_AUTO_BACKUP_INTERVAL_MS / (60 * 60 * 1000)} oras at ${CLOUD_BACKUP_MAX_AUTO_BACKUP_INTERVAL_MS / (60 * 60 * 1000)} oras (30 araw).`
+            });
+        }
+    }
     const existing = cloudBackupPlanOverrides[tier] || {};
     const updated = { ...existing };
     if (typeof name === 'string' && name.trim()) updated.name = name.trim();
     if (typeof storageQuotaMB === 'number') updated.storageQuotaMB = storageQuotaMB;
+    if (typeof autoBackupIntervalMs === 'number') updated.autoBackupIntervalMs = autoBackupIntervalMs;
     if (typeof monthly === 'number' || typeof yearly === 'number') {
         const price = { ...(existing.price || {}) };
         if (typeof monthly === 'number') price.monthly = monthly;
@@ -3837,26 +3864,47 @@ function maskDatabaseUrlForDisplay(urlStr) {
         return { host: null, database: null };
     }
 }
+// AYOS: idinagdag ang latencyMs (Date.now() bago/pagkatapos ng query, para
+// makita kung "reachable pero mabagal" — hindi lang plain yes/no) pati na
+// rin ang live pool stats mula mismo sa pg library (totalCount/idleCount/
+// waitingCount, walang extra query, laging tinatrack na ito ng `pg`)
+// para makita agad kung papalapit sa pagka-exhaust ang connection pool.
 async function checkPgPoolReachable(pool, timeoutMs = 5000) {
-    if (!pool) return { configured: false, reachable: false, error: null };
+    if (!pool) return { configured: false, reachable: false, error: null, latencyMs: null, pool: null };
+    const startedAt = Date.now();
+    const poolStats = () => ({
+        totalCount: pool.totalCount,
+        idleCount: pool.idleCount,
+        waitingCount: pool.waitingCount
+    });
     try {
         await Promise.race([
             pool.query('SELECT 1'),
             new Promise((_, reject) => setTimeout(() => reject(new Error('Timed out while checking this database.')), timeoutMs))
         ]);
-        return { configured: true, reachable: true, error: null };
+        return { configured: true, reachable: true, error: null, latencyMs: Date.now() - startedAt, pool: poolStats() };
     } catch (err) {
-        return { configured: true, reachable: false, error: err.message };
+        return { configured: true, reachable: false, error: err.message, latencyMs: Date.now() - startedAt, pool: poolStats() };
     }
 }
+// Maikling in-memory cache lang (hindi persisted, hindi shared sa ibang
+// process) para kung ipapa-poll ito ng dashboard kada ilang segundo,
+// hindi paulit-ulit na tinatamaan ng live SELECT 1 ang parehong dalawang
+// database sa bawat request.
+let dbStatusCache = { at: 0, payload: null };
+const DB_STATUS_CACHE_MS = 4000;
 app.get('/relay/admin/api/db-status', requireAdminKey, async (req, res) => {
     try {
+        if (dbStatusCache.payload && (Date.now() - dbStatusCache.at) < DB_STATUS_CACHE_MS) {
+            return res.json({ ...dbStatusCache.payload, cached: true });
+        }
         const [cloudBackupCheck, devicesCheck] = await Promise.all([
             checkPgPoolReachable(pgPool),
             checkPgPoolReachable(pgPoolDevices)
         ]);
-        res.json({
+        const payload = {
             success: true,
+            checkedAt: Date.now(),
             isSeparateDatabase: DEVICES_DB_IS_SEPARATE,
             cloudBackup: {
                 ...cloudBackupCheck,
@@ -3868,7 +3916,9 @@ app.get('/relay/admin/api/db-status', requireAdminKey, async (req, res) => {
                 envVar: process.env.RELAY_DEVICES_DATABASE_URL ? 'RELAY_DEVICES_DATABASE_URL' : 'DATABASE_URL (fallback — RELAY_DEVICES_DATABASE_URL not set)',
                 connection: maskDatabaseUrlForDisplay(DEVICES_DATABASE_URL)
             }
-        });
+        };
+        dbStatusCache = { at: Date.now(), payload };
+        res.json({ ...payload, cached: false });
     } catch (err) {
         console.error('⚠️  /relay/admin/api/db-status error:', err.message);
         res.status(500).json({ success: false, message: 'Could not determine database status.' });

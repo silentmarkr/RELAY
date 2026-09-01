@@ -216,6 +216,11 @@ function fieldIsCustom(tier, key) {
   return ov[key] !== undefined;
 }
 
+function formatIntervalHours(ms) {
+  const hours = ms / (60 * 60 * 1000);
+  return (Math.round(hours * 100) / 100).toString();
+}
+
 function renderPlans() {
   const grid = document.getElementById('plansGrid');
   grid.innerHTML = '';
@@ -246,6 +251,13 @@ function renderPlans() {
         <label>Storage quota (MB) ${fieldIsCustom(tier, 'storageQuotaMB') ? '<span class="badge">customized</span>' : '<span class="badge default">default</span>'}</label>
         <input type="number" min="1" step="1" id="quota-${tier}" value="${plan.storageQuotaMB}">
       </div>
+      <div class="field">
+        <label>Auto-backup every (hours) ${fieldIsCustom(tier, 'autoBackupIntervalMs') ? '<span class="badge">customized</span>' : '<span class="badge default">default</span>'}</label>
+        <input type="number" min="0.25" step="0.25" id="interval-${tier}" value="${formatIntervalHours(plan.autoBackupIntervalMs)}">
+        <div style="font-size:11px; color:var(--muted-dim); margin-top:4px;">
+          Minimum 0.25h (15 min). Ito ang gagamitin ng OMNIPOS client sa susunod na pricing refresh nito (agad kung on-demand refresh, o hanggang 30 min kung passive).
+        </div>
+      </div>
       <div class="actions">
         <button class="btn btn-save" onclick="savePlan('${tier}')">Save</button>
         <button class="btn btn-reset" onclick="resetPlan('${tier}')">Reset to default</button>
@@ -260,10 +272,11 @@ async function savePlan(tier) {
   const monthly = Number(document.getElementById(`monthly-${tier}`).value);
   const yearly = Number(document.getElementById(`yearly-${tier}`).value);
   const storageQuotaMB = Number(document.getElementById(`quota-${tier}`).value);
+  const autoBackupIntervalHours = Number(document.getElementById(`interval-${tier}`).value);
   try {
     const data = await api('/relay/admin/api/pricing/cloud-backup', {
       method: 'POST',
-      body: JSON.stringify({ tier, name, monthly, yearly, storageQuotaMB })
+      body: JSON.stringify({ tier, name, monthly, yearly, storageQuotaMB, autoBackupIntervalHours })
     });
     toast(`Saved "${data.plan.name}" pricing.`);
     await loadPricing();

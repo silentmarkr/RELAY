@@ -1291,6 +1291,16 @@ a:focus-visible,
           <div id="buildHistoryList" class="empty" style="margin-top:12px;">Loading...</div>
         </div>
       </div>
+      <div class="card collapsible collapsed" id="cardDbStatus" data-card-id="dbStatus">
+        <h2 onclick="toggleCardCollapse('cardDbStatus')">🩺 Database Health <span style="font-size:11px; color:var(--muted); font-weight:normal;">(read-only SELECT 1 check, walang epekto sa datos)</span><span class="collapse-chevron">▾</span></h2>
+        <div class="collapse-body">
+          <div class="backup-row" style="margin-bottom:8px;">
+            <button class="btn-revoke" onclick="loadDbStatus()" id="refreshDbStatusBtn" style="background:var(--accent-bg,#12293b); color:var(--accent,#6cf); border-color:var(--accent-line,#1f4a63);">🔄 Refresh</button>
+            <span id="dbStatusCheckedAt" style="font-size:11px; color:var(--muted-dim);"></span>
+          </div>
+          <div id="dbStatusList" class="empty">Loading...</div>
+        </div>
+      </div>
     </div>
     <div class="footer-note">
       Automatically logs out after 20 minutes of inactivity. A countdown will appear at the top before logout.
@@ -1699,6 +1709,7 @@ function logout(message) {
   sessionStorage.removeItem('relayAdminKey');
   adminKey = '';
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  if (dbStatusPollTimer) { clearInterval(dbStatusPollTimer); dbStatusPollTimer = null; }
   document.getElementById('mainScreen').style.display = 'none';
   document.getElementById('loginScreen').style.display = 'block';
   document.getElementById('loginError').innerText = '';
@@ -2042,6 +2053,67 @@ async function loadBuildHistory() {
   } catch (err) {
     container.className = 'empty';
     container.innerText = 'Could not load the build history.';
+  }
+}
+function renderDbCheckCard(label, envVar, check) {
+  const green = 'background:var(--green-bg,#0f2e1c); color:var(--green,#4ade80); border:1px solid var(--green-line,#1c5c34);';
+  const red = 'background:var(--red-bg,#3a1418); color:var(--red,#ff5c72); border:1px solid var(--red-line,#5c1c26);';
+  const gray = 'background:var(--gray-bg,#2a2a2a); color:var(--gray,#888);';
+  if (!check || check.configured === false) {
+    return `
+      <div class="backup-row" style="padding:10px 0; border-bottom:1px solid var(--border, #2a2a2a); align-items:flex-start;">
+        <div style="flex:1; min-width:0;">
+          <div><strong>${label}</strong> <span class="badge" style="${gray}">⚪ NOT CONFIGURED</span></div>
+          <div style="font-size:11px; color:var(--muted);">${envVar} — walang naka-set na connection string.</div>
+        </div>
+      </div>`;
+  }
+  const conn = check.connection || {};
+  const statusBadge = check.reachable
+    ? `<span class="badge" style="${green}">🟢 REACHABLE</span>`
+    : `<span class="badge" style="${red}">🔴 UNREACHABLE</span>`;
+  const pool = check.pool
+    ? `pool: ${check.pool.totalCount ?? '—'} total / ${check.pool.idleCount ?? '—'} idle / ${check.pool.waitingCount ?? '—'} waiting`
+    : '';
+  return `
+    <div class="backup-row" style="padding:10px 0; border-bottom:1px solid var(--border, #2a2a2a); align-items:flex-start;">
+      <div style="flex:1; min-width:0;">
+        <div><strong>${label}</strong> ${statusBadge} <span style="font-size:11px; color:var(--muted);">${check.latencyMs != null ? `${check.latencyMs} ms` : ''}</span></div>
+        <div style="font-size:11px; color:var(--muted);">
+          ${envVar} · host: ${conn.host || '—'} · db: ${conn.database || '—'}${pool ? ' · ' + pool : ''}
+        </div>
+        ${!check.reachable && check.error ? `<div style="font-size:11px; color:var(--red);">⚠️ ${check.error}</div>` : ''}
+      </div>
+    </div>`;
+}
+let dbStatusInFlight = false;
+async function loadDbStatus() {
+  const container = document.getElementById('dbStatusList');
+  if (!container || dbStatusInFlight) return;
+  dbStatusInFlight = true;
+  const btn = document.getElementById('refreshDbStatusBtn');
+  if (btn) btn.disabled = true;
+  try {
+    const data = await api('/relay/admin/api/db-status');
+    if (!data.success) {
+      container.className = 'empty';
+      container.innerText = data.message || 'Could not load database status.';
+      return;
+    }
+    container.className = '';
+    container.innerHTML =
+      renderDbCheckCard('Cloud Backup DB', data.cloudBackup.envVar, data.cloudBackup) +
+      renderDbCheckCard('Devices/License DB' + (data.isSeparateDatabase ? '' : ' (same as Cloud Backup)'), data.devices.envVar, data.devices);
+    const checkedAtEl = document.getElementById('dbStatusCheckedAt');
+    if (checkedAtEl && data.checkedAt) {
+      checkedAtEl.innerText = `Last checked: ${new Date(data.checkedAt).toLocaleTimeString()}${data.cached ? ' (cached)' : ''}`;
+    }
+  } catch (err) {
+    container.className = 'empty';
+    container.innerText = 'Could not load the database status.';
+  } finally {
+    dbStatusInFlight = false;
+    if (btn) btn.disabled = false;
   }
 }
 async function clearBuildHistory() {
@@ -3390,13 +3462,20 @@ function promptForLabel(currentLabel) {
     cancelBtn.onclick = () => cleanup(null);
   });
 }
+let dbStatusPollTimer = null;
 function startPolling() {
   loadDevices();
   loadDownloadCodes();
   loadBuildHistory();
+  loadDbStatus();
   if (pollTimer) clearInterval(pollTimer);
   const loadDevicesNoJump = withScrollPreserved(loadDevices);
   pollTimer = setInterval(() => { if (adminKey) loadDevicesNoJump(); }, 8000);
+  // Hiwalay at mas mabagal na interval ang db-status (may sarili na ring
+  // 4s server-side cache) — hindi na kailangan i-tali sa 8s device poll
+  // dahil hindi ito kasing-dalas kailangan at may live SELECT 1 pa rin ito.
+  if (dbStatusPollTimer) clearInterval(dbStatusPollTimer);
+  dbStatusPollTimer = setInterval(() => { if (adminKey) loadDbStatus(); }, 30000);
 }
 if (adminKey) { renderLastExportNote(); renderAutoBackupToggle(); startPolling(); }
 let deferredInstallPrompt = null;
