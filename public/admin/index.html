@@ -1301,6 +1301,17 @@ a:focus-visible,
           <div id="dbStatusList" class="empty">Loading...</div>
         </div>
       </div>
+      <div class="card collapsible collapsed" id="cardDbHealth" data-card-id="dbHealth">
+        <h2 onclick="toggleCardCollapse('cardDbHealth')">📊 Storage Usage &amp; Neon Pricing <span style="font-size:11px; color:var(--muted); font-weight:normal;">(real Neon storage, tier comparison, USD/₱)</span><span class="collapse-chevron">▾</span></h2>
+        <div class="collapse-body">
+          <div class="backup-row" style="margin-bottom:8px;">
+            <button class="btn-revoke" onclick="loadDbHealth(true)" id="refreshDbHealthBtn" style="background:var(--accent-bg,#12293b); color:var(--accent,#6cf); border-color:var(--accent-line,#1f4a63);">🔄 Refresh</button>
+            <span id="dbHealthCheckedAt" style="font-size:11px; color:var(--muted-dim);"></span>
+          </div>
+          <div id="dbHealthList" class="empty">Loading...</div>
+          <div class="backup-note" id="dbHealthMeta" style="margin-top:10px;"></div>
+        </div>
+      </div>
     </div>
     <div class="footer-note">
       Automatically logs out after 20 minutes of inactivity. A countdown will appear at the top before logout.
@@ -2116,6 +2127,126 @@ async function loadDbStatus() {
     if (btn) btn.disabled = false;
   }
 }
+let dbHealthInFlight = false;
+let dbHealthPollTimer = null;
+const NEON_TIER_ORDER = ['free', 'launch', 'scale', 'enterprise'];
+function fmtUsdPhp(usd, phpRate) {
+  if (usd === null || usd === undefined) return '—';
+  const php = usd * phpRate;
+  return `$${usd.toFixed(2)} · ₱${php.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+function renderDbHealthEntry(dbKey, entry, phpRate) {
+  const gbUsed = entry.gb !== null ? entry.gb : 0;
+  const planOptions = NEON_TIER_ORDER.filter(t => t !== 'enterprise').map(t =>
+    `<option value="${t}" ${entry.configuredPlan === t ? 'selected' : ''}>${t.charAt(0).toUpperCase() + t.slice(1)}</option>`
+  ).join('');
+  let allowanceLine = '';
+  const cur = entry.currentTierEstimate;
+  if (cur && cur.tier === 'free') {
+    const pct = cur.storagePercentUsed !== null ? Math.min(100, cur.storagePercentUsed) : 0;
+    const barColor = cur.storagePercentUsed >= 100 ? 'var(--red,#ff5c72)' : (cur.storagePercentUsed >= 80 ? 'var(--amber,#f5a623)' : 'var(--green,#4ade80)');
+    allowanceLine = `
+      <div style="margin-top:6px;">
+        <div style="height:8px; border-radius:4px; background:var(--border-soft,#2a2a2a); overflow:hidden;">
+          <div style="height:100%; width:${pct}%; background:${barColor};"></div>
+        </div>
+        <div style="font-size:11px; color:var(--muted); margin-top:3px;">
+          ${cur.storageUsedGB.toFixed(4)} GB / ${cur.storageIncludedGB} GB free allowance
+          (${cur.storageRemainingGB.toFixed(4)} GB natitira${cur.storagePercentUsed >= 100 ? ' — ⚠️ LUMAMPAS NA' : ''})
+        </div>
+      </div>`;
+  } else if (cur && !cur.customPricing) {
+    allowanceLine = `
+      <div style="font-size:11px; color:var(--muted); margin-top:6px;">
+        Storage cost sa "${cur.name}": ${fmtUsdPhp(cur.storageCostUSD, phpRate)}/buwan (walang hard cap sa paid plan)
+      </div>`;
+  }
+  const rowsHtml = entry.tierComparison.map(t => {
+    if (t.customPricing) {
+      return `<tr><td>${t.name}</td><td colspan="3" style="color:var(--muted); font-size:12px;">${t.notes}</td></tr>`;
+    }
+    if (t.tier === 'free') {
+      return `<tr${entry.configuredPlan === 'free' ? ' style="background:var(--accent-bg,#12293b);"' : ''}>
+        <td>${t.name}</td>
+        <td>${fmtUsdPhp(0, phpRate)}</td>
+        <td>${t.storageUsedGB.toFixed(3)} / ${t.storageIncludedGB} GB</td>
+        <td style="font-size:11px; color:${t.fitsInFreeStorage ? 'var(--green,#4ade80)' : 'var(--red,#ff5c72)'};">${t.fitsInFreeStorage ? '✅ Kasya' : '⚠️ Hindi kasya'}</td>
+      </tr>`;
+    }
+    return `<tr${entry.configuredPlan === t.tier ? ' style="background:var(--accent-bg,#12293b);"' : ''}>
+      <td>${t.name}</td>
+      <td>${fmtUsdPhp(t.storageCostUSD, phpRate)} storage${t.exampleComputeCostUSD !== null ? `<br><span style="font-size:11px; color:var(--muted);">+ ${fmtUsdPhp(t.exampleComputeCostUSD, phpRate)} example compute*</span>` : ''}</td>
+      <td>$${t.computeRatePerCUHourUSD}/CU-hr</td>
+      <td>${t.estimatedMonthlyTotalUSD !== null ? fmtUsdPhp(t.estimatedMonthlyTotalUSD, phpRate) + '*' : '—'}</td>
+    </tr>`;
+  }).join('');
+  return `
+    <div class="backup-row" style="padding:10px 0; border-bottom:1px solid var(--border, #2a2a2a); align-items:flex-start; flex-direction:column;">
+      <div style="width:100%; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+        <strong>${entry.label}</strong>
+        <span style="font-size:12px; color:var(--muted);">
+          ${entry.mb !== null ? `${entry.mb.toLocaleString()} MB (${gbUsed.toFixed(4)} GB)` : 'Hindi ma-query (offline o hindi configured)'}
+        </span>
+      </div>
+      <div style="font-size:11px; color:var(--muted); margin-top:4px;">
+        Configured Neon plan:
+        <select onchange="setDbHealthPlan('${dbKey}', this.value)" style="padding:4px 8px; border-radius:6px; border:1px solid var(--border-soft); background:var(--bg); color:var(--text); font-size:11px;">
+          ${planOptions}
+        </select>
+      </div>
+      ${allowanceLine}
+      <table style="width:100%; margin-top:8px; border-collapse:collapse; font-size:12px;">
+        <thead><tr style="text-align:left; color:var(--muted); font-size:11px;"><th>Tier</th><th>Storage cost</th><th>Compute rate</th><th>Est. total*</th></tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    </div>`;
+}
+async function setDbHealthPlan(database, tier) {
+  try {
+    const res = await api('/relay/admin/api/db-health/plan', { method: 'POST', body: JSON.stringify({ database, tier }) });
+    if (res.success) { toast('Plan updated.', 'success'); loadDbHealth(true); }
+    else toast(res.message || 'Could not update.', 'error');
+  } catch (err) {   }
+}
+async function loadDbHealth(force) {
+  const container = document.getElementById('dbHealthList');
+  if (!container || dbHealthInFlight) return;
+  dbHealthInFlight = true;
+  const btn = document.getElementById('refreshDbHealthBtn');
+  if (btn) btn.disabled = true;
+  try {
+    const data = await api('/relay/admin/api/db-health' + (force ? '?force=1' : ''));
+    if (!data.success) {
+      container.className = 'empty';
+      container.innerText = data.message || 'Could not load database health.';
+      return;
+    }
+    container.className = '';
+    const phpRate = data.exchangeRate.usdToPhp;
+    container.innerHTML =
+      renderDbHealthEntry('cloudBackup', data.databases.cloudBackup, phpRate) +
+      renderDbHealthEntry('devices', data.databases.devices, phpRate);
+    const checkedAtEl = document.getElementById('dbHealthCheckedAt');
+    if (checkedAtEl && data.checkedAt) {
+      checkedAtEl.innerText = `Last checked: ${new Date(data.checkedAt).toLocaleTimeString()}${data.cached ? ' (cached)' : ''}`;
+    }
+    const metaEl = document.getElementById('dbHealthMeta');
+    if (metaEl) {
+      metaEl.innerHTML =
+        `💱 USD→PHP: ₱${phpRate.toFixed(4)} (${data.exchangeRate.source})<br>` +
+        `🗓️ Neon pricing verified: ${data.pricingMeta.verifiedAt} — <a href="${NEON_PRICING_SOURCE_URL_JS}" target="_blank" rel="noopener" style="color:var(--accent,#6cf);">source</a>` +
+        `${data.pricingMeta.hasOverrides ? ' (may custom override na naka-apply)' : ''}<br>` +
+        `<span style="font-size:11px;">*Ang "example compute" at "Est. total" ay ILUSTRATIBONG halimbawa lang (0.25 CU × 8 oras/araw × 30 araw) — hindi ito aktwal na gamit niyo, dahil hindi ito nasusubaybayan nang hindi kumokonekta sa Neon account API. Ang storage cost lang ang base sa TUNAY na kasalukuyang laki ng database. I-verify pa rin sa Neon dashboard mo ang aktwal na bill.</span>`;
+    }
+  } catch (err) {
+    container.className = 'empty';
+    container.innerText = 'Could not load database health.';
+  } finally {
+    dbHealthInFlight = false;
+    if (btn) btn.disabled = false;
+  }
+}
+const NEON_PRICING_SOURCE_URL_JS = 'https://neon.com/docs/introduction/plans';
 async function clearBuildHistory() {
   const ok = await confirmAction({
     title: 'Clear Build History?',
@@ -2517,13 +2648,13 @@ function renderOtps(list) {
         <div class="otp-code">${o.code}</div>
         <button class="btn-copy" style="margin-top:6px; display:block; width:100%;" onclick="copyCode('${o.code}', this)">Copy</button>
         ${!o.approved
-          ? `<button class="btn-allow" style="margin-top:6px; width:100%;" onclick="approveOtp('${o.key}', '${(label || '').replace(/'/g, "\\'")}', '${(o.storeName || '').replace(/'/g, "\\'")}', '${(o.featureId || '').replace(/'/g, "\\'")}', ${typeof o.durationDays === 'number' ? o.durationDays : 'null'})">✓ Allow / Run</button>`
+          ? `<button class="btn-allow" style="margin-top:6px; width:100%;" onclick="approveOtp('${o.key}', '${(label || '').replace(/'/g, "\\'")}', '${(o.storeName || '').replace(/'/g, "\\'")}', '${(o.featureId || '').replace(/'/g, "\\'")}', ${typeof o.durationDays === 'number' ? o.durationDays : 'null'}, ${typeof o.price !== 'undefined' && o.price !== null ? `'${String(o.price).replace(/'/g, "\\'")}'` : 'null'}, ${o.billingCycle ? `'${o.billingCycle}'` : 'null'})">✓ Allow / Run</button>`
           : ''}
       </div>
     </div>`;
   }).join('');
 }
-async function approveOtp(key, featureLabel, storeName, featureId, presetDurationDays) {
+async function approveOtp(key, featureLabel, storeName, featureId, presetDurationDays, presetPrice, presetBillingCycle) {
   const isDemo = featureId === '__demo__';
   const isCloudBackup = featureId === 'cloud_backup';
   const ok = await confirmAction({
@@ -2534,11 +2665,21 @@ async function approveOtp(key, featureLabel, storeName, featureId, presetDuratio
     confirmLabel: '✓ Allow / Run'
   });
   if (!ok) return;
+  let planSummaryHtml = '';
+  if (isCloudBackup) {
+    const billingLabel = presetBillingCycle === 'yearly' ? 'Yearly' : 'Monthly';
+    planSummaryHtml = `<div style="padding:10px 12px; border-radius:8px; background:var(--bg); border:1px solid var(--border-soft); margin-bottom:10px;">` +
+      `<strong>${featureLabel}</strong><br>` +
+      `<span style="color:var(--muted); font-size:.85rem;">${presetPrice ? '₱' + presetPrice + ' · ' : ''}${billingLabel} subscription</span>` +
+      `</div>`;
+  }
   const durationDays = isDemo
     ? await promptForDemoDuration(`How long should Demo Mode run before it expires?`)
     : await promptForDuration(
-        isCloudBackup ? `Confirm the Cloud Backup subscription length (pre-filled based on the customer's chosen billing cycle):` : `How long until "${featureLabel}" expires and needs renewal?`,
-        (isCloudBackup && typeof presetDurationDays === 'number') ? String(presetDurationDays) : undefined
+        isCloudBackup ? `The plan below was selected by the customer. The subscription length is set to match — you can still change it if needed:` : `How long until "${featureLabel}" expires and needs renewal?`,
+        (isCloudBackup && typeof presetDurationDays === 'number') ? String(presetDurationDays) : undefined,
+        planSummaryHtml,
+        isCloudBackup ? 'Confirm Cloud Backup plan' : undefined
       );
   if (durationDays === null) return; 
   try {
@@ -3342,13 +3483,14 @@ function promptForNote(message) {
     cancelBtn.onclick = () => cleanup(null);
   });
 }
-function promptForDuration(message, defaultLabel) {
+function promptForDuration(message, defaultLabel, extraInfoHtml, titleOverride) {
   return new Promise((resolve) => {
     const backdrop = document.getElementById('confirmBackdrop');
     const okBtn = document.getElementById('confirmActionBtn');
     const cancelBtn = document.getElementById('confirmCancelBtn');
-    document.getElementById('confirmTitle').innerText = 'How long should the license run?';
+    document.getElementById('confirmTitle').innerText = titleOverride || 'How long should the license run?';
     document.getElementById('confirmMessage').innerHTML = `${message}<br><br>` +
+      `${extraInfoHtml || ''}` +
       `<select id="durationSelect" style="width:100%; padding:10px; border-radius:8px; border:1px solid var(--border-soft); background:var(--bg); color:var(--text); margin-top:4px;">` +
       `<option value="0">Permanent (no expiry)</option>` +
       `<option value="7">7 days</option>` +
@@ -3476,6 +3618,12 @@ function startPolling() {
   // dahil hindi ito kasing-dalas kailangan at may live SELECT 1 pa rin ito.
   if (dbStatusPollTimer) clearInterval(dbStatusPollTimer);
   dbStatusPollTimer = setInterval(() => { if (adminKey) loadDbStatus(); }, 30000);
+  loadDbHealth();
+  // Mas mabagal na interval ang db-health kesa db-status — may extra
+  // work ito (pg_database_size query sa dalawang database + live
+  // exchange-rate fetch), at may sarili nang 15s server-side cache.
+  if (dbHealthPollTimer) clearInterval(dbHealthPollTimer);
+  dbHealthPollTimer = setInterval(() => { if (adminKey) loadDbHealth(); }, 60000);
 }
 if (adminKey) { renderLastExportNote(); renderAutoBackupToggle(); startPolling(); }
 let deferredInstallPrompt = null;

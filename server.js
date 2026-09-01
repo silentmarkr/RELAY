@@ -770,6 +770,164 @@ function getModuleSubscriptionPrice(featureId, billingCycle) {
     if (!plan || !MODULE_SUBSCRIPTION_BILLING_DAYS[billingCycle]) return null;
     return typeof plan.price[billingCycle] === 'number' ? plan.price[billingCycle] : null;
 }
+// ===================================================================
+// NEON POSTGRES PRICING (para sa "Database Health" tab ng admin panel)
+// ===================================================================
+// Hindi ito galing sa isang live/official Neon pricing API — walang
+// pampublikong API si Neon para dito, kaya ang mga rates sa ibaba ay
+// manual na kinopya mula sa https://neon.com/docs/introduction/plans
+// (verified 2026-08). Kapag nagbago ang pricing ni Neon, i-update ang
+// NEON_PRICING_BASE sa ibaba (o gamitin ang admin panel override —
+// tingnan ang /relay/admin/api/pricing/neon sa baba, parehong pattern
+// ng cloudBackupPlanOverrides) — awtomatikong susundan ito ng
+// /relay/admin/api/db-health sa susunod na request, walang redeploy
+// na kailangan.
+const NEON_PRICING_VERIFIED_AT = '2026-08';
+const NEON_PRICING_SOURCE_URL = 'https://neon.com/docs/introduction/plans';
+const NEON_PRICING_BASE = {
+    free: {
+        id: 'free', name: 'Free', monthlyBaseUSD: 0,
+        computeRatePerCUHourUSD: 0, storageRatePerGBMonthUSD: 0,
+        includedStorageGB: 0.5, includedComputeHours: 100, includedProjects: 100,
+        includedBranchesPerProject: 10, includedEgressGB: 5,
+        maxAutoscaleCU: 2, hasHardCap: true,
+        notes: 'Walang bayad. May hard cap: kapag naubos ang 0.5 GB storage o 100 CU-hours/project, tumitigil ang compute hanggang susunod na billing cycle o mag-upgrade.'
+    },
+    launch: {
+        id: 'launch', name: 'Launch', monthlyBaseUSD: 0,
+        computeRatePerCUHourUSD: 0.106, storageRatePerGBMonthUSD: 0.35,
+        includedBranchesPerProject: 10, extraBranchRatePerMonthUSD: 1.50,
+        includedEgressGB: 100, egressOverageRatePerGBUSD: 0.10,
+        maxAutoscaleCU: 16, hasHardCap: false,
+        notes: 'Bayad ayon lang sa aktwal na gamit, walang minimum na bayad bawat buwan. Walang hard cap — pero tuloy-tuloy ang bayad sa storage kahit naka-suspend ang compute.'
+    },
+    scale: {
+        id: 'scale', name: 'Scale', monthlyBaseUSD: 0,
+        computeRatePerCUHourUSD: 0.222, storageRatePerGBMonthUSD: 0.35,
+        includedBranchesPerProject: 10, extraBranchRatePerMonthUSD: 1.50,
+        includedEgressGB: 100, egressOverageRatePerGBUSD: 0.10,
+        maxAutoscaleCU: 16, hasHardCap: false,
+        notes: 'Kaparehong storage rate ng Launch pero mas mataas ang compute rate — kapalit nito ang SOC2/HIPAA, SLA, at read replicas para sa production-grade na workload.'
+    },
+    enterprise: {
+        id: 'enterprise', name: 'Enterprise', monthlyBaseUSD: null,
+        computeRatePerCUHourUSD: null, storageRatePerGBMonthUSD: null,
+        includedBranchesPerProject: null, extraBranchRatePerMonthUSD: null,
+        includedEgressGB: null, egressOverageRatePerGBUSD: null,
+        maxAutoscaleCU: null, hasHardCap: false, customPricing: true,
+        notes: 'Custom quote lang — kailangang makipag-ugnayan sa Neon sales para dito.'
+    },
+    // Mga karagdagang rate na hiwalay sa itaas (parehas ito sa Launch at Scale)
+    instantRestoreRatePerGBMonthUSD: 0.20,
+    snapshotRatePerGBMonthUSD: 0.09
+};
+const NEON_PRICING_OVERRIDES_PATH = path.join(__dirname, 'neon-pricing-overrides.json');
+async function loadNeonPricingOverrides() {
+    const fromRedis = await redisGetJSON('neon-pricing-overrides', null);
+    if (fromRedis !== null) return fromRedis;
+    try {
+        return JSON.parse(fs.readFileSync(NEON_PRICING_OVERRIDES_PATH, 'utf8'));
+    } catch (err) {
+        return {};
+    }
+}
+function saveNeonPricingOverrides(obj) {
+    if (redisClient) {
+        redisSetJSON('neon-pricing-overrides', obj);
+        return;
+    }
+    try {
+        fs.writeFileSync(NEON_PRICING_OVERRIDES_PATH, JSON.stringify(obj, null, 2));
+    } catch (err) {
+        console.error('Hindi ma-save ang neon-pricing-overrides.json:', err);
+    }
+}
+let neonPricingOverrides = {}; 
+let NEON_PRICING = JSON.parse(JSON.stringify(NEON_PRICING_BASE));
+const NEON_PRICING_TIER_IDS = ['free', 'launch', 'scale', 'enterprise'];
+function recomputeNeonPricing() {
+    const merged = { ...NEON_PRICING_BASE };
+    for (const tier of NEON_PRICING_TIER_IDS) {
+        merged[tier] = { ...NEON_PRICING_BASE[tier], ...(neonPricingOverrides[tier] || {}) };
+    }
+    merged.instantRestoreRatePerGBMonthUSD = (typeof neonPricingOverrides.instantRestoreRatePerGBMonthUSD === 'number')
+        ? neonPricingOverrides.instantRestoreRatePerGBMonthUSD : NEON_PRICING_BASE.instantRestoreRatePerGBMonthUSD;
+    merged.snapshotRatePerGBMonthUSD = (typeof neonPricingOverrides.snapshotRatePerGBMonthUSD === 'number')
+        ? neonPricingOverrides.snapshotRatePerGBMonthUSD : NEON_PRICING_BASE.snapshotRatePerGBMonthUSD;
+    NEON_PRICING = merged;
+}
+// Anong Neon plan ang aktwal na ginagamit ngayon para sa bawat database
+// (dalawang hiwalay na Neon project/database ang RELAY — Cloud Backup at
+// Devices/License — kaya posibleng magkaiba ang plan ng bawat isa).
+// Admin-configurable dahil hindi ito automatic na nalalaman ng RELAY
+// (walang Neon account API key na naka-configure) — ito lang ang
+// paraan para malaman ng /relay/admin/api/db-health kung anong hard cap
+// (kung free) o rate (kung paid) ang dapat gamitin sa computation.
+const NEON_CONFIGURED_PLAN_PATH = path.join(__dirname, 'neon-configured-plans.json');
+async function loadNeonConfiguredPlans() {
+    const fromRedis = await redisGetJSON('neon-configured-plans', null);
+    if (fromRedis !== null) return fromRedis;
+    try {
+        return JSON.parse(fs.readFileSync(NEON_CONFIGURED_PLAN_PATH, 'utf8'));
+    } catch (err) {
+        return { cloudBackup: 'free', devices: 'free' };
+    }
+}
+function saveNeonConfiguredPlans(obj) {
+    if (redisClient) {
+        redisSetJSON('neon-configured-plans', obj);
+        return;
+    }
+    try {
+        fs.writeFileSync(NEON_CONFIGURED_PLAN_PATH, JSON.stringify(obj, null, 2));
+    } catch (err) {
+        console.error('Hindi ma-save ang neon-configured-plans.json:', err);
+    }
+}
+let neonConfiguredPlans = { cloudBackup: 'free', devices: 'free' };
+// ===================================================================
+// USD -> PHP exchange rate (live, may cache + fallback)
+// ===================================================================
+// Gumagamit ng open.er-api.com (walang API key na kailangan). May
+// in-memory cache (6 oras) para hindi paulit-ulit tinatawagan sa bawat
+// request, at may hardcoded fallback rate kung mabigo ang fetch (hal.
+// walang internet, nag-expire ang free API, atbp.) — laging ipapakita
+// sa UI kung "live" o "fallback" ang rate na ginamit, kasama ang oras
+// noong huling successful fetch.
+const EXCHANGE_RATE_FALLBACK_USD_TO_PHP = 58.7;
+const EXCHANGE_RATE_FALLBACK_NOTE_DATE = '2026-01';
+const EXCHANGE_RATE_CACHE_MS = 6 * 60 * 60 * 1000;
+let exchangeRateCache = { at: 0, rate: null, source: null, fetchedAt: null };
+async function getUsdToPhpRate() {
+    const now = Date.now();
+    if (exchangeRateCache.rate && (now - exchangeRateCache.at) < EXCHANGE_RATE_CACHE_MS) {
+        return exchangeRateCache;
+    }
+    try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 6000);
+        const resp = await fetch('https://open.er-api.com/v6/latest/USD', { signal: controller.signal });
+        clearTimeout(timeout);
+        const data = await resp.json();
+        const rate = data && data.rates && typeof data.rates.PHP === 'number' ? data.rates.PHP : null;
+        if (rate) {
+            exchangeRateCache = { at: now, rate, source: 'open.er-api.com (live)', fetchedAt: now };
+            return exchangeRateCache;
+        }
+    } catch (err) {
+        console.warn('⚠️  Hindi ma-fetch ang live USD→PHP rate, gagamit ng fallback:', err.message);
+    }
+    // Fallback: gamitin ang huling successful live rate kung meron (kahit
+    // lumagpas na sa cache window), kung wala talaga, gamitin ang hardcoded.
+    if (exchangeRateCache.rate) {
+        return { ...exchangeRateCache, source: exchangeRateCache.source + ' — stale, hindi na-refresh' };
+    }
+    return {
+        at: now, rate: EXCHANGE_RATE_FALLBACK_USD_TO_PHP,
+        source: `fallback (hardcoded, huling ni-verify noong ${EXCHANGE_RATE_FALLBACK_NOTE_DATE} — hindi live)`,
+        fetchedAt: null
+    };
+}
 const FEATURE_CATALOG_OVERRIDES_PATH = path.join(__dirname, 'feature-catalog-overrides.json');
 async function loadFeatureCatalogOverrides() {
     const fromRedis = await redisGetJSON('feature-catalog-overrides', null);
@@ -3924,6 +4082,199 @@ app.get('/relay/admin/api/db-status', requireAdminKey, async (req, res) => {
         res.status(500).json({ success: false, message: 'Could not determine database status.' });
     }
 });
+// ===================================================================
+// DATABASE HEALTH — real na storage usage mula sa Neon (pg_database_size),
+// kasama ang natitirang allowance (kung Free plan) at ang buong Neon
+// pricing/tier comparison (USD + PHP) para makatulong sa desisyon ng
+// developer kung kailan/anong tier dapat mag-upgrade. Tingnan ang
+// NEON_PRICING_BASE sa itaas — manual na pinapanatiling updated ito
+// laban sa https://neon.com/docs/introduction/plans.
+// ===================================================================
+async function getPgDatabaseSizeBytes(pool) {
+    if (!pool) return null;
+    try {
+        const result = await pool.query('SELECT pg_database_size(current_database()) AS bytes');
+        const bytes = result.rows && result.rows[0] ? Number(result.rows[0].bytes) : null;
+        return Number.isFinite(bytes) ? bytes : null;
+    } catch (err) {
+        console.warn('⚠️  Hindi makuha ang pg_database_size:', err.message);
+        return null;
+    }
+}
+async function getTopTableSizes(pool, limit = 8) {
+    if (!pool) return [];
+    try {
+        const result = await pool.query(`
+            SELECT relname AS table_name, pg_total_relation_size(relid) AS bytes
+            FROM pg_catalog.pg_statio_user_tables
+            ORDER BY pg_total_relation_size(relid) DESC
+            LIMIT $1
+        `, [limit]);
+        return result.rows.map(r => ({ table: r.table_name, bytes: Number(r.bytes) }));
+    } catch (err) {
+        console.warn('⚠️  Hindi makuha ang per-table sizes:', err.message);
+        return [];
+    }
+}
+function bytesToGB(bytes) {
+    return typeof bytes === 'number' ? bytes / (1024 * 1024 * 1024) : null;
+}
+// Tinatantya lang ang buong Neon bill base sa CURRENT storage usage
+// (walang paraan ang RELAY na malaman ang aktwal na compute-hours na
+// nagamit nang hindi kumonekta sa Neon's own API/account) — kaya ang
+// "computeCostUSD" dito ay isang ILLUSTRATIVE example lang gamit ang
+// buong buwan (720 oras) ng average compute size, HINDI aktwal na
+// bill. Malinaw itong nakalagay sa response bilang paalala.
+function computeNeonTierEstimate(tierId, storageGB, exampleComputeCUHours) {
+    const tier = NEON_PRICING[tierId];
+    if (!tier) return null;
+    if (tier.customPricing) {
+        return { tier: tierId, name: tier.name, customPricing: true, notes: tier.notes };
+    }
+    if (tierId === 'free') {
+        const overStorage = storageGB > tier.includedStorageGB;
+        return {
+            tier: tierId, name: tier.name, monthlyCostUSD: 0,
+            fitsInFreeStorage: !overStorage,
+            storageUsedGB: storageGB, storageIncludedGB: tier.includedStorageGB,
+            storageRemainingGB: Math.max(0, tier.includedStorageGB - storageGB),
+            storagePercentUsed: tier.includedStorageGB > 0 ? Math.min(999, (storageGB / tier.includedStorageGB) * 100) : null,
+            computeHoursIncluded: tier.includedComputeHours,
+            notes: overStorage ? '⚠️ Lumampas na sa 0.5 GB free storage cap — kailangan nang mag-upgrade.' : tier.notes
+        };
+    }
+    const storageCostUSD = storageGB * tier.storageRatePerGBMonthUSD;
+    const computeCostUSD = typeof exampleComputeCUHours === 'number' ? exampleComputeCUHours * tier.computeRatePerCUHourUSD : null;
+    return {
+        tier: tierId, name: tier.name,
+        storageCostUSD: Math.round(storageCostUSD * 100) / 100,
+        exampleComputeCostUSD: computeCostUSD !== null ? Math.round(computeCostUSD * 100) / 100 : null,
+        exampleComputeCUHoursAssumed: exampleComputeCUHours,
+        estimatedMonthlyTotalUSD: computeCostUSD !== null ? Math.round((storageCostUSD + computeCostUSD) * 100) / 100 : null,
+        computeRatePerCUHourUSD: tier.computeRatePerCUHourUSD,
+        storageRatePerGBMonthUSD: tier.storageRatePerGBMonthUSD,
+        notes: tier.notes
+    };
+}
+let dbHealthCache = { at: 0, payload: null };
+const DB_HEALTH_CACHE_MS = 15000;
+app.get('/relay/admin/api/db-health', requireAdminKey, async (req, res) => {
+    try {
+        if (dbHealthCache.payload && (Date.now() - dbHealthCache.at) < DB_HEALTH_CACHE_MS && req.query.force !== '1') {
+            return res.json({ ...dbHealthCache.payload, cached: true });
+        }
+        const [cloudBackupBytes, devicesBytes, cloudBackupTables, devicesTables, exchangeRate] = await Promise.all([
+            getPgDatabaseSizeBytes(pgPool),
+            getPgDatabaseSizeBytes(pgPoolDevices),
+            getTopTableSizes(pgPool),
+            getTopTableSizes(pgPoolDevices),
+            getUsdToPhpRate()
+        ]);
+        // Halimbawang compute assumption para lang sa "illustrative" na
+        // tier comparison (hindi ito aktwal na gamit) — katumbas ng
+        // 0.25 CU na tumatakbo nang 8 oras/araw sa loob ng 30 araw.
+        const EXAMPLE_COMPUTE_CU_HOURS = 0.25 * 8 * 30;
+        function buildDbEntry(label, bytes, tables, configuredPlan) {
+            const gb = bytesToGB(bytes);
+            const tierEstimates = NEON_PRICING_TIER_IDS.map(t => computeNeonTierEstimate(t, gb === null ? 0 : gb, EXAMPLE_COMPUTE_CU_HOURS));
+            return {
+                label,
+                configuredPlan,
+                bytes,
+                mb: bytes !== null ? Math.round((bytes / (1024 * 1024)) * 100) / 100 : null,
+                gb: gb !== null ? Math.round(gb * 10000) / 10000 : null,
+                topTables: tables,
+                currentTierEstimate: tierEstimates.find(t => t.tier === configuredPlan) || null,
+                tierComparison: tierEstimates
+            };
+        }
+        const payload = {
+            success: true,
+            checkedAt: Date.now(),
+            exchangeRate: {
+                usdToPhp: exchangeRate.rate,
+                source: exchangeRate.source,
+                fetchedAt: exchangeRate.fetchedAt
+            },
+            pricingMeta: {
+                verifiedAt: NEON_PRICING_VERIFIED_AT,
+                sourceUrl: NEON_PRICING_SOURCE_URL,
+                hasOverrides: Object.keys(neonPricingOverrides).length > 0,
+                exampleComputeCUHoursAssumed: EXAMPLE_COMPUTE_CU_HOURS,
+                exampleComputeAssumptionNote: 'Ang exampleComputeCostUSD/estimatedMonthlyTotalUSD ay HALIMBAWA LANG (0.25 CU × 8 oras/araw × 30 araw) — hindi ito aktwal na compute usage niyo, dahil hindi ito nasusubaybayan ng RELAY nang hindi kumokonekta sa Neon account API. Ang storageCostUSD lang ang base sa TUNAY na kasalukuyang laki ng database.'
+            },
+            databases: {
+                cloudBackup: buildDbEntry('Cloud Backup (DATABASE_URL)', cloudBackupBytes, cloudBackupTables, neonConfiguredPlans.cloudBackup || 'free'),
+                devices: buildDbEntry('Devices / License' + (DEVICES_DB_IS_SEPARATE ? ' (RELAY_DEVICES_DATABASE_URL)' : ' (shared sa DATABASE_URL)'), devicesBytes, devicesTables, neonConfiguredPlans.devices || 'free')
+            },
+            neonPricing: NEON_PRICING
+        };
+        dbHealthCache = { at: Date.now(), payload };
+        res.json({ ...payload, cached: false });
+    } catch (err) {
+        console.error('⚠️  /relay/admin/api/db-health error:', err.message);
+        res.status(500).json({ success: false, message: 'Could not compute database health.' });
+    }
+});
+app.post('/relay/admin/api/db-health/plan', requireAdminKey, (req, res) => {
+    const { database, tier } = req.body || {};
+    if (!['cloudBackup', 'devices'].includes(database)) {
+        return res.status(400).json({ success: false, message: 'Invalid database (cloudBackup/devices).' });
+    }
+    if (!NEON_PRICING_TIER_IDS.includes(tier)) {
+        return res.status(400).json({ success: false, message: `Invalid tier. Options: ${NEON_PRICING_TIER_IDS.join(', ')}.` });
+    }
+    neonConfiguredPlans = { ...neonConfiguredPlans, [database]: tier };
+    saveNeonConfiguredPlans(neonConfiguredPlans);
+    dbHealthCache = { at: 0, payload: null };
+    console.log(`🗄️  Na-set ang configured Neon plan ng "${database}" tungong "${tier}" via admin panel.`);
+    res.json({ success: true, neonConfiguredPlans });
+});
+app.get('/relay/admin/api/pricing/neon', requireAdminKey, (req, res) => {
+    res.json({
+        success: true,
+        neonPricing: NEON_PRICING,
+        neonPricingBase: NEON_PRICING_BASE,
+        neonPricingOverrides,
+        verifiedAt: NEON_PRICING_VERIFIED_AT,
+        sourceUrl: NEON_PRICING_SOURCE_URL
+    });
+});
+app.post('/relay/admin/api/pricing/neon', requireAdminKey, (req, res) => {
+    const { tier, computeRatePerCUHourUSD, storageRatePerGBMonthUSD, includedStorageGB, includedComputeHours } = req.body || {};
+    if (!tier || !NEON_PRICING_BASE[tier] || NEON_PRICING_BASE[tier].customPricing) {
+        return res.status(400).json({ success: false, message: `Invalid tier. Options: free, launch, scale.` });
+    }
+    const numericFields = { computeRatePerCUHourUSD, storageRatePerGBMonthUSD, includedStorageGB, includedComputeHours };
+    for (const [key, val] of Object.entries(numericFields)) {
+        if (val !== undefined && (typeof val !== 'number' || !isFinite(val) || val < 0)) {
+            return res.status(400).json({ success: false, message: `Invalid ${key}.` });
+        }
+    }
+    const existing = neonPricingOverrides[tier] || {};
+    const updated = { ...existing };
+    if (typeof computeRatePerCUHourUSD === 'number') updated.computeRatePerCUHourUSD = computeRatePerCUHourUSD;
+    if (typeof storageRatePerGBMonthUSD === 'number') updated.storageRatePerGBMonthUSD = storageRatePerGBMonthUSD;
+    if (typeof includedStorageGB === 'number') updated.includedStorageGB = includedStorageGB;
+    if (typeof includedComputeHours === 'number') updated.includedComputeHours = includedComputeHours;
+    neonPricingOverrides[tier] = updated;
+    saveNeonPricingOverrides(neonPricingOverrides);
+    recomputeNeonPricing();
+    dbHealthCache = { at: 0, payload: null };
+    console.log(`🗄️  Na-update ang Neon pricing override para sa "${tier}" via admin panel (Neon updated their pricing).`);
+    res.json({ success: true, neonPricing: NEON_PRICING[tier] });
+});
+app.post('/relay/admin/api/pricing/neon/reset', requireAdminKey, (req, res) => {
+    const { tier } = req.body || {};
+    if (!tier || !NEON_PRICING_BASE[tier]) {
+        return res.status(400).json({ success: false, message: 'Invalid tier.' });
+    }
+    delete neonPricingOverrides[tier];
+    saveNeonPricingOverrides(neonPricingOverrides);
+    recomputeNeonPricing();
+    dbHealthCache = { at: 0, payload: null };
+    res.json({ success: true, neonPricing: NEON_PRICING[tier] });
+});
 const BUILD_EXCLUDE_NAMES = new Set([
     '.git', 'node_modules', 'database', 'release', 'uploads_tmp',
     '.start.sh.lock', '.self-update-backup', 'package-lock.json',
@@ -4544,7 +4895,9 @@ async function bootstrapStores() {
         featurePricingOverrides,
         upgradeTierPricingOverrides,
         moduleSubscriptionOverrides,
-        SUGGESTED_DISCOUNT_PERCENT
+        SUGGESTED_DISCOUNT_PERCENT,
+        neonPricingOverrides,
+        neonConfiguredPlans
     ] = await Promise.all([
         loadAllowedDevices(),
         loadDeviceLabels(),
@@ -4565,7 +4918,9 @@ async function bootstrapStores() {
         loadFeaturePricingOverrides(),
         loadUpgradeTierPricingOverrides(),
         loadModuleSubscriptionOverrides(),
-        loadSuggestedDiscountPercent()
+        loadSuggestedDiscountPercent(),
+        loadNeonPricingOverrides(),
+        loadNeonConfiguredPlans()
     ]);
     recomputeFeatureCatalog();
     if (Object.keys(featureCatalogOverrides).length > 0) {
@@ -4586,6 +4941,11 @@ async function bootstrapStores() {
     if (Object.keys(upgradeTierPricingOverrides).length > 0) {
         console.log(`💳 Na-load ang custom na Upgrade Tier bundle pricing override para sa: ${Object.keys(upgradeTierPricingOverrides).join(', ')}.`);
     }
+    recomputeNeonPricing();
+    if (Object.keys(neonPricingOverrides).length > 0) {
+        console.log(`🗄️  Na-load ang custom na Neon pricing override para sa: ${Object.keys(neonPricingOverrides).join(', ')}.`);
+    }
+    if (!neonConfiguredPlans || typeof neonConfiguredPlans !== 'object') neonConfiguredPlans = { cloudBackup: 'free', devices: 'free' };
     console.log(
         pgPoolDevices
             ? `✅ Na-load mula sa Postgres (Neon): ${allowedDevices.size} allowed device(s), ${Object.keys(issuedUnlocks).length} device(s) may naka-unlock.`
