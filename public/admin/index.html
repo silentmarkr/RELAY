@@ -662,6 +662,7 @@ a:focus-visible,
 .toast-success { background: rgba(61,220,132,.14); color: var(--green); border: 1px solid var(--green-line); }
 .toast-error { background: rgba(255,92,114,.14); color: var(--red); border: 1px solid var(--red-line); }
 .toast-info { background: var(--accent-soft); color: var(--accent-bright); border: 1px solid var(--accent-dim); }
+.toast-warning { background: rgba(255,186,0,.14); color: #ffba00; border: 1px solid rgba(255,186,0,.4); }
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(-10px) scale(.97); }
   to { opacity: 1; transform: translateY(0) scale(1); }
@@ -2003,6 +2004,7 @@ async function buildRelease() {
       buildProgressCtl.setTarget({ percent: 100, message: 'Build finished.', stage: 'done', done: true });
       const obfNote = data.obfuscated === false ? ' — unobfuscated' : '';
       toast(`✅ Release built (${(data.sizeBytes / 1024 / 1024).toFixed(2)} MB)${obfNote}.`, 'success');
+      if (data.warning) toast(data.warning, 'warning');
       if (captionInput) captionInput.value = '';
       loadBuildHistory();
     } else {
@@ -2060,6 +2062,7 @@ async function publishRelease() {
         : 'now visible to ALL clients';
       const obfNote = data.build && data.build.obfuscated === false ? ' — unobfuscated' : '';
       toast(`✅ Built v${version} (${mb} MB)${obfNote} — ${scopeMsg}.`, 'success');
+      if (data.build && data.build.warning) toast(data.build.warning, 'warning');
       if (versionInput) versionInput.value = '';
       if (changelogInput) changelogInput.value = '';
       if (captionInput) captionInput.value = '';
@@ -2413,6 +2416,7 @@ async function clearBuildHistory() {
     const data = await api('/relay/admin/api/build-history/clear', { method: 'POST' });
     if (data.success) {
       toast(`✅ Cleared build history (${data.clearedCount} entries).`, 'success');
+      if (data.warning) toast(data.warning, 'warning');
       loadBuildHistory();
     } else {
       toast(data.message || 'Could not clear the build history.', 'error');
@@ -2446,6 +2450,7 @@ async function generateDownloadCode() {
   document.getElementById('newCodeExpiresHours').value = '';
   await navigator.clipboard.writeText(data.downloadUrl).catch(() => {});
   toast('✅ Link created and copied to clipboard: ' + data.downloadUrl, 'success');
+  if (data.warning) toast(data.warning, 'warning');
   loadDownloadCodes();
 }
 async function loadDownloadCodes() {
@@ -2494,10 +2499,12 @@ async function revokeDownloadCode(code, label) {
     danger: true
   });
   if (!ok) return;
+  let revokeData;
   try {
-    await api(`/relay/admin/api/download-codes/${code}/revoke`, { method: 'POST' });
+    revokeData = await api(`/relay/admin/api/download-codes/${code}/revoke`, { method: 'POST' });
   } catch (err) { return; }
   toast('Download link revoked.', 'success');
+  if (revokeData && revokeData.warning) toast(revokeData.warning, 'warning');
   loadDownloadCodes();
 }
 function downloadCodesJSON() {

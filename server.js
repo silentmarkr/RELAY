@@ -273,7 +273,104 @@ async function ensureBuildKvSchema() {
             updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
         );
     `);
-    console.log('✅ Build/Push Postgres schema ready (relay_build_kv_store) sa HIWALAY na database mula sa allowed devices.');
+    // AYOS: dating ang release zip mismo (RELEASE_PACKAGE_PATH) ay lokal na file
+    // LANG sa ephemeral disk ng Render — nawawala ito kapag nag-restart/na-redeploy
+    // ang service, kahit na-publish na ang bersyon (ang metadata lang gaya ng
+    // download codes/build history ang naka-Neon dati, hindi ang binary zip mismo).
+    // Kaya "Walang naka-publish na release package sa server pa" pa rin kahit
+    // may na-generate nang download code. Dito na rin ito naka-save (bytea) sa
+    // parehong HIWALAY na Build database, para kahit mabura ang lokal na disk,
+    // mai-restore pa rin ang aktwal na zip mula sa Neon.
+    await pgPoolBuild.query(`
+        CREATE TABLE IF NOT EXISTS relay_build_package_blob (
+            id         TEXT PRIMARY KEY,
+            file_name  TEXT NOT NULL,
+            data       BYTEA NOT NULL,
+            size_bytes BIGINT NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+    `);
+    console.log('✅ Build/Push Postgres schema ready (relay_build_kv_store + relay_build_package_blob) sa HIWALAY na database mula sa allowed devices.');
+}
+const RELEASE_PACKAGE_BLOB_ID = 'omnipos-client';
+// Marker ng KASALUKUYANG laman ng RELEASE_PACKAGE_PATH sa DISK NG INSTANCE NA
+// ITO — ginagamit para malaman kung "stale" na ba ito kumpara sa pinakabagong
+// naka-save sa Neon build DB (hal. binuo ng ANOTHER Render instance kung
+// naka-multiple instances/autoscale). Kung existence-check lang ang gagamitin,
+// posibleng manatiling naka-serve ng LUMANG zip ang isang instance kahit na
+// meron nang mas bago sa Neon (dahil "meron na naman" ang lokal na file nito).
+let releasePackageDiskMeta = { sizeBytes: null, updatedAtMs: null };
+// I-save ang aktwal na release zip (binary) papuntang Neon build DB para
+// hindi na umasa lang sa lokal/ephemeral disk. Tinatawag ito pagkatapos
+// magtagumpay ang build (pagkatapos ng fs.renameSync papuntang RELEASE_PACKAGE_PATH).
+async function saveReleasePackageToBuildDb(filePath) {
+    if (!pgPoolBuild) return false;
+    try {
+        const buf = fs.readFileSync(filePath);
+        const result = await queryWithRetry(pgPoolBuild, `
+            INSERT INTO relay_build_package_blob (id, file_name, data, size_bytes, updated_at)
+            VALUES ($1, $2, $3, $4, now())
+            ON CONFLICT (id) DO UPDATE SET file_name = EXCLUDED.file_name, data = EXCLUDED.data,
+                size_bytes = EXCLUDED.size_bytes, updated_at = now()
+            RETURNING size_bytes, updated_at
+        `, [RELEASE_PACKAGE_BLOB_ID, 'omnipos-client.zip', buf, buf.length]);
+        const row = result.rows[0];
+        releasePackageDiskMeta = { sizeBytes: Number(row.size_bytes), updatedAtMs: new Date(row.updated_at).getTime() };
+        console.log(`✅ Na-save ang release package (${buf.length} bytes) sa Neon build DB — hindi na ito mawawala kahit ma-restart/ma-redeploy ang server.`);
+        return true;
+    } catch (err) {
+        console.error('⚠️  Hindi ma-save ang release package sa Neon build DB (bytea):', err.message);
+        return false;
+    }
+}
+// Tinitiyak na "fresh" (pinakabagong bersyon) ang laman ng RELEASE_PACKAGE_PATH
+// sa DISK NG INSTANCE NA ITO kumpara sa naka-save sa Neon build DB. Isang
+// mabilisang metadata-only query lang ang ginagawa (walang binary transfer)
+// maliban kung talagang naiiba ang laki/petsa — doon lang hihilahin ang buong
+// blob. Ginagamit ito sa halip na basta existence-check lang, dahil kung
+// naka-multiple Render instances (autoscale/zero-downtime deploy), posibleng
+// may ibang instance na nakapag-build ng mas bagong version at ang instance na
+// ito ay mananatiling naka-serve ng LUMANG zip kung existence-check lang.
+async function ensureReleasePackageFreshOnDisk() {
+    if (!pgPoolBuild) {
+        // Walang Neon build DB na naka-configure — wala tayong paraan para
+        // malaman kung stale ang lokal na file, existence na lang ang masasabi.
+        return fs.existsSync(RELEASE_PACKAGE_PATH);
+    }
+    try {
+        const result = await queryWithRetry(pgPoolBuild, 'SELECT size_bytes, updated_at FROM relay_build_package_blob WHERE id = $1', [RELEASE_PACKAGE_BLOB_ID]);
+        if (result.rows.length === 0) {
+            // Wala pang na-publish kahit sa Neon — gamitin na lang kung
+            // meron man dating naiwan sa lokal na disk (hal. bago pa ang
+            // migration na ito).
+            return fs.existsSync(RELEASE_PACKAGE_PATH);
+        }
+        const dbSize = Number(result.rows[0].size_bytes);
+        const dbUpdatedAtMs = new Date(result.rows[0].updated_at).getTime();
+        const localMatches = fs.existsSync(RELEASE_PACKAGE_PATH)
+            && releasePackageDiskMeta.sizeBytes === dbSize
+            && releasePackageDiskMeta.updatedAtMs === dbUpdatedAtMs;
+        if (localMatches) return true;
+        // Naiiba (o wala pa sa disk) — hilahin ang buong blob mula Neon.
+        const blobResult = await queryWithRetry(pgPoolBuild, 'SELECT data FROM relay_build_package_blob WHERE id = $1', [RELEASE_PACKAGE_BLOB_ID]);
+        if (blobResult.rows.length === 0) return fs.existsSync(RELEASE_PACKAGE_PATH);
+        const releaseDir = path.dirname(RELEASE_PACKAGE_PATH);
+        if (!fs.existsSync(releaseDir)) fs.mkdirSync(releaseDir, { recursive: true });
+        // Isulat muna sa ibang temp filename sa PAREHONG folder tapos i-rename
+        // (atomic sa parehong filesystem) — para kung may kasabay na
+        // res.download() na kasalukuyang nagba-basa/nagsa-stream ng
+        // RELEASE_PACKAGE_PATH, hindi ito maabutan ng bahagyang-nasulat pa
+        // lang (partial write) na file.
+        const tmpRefreshPath = `${RELEASE_PACKAGE_PATH}.refresh-${process.pid}-${Date.now()}.tmp`;
+        fs.writeFileSync(tmpRefreshPath, blobResult.rows[0].data);
+        fs.renameSync(tmpRefreshPath, RELEASE_PACKAGE_PATH);
+        releasePackageDiskMeta = { sizeBytes: dbSize, updatedAtMs: dbUpdatedAtMs };
+        console.log('✅ Na-refresh ang release package sa lokal na disk ng instance na ito mula sa Neon build DB (bagong bersyon o unang restore).');
+        return true;
+    } catch (err) {
+        console.error('⚠️  Hindi ma-verify/ma-refresh ang release package mula sa Neon build DB, babalik sa existence-check na lang:', err.message);
+        return fs.existsSync(RELEASE_PACKAGE_PATH);
+    }
 }
 // Parehong pattern ng redisGetJSON/redisSetJSON sa itaas, pero NAKATUON
 // lang sa pgPoolBuild (hiwalay na Neon database) — walang Redis fallback
@@ -291,14 +388,21 @@ async function buildKvGetJSON(key, fallback) {
     }
     return fallback;
 }
+// AYOS: dating "fire-and-forget" ito (walang return, walang paraan para
+// malaman ng caller kung nagtagumpay o hindi ang pag-save) — parehong uri ng
+// gap na nagdulot ng orihinal na "release package" bug. Ngayon, ibinabalik
+// na nito ang Promise<boolean> para magamit ng mga tumatawag (lalo na sa
+// build/publish/download-code endpoints) na i-await ito at ipaalam sa admin
+// kung mabigo ang pag-save sa Neon, sa halip na tahimik lang na-log.
 function buildKvSetJSON(key, value) {
-    if (!pgPoolBuild) return;
-    pgPoolBuild.query(
+    if (!pgPoolBuild) return Promise.resolve(false);
+    return pgPoolBuild.query(
         `INSERT INTO relay_build_kv_store (key, value, updated_at) VALUES ($1, $2::jsonb, now())
          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
         [key, JSON.stringify(value)]
-    ).catch((err) => {
+    ).then(() => true).catch((err) => {
         console.error(`⚠️  Hindi ma-save sa Build Postgres store ang key "${key}":`, err.message);
+        return false;
     });
 }
 async function redisGetJSON(key, fallback) {
@@ -1726,16 +1830,17 @@ async function loadReleaseBaselines() {
         return new Map();
     }
 }
-function saveReleaseBaselines(map) {
+async function saveReleaseBaselines(map) {
     const obj = Object.fromEntries(map);
     if (pgPoolBuild) {
-        buildKvSetJSON('release-baselines', obj);
-        return;
+        return await buildKvSetJSON('release-baselines', obj);
     }
     try {
         fs.writeFileSync(RELEASE_BASELINES_PATH, JSON.stringify(obj, null, 2));
+        return true;
     } catch (err) {
         console.error('Hindi ma-save ang release-baselines.json:', err);
+        return false;
     }
 }
 let releaseBaselines = new Map(); 
@@ -1796,15 +1901,16 @@ async function loadTargetedReleases() {
         return new Map();
     }
 }
-function saveTargetedReleases(map) {
+async function saveTargetedReleases(map) {
     if (pgPoolBuild) {
-        buildKvSetJSON('targeted-releases', Object.fromEntries(map));
-        return;
+        return await buildKvSetJSON('targeted-releases', Object.fromEntries(map));
     }
     try {
         fs.writeFileSync(TARGETED_RELEASES_PATH, JSON.stringify(Object.fromEntries(map), null, 2));
+        return true;
     } catch (err) {
         console.error('Hindi ma-save ang targeted-releases.json:', err);
+        return false;
     }
 }
 let targetedReleases = new Map(); 
@@ -1819,15 +1925,16 @@ async function loadDownloadCodes() {
         return new Map();
     }
 }
-function saveDownloadCodes(map) {
+async function saveDownloadCodes(map) {
     if (pgPoolBuild) {
-        buildKvSetJSON('download-codes', Object.fromEntries(map));
-        return;
+        return await buildKvSetJSON('download-codes', Object.fromEntries(map));
     }
     try {
         fs.writeFileSync(DOWNLOAD_CODES_PATH, JSON.stringify(Object.fromEntries(map), null, 2));
+        return true;
     } catch (err) {
         console.error('Hindi ma-save ang download-codes.json:', err);
+        return false;
     }
 }
 let downloadCodes = new Map(); 
@@ -1846,23 +1953,24 @@ async function loadBuildHistory() {
         return [];
     }
 }
-function saveBuildHistory(list) {
+async function saveBuildHistory(list) {
     if (pgPoolBuild) {
-        buildKvSetJSON('build-history', list);
-        return;
+        return await buildKvSetJSON('build-history', list);
     }
     try {
         fs.writeFileSync(BUILD_HISTORY_PATH, JSON.stringify(list, null, 2));
+        return true;
     } catch (err) {
         console.error('Hindi ma-save ang build-history.json:', err);
+        return false;
     }
 }
-function recordBuildHistoryEntry(entry) {
+async function recordBuildHistoryEntry(entry) {
     buildHistory.unshift(entry); 
     if (buildHistory.length > BUILD_HISTORY_MAX_ENTRIES) {
         buildHistory.length = BUILD_HISTORY_MAX_ENTRIES;
     }
-    saveBuildHistory(buildHistory);
+    return await saveBuildHistory(buildHistory);
 }
 let buildHistory = []; 
 const ADMIN_KEY = process.env.RELAY_ADMIN_KEY || null;
@@ -4756,14 +4864,15 @@ app.get('/relay/latest-version', requireApiKey, rateLimit('latest-version', 60, 
         targeted: !!targeted
     });
 });
-app.get('/relay/release-package', requireApiKey, rateLimit('release-package', 10, 60 * 60 * 1000), (req, res) => {
+app.get('/relay/release-package', requireApiKey, rateLimit('release-package', 10, 60 * 60 * 1000), async (req, res) => {
+    await ensureReleasePackageFreshOnDisk();
     if (!fs.existsSync(RELEASE_PACKAGE_PATH)) {
         return res.status(503).json({ success: false, message: 'Walang naka-publish na release package sa RELAY pa.' });
     }
     logActivity(null, 'release_package_self_update_fetch', { ip: req.ip });
     res.download(RELEASE_PACKAGE_PATH, 'omnipos-client.zip');
 });
-app.post('/relay/admin/api/system/publish-version', requireAdminKey, (req, res) => {
+app.post('/relay/admin/api/system/publish-version', requireAdminKey, async (req, res) => {
     const { version, changelog, installationId } = req.body || {};
     const trimmedVersion = String(version || '').trim();
     if (!trimmedVersion) {
@@ -4777,8 +4886,11 @@ app.post('/relay/admin/api/system/publish-version', requireAdminKey, (req, res) 
     const targetId = String(installationId || '').trim();
     if (targetId) {
         targetedReleases.set(targetId, entry);
-        saveTargetedReleases(targetedReleases);
-        return res.json({ success: true, targeted: true, installationId: targetId, release: entry });
+        const persisted = await saveTargetedReleases(targetedReleases);
+        return res.json({
+            success: true, targeted: true, installationId: targetId, release: entry,
+            warning: (!persisted && pgPoolBuild) ? 'PAALALA: Hindi na-save sa Neon build DB ang targeted release na ito — lokal na memory lang muna ito ng instance na ito.' : undefined
+        });
     }
     systemVersionInfo = entry;
     saveSystemVersionInfo(systemVersionInfo);
@@ -5382,7 +5494,26 @@ function setBuildProgress(patch) {
 app.get('/relay/admin/api/build-progress', requireAdminKey, (req, res) => {
     res.json({ success: true, progress: buildProgressState });
 });
+// Simpleng in-process lock (per Render instance) para maiwasan ang dalawang
+// magkasabay na build (hal. double-click sa admin panel, o /build-release at
+// /system/publish-release na parehong tinawag halos sabay) na maglaro sa
+// parehong RELEASE_PACKAGE_TMP_PATH/tmpDir at magresulta sa sirang zip o
+// nagkakasalungat na build-progress state.
+let buildInProgress = false;
 async function performBuildRelease(reqBody, req, publishOverride) {
+    if (buildInProgress) {
+        const err = new Error('May kasalukuyang build pa rin na tumatakbo — hintayin munang matapos ito bago mag-request ng bago.');
+        err.statusCode = 409;
+        throw err;
+    }
+    buildInProgress = true;
+    try {
+        return await performBuildReleaseInner(reqBody, req, publishOverride);
+    } finally {
+        buildInProgress = false;
+    }
+}
+async function performBuildReleaseInner(reqBody, req, publishOverride) {
     try {
         process.loadEnvFile(path.join(__dirname, '.env'));
     } catch (err) {
@@ -5504,6 +5635,16 @@ async function performBuildRelease(reqBody, req, publishOverride) {
         setBuildProgress({ stage: 'verify', percent: BUILD_STEP_END_PERCENT.verify, message: 'Pumasa sa integrity check — inilalapat na ang bagong release...' });
         fs.renameSync(RELEASE_PACKAGE_TMP_PATH, RELEASE_PACKAGE_PATH);
         const stats = fs.statSync(RELEASE_PACKAGE_PATH);
+        setBuildProgress({ stage: 'verify', percent: BUILD_STEP_END_PERCENT.verify, message: 'Sine-save ang release package sa Neon build DB...' });
+        const persistedToNeon = await saveReleasePackageToBuildDb(RELEASE_PACKAGE_PATH);
+        if (!persistedToNeon && pgPoolBuild) {
+            // Nabuo ang zip at nasa lokal na disk NG INSTANCE NA ITO, pero
+            // HINDI ito na-save sa Neon build DB (hal. temporary connectivity
+            // issue). Kung ma-restart/ma-redeploy bago ito ma-retry, mababalik
+            // ito sa dating (mas lumang) na-publish na version. Ipinapaalam
+            // ito sa admin sa halip na tahimik lang na-log sa server console.
+            console.warn('⚠️  Nabuo ang release pero HINDI ito na-persist sa Neon build DB — lokal na disk lang muna ito ng instance na ito.');
+        }
         const builtAt = Date.now();
         logActivity(null, 'release_package_built', {
             ref,
@@ -5519,9 +5660,9 @@ async function performBuildRelease(reqBody, req, publishOverride) {
             fileCount: Object.keys(baselineFiles).length,
             files: baselineFiles
         });
-        saveReleaseBaselines(releaseBaselines);
+        const baselinePersisted = await saveReleaseBaselines(releaseBaselines);
         console.log(`🔐 Integrity baseline saved para sa version ${baselineVersion} (${Object.keys(baselineFiles).length} file(s)).`);
-        recordBuildHistoryEntry({
+        const historyPersisted = await recordBuildHistoryEntry({
             id: crypto.randomBytes(6).toString('hex'),
             caption: caption || null,
             version: resolvedVersion,
@@ -5541,6 +5682,20 @@ async function performBuildRelease(reqBody, req, publishOverride) {
         const obfMsgPart = shouldObfuscate
             ? `Na-obfuscate ang ${obfuscatedCount} file(s)`
             : `Nagawa nang HINDI obfuscated (${obfuscatedCount} file(s) na-process)`;
+        // Kolektahin ang lahat ng "hindi na-persist sa Neon" na warning (zip
+        // mismo, integrity baseline, build history) sa IISANG warning string —
+        // para hindi kailangang hanapin ng admin sa maraming fields, buong
+        // larawan agad ng kung ano ang tunay na naka-Neon vs. lokal na disk lang.
+        const persistWarnings = [];
+        if (!persistedToNeon && pgPoolBuild) persistWarnings.push('release zip');
+        if (!baselinePersisted && pgPoolBuild) persistWarnings.push('integrity baseline');
+        if (!historyPersisted && pgPoolBuild) persistWarnings.push('build history entry');
+        let warning;
+        if (persistWarnings.length > 0) {
+            warning = `PAALALA: Nabuo ang release pero HINDI na-save sa Neon build DB ang: ${persistWarnings.join(', ')}. Kung ma-restart/ma-redeploy ang RELAY bago ito ma-retry, posibleng mawala/mababalik sa luma ang mga ito. I-retry ang build o suriin ang RELAY_BUILD_DATABASE_URL connection.`;
+        } else if (!pgPoolBuild) {
+            warning = 'PAALALA: Walang RELAY_BUILD_DATABASE_URL na naka-configure — lokal na ephemeral disk lang ang release package/build metadata, mawawala ito kapag nag-restart/na-redeploy.';
+        }
         return {
             message: envResult.encrypted
                 ? `Nagawa ang bagong release package. ${obfMsgPart}, naka-encrypt na ang .env.`
@@ -5549,7 +5704,9 @@ async function performBuildRelease(reqBody, req, publishOverride) {
             obfuscatedFiles: obfuscatedCount,
             obfuscated: shouldObfuscate,
             envEncrypted: envResult.encrypted,
-            builtAt
+            builtAt,
+            persistedToNeon,
+            warning
         };
     } catch (err) {
         console.error('❌ Build-release error:', err.message);
@@ -5610,23 +5767,30 @@ app.post('/relay/admin/api/system/publish-release', requireAdminKey, async (req,
 app.get('/relay/admin/api/system/targeted-releases', requireAdminKey, (req, res) => {
     res.json({ success: true, targeted: Object.fromEntries(targetedReleases) });
 });
-app.post('/relay/admin/api/system/targeted-releases/:installationId/clear', requireAdminKey, (req, res) => {
+app.post('/relay/admin/api/system/targeted-releases/:installationId/clear', requireAdminKey, async (req, res) => {
     const { installationId } = req.params;
     const existed = targetedReleases.delete(installationId);
-    if (existed) saveTargetedReleases(targetedReleases);
-    res.json({ success: true, cleared: existed });
+    let persisted = true;
+    if (existed) persisted = await saveTargetedReleases(targetedReleases);
+    res.json({
+        success: true, cleared: existed,
+        warning: (existed && !persisted && pgPoolBuild) ? 'PAALALA: Hindi na-save sa Neon build DB ang pag-clear na ito — posibleng bumalik ito kapag nag-restart ang server.' : undefined
+    });
 });
 app.get('/relay/admin/api/build-history', requireAdminKey, (req, res) => {
     res.json({ success: true, history: buildHistory });
 });
-app.post('/relay/admin/api/build-history/clear', requireAdminKey, (req, res) => {
+app.post('/relay/admin/api/build-history/clear', requireAdminKey, async (req, res) => {
     const clearedCount = buildHistory.length;
     buildHistory = [];
-    saveBuildHistory(buildHistory);
+    const persisted = await saveBuildHistory(buildHistory);
     logActivity(null, 'build_history_cleared', { clearedCount });
-    res.json({ success: true, clearedCount });
+    res.json({
+        success: true, clearedCount,
+        warning: (!persisted && pgPoolBuild) ? 'PAALALA: Hindi na-save sa Neon build DB ang pag-clear na ito — posibleng bumalik ang lumang history kapag nag-restart ang server.' : undefined
+    });
 });
-app.post('/relay/admin/api/download-codes/generate', requireAdminKey, (req, res) => {
+app.post('/relay/admin/api/download-codes/generate', requireAdminKey, async (req, res) => {
     const { label, maxUses, expiresInHours } = req.body || {};
     const code = crypto.randomBytes(9).toString('base64url'); 
     const now = Date.now();
@@ -5639,24 +5803,28 @@ app.post('/relay/admin/api/download-codes/generate', requireAdminKey, (req, res)
         lastUsedAt: null,
         downloadCount: 0
     });
-    saveDownloadCodes(downloadCodes);
+    const persisted = await saveDownloadCodes(downloadCodes);
     logActivity(null, 'download_code_generated', { code, label: label || null });
     res.json({
         success: true,
         code,
-        downloadUrl: `${req.protocol}://${req.get('host')}/relay/download/${code}`
+        downloadUrl: `${req.protocol}://${req.get('host')}/relay/download/${code}`,
+        warning: (!persisted && pgPoolBuild) ? 'PAALALA: Hindi na-save sa Neon build DB ang download code na ito — kung ma-restart/ma-redeploy ang server bago ito ma-retry, hindi na gagana ang link na ito.' : undefined
     });
 });
 app.get('/relay/admin/api/download-codes', requireAdminKey, (req, res) => {
     const list = [...downloadCodes.entries()].map(([code, meta]) => ({ code, ...meta }));
     res.json({ success: true, codes: list });
 });
-app.post('/relay/admin/api/download-codes/:code/revoke', requireAdminKey, (req, res) => {
+app.post('/relay/admin/api/download-codes/:code/revoke', requireAdminKey, async (req, res) => {
     downloadCodes.delete(req.params.code);
-    saveDownloadCodes(downloadCodes);
-    res.json({ success: true });
+    const persisted = await saveDownloadCodes(downloadCodes);
+    res.json({
+        success: true,
+        warning: (!persisted && pgPoolBuild) ? 'PAALALA: Hindi na-save sa Neon build DB ang pag-revoke na ito — posibleng gumana pa rin ang code kapag nag-restart ang server bago ito ma-retry.' : undefined
+    });
 });
-app.get('/relay/download/:code', (req, res) => {
+app.get('/relay/download/:code', async (req, res) => {
     const { code } = req.params;
     const meta = downloadCodes.get(code);
     if (!meta) {
@@ -5670,6 +5838,7 @@ app.get('/relay/download/:code', (req, res) => {
     if (meta.usesRemaining <= 0) {
         return res.status(410).send('Naubos na ang bilang ng pwedeng gamitin sa code na ito. Kontakin ang developer para sa bagong link.');
     }
+    await ensureReleasePackageFreshOnDisk();
     if (!fs.existsSync(RELEASE_PACKAGE_PATH)) {
         return res.status(503).send('Walang naka-publish na release package sa server pa. Kontakin ang developer.');
     }
@@ -5689,6 +5858,10 @@ async function bootstrapStores() {
         ensureKvSchema(),
         ensureBuildKvSchema()
     ]);
+    // Ibalik agad sa disk ang release zip (kung meron na naka-save sa Neon build
+    // DB) bago pa man tumanggap ng unang download request — para hindi na
+    // mag-503 ang unang user na mag-do-download pagkatapos ng redeploy/restart.
+    await ensureReleasePackageFreshOnDisk();
 
     [
         allowedDevices,
