@@ -1417,6 +1417,11 @@ a:focus-visible,
       <button class="btn-revoke" onclick="clearDeviceHistory()" id="clearDeviceHistoryBtn" style="margin-bottom:12px;">🗑️ Clear History for this device</button>
       <div id="detailHistoryList" class="empty">Loading...</div>
     </div>
+    <div class="card">
+      <h2>⚠️ Danger Zone</h2>
+      <div class="meta" style="margin-bottom:10px;">Permanently deletes this device everywhere — allow-list, label, fingerprint, clone-split history, issued unlocks, backup/integrity history, maintenance-fee override, and its Cloud Backup data on Neon. Use only for an old/duplicate installation ID (e.g. after uninstall+reinstall created a new one). Cannot be undone.</div>
+      <button class="btn-revoke" style="background:linear-gradient(135deg,#5a0f1a,#2b0605);" onclick="purgeDevice(currentDetailId, document.getElementById('detailMeta').innerText)">🗑️ Purge This Device (permanent)</button>
+    </div>
   </div>
 </div>
 <div id="analyticsScreen" style="display:none;">
@@ -2627,6 +2632,7 @@ function renderSeenList() {
         ${d.allowed
           ? `<button class="btn-revoke" onclick="revoke('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">Remove</button>`
           : `<button class="btn-allow" onclick="allow('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">Allow</button>`}
+        <button class="btn-revoke" style="background:linear-gradient(135deg,#5a0f1a,#2b0605);" onclick="purgeDevice('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')" title="Permanently delete this device everywhere, including its Cloud Backup data. Use for old/duplicate installation IDs (e.g. after uninstall+reinstall).">🗑️ Purge (permanent)</button>
       </div>
     </div>
   `).join('');
@@ -2866,6 +2872,39 @@ async function revoke(id, storeName) {
   try {
     const res = await api('/relay/admin/api/devices/revoke', { method: 'POST', body: JSON.stringify({ installationId: id }) });
     if (res.success) toast('Device removed.', 'success');
+  } catch (err) {   }
+  loadDevices();
+}
+async function purgeDevice(id, storeName) {
+  // Dalawang hakbang ang confirmation dahil PERMANENTE ito at hindi na
+  // mababawi — hindi tulad ng "Remove" (revoke) na puwede pang i-Allow
+  // ulit. Gamitin lang ito para sa luma/duplicate na installation ID (hal.
+  // matapos mag-uninstall at mag-reinstall ng OMNIPOS kaya nagkaroon ng
+  // BAGONG installation ID) — HINDI para sa device na baka i-allow mo pa
+  // ulit sa hinaharap.
+  const ok = await confirmAction({
+    title: '⚠️ Permanently delete this device?',
+    message: `This PERMANENTLY deletes device${storeName ? ' (' + storeName + ')' : ''} everywhere: allow-list, label, fingerprint binding, clone-split history, issued unlocks, backup/integrity history, per-client maintenance-fee override, AND its Cloud Backup data on Neon (it will also disappear from the client cost allocation list). This CANNOT be undone. Only use this for an old/duplicate installation ID.`,
+    confirmLabel: 'Oo, alam ko ang panganib',
+    danger: true
+  });
+  if (!ok) return;
+  const typed = prompt(`Para tuluyang kumpirmahin, i-type nang eksakto ang installation ID na ito:\n\n${id}`);
+  if (typed === null) return;
+  if (typed.trim() !== id) {
+    toast('Hindi tumugma ang installation ID na na-type — kinansela ang pag-purge.', 'error');
+    return;
+  }
+  try {
+    const res = await api(`/relay/admin/api/devices/${encodeURIComponent(id)}/purge?confirm=DELETE`, { method: 'POST' });
+    if (res.success) {
+      toast('Device permanently deleted.', 'success');
+      if (typeof currentDetailId !== 'undefined' && currentDetailId === id) {
+        closeDeviceDetail();
+      }
+    } else {
+      toast(res.message || 'Hindi natapos ang pag-purge.', 'error');
+    }
   } catch (err) {   }
   loadDevices();
 }

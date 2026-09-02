@@ -2052,7 +2052,7 @@ app.post('/relay/admin/api/devices/bulk-reset', requireAdminKey, async (req, res
     for (const id of installationIds) {
         deviceLabels.delete(id);
         deviceFingerprints.delete(id);
-        cloneSplits.delete(id);
+        purgeCloneSplitsForInstallation(id);
         seenDevices.delete(id); 
         logActivity(id, 'device_bulk_reset', {});
     }
@@ -2115,6 +2115,128 @@ app.post('/relay/admin/api/devices/reset-all', requireAdminKey, async (req, res)
             ? 'Buong reset: wala nang naka-Allow/naka-label/naka-fingerprint na device, wala nang online status, at wala nang issued unlocks/activity log/backup check-ins.'
             : 'Na-reset ang device list: wala nang naka-Allow/naka-label/naka-fingerprint na device at wala nang online status. Hindi ginalaw ang issued unlocks/activity log/backup check-ins (pasa "wipeUnlocksToo": true kung gusto mo ring buraan iyon).'
     });
+});
+// Tinatanggal ang LAHAT ng clone-split record ng isang device. Composite key
+// ang `cloneSplits` Map ("installationId::fingerprint"), kaya hindi
+// tama/sapat ang simpleng `cloneSplits.delete(installationId)` (ito ang dating
+// bug sa /bulk-reset sa itaas — hindi na-clear ang tunay na clone-split
+// record dahil hindi tumutugma ang key). Ito ang tamang paraan: hanapin ang
+// LAHAT ng key na nagsisimula sa "installationId::" at burahin lahat.
+function purgeCloneSplitsForInstallation(installationId) {
+    let removed = 0;
+    const prefix = `${installationId}::`;
+    for (const key of [...cloneSplits.keys()]) {
+        if (key === installationId || key.startsWith(prefix)) {
+            cloneSplits.delete(key);
+            removed++;
+        }
+    }
+    if (removed > 0) saveCloneSplits(cloneSplits);
+    return removed;
+}
+// TULUYANG PAGBURA NG DEVICE — ginagamit ito kapag, hal., na-uninstall at
+// muling na-install ang OMNIPOS sa parehong pisikal na device kaya nagkaroon
+// ito ng BAGONG installation ID, at gusto nang tuluyang alisin ang LUMANG
+// installation ID sa lahat ng lugar: allow-list, label, fingerprint binding,
+// clone-split history, issued unlocks (ala-carte/subscription), backup at
+// integrity check-in history, per-client maintenance-fee override, online
+// status, AT ang Cloud Backup data mismo (cloud_backup_modules/meta) sa Neon
+// — kaya awtomatiko rin itong mawawala sa "client cost allocation" list
+// dahil derived lang iyon mula sa cloud_backup_meta.
+//
+// SAFETY: kailangan ng ?confirm=DELETE (o "confirm":"DELETE" sa JSON body)
+// dahil hindi na ito mababawi — hindi tulad ng revoke (na puwede pang i-allow
+// ulit), permanenteng bura na ito ng lahat ng datos ng device.
+app.post('/relay/admin/api/devices/:installationId/purge', requireAdminKey, async (req, res) => {
+    const { installationId } = req.params;
+    const confirm = req.query.confirm || req.body?.confirm;
+    if (!installationId) {
+        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+    }
+    if (confirm !== 'DELETE') {
+        return res.status(400).json({
+            success: false,
+            message: 'Safety check: kailangan ng ?confirm=DELETE (o "confirm":"DELETE" sa JSON body) para tuluyang burahin ang device na ito. Hindi na ito mababawi — kabilang na ang Cloud Backup data nito sa Neon.'
+        });
+    }
+    const summary = { installationId };
+    try {
+        summary.wasAllowed = allowedDevices.has(installationId);
+        allowedDevices.delete(installationId);
+        saveAllowedDevices(allowedDevices);
+
+        summary.hadLabel = deviceLabels.has(installationId);
+        deviceLabels.delete(installationId);
+        saveDeviceLabels(deviceLabels);
+
+        summary.hadFingerprint = deviceFingerprints.has(installationId);
+        deviceFingerprints.delete(installationId);
+        saveDeviceFingerprints(deviceFingerprints);
+
+        summary.removedCloneSplits = purgeCloneSplitsForInstallation(installationId);
+
+        seenDevices.delete(installationId);
+
+        summary.hadIssuedUnlocks = !!issuedUnlocks[installationId];
+        if (summary.hadIssuedUnlocks) {
+            delete issuedUnlocks[installationId];
+            saveIssuedUnlocks(issuedUnlocks);
+        }
+
+        summary.hadBackupCheckin = !!backupCheckins[installationId];
+        if (summary.hadBackupCheckin) {
+            delete backupCheckins[installationId];
+            saveBackupCheckins(backupCheckins);
+        }
+
+        summary.hadIntegrityStatus = !!integrityStatus[installationId];
+        if (summary.hadIntegrityStatus) {
+            delete integrityStatus[installationId];
+            saveIntegrityStatus(integrityStatus);
+        }
+
+        const hasFeeOverride = !!(clientMaintenanceFeeConfig.perClientOverridePHP &&
+            clientMaintenanceFeeConfig.perClientOverridePHP[installationId] !== undefined);
+        summary.hadMaintenanceFeeOverride = hasFeeOverride;
+        if (hasFeeOverride) {
+            delete clientMaintenanceFeeConfig.perClientOverridePHP[installationId];
+            saveClientMaintenanceFeeConfig(clientMaintenanceFeeConfig);
+        }
+
+        if (redisClient) {
+            try {
+                await redisClient.del(ONLINE_KEY_PREFIX + installationId);
+            } catch (err) {
+                console.error('⚠️  Hindi na-clear ang online heartbeat key (purge):', err.message);
+            }
+        }
+
+        if (pgPool) {
+            try {
+                await runPgWriteTx(pgPool, async (client) => {
+                    const modulesResult = await client.query('DELETE FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
+                    const metaResult = await client.query('DELETE FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
+                    summary.deletedCloudBackupModuleRows = modulesResult.rowCount;
+                    summary.deletedCloudBackupMetaRows = metaResult.rowCount;
+                });
+            } catch (err) {
+                console.error('⚠️  Hindi na-delete ang Cloud Backup data ng device (purge):', err.message);
+                summary.cloudBackupDeleteError = err.message;
+            }
+        } else {
+            summary.cloudBackupDeleteError = 'Hindi naka-configure ang Postgres (DATABASE_URL) para sa Cloud Backup.';
+        }
+
+        logActivity(installationId, 'device_purged', summary);
+        res.json({
+            success: true,
+            message: `Tuluyang binura ang device ${installationId}: allow-list, label, fingerprint binding, clone-split record, issued unlocks, backup/integrity history, maintenance-fee override, online status, at Cloud Backup data (Neon). Awtomatiko rin itong mawawala sa client cost allocation list.`,
+            summary
+        });
+    } catch (err) {
+        console.error('⚠️  /relay/admin/api/devices/:installationId/purge error:', err.message);
+        res.status(500).json({ success: false, message: 'Hindi na-buo ang pag-purge ng device — posibleng may parte itong tapos na (tingnan ang summary sa logs).', summary });
+    }
 });
 app.get('/relay/admin/api/catalog', requireAdminKey, (req, res) => {
     res.json({ success: true, catalog: FEATURE_CATALOG, tiers: UPGRADE_TIERS });
