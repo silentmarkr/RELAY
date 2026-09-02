@@ -84,6 +84,27 @@ if (DEVICES_DB_IS_SEPARATE && pgPoolDevices) {
 } else {
     console.warn('ℹ️  Walang hiwalay na RELAY_DEVICES_DATABASE_URL na naka-set — GINAGAMIT PA RIN ang parehong DATABASE_URL para sa Device/License data at Cloud Backup. Para tunay na mahiwalay, magtakda ng ibang Neon connection string sa RELAY_DEVICES_DATABASE_URL.');
 }
+// ===================================================================
+// BUILD & PUSH DATABASE (hiwalay na Neon project/database) — dito
+// lang naka-save ang download codes, build history, targeted releases,
+// system version info, at release integrity/baseline data. SADYANG
+// HIWALAY ito sa DATABASE_URL (Cloud Backup) at RELAY_DEVICES_DATABASE_URL
+// (allowed devices/license) — kahit magkasabay silang ma-configure sa
+// parehong Neon account, magkaiba dapat ang project/database para
+// walang paghahalo ng data. Kung walang RELAY_BUILD_DATABASE_URL na
+// naka-set, HINDI ito babalik sa pgPool/pgPoolDevices (iyon mismo ang
+// gustong iwasan) — babalik na lang sa lokal na file (na alam nating
+// ephemeral sa Render, pero mas mabuti pa rin kesa ihalo sa ibang DB).
+const BUILD_DATABASE_URL = process.env.RELAY_BUILD_DATABASE_URL || null;
+const pgPoolBuild = makePgPool(BUILD_DATABASE_URL);
+if (pgPoolBuild) {
+    pgPoolBuild.on('error', (err) => {
+        console.error('⚠️  Postgres pool error (build/push storage):', err.message);
+    });
+    console.log('✅ Hiwalay na Neon database ang ginagamit para sa Build/Push data (RELAY_BUILD_DATABASE_URL) — hiwalay ito sa Cloud Backup at Devices/License.');
+} else {
+    console.warn('⚠️  Walang RELAY_BUILD_DATABASE_URL na naka-set — babalik sa lokal na file (ephemeral sa Render) ang download codes/build history/atbp., SADYANG hindi ito ibinabalik sa Cloud Backup o Devices database. Gumawa ng bagong Neon database at itakda ang connection string dito para persistent.');
+}
 function isTransientPgConnectionError(err) {
     if (!err) return false;
     const msg = String(err.message || '');
@@ -214,22 +235,118 @@ async function ensureDeviceLicenseSchema() {
     `);
     console.log('✅ Device/license Postgres schema ready (relay_devices, relay_device_fingerprints, relay_clone_splits).');
 }
-async function redisGetJSON(key, fallback) {
-    if (!redisClient) return fallback;
-    try {
-        const raw = await redisClient.get(REDIS_KEY_PREFIX + key);
-        if (raw === null) return fallback;
-        return JSON.parse(raw);
-    } catch (err) {
-        console.error(`⚠️  Hindi mabasa sa Redis ang key "${key}":`, err.message);
+// ===================================================================
+// GENERIC PERSISTENT KEY-VALUE STORE (Neon Postgres) — dito na-save
+// ang LAHAT ng admin settings/lists na dating Redis-or-local-file lang
+// (download codes, pricing overrides, device unlocks, activity log,
+// atbp. — bawat load*()/save*() function pair sa buong file na
+// dumadaan sa redisGetJSON/redisSetJSON sa ibaba). Ginamit ang
+// parehong Neon Postgres na ginagamit na rin ng Cloud Backup/Devices
+// data — walang extra service (Redis/Upstash) na kailangan pang i-set
+// up, at HINDI ito mawawala kapag nag-restart/natulog ang Render web
+// service (hindi tulad ng lokal na file, na napapawi sa ephemeral
+// filesystem — tingnan ang paalala sa REDIS_URL warning sa itaas).
+// Redis pa rin ang unang susubukan KUNG naka-configure ito (para hindi
+// biglang mawala ang datos ng mga umiiral nang gumagamit ng Redis),
+// pero Postgres na ang PANGUNAHING target ng LAHAT ng bagong save mula
+// ngayon — tingnan ang redisGetJSON/redisSetJSON sa ibaba.
+async function ensureKvSchema() {
+    const pool = pgPoolDevices || pgPool;
+    if (!pool) return;
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS relay_kv_store (
+            key        TEXT PRIMARY KEY,
+            value      JSONB NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+    `);
+    console.log('✅ Persistent settings Postgres schema ready (relay_kv_store) — dito na-save ang download codes at lahat ng admin settings, hindi na sa ephemeral file.');
+}
+// Hiwalay na schema/table sa HIWALAY na database (pgPoolBuild) — tingnan
+// ang paalala sa itaas kung bakit sinadyang hiwalay ito sa relay_kv_store.
+async function ensureBuildKvSchema() {
+    if (!pgPoolBuild) return;
+    await pgPoolBuild.query(`
+        CREATE TABLE IF NOT EXISTS relay_build_kv_store (
+            key        TEXT PRIMARY KEY,
+            value      JSONB NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+    `);
+    console.log('✅ Build/Push Postgres schema ready (relay_build_kv_store) sa HIWALAY na database mula sa allowed devices.');
+}
+// Parehong pattern ng redisGetJSON/redisSetJSON sa itaas, pero NAKATUON
+// lang sa pgPoolBuild (hiwalay na Neon database) — walang Redis fallback
+// dito dahil sadyang isolated na dapat itong storage, at walang
+// pag-fallback sa pgPool/pgPoolDevices (iyon mismo ang iniiwasan).
+async function buildKvGetJSON(key, fallback) {
+    if (pgPoolBuild) {
+        try {
+            const result = await queryWithRetry(pgPoolBuild, 'SELECT value FROM relay_build_kv_store WHERE key = $1', [key]);
+            if (result.rows.length > 0) return result.rows[0].value; 
+        } catch (err) {
+            console.error(`⚠️  Hindi mabasa sa Build Postgres store ang key "${key}":`, err.message);
+        }
         return fallback;
     }
+    return fallback;
+}
+function buildKvSetJSON(key, value) {
+    if (!pgPoolBuild) return;
+    pgPoolBuild.query(
+        `INSERT INTO relay_build_kv_store (key, value, updated_at) VALUES ($1, $2::jsonb, now())
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+        [key, JSON.stringify(value)]
+    ).catch((err) => {
+        console.error(`⚠️  Hindi ma-save sa Build Postgres store ang key "${key}":`, err.message);
+    });
+}
+async function redisGetJSON(key, fallback) {
+    // 1) Neon Postgres — pangunahing storage ngayon, laging persistent.
+    const pool = pgPoolDevices || pgPool;
+    if (pool) {
+        try {
+            const result = await queryWithRetry(pool, 'SELECT value FROM relay_kv_store WHERE key = $1', [REDIS_KEY_PREFIX + key]);
+            if (result.rows.length > 0) return result.rows[0].value; 
+        } catch (err) {
+            console.error(`⚠️  Hindi mabasa sa Postgres KV store ang key "${key}":`, err.message);
+        }
+    }
+    // 2) Redis — fallback lang ngayon (kung meron pang lumang datos dito
+    // mula bago ang Postgres migration na ito). Kapag nakita dito,
+    // isinusulat din agad papuntang Postgres para sa susunod na basa.
+    if (redisClient) {
+        try {
+            const raw = await redisClient.get(REDIS_KEY_PREFIX + key);
+            if (raw !== null) {
+                const parsed = JSON.parse(raw);
+                if (pool) redisSetJSON(key, parsed); 
+                return parsed;
+            }
+        } catch (err) {
+            console.error(`⚠️  Hindi mabasa sa Redis ang key "${key}":`, err.message);
+        }
+    }
+    // 3) Wala talaga — babalik sa fallback (kadalasan ay lokal na file,
+    // hawak-hawak na ito ng bawat load*() function sa ibaba).
+    return fallback;
 }
 function redisSetJSON(key, value) {
-    if (!redisClient) return;
-    redisClient.set(REDIS_KEY_PREFIX + key, JSON.stringify(value)).catch((err) => {
-        console.error(`⚠️  Hindi ma-save sa Redis ang key "${key}":`, err.message);
-    });
+    const pool = pgPoolDevices || pgPool;
+    if (pool) {
+        pool.query(
+            `INSERT INTO relay_kv_store (key, value, updated_at) VALUES ($1, $2::jsonb, now())
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+            [REDIS_KEY_PREFIX + key, JSON.stringify(value)]
+        ).catch((err) => {
+            console.error(`⚠️  Hindi ma-save sa Postgres KV store ang key "${key}":`, err.message);
+        });
+    }
+    if (redisClient) {
+        redisClient.set(REDIS_KEY_PREFIX + key, JSON.stringify(value)).catch((err) => {
+            console.error(`⚠️  Hindi ma-save sa Redis ang key "${key}":`, err.message);
+        });
+    }
 }
 try {
     process.loadEnvFile(path.join(__dirname, '.env'));
@@ -1585,8 +1702,8 @@ function buildFileManifest(rootDir) {
 }
 const RELEASE_BASELINES_PATH = path.join(__dirname, 'release-baselines.json');
 async function loadReleaseBaselines() {
-    const fromRedis = await redisGetJSON('release-baselines', null);
-    if (fromRedis !== null) return new Map(Object.entries(fromRedis));
+    const fromBuildDb = await buildKvGetJSON('release-baselines', null);
+    if (fromBuildDb !== null) return new Map(Object.entries(fromBuildDb));
     try {
         return new Map(Object.entries(JSON.parse(fs.readFileSync(RELEASE_BASELINES_PATH, 'utf8'))));
     } catch (err) {
@@ -1595,8 +1712,8 @@ async function loadReleaseBaselines() {
 }
 function saveReleaseBaselines(map) {
     const obj = Object.fromEntries(map);
-    if (redisClient) {
-        redisSetJSON('release-baselines', obj);
+    if (pgPoolBuild) {
+        buildKvSetJSON('release-baselines', obj);
         return;
     }
     try {
@@ -1608,8 +1725,8 @@ function saveReleaseBaselines(map) {
 let releaseBaselines = new Map(); 
 const INTEGRITY_STATUS_PATH = path.join(__dirname, 'integrity-status.json');
 async function loadIntegrityStatus() {
-    const fromRedis = await redisGetJSON('integrity-status', null);
-    if (fromRedis !== null) return fromRedis;
+    const fromBuildDb = await buildKvGetJSON('integrity-status', null);
+    if (fromBuildDb !== null) return fromBuildDb;
     try {
         return JSON.parse(fs.readFileSync(INTEGRITY_STATUS_PATH, 'utf8'));
     } catch (err) {
@@ -1617,8 +1734,8 @@ async function loadIntegrityStatus() {
     }
 }
 function saveIntegrityStatus(obj) {
-    if (redisClient) {
-        redisSetJSON('integrity-status', obj);
+    if (pgPoolBuild) {
+        buildKvSetJSON('integrity-status', obj);
         return;
     }
     try {
@@ -1632,8 +1749,8 @@ const pendingIntegrityChecks = new Set();
 const SYSTEM_VERSION_PATH = path.join(__dirname, 'system-version.json');
 const DEFAULT_SYSTEM_VERSION_INFO = { version: '0.0.0', changelog: '', publishedAt: null };
 async function loadSystemVersionInfo() {
-    const fromRedis = await redisGetJSON('system-version', null);
-    if (fromRedis !== null) return fromRedis;
+    const fromBuildDb = await buildKvGetJSON('system-version', null);
+    if (fromBuildDb !== null) return fromBuildDb;
     try {
         return JSON.parse(fs.readFileSync(SYSTEM_VERSION_PATH, 'utf8'));
     } catch (err) {
@@ -1641,8 +1758,8 @@ async function loadSystemVersionInfo() {
     }
 }
 function saveSystemVersionInfo(obj) {
-    if (redisClient) {
-        redisSetJSON('system-version', obj);
+    if (pgPoolBuild) {
+        buildKvSetJSON('system-version', obj);
         return;
     }
     try {
@@ -1654,8 +1771,8 @@ function saveSystemVersionInfo(obj) {
 let systemVersionInfo = { ...DEFAULT_SYSTEM_VERSION_INFO }; 
 const TARGETED_RELEASES_PATH = path.join(__dirname, 'targeted-releases.json');
 async function loadTargetedReleases() {
-    const fromRedis = await redisGetJSON('targeted-releases', null);
-    if (fromRedis !== null) return new Map(Object.entries(fromRedis));
+    const fromBuildDb = await buildKvGetJSON('targeted-releases', null);
+    if (fromBuildDb !== null) return new Map(Object.entries(fromBuildDb));
     try {
         const raw = fs.readFileSync(TARGETED_RELEASES_PATH, 'utf8');
         return new Map(Object.entries(JSON.parse(raw)));
@@ -1664,8 +1781,8 @@ async function loadTargetedReleases() {
     }
 }
 function saveTargetedReleases(map) {
-    if (redisClient) {
-        redisSetJSON('targeted-releases', Object.fromEntries(map));
+    if (pgPoolBuild) {
+        buildKvSetJSON('targeted-releases', Object.fromEntries(map));
         return;
     }
     try {
@@ -1677,8 +1794,8 @@ function saveTargetedReleases(map) {
 let targetedReleases = new Map(); 
 const DOWNLOAD_CODES_PATH = path.join(__dirname, 'download-codes.json');
 async function loadDownloadCodes() {
-    const fromRedis = await redisGetJSON('download-codes', null);
-    if (fromRedis !== null) return new Map(Object.entries(fromRedis));
+    const fromBuildDb = await buildKvGetJSON('download-codes', null);
+    if (fromBuildDb !== null) return new Map(Object.entries(fromBuildDb));
     try {
         const raw = fs.readFileSync(DOWNLOAD_CODES_PATH, 'utf8');
         return new Map(Object.entries(JSON.parse(raw)));
@@ -1687,8 +1804,8 @@ async function loadDownloadCodes() {
     }
 }
 function saveDownloadCodes(map) {
-    if (redisClient) {
-        redisSetJSON('download-codes', Object.fromEntries(map));
+    if (pgPoolBuild) {
+        buildKvSetJSON('download-codes', Object.fromEntries(map));
         return;
     }
     try {
@@ -1703,8 +1820,8 @@ const RELEASE_PACKAGE_TMP_PATH = path.join(__dirname, 'release', '.omnipos-clien
 const BUILD_HISTORY_PATH = path.join(__dirname, 'build-history.json');
 const BUILD_HISTORY_MAX_ENTRIES = 100;
 async function loadBuildHistory() {
-    const fromRedis = await redisGetJSON('build-history', null);
-    if (fromRedis !== null) return Array.isArray(fromRedis) ? fromRedis : [];
+    const fromBuildDb = await buildKvGetJSON('build-history', null);
+    if (fromBuildDb !== null) return Array.isArray(fromBuildDb) ? fromBuildDb : [];
     try {
         const raw = fs.readFileSync(BUILD_HISTORY_PATH, 'utf8');
         const parsed = JSON.parse(raw);
@@ -1714,8 +1831,8 @@ async function loadBuildHistory() {
     }
 }
 function saveBuildHistory(list) {
-    if (redisClient) {
-        redisSetJSON('build-history', list);
+    if (pgPoolBuild) {
+        buildKvSetJSON('build-history', list);
         return;
     }
     try {
@@ -5269,7 +5386,9 @@ async function bootstrapStores() {
     // Siguraduhing tapos na ang CREATE TABLE bago mag-SELECT — iwas race condition sa Neon cold-start
     await Promise.all([
         ensureCloudBackupSchema(),
-        ensureDeviceLicenseSchema()
+        ensureDeviceLicenseSchema(),
+        ensureKvSchema(),
+        ensureBuildKvSchema()
     ]);
 
     [
