@@ -794,7 +794,7 @@ async function loadCloudBackupPlanOverrides() {
     }
 }
 function saveCloudBackupPlanOverrides(obj) {
-    if (redisClient) {
+    if (pgPoolDevices || pgPool || redisClient) {
         redisSetJSON('cloud-backup-plan-overrides', obj);
         return;
     }
@@ -857,7 +857,7 @@ async function loadModuleSubscriptionOverrides() {
     }
 }
 function saveModuleSubscriptionOverrides(obj) {
-    if (redisClient) {
+    if (pgPoolDevices || pgPool || redisClient) {
         redisSetJSON('module-subscription-overrides', obj);
         return;
     }
@@ -949,7 +949,7 @@ async function loadNeonPricingOverrides() {
     }
 }
 function saveNeonPricingOverrides(obj) {
-    if (redisClient) {
+    if (pgPoolDevices || pgPool || redisClient) {
         redisSetJSON('neon-pricing-overrides', obj);
         return;
     }
@@ -991,7 +991,7 @@ async function loadNeonConfiguredPlans() {
     }
 }
 function saveNeonConfiguredPlans(obj) {
-    if (redisClient) {
+    if (pgPoolDevices || pgPool || redisClient) {
         redisSetJSON('neon-configured-plans', obj);
         return;
     }
@@ -1024,7 +1024,7 @@ async function loadClientMaintenanceFeeConfig() {
     }
 }
 function saveClientMaintenanceFeeConfig(obj) {
-    if (redisClient) {
+    if (pgPoolDevices || pgPool || redisClient) {
         redisSetJSON('client-maintenance-fee', obj);
         return;
     }
@@ -1382,7 +1382,7 @@ async function loadFeatureCatalogOverrides() {
     }
 }
 function saveFeatureCatalogOverrides(obj) {
-    if (redisClient) {
+    if (pgPoolDevices || pgPool || redisClient) {
         redisSetJSON('feature-catalog-overrides', obj);
         return;
     }
@@ -1404,7 +1404,7 @@ async function loadFeaturePricingOverrides() {
     }
 }
 function saveFeaturePricingOverrides(obj) {
-    if (redisClient) {
+    if (pgPoolDevices || pgPool || redisClient) {
         redisSetJSON('feature-pricing-overrides', obj);
         return;
     }
@@ -1426,7 +1426,7 @@ async function loadUpgradeTierPricingOverrides() {
     }
 }
 function saveUpgradeTierPricingOverrides(obj) {
-    if (redisClient) {
+    if (pgPoolDevices || pgPool || redisClient) {
         redisSetJSON('upgrade-tier-pricing-overrides', obj);
         return;
     }
@@ -1517,7 +1517,7 @@ async function loadIssuedUnlocks() {
     }
 }
 function saveIssuedUnlocks(obj) {
-    if (redisClient) {
+    if (pgPoolDevices || pgPool || redisClient) {
         redisSetJSON('issued-unlocks', obj);
         return;
     }
@@ -1557,7 +1557,7 @@ async function loadActivityLog() {
     }
 }
 function saveActivityLog(arr) {
-    if (redisClient) {
+    if (pgPoolDevices || pgPool || redisClient) {
         redisSetJSON('activity-log', arr);
         return;
     }
@@ -1624,7 +1624,7 @@ async function loadBackupCheckins() {
     }
 }
 function saveBackupCheckins(obj) {
-    if (redisClient) {
+    if (pgPoolDevices || pgPool || redisClient) {
         redisSetJSON('backup-checkins', obj);
         return;
     }
@@ -1646,7 +1646,7 @@ async function loadBranchSummaries() {
     }
 }
 function saveBranchSummaries(obj) {
-    if (redisClient) {
+    if (pgPoolDevices || pgPool || redisClient) {
         redisSetJSON('branch-summaries', obj);
         return;
     }
@@ -2460,7 +2460,7 @@ async function loadSuggestedDiscountPercent() {
     return 30;
 }
 function saveSuggestedDiscountPercent(value) {
-    if (redisClient) {
+    if (pgPoolDevices || pgPool || redisClient) {
         redisSetJSON('suggested-discount-percent', value);
         return;
     }
@@ -2877,33 +2877,155 @@ app.post('/relay/admin/api/devices/:installationId/deactivate-all', requireAdmin
 app.get('/relay/admin/api/backup', requireAdminKey, (req, res) => {
     res.json({
         success: true,
-        backupVersion: 2, 
+        backupVersion: 3, 
         exportedAt: Date.now(),
+        // === Devices/License (dating v2 fields) ===
         allowedDevices: [...allowedDevices],
         deviceLabels: Object.fromEntries(deviceLabels),
         issuedUnlocks,
-        activityLog
+        activityLog,
+        // === BAGO sa v3: dating Postgres-only o file-only, wala pang backup ===
+        deviceFingerprints: Object.fromEntries(deviceFingerprints),
+        cloneSplits: Object.fromEntries(cloneSplits),
+        backupCheckins,
+        branchSummaries,
+        // Build/Push
+        systemVersionInfo,
+        targetedReleases: Object.fromEntries(targetedReleases),
+        downloadCodes: Object.fromEntries(downloadCodes),
+        buildHistory,
+        releaseBaselines: Object.fromEntries(releaseBaselines),
+        integrityStatus,
+        // Pricing/feature config overrides
+        featureCatalogOverrides,
+        featurePricingOverrides,
+        upgradeTierPricingOverrides,
+        cloudBackupPlanOverrides,
+        moduleSubscriptionOverrides,
+        suggestedDiscountPercent: SUGGESTED_DISCOUNT_PERCENT,
+        neonPricingOverrides,
+        neonConfiguredPlans,
+        clientMaintenanceFeeConfig
     });
 });
 app.post('/relay/admin/api/restore', requireAdminKey, (req, res) => {
-    const { allowedDevices: backupAllowed, deviceLabels: backupLabels, issuedUnlocks: backupUnlocks, activityLog: backupLog } = req.body;
+    const body = req.body || {};
+    const { allowedDevices: backupAllowed, deviceLabels: backupLabels, issuedUnlocks: backupUnlocks, activityLog: backupLog } = body;
     if (!Array.isArray(backupAllowed) || typeof backupUnlocks !== 'object' || backupUnlocks === null || !Array.isArray(backupLog)) {
         return res.status(400).json({ success: false, message: 'Hindi kilalang format ng backup file — siguraduhing yung na-download galing sa /backup ang ini-restore.' });
     }
+    const restoredParts = [];
     const hasLabels = backupLabels && typeof backupLabels === 'object' && !Array.isArray(backupLabels);
     allowedDevices = new Set(backupAllowed);
     saveAllowedDevices(allowedDevices);
+    restoredParts.push(`${allowedDevices.size} allowed device(s)`);
     if (hasLabels) {
         deviceLabels = new Map(Object.entries(backupLabels));
         saveDeviceLabels(deviceLabels);
+        restoredParts.push(`${deviceLabels.size} label(s)`);
     }
     issuedUnlocks = backupUnlocks;
     saveIssuedUnlocks(issuedUnlocks);
+    restoredParts.push(`${Object.keys(issuedUnlocks).length} device(s) may naka-unlock`);
     activityLog = backupLog;
     saveActivityLog(activityLog);
+    restoredParts.push(`${activityLog.length} history entry(ies)`);
+    // === v3 fields — LAHAT ay OPTIONAL (backward-compatible sa lumang v2
+    // backup files na 4 fields lang ang laman). Kung wala sa backup ang
+    // isang field, hindi ito ginagalaw — nananatili ang kasalukuyang datos. ===
+    const isPlainObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
+    if (isPlainObj(body.deviceFingerprints)) {
+        deviceFingerprints = new Map(Object.entries(body.deviceFingerprints));
+        saveDeviceFingerprints(deviceFingerprints);
+        restoredParts.push(`${deviceFingerprints.size} fingerprint(s)`);
+    }
+    if (isPlainObj(body.cloneSplits)) {
+        cloneSplits = new Map(Object.entries(body.cloneSplits));
+        saveCloneSplits(cloneSplits);
+        restoredParts.push(`${cloneSplits.size} clone-split(s)`);
+    }
+    if (isPlainObj(body.backupCheckins)) {
+        backupCheckins = body.backupCheckins;
+        saveBackupCheckins(backupCheckins);
+    }
+    if (isPlainObj(body.branchSummaries)) {
+        branchSummaries = body.branchSummaries;
+        saveBranchSummaries(branchSummaries);
+    }
+    if (isPlainObj(body.systemVersionInfo)) {
+        systemVersionInfo = body.systemVersionInfo;
+        saveSystemVersionInfo(systemVersionInfo);
+    }
+    if (isPlainObj(body.targetedReleases)) {
+        targetedReleases = new Map(Object.entries(body.targetedReleases));
+        saveTargetedReleases(targetedReleases);
+    }
+    if (isPlainObj(body.downloadCodes)) {
+        downloadCodes = new Map(Object.entries(body.downloadCodes));
+        saveDownloadCodes(downloadCodes);
+        restoredParts.push(`${downloadCodes.size} download code(s)`);
+    }
+    if (Array.isArray(body.buildHistory)) {
+        buildHistory = body.buildHistory;
+        saveBuildHistory(buildHistory);
+    }
+    if (isPlainObj(body.releaseBaselines)) {
+        releaseBaselines = new Map(Object.entries(body.releaseBaselines));
+        saveReleaseBaselines(releaseBaselines);
+    }
+    if (isPlainObj(body.integrityStatus)) {
+        integrityStatus = body.integrityStatus;
+        saveIntegrityStatus(integrityStatus);
+    }
+    if (isPlainObj(body.featureCatalogOverrides)) {
+        featureCatalogOverrides = body.featureCatalogOverrides;
+        saveFeatureCatalogOverrides(featureCatalogOverrides);
+    }
+    if (isPlainObj(body.featurePricingOverrides)) {
+        featurePricingOverrides = body.featurePricingOverrides;
+        saveFeaturePricingOverrides(featurePricingOverrides);
+    }
+    if (isPlainObj(body.upgradeTierPricingOverrides)) {
+        upgradeTierPricingOverrides = body.upgradeTierPricingOverrides;
+        saveUpgradeTierPricingOverrides(upgradeTierPricingOverrides);
+    }
+    // AYOS: umaasa ang recomputeFeatureCatalog() sa PAREHONG featureCatalogOverrides
+    // AT featurePricingOverrides, at ito rin ang tumatawag sa recomputeProTierFeatureIds()
+    // (na umaasa naman sa upgradeTierPricingOverrides) — kaya laging tinatawag ito nang
+    // isang beses dito sa dulo, hindi lang kondisyonal sa isa sa tatlong field, para hindi
+    // mag-stale ang FEATURE_CATALOG/UPGRADE_TIERS kung isa lang sa tatlo ang nasa backup.
+    recomputeFeatureCatalog();
+    if (isPlainObj(body.cloudBackupPlanOverrides)) {
+        cloudBackupPlanOverrides = body.cloudBackupPlanOverrides;
+        saveCloudBackupPlanOverrides(cloudBackupPlanOverrides);
+        recomputeCloudBackupPlans();
+    }
+    if (isPlainObj(body.moduleSubscriptionOverrides)) {
+        moduleSubscriptionOverrides = body.moduleSubscriptionOverrides;
+        saveModuleSubscriptionOverrides(moduleSubscriptionOverrides);
+        recomputeModuleSubscriptionPlans();
+    }
+    if (typeof body.suggestedDiscountPercent === 'number') {
+        SUGGESTED_DISCOUNT_PERCENT = body.suggestedDiscountPercent;
+        saveSuggestedDiscountPercent(SUGGESTED_DISCOUNT_PERCENT);
+    }
+    if (isPlainObj(body.neonPricingOverrides)) {
+        neonPricingOverrides = body.neonPricingOverrides;
+        saveNeonPricingOverrides(neonPricingOverrides);
+        recomputeNeonPricing();
+    }
+    if (isPlainObj(body.neonConfiguredPlans)) {
+        neonConfiguredPlans = body.neonConfiguredPlans;
+        saveNeonConfiguredPlans(neonConfiguredPlans);
+    }
+    if (isPlainObj(body.clientMaintenanceFeeConfig)) {
+        clientMaintenanceFeeConfig = body.clientMaintenanceFeeConfig;
+        saveClientMaintenanceFeeConfig(clientMaintenanceFeeConfig);
+    }
+    if (!hasLabels) restoredParts.push('(lumang backup na walang labels — hindi binago ang labels)');
     res.json({
         success: true,
-        message: `Na-restore: ${allowedDevices.size} allowed device(s), ${deviceLabels.size} label(s)${hasLabels ? '' : ' (hindi binago — lumang backup na walang labels)'}, ${Object.keys(issuedUnlocks).length} device(s) may naka-unlock, ${activityLog.length} history entry(ies).`
+        message: `Na-restore: ${restoredParts.join(', ')}.`
     });
 });
 app.post('/relay/restore-tokens', requireApiKey, requireAllowedDevice, rateLimit('restore-tokens', 30, 10 * 60 * 1000), (req, res) => {

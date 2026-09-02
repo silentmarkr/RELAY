@@ -1196,7 +1196,7 @@ a:focus-visible,
         <h2 onclick="toggleCardCollapse('cardBackupRestore')">💾 Backup / Restore<span class="collapse-chevron">▾</span></h2>
         <div class="collapse-body">
           <div class="backup-note">
-            Render's free tier has no persistent disk — allowed devices, unlocked features, and history are lost on every <code>git push</code>/redeploy, and everything is lost if you delete the service/domain. Download the backup periodically (especially after a new unlock/customer) and keep it somewhere safe.
+            Full snapshot ito ngayon (v3) — kasama na ang lahat ng persisted data (devices, unlocks, history, fingerprints, pricing/feature overrides, download codes, build history, atbp.), hindi lang yung 4 na field dati. Bagama't naka-Postgres na ang karamihan nito (hindi na basta-basta nawawala sa redeploy), extra safety net pa rin ito kung sakaling magkaproblema ang database mismo o mag-delete ka ng service/domain. Download-in pa rin periodically (lalo na pagkatapos ng bagong unlock/customer) at itago sa ligtas na lugar.
           </div>
           <div class="backup-row">
             <button class="btn-primary" onclick="downloadBackup()">⬇️ Download Backup</button>
@@ -2374,6 +2374,9 @@ async function loadDbHealth(force) {
       renderDbHealthEntry('cloudBackup', data.databases.cloudBackup, phpRate) +
       renderDbHealthEntry('devices', data.databases.devices, phpRate) +
       renderDbHealthEntry('build', data.databases.build, phpRate);
+    if (customerScaleDbKey && document.getElementById('customerScaleBackdrop').style.display !== 'none') {
+      renderCustomerScaleTable();
+    }
     const checkedAtEl = document.getElementById('dbHealthCheckedAt');
     if (checkedAtEl && data.checkedAt) {
       checkedAtEl.innerText = `Last checked: ${new Date(data.checkedAt).toLocaleTimeString()}${data.cached ? ' (cached)' : ''}`;
@@ -2551,7 +2554,7 @@ async function restoreBackupFromFile(event) {
   const exportedNote = parsed.exportedAt ? ` (ginawa noong ${new Date(parsed.exportedAt).toLocaleString('en-PH')})` : '';
   const ok = await confirmAction({
     title: 'Restore this backup?',
-    message: `This will REPLACE the CURRENT allowed devices, unlocked features, and history with the contents of the backup file${exportedNote}. This cannot be undone unless you have a newer backup after this.`,
+    message: `This will REPLACE the CURRENT devices, unlocked features, history, and any other data present in this backup file${exportedNote} (older v2 backups only touch devices/unlocks/history — fields missing from an older file are left untouched). This cannot be undone unless you have a newer backup after this.`,
     confirmLabel: 'Oo, i-restore',
     danger: true
   });
