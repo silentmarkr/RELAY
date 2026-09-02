@@ -157,7 +157,9 @@
     content: ''; position: absolute; inset: 0 0 auto 0; height: 2px;
     background: linear-gradient(90deg, var(--accent), transparent);
   }
+  .client-card-label { font-size: .92rem; font-weight: 600; color: var(--text); word-break: break-word; line-height: 1.3; }
   .client-card-id { font-size: .82rem; color: var(--text); word-break: break-all; line-height: 1.4; }
+  .client-card-id.has-label { font-size: .72rem; color: var(--muted); margin-top: 2px; }
   .client-card-sub { font-size: .75rem; color: var(--muted); margin-top: 2px; }
   .client-metric-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
   .client-metric-label { font-size: .7rem; text-transform: uppercase; letter-spacing: .07em; color: var(--muted-dim); }
@@ -328,7 +330,7 @@
     <div id="clientsWrap">
       <div class="client-toolbar hidden" id="clientToolbar">
         <div class="search-field">
-          <input type="search" id="clientSearchInput" placeholder="Search by installation ID…" oninput="onClientSearchChange(this.value)">
+          <input type="search" id="clientSearchInput" placeholder="Search by label, store name, or installation ID…" oninput="onClientSearchChange(this.value)">
         </div>
         <select id="clientSortSelect" onchange="onClientSortChange(this.value)">
           <option value="totalDesc" selected>Total / month (high → low)</option>
@@ -512,7 +514,10 @@ function getFilteredSortedClients() {
   const clients = (lastAllocation && Array.isArray(lastAllocation.clients)) ? lastAllocation.clients : [];
   const q = clientSearchQuery.trim().toLowerCase();
   const filtered = q
-    ? clients.filter((c) => String(c.installationId || '').toLowerCase().includes(q))
+    ? clients.filter((c) =>
+        String(c.installationId || '').toLowerCase().includes(q) ||
+        String(c.label || '').toLowerCase().includes(q) ||
+        String(c.storeName || '').toLowerCase().includes(q))
     : clients.slice();
   const sorters = {
     totalDesc: (a, b) => (b.finalPricePHP || 0) - (a.finalPricePHP || 0),
@@ -531,10 +536,19 @@ function renderClientCard(c) {
     ? dirtyFees[c.installationId]
     : c.maintenanceFeePHP;
   const safeId = escapeHtml(c.installationId);
+  // AYOS: hiniling na makita rin sa Client Cost Allocation kung ano ang
+  // naka-label sa device sa Allowed Devices page, hindi lang basta
+  // installation ID. Kung walang manual label, gamitin ang self-reported
+  // store name mula sa Cloud Backup check-in bilang fallback; kung wala ring
+  // alinman, ang installation ID lang mismo ang lalabas gaya ng dati.
+  const displayLabel = c.label || c.storeName || null;
+  const idBlock = displayLabel
+    ? `<div class="client-card-label">${escapeHtml(displayLabel)}</div><div class="mono client-card-id has-label">${safeId}</div>`
+    : `<div class="mono client-card-id">${safeId}</div>`;
   return `
     <div class="client-card" data-installation-id="${safeId}">
       <div>
-        <div class="mono client-card-id">${safeId}</div>
+        ${idBlock}
         <div class="client-card-sub">${c.syncCount != null ? c.syncCount : 0} syncs · ${c.totalRecords != null ? c.totalRecords : 0} records</div>
       </div>
 

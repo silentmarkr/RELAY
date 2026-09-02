@@ -1298,7 +1298,7 @@ async function computeClientCostAllocation() {
 
     const { rows } = await queryWithRetry(
         pgPool,
-        'SELECT installation_id, size_bytes, sync_count, total_records, last_sync_at FROM cloud_backup_meta ORDER BY size_bytes DESC',
+        'SELECT installation_id, store_name, size_bytes, sync_count, total_records, last_sync_at FROM cloud_backup_meta ORDER BY size_bytes DESC',
         []
     );
     const totalSizeBytes = rows.reduce((sum, r) => sum + (Number(r.size_bytes) || 0), 0);
@@ -1316,6 +1316,14 @@ async function computeClientCostAllocation() {
         const maintenanceFeePHP = getMaintenanceFeeForClient(r.installation_id);
         return {
             installationId: r.installation_id,
+            // AYOS: idinagdag ang label (mula sa Devices page, `deviceLabels`
+            // — ito ang hiniling: makita rin sa Client Cost Allocation kung
+            // ano ang naka-label sa Allowed Devices, hindi lang basta
+            // installation ID) at storeName (ang self-reported na pangalan ng
+            // tindahan mula mismo sa cloud_backup_meta) bilang fallback kapag
+            // wala pang manual label na naka-set.
+            label: deviceLabels.get(r.installation_id) || null,
+            storeName: r.store_name || null,
             sizeBytes,
             sizeMB: Math.round((sizeBytes / (1024 * 1024)) * 100) / 100,
             syncCount,
@@ -2116,17 +2124,19 @@ app.post('/relay/admin/api/devices/reset-all', requireAdminKey, async (req, res)
             : 'Na-reset ang device list: wala nang naka-Allow/naka-label/naka-fingerprint na device at wala nang online status. Hindi ginalaw ang issued unlocks/activity log/backup check-ins (pasa "wipeUnlocksToo": true kung gusto mo ring buraan iyon).'
     });
 });
-// Tinatanggal ang LAHAT ng clone-split record ng isang device. Composite key
-// ang `cloneSplits` Map ("installationId::fingerprint"), kaya hindi
-// tama/sapat ang simpleng `cloneSplits.delete(installationId)` (ito ang dating
-// bug sa /bulk-reset sa itaas — hindi na-clear ang tunay na clone-split
-// record dahil hindi tumutugma ang key). Ito ang tamang paraan: hanapin ang
-// LAHAT ng key na nagsisimula sa "installationId::" at burahin lahat.
+// Tinatanggal ang LAHAT ng clone-split record ng isang device — kapwa ang
+// mga rekord kung saan ito ang ORIHINAL (split_key na "installationId::fp")
+// AT ang mga rekord kung saan ito pala ang RESULTA ng isang split (ibig
+// sabihin, ito ang naka-set bilang new_installation_id ng ibang device).
+// Composite key ang `cloneSplits` Map ("installationId::fingerprint"), kaya
+// hindi tama/sapat ang simpleng `cloneSplits.delete(installationId)` (ito
+// ang dating bug sa /bulk-reset sa itaas — hindi na-clear ang tunay na
+// clone-split record dahil hindi tumutugma ang key).
 function purgeCloneSplitsForInstallation(installationId) {
     let removed = 0;
     const prefix = `${installationId}::`;
-    for (const key of [...cloneSplits.keys()]) {
-        if (key === installationId || key.startsWith(prefix)) {
+    for (const [key, rec] of [...cloneSplits.entries()]) {
+        if (key === installationId || key.startsWith(prefix) || rec.newInstallationId === installationId) {
             cloneSplits.delete(key);
             removed++;
         }
@@ -2177,6 +2187,15 @@ app.post('/relay/admin/api/devices/:installationId/purge', requireAdminKey, asyn
 
         seenDevices.delete(installationId);
 
+        let removedPendingOtps = 0;
+        for (const key of [...pendingOtps.keys()]) {
+            if (key.startsWith(`${installationId}:`)) {
+                pendingOtps.delete(key);
+                removedPendingOtps++;
+            }
+        }
+        summary.removedPendingOtps = removedPendingOtps;
+
         summary.hadIssuedUnlocks = !!issuedUnlocks[installationId];
         if (summary.hadIssuedUnlocks) {
             delete issuedUnlocks[installationId];
@@ -2225,6 +2244,24 @@ app.post('/relay/admin/api/devices/:installationId/purge', requireAdminKey, asyn
             }
         } else {
             summary.cloudBackupDeleteError = 'Hindi naka-configure ang Postgres (DATABASE_URL) para sa Cloud Backup.';
+        }
+
+        // AYOS: si saveAllowedDevices()/saveDeviceLabels() ay hindi talaga
+        // nagde-DELETE ng row sa `relay_devices` — nagse-set lamang ito ng
+        // allowed=false at label=NULL (soft update, dahil "buong listahan"
+        // ang isinusulat nila kada save, hindi single-row delete). Kaya kahit
+        // walang epekto ang naiiwan na row (hindi ito lalabas kahit saan
+        // dahil laging naka-filter ang mga query sa allowed=true/label IS NOT
+        // NULL), tuluyan pa rin nating tatanggalin dito ang buong row para
+        // talagang wala nang bakas ang lumang installation ID sa database.
+        if (pgPoolDevices) {
+            try {
+                const devicesResult = await queryWithRetry(pgPoolDevices, 'DELETE FROM relay_devices WHERE installation_id = $1', [installationId]);
+                summary.deletedRelayDevicesRows = devicesResult.rowCount;
+            } catch (err) {
+                console.error('⚠️  Hindi na-delete ang relay_devices row (purge):', err.message);
+                summary.relayDevicesDeleteError = err.message;
+            }
         }
 
         logActivity(installationId, 'device_purged', summary);
