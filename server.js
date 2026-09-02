@@ -987,7 +987,7 @@ async function loadNeonConfiguredPlans() {
     try {
         return JSON.parse(fs.readFileSync(NEON_CONFIGURED_PLAN_PATH, 'utf8'));
     } catch (err) {
-        return { cloudBackup: 'free', devices: 'free' };
+        return { cloudBackup: 'free', devices: 'free', build: 'free' };
     }
 }
 function saveNeonConfiguredPlans(obj) {
@@ -1001,7 +1001,7 @@ function saveNeonConfiguredPlans(obj) {
         console.error('Hindi ma-save ang neon-configured-plans.json:', err);
     }
 }
-let neonConfiguredPlans = { cloudBackup: 'free', devices: 'free' };
+let neonConfiguredPlans = { cloudBackup: 'free', devices: 'free', build: 'free' };
 // ===================================================================
 // PER-CLIENT COST ALLOCATION (Cloud Backup Neon project lang)
 // ===================================================================
@@ -1095,7 +1095,15 @@ async function getUsdToPhpRate() {
 const NEON_API_KEY = process.env.NEON_API_KEY || '';
 const NEON_CLOUD_BACKUP_PROJECT_ID = process.env.NEON_CLOUD_BACKUP_PROJECT_ID || '';
 const NEON_DEVICES_PROJECT_ID = process.env.NEON_DEVICES_PROJECT_ID || NEON_CLOUD_BACKUP_PROJECT_ID;
-const NEON_API_CONFIGURED = !!(NEON_API_KEY && (NEON_CLOUD_BACKUP_PROJECT_ID || NEON_DEVICES_PROJECT_ID));
+// BUILD/PUSH DATABASE Neon project ID — HIWALAY na project ito (pgPoolBuild),
+// kaya SINASADYANG walang fallback sa NEON_CLOUD_BACKUP_PROJECT_ID/
+// NEON_DEVICES_PROJECT_ID dito (di tulad ng devices sa itaas) — kung mali
+// ang fallback, magiging maling project ang mala-attribute ng usage/cost.
+// Kung blangko ito, magpapakita pa rin ang Database Health card ng laki
+// ng build database (via pg_database_size), pero walang real Neon
+// usage/cost card para dito hangga't hindi ito nalagyan.
+const NEON_BUILD_PROJECT_ID = process.env.NEON_BUILD_PROJECT_ID || '';
+const NEON_API_CONFIGURED = !!(NEON_API_KEY && (NEON_CLOUD_BACKUP_PROJECT_ID || NEON_DEVICES_PROJECT_ID || NEON_BUILD_PROJECT_ID));
 const NEON_USAGE_CACHE_MS = 5 * 60 * 1000; // 5 min — huwag masyadong tawagin, kahit safe naman ang endpoint na ito (hindi ito gumigising ng suspended compute).
 let neonUsageCache = {}; // keyed by projectId -> { at, data }
 // Kung magkaparehong projectId ang cloud backup at devices (walang hiwalay
@@ -4548,9 +4556,10 @@ app.get('/relay/admin/api/db-status', requireAdminKey, async (req, res) => {
         if (dbStatusCache.payload && (Date.now() - dbStatusCache.at) < DB_STATUS_CACHE_MS) {
             return res.json({ ...dbStatusCache.payload, cached: true });
         }
-        const [cloudBackupCheck, devicesCheck] = await Promise.all([
+        const [cloudBackupCheck, devicesCheck, buildCheck] = await Promise.all([
             checkPgPoolReachable(pgPool),
-            checkPgPoolReachable(pgPoolDevices)
+            checkPgPoolReachable(pgPoolDevices),
+            checkPgPoolReachable(pgPoolBuild)
         ]);
         const payload = {
             success: true,
@@ -4565,6 +4574,11 @@ app.get('/relay/admin/api/db-status', requireAdminKey, async (req, res) => {
                 ...devicesCheck,
                 envVar: process.env.RELAY_DEVICES_DATABASE_URL ? 'RELAY_DEVICES_DATABASE_URL' : 'DATABASE_URL (fallback — RELAY_DEVICES_DATABASE_URL not set)',
                 connection: maskDatabaseUrlForDisplay(DEVICES_DATABASE_URL)
+            },
+            build: {
+                ...buildCheck,
+                envVar: 'RELAY_BUILD_DATABASE_URL',
+                connection: maskDatabaseUrlForDisplay(BUILD_DATABASE_URL)
             }
         };
         dbStatusCache = { at: Date.now(), payload };
@@ -4655,14 +4669,17 @@ app.get('/relay/admin/api/db-health', requireAdminKey, async (req, res) => {
         if (dbHealthCache.payload && (Date.now() - dbHealthCache.at) < DB_HEALTH_CACHE_MS && req.query.force !== '1') {
             return res.json({ ...dbHealthCache.payload, cached: true });
         }
-        const [cloudBackupBytes, devicesBytes, cloudBackupTables, devicesTables, exchangeRate, cloudBackupNeonUsage, devicesNeonUsage] = await Promise.all([
+        const [cloudBackupBytes, devicesBytes, buildBytes, cloudBackupTables, devicesTables, buildTables, exchangeRate, cloudBackupNeonUsage, devicesNeonUsage, buildNeonUsage] = await Promise.all([
             getPgDatabaseSizeBytes(pgPool),
             getPgDatabaseSizeBytes(pgPoolDevices),
+            getPgDatabaseSizeBytes(pgPoolBuild),
             getTopTableSizes(pgPool),
             getTopTableSizes(pgPoolDevices),
+            getTopTableSizes(pgPoolBuild),
             getUsdToPhpRate(),
             getNeonProjectUsage(NEON_CLOUD_BACKUP_PROJECT_ID),
-            getNeonProjectUsage(NEON_DEVICES_PROJECT_ID)
+            getNeonProjectUsage(NEON_DEVICES_PROJECT_ID),
+            getNeonProjectUsage(NEON_BUILD_PROJECT_ID)
         ]);
         // Halimbawang compute assumption — ito na lang ang FALLBACK kapag
         // wala pang totoong Neon usage data (o wala pang isang oras na
@@ -4719,7 +4736,8 @@ app.get('/relay/admin/api/db-health', requireAdminKey, async (req, res) => {
             },
             databases: {
                 cloudBackup: buildDbEntry('Cloud Backup (DATABASE_URL)', cloudBackupBytes, cloudBackupTables, neonConfiguredPlans.cloudBackup || 'free', cloudBackupNeonUsage),
-                devices: buildDbEntry('Devices / License' + (DEVICES_DB_IS_SEPARATE ? ' (RELAY_DEVICES_DATABASE_URL)' : ' (shared sa DATABASE_URL)'), devicesBytes, devicesTables, neonConfiguredPlans.devices || 'free', devicesNeonUsage)
+                devices: buildDbEntry('Devices / License' + (DEVICES_DB_IS_SEPARATE ? ' (RELAY_DEVICES_DATABASE_URL)' : ' (shared sa DATABASE_URL)'), devicesBytes, devicesTables, neonConfiguredPlans.devices || 'free', devicesNeonUsage),
+                build: buildDbEntry('Build / Push' + (pgPoolBuild ? ' (RELAY_BUILD_DATABASE_URL)' : ' (not configured — walang RELAY_BUILD_DATABASE_URL)'), buildBytes, buildTables, neonConfiguredPlans.build || 'free', buildNeonUsage)
             },
             neonPricing: NEON_PRICING
         };
@@ -4732,8 +4750,8 @@ app.get('/relay/admin/api/db-health', requireAdminKey, async (req, res) => {
 });
 app.post('/relay/admin/api/db-health/plan', requireAdminKey, (req, res) => {
     const { database, tier } = req.body || {};
-    if (!['cloudBackup', 'devices'].includes(database)) {
-        return res.status(400).json({ success: false, message: 'Invalid database (cloudBackup/devices).' });
+    if (!['cloudBackup', 'devices', 'build'].includes(database)) {
+        return res.status(400).json({ success: false, message: 'Invalid database (cloudBackup/devices/build).' });
     }
     if (!NEON_PRICING_TIER_IDS.includes(tier)) {
         return res.status(400).json({ success: false, message: `Invalid tier. Options: ${NEON_PRICING_TIER_IDS.join(', ')}.` });
@@ -5463,7 +5481,7 @@ async function bootstrapStores() {
     if (Object.keys(neonPricingOverrides).length > 0) {
         console.log(`🗄️  Na-load ang custom na Neon pricing override para sa: ${Object.keys(neonPricingOverrides).join(', ')}.`);
     }
-    if (!neonConfiguredPlans || typeof neonConfiguredPlans !== 'object') neonConfiguredPlans = { cloudBackup: 'free', devices: 'free' };
+    if (!neonConfiguredPlans || typeof neonConfiguredPlans !== 'object') neonConfiguredPlans = { cloudBackup: 'free', devices: 'free', build: 'free' };
     if (!clientMaintenanceFeeConfig || typeof clientMaintenanceFeeConfig !== 'object') clientMaintenanceFeeConfig = JSON.parse(JSON.stringify(CLIENT_MAINTENANCE_FEE_DEFAULT));
     if (!clientMaintenanceFeeConfig.perClientOverridePHP || typeof clientMaintenanceFeeConfig.perClientOverridePHP !== 'object') clientMaintenanceFeeConfig.perClientOverridePHP = {};
     console.log(

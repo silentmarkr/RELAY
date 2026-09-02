@@ -2131,7 +2131,8 @@ async function loadDbStatus() {
     container.className = '';
     container.innerHTML =
       renderDbCheckCard('Cloud Backup DB', data.cloudBackup.envVar, data.cloudBackup) +
-      renderDbCheckCard('Devices/License DB' + (data.isSeparateDatabase ? '' : ' (same as Cloud Backup)'), data.devices.envVar, data.devices);
+      renderDbCheckCard('Devices/License DB' + (data.isSeparateDatabase ? '' : ' (same as Cloud Backup)'), data.devices.envVar, data.devices) +
+      renderDbCheckCard('Build/Push DB', data.build.envVar, data.build);
     const checkedAtEl = document.getElementById('dbStatusCheckedAt');
     if (checkedAtEl && data.checkedAt) {
       checkedAtEl.innerText = `Last checked: ${new Date(data.checkedAt).toLocaleTimeString()}${data.cached ? ' (cached)' : ''}`;
@@ -2272,7 +2273,8 @@ async function loadDbHealth(force) {
     const phpRate = data.exchangeRate.usdToPhp;
     container.innerHTML =
       renderDbHealthEntry('cloudBackup', data.databases.cloudBackup, phpRate) +
-      renderDbHealthEntry('devices', data.databases.devices, phpRate);
+      renderDbHealthEntry('devices', data.databases.devices, phpRate) +
+      renderDbHealthEntry('build', data.databases.build, phpRate);
     const checkedAtEl = document.getElementById('dbHealthCheckedAt');
     if (checkedAtEl && data.checkedAt) {
       checkedAtEl.innerText = `Last checked: ${new Date(data.checkedAt).toLocaleTimeString()}${data.cached ? ' (cached)' : ''}`;
@@ -3668,8 +3670,9 @@ function startPolling() {
   dbStatusPollTimer = setInterval(() => { if (adminKey) loadDbStatus(); }, 30000);
   loadDbHealth();
   // Mas mabagal na interval ang db-health kesa db-status — may extra
-  // work ito (pg_database_size query sa dalawang database + live
-  // exchange-rate fetch), at may sarili nang 15s server-side cache.
+  // work ito (pg_database_size query sa tatlong database (Cloud Backup,
+  // Devices, Build/Push) + live exchange-rate fetch), at may sarili
+  // nang 15s server-side cache.
   if (dbHealthPollTimer) clearInterval(dbHealthPollTimer);
   dbHealthPollTimer = setInterval(() => { if (adminKey) loadDbHealth(); }, 60000);
 }
