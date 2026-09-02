@@ -1515,6 +1515,26 @@ a:focus-visible,
     </div>
   </div>
 </div>
+<div id="customerScaleBackdrop" class="modal-backdrop">
+  <div class="modal-box" style="max-width:640px; max-height:80vh; overflow-y:auto;">
+    <h3>📈 Customer Count Projection — <span id="customerScaleLabel"></span></h3>
+    <p class="meta" id="customerScaleBasis" style="margin-bottom:10px;"></p>
+    <div style="font-size:12px; color:var(--muted); margin-bottom:6px;">Kung ganito karami ang customer:</div>
+    <select id="customerScaleCount" style="padding:6px 10px; border-radius:8px; border:1px solid var(--border-soft); background:var(--bg); color:var(--text); font-size:13px;" onchange="renderCustomerScaleTable()">
+      <option value="2">2 customers</option>
+      <option value="5">5 customers</option>
+      <option value="10" selected>10 customers</option>
+      <option value="20">20 customers</option>
+      <option value="50">50 customers</option>
+      <option value="100">100 customers</option>
+    </select>
+    <div id="customerScaleBody" style="margin-top:12px;"></div>
+    <div class="modal-actions">
+      <button class="btn-ghost" onclick="closeCustomerScaleModal()">Close</button>
+    </div>
+  </div>
+</div>
+
 <script>
 let adminKey = sessionStorage.getItem('relayAdminKey') || '';
 let lastLoadedDevices = [];
@@ -2152,6 +2172,7 @@ async function loadDbStatus() {
 }
 let dbHealthInFlight = false;
 let dbHealthPollTimer = null;
+let lastDbHealthEntries = {};
 const NEON_TIER_ORDER = ['free', 'launch', 'scale', 'enterprise'];
 function fmtUsdPhp(usd, phpRate) {
   if (usd === null || usd === undefined) return '—';
@@ -2220,11 +2241,18 @@ function renderDbHealthEntry(dbKey, entry, phpRate) {
         <td style="font-size:11px; color:${t.fitsInFreeStorage ? 'var(--green,#4ade80)' : 'var(--red,#ff5c72)'};">${t.fitsInFreeStorage ? '✅ Kasya' : '⚠️ Hindi kasya'}</td>
       </tr>`;
     }
+    // AYOS: dating may "+ X projected compute†" sub-line at isang
+    // projected na "Est. total" dito sa card mismo — inalis na ito
+    // (kasama ang † / * footnote sa ibaba). Ngayon, storage cost (real,
+    // batay sa kasalukuyang totoong laki) at ang compute RATE (constant
+    // ng tier, hindi isang guess) na lang ang nakikita dito. Ang buong
+    // projected na computation ay nasa "📈 Projection" button/modal na
+    // lang — doon pipili ang admin kung ilang customer ang isasaalang-alang.
     return `<tr${entry.configuredPlan === t.tier ? ' style="background:var(--accent-bg,#12293b);"' : ''}>
       <td>${t.name}</td>
-      <td>${fmtUsdPhp(t.storageCostUSD, phpRate)} storage${t.exampleComputeCostUSD !== null ? `<br><span style="font-size:11px; color:var(--muted);">+ ${fmtUsdPhp(t.exampleComputeCostUSD, phpRate)} ${entry.tierComparisonBasis === 'real-projection' ? 'projected compute†' : 'example compute*'}</span>` : ''}</td>
+      <td>${fmtUsdPhp(t.storageCostUSD, phpRate)}</td>
       <td>$${t.computeRatePerCUHourUSD}/CU-hr</td>
-      <td>${t.estimatedMonthlyTotalUSD !== null ? fmtUsdPhp(t.estimatedMonthlyTotalUSD, phpRate) + (entry.tierComparisonBasis === 'real-projection' ? '†' : '*') : '—'}</td>
+      <td style="font-size:11px; color:var(--muted);">—</td>
     </tr>`;
   }).join('');
   return `
@@ -2235,23 +2263,19 @@ function renderDbHealthEntry(dbKey, entry, phpRate) {
           ${entry.mb !== null ? `${entry.mb.toLocaleString()} MB (${gbUsed.toFixed(4)} GB)` : 'Hindi ma-query (offline o hindi configured)'}
         </span>
       </div>
-      <div style="font-size:11px; color:var(--muted); margin-top:4px;">
-        Configured Neon plan:
+      <div style="font-size:11px; color:var(--muted); margin-top:4px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+        <span>Configured Neon plan:
         <select onchange="setDbHealthPlan('${dbKey}', this.value)" style="padding:4px 8px; border-radius:6px; border:1px solid var(--border-soft); background:var(--bg); color:var(--text); font-size:11px;">
           ${planOptions}
-        </select>
+        </select></span>
+        <button onclick="openCustomerScaleModal('${dbKey}')" style="flex:0 0 auto; padding:4px 10px; border-radius:6px; border:1px solid var(--border-soft); background:rgba(255,255,255,.03); color:var(--accent,#6cf); font-size:11px; cursor:pointer;">📈 Projection</button>
       </div>
       ${allowanceLine}
       ${realUsageBlock}
       <table style="width:100%; margin-top:8px; border-collapse:collapse; font-size:12px;">
-        <thead><tr style="text-align:left; color:var(--muted); font-size:11px;"><th>Tier</th><th>Storage cost</th><th>Compute rate</th><th>Est. total</th></tr></thead>
+        <thead><tr style="text-align:left; color:var(--muted); font-size:11px;"><th>Tier</th><th>Storage cost</th><th>Compute rate</th><th>Status</th></tr></thead>
         <tbody>${rowsHtml}</tbody>
       </table>
-      <div style="font-size:11px; color:var(--muted); margin-top:4px;">
-        ${entry.tierComparisonBasis === 'real-projection'
-          ? `† Projection base sa TUNAY na average compute niyo ngayong billing period (${entry.usageProjection ? entry.usageProjection.cuHoursSoFar + ' CU-hr sa loob ng ' + entry.usageProjection.elapsedHours + ' oras, i-nproject papuntang buong buwan' : ''})${entry.usageProjection && entry.usageProjection.lowConfidence ? ' — <span style="color:var(--amber,#f5a623);">⚠️ bago pa lang ang datos (&lt;24 oras), maaaring magbago pa habang tumatagal ang buwan</span>' : ''}.`
-          : '* Halimbawang senaryo lang (0.25 CU × 8 oras/araw × 30 araw), hindi pa batay sa totoong average niyo.'}
-      </div>
     </div>`;
 }
 async function setDbHealthPlan(database, tier) {
@@ -2260,6 +2284,75 @@ async function setDbHealthPlan(database, tier) {
     if (res.success) { toast('Plan updated.', 'success'); loadDbHealth(true); }
     else toast(res.message || 'Could not update.', 'error');
   } catch (err) {   }
+}
+// AYOS: dito na lang nakikita ang "projected computation" (dating nasa
+// card mismo) — pinipili ng admin kung ilang customer ang isasaalang-alang,
+// tapos ang KASALUKUYANG totoong (o halimbawang) consumption sa Free tier
+// ang ini-iskala nang sabay-sabay (storage GB at projected CU-hr) ng ganoong
+// dami, gamit ang parehong rate constants (storageRatePerGBMonthUSD/
+// computeRatePerCUHourUSD) na galing mismo sa huling na-load na db-health
+// data — walang bagong network call, kaya laging naka-sync sa tunay na
+// pinagbabatayan ng "Est. total" bago ito inalis sa card.
+let customerScaleDbKey = null;
+function openCustomerScaleModal(dbKey) {
+  const entry = lastDbHealthEntries.entries && lastDbHealthEntries.entries[dbKey];
+  if (!entry) { toast('Wala pang na-load na database usage — i-refresh muna.', 'error'); return; }
+  customerScaleDbKey = dbKey;
+  document.getElementById('customerScaleLabel').innerText = entry.label;
+  document.getElementById('customerScaleBackdrop').style.display = 'flex';
+  renderCustomerScaleTable();
+}
+function closeCustomerScaleModal() {
+  document.getElementById('customerScaleBackdrop').style.display = 'none';
+  customerScaleDbKey = null;
+}
+function renderCustomerScaleTable() {
+  const entry = lastDbHealthEntries.entries && lastDbHealthEntries.entries[customerScaleDbKey];
+  const phpRate = lastDbHealthEntries.phpRate;
+  const body = document.getElementById('customerScaleBody');
+  if (!entry || !phpRate || !body) return;
+  const count = parseInt(document.getElementById('customerScaleCount').value, 10) || 1;
+  const baseStorageGB = entry.gb || 0;
+  const exampleTier = entry.tierComparison.find(t => typeof t.exampleComputeCUHoursAssumed === 'number');
+  const baseCUHours = (entry.usageProjection && typeof entry.usageProjection.projectedCUHoursFullPeriod === 'number')
+    ? entry.usageProjection.projectedCUHoursFullPeriod
+    : (exampleTier ? exampleTier.exampleComputeCUHoursAssumed : 0);
+  const basisLabel = entry.tierComparisonBasis === 'real-projection'
+    ? 'batay sa TUNAY na na-detect na consumption ngayong billing period'
+    : 'batay sa halimbawang senaryo lang (wala pang totoong Neon usage data)';
+  document.getElementById('customerScaleBasis').innerHTML =
+    `Kasalukuyang consumption (1x): ${baseStorageGB.toFixed(4)} GB storage, ~${Math.round(baseCUHours * 100) / 100} CU-hr/buwan (${basisLabel}). ` +
+    `Isinaisip dito: bawat karagdagang customer ay katulad ang gamit sa kasalukuyan — ${count}x ang pinag-uusapan sa ibaba.`;
+  const scaledStorageGB = baseStorageGB * count;
+  const scaledCUHours = baseCUHours * count;
+  const rows = entry.tierComparison.map(t => {
+    if (t.customPricing) {
+      return `<tr><td>${t.name}</td><td colspan="3" style="color:var(--muted); font-size:12px;">${t.notes}</td></tr>`;
+    }
+    if (t.tier === 'free') {
+      const fits = scaledStorageGB <= t.storageIncludedGB;
+      return `<tr>
+        <td>${t.name}</td>
+        <td>${fmtUsdPhp(0, phpRate)}</td>
+        <td>${scaledStorageGB.toFixed(3)} / ${t.storageIncludedGB} GB</td>
+        <td style="font-size:11px; color:${fits ? 'var(--green,#4ade80)' : 'var(--red,#ff5c72)'};">${fits ? '✅ Kasya' : '⚠️ Hindi kasya'}</td>
+      </tr>`;
+    }
+    const storageCostUSD = scaledStorageGB * t.storageRatePerGBMonthUSD;
+    const computeCostUSD = scaledCUHours * t.computeRatePerCUHourUSD;
+    const totalUSD = storageCostUSD + computeCostUSD;
+    return `<tr>
+      <td>${t.name}</td>
+      <td>${fmtUsdPhp(storageCostUSD, phpRate)}</td>
+      <td>$${t.computeRatePerCUHourUSD}/CU-hr</td>
+      <td>${fmtUsdPhp(totalUSD, phpRate)}</td>
+    </tr>`;
+  }).join('');
+  body.innerHTML = `
+    <table style="width:100%; border-collapse:collapse; font-size:12px;">
+      <thead><tr style="text-align:left; color:var(--muted); font-size:11px;"><th>Tier</th><th>Storage cost</th><th>Compute rate</th><th>Est. total (${count}x)</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
 }
 async function loadDbHealth(force) {
   const container = document.getElementById('dbHealthList');
@@ -2276,6 +2369,7 @@ async function loadDbHealth(force) {
     }
     container.className = '';
     const phpRate = data.exchangeRate.usdToPhp;
+    lastDbHealthEntries = { entries: data.databases, phpRate };
     container.innerHTML =
       renderDbHealthEntry('cloudBackup', data.databases.cloudBackup, phpRate) +
       renderDbHealthEntry('devices', data.databases.devices, phpRate) +
