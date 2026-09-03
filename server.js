@@ -465,11 +465,33 @@ app.use((req, res, next) => {
     next();
 });
 const CLOUD_BACKUP_UPLOAD_CHUNK_PATH = '/relay/cloud-backup/upload/chunk';
+// AYOS: kailangan ng PayMongo webhook ang RAW (unparsed) request body
+// para ma-verify ang "Paymongo-Signature" header (HMAC laban sa eksaktong
+// bytes na natanggap) — kaya excluded din ito dito, kagaya ng cloud
+// backup chunk upload sa itaas. Ang mismong express.raw() para dito ay
+// nasa route definition mismo ng /relay/webhooks/paymongo sa ibaba.
+const PAYMONGO_WEBHOOK_PATH = '/relay/webhooks/paymongo';
+// AYOS: kailangan din ng Stripe webhook ang RAW (unparsed) request body
+// para ma-verify ang "Stripe-Signature" header, kagaya mismo ng PayMongo
+// sa itaas — kaya excluded din ito dito. (Xendit at PayPal webhooks ay
+// hindi nangangailangan ng raw bytes para sa kanilang verification, kaya
+// default JSON parser lang ang gamit doon.)
+const STRIPE_WEBHOOK_PATH = '/relay/webhooks/stripe';
+// Dragonpay Postback ay pina-POST bilang normal na
+// application/x-www-form-urlencoded (HINDI JSON, at hindi rin
+// nangangailangan ng raw bytes tulad ng PayMongo/Stripe sa itaas —
+// SHA1 lang ang laban sa mismong POSTED FIELDS, hindi sa raw body) —
+// kaya excluded din ito dito, at gagamit ng express.urlencoded() sa
+// route definition mismo ng /relay/webhooks/dragonpay sa ibaba.
+const DRAGONPAY_WEBHOOK_PATH = '/relay/webhooks/dragonpay';
 const defaultJsonParser = express.json({ limit: '2mb' });
 const cloudBackupChunkRawParser = express.raw({ type: '*/*', limit: '6mb' });
 app.use((req, res, next) => {
     if (req.path === CLOUD_BACKUP_UPLOAD_CHUNK_PATH) {
         return cloudBackupChunkRawParser(req, res, next);
+    }
+    if (req.path === PAYMONGO_WEBHOOK_PATH || req.path === STRIPE_WEBHOOK_PATH || req.path === DRAGONPAY_WEBHOOK_PATH) {
+        return next();
     }
     return defaultJsonParser(req, res, next);
 });
@@ -927,6 +949,552 @@ function getCloudBackupPlanPrice(tier, billingCycle) {
     const plan = CLOUD_BACKUP_PLANS[tier];
     if (!plan || !CLOUD_BACKUP_BILLING_DAYS[billingCycle]) return null;
     return typeof plan.price[billingCycle] === 'number' ? plan.price[billingCycle] : null;
+}
+// ===================================================================
+// CLOUD BACKUP TOKENS ("diamonds") — bagong currency na ginagamit ng
+// isang OMNIPOS installation para panatilihing ACTIVE ang cloud backup
+// sync nito (auto o manual). 1 token = ₱1. Binibili ito gamit ang
+// GCash/Maya/Online Banking (PayMongo), tapos "ginagastos" (consumed)
+// isang beses kada successful sync — iyon ang dahilan kung bakit may
+// separate na "Auto-Sync" toggle sa OMNIPOS admin panel: kapag na-off
+// ito, hindi na sumusunod ang auto-schedule (nakakatipid ng tokens),
+// pero pwede pa ring mag-manual backup/restore basta may sapat na
+// balance. Kapag naubos na ang tokens (mas mababa sa halagang
+// kailangan kada sync ng kasalukuyang tier), awtomatikong nagiging
+// "insufficient" ang wallet — dito hihinto ang auto-sync AT ang
+// manual backup/restore buttons sa OMNIPOS hanggang sa bumili ulit ng
+// tokens.
+// ===================================================================
+const CLOUD_TOKEN_PACKAGES = ['basic', 'standard', 'pro'];
+// Ang bilang ng tokens na ibinibigay kada package ay eksaktong katumbas
+// (1:1, ₱1 = 1 token) ng buwanang presyo ng kaukulang Cloud Backup tier
+// sa CLOUD_BACKUP_PLANS sa itaas — kaya awtomatiko itong sumusunod
+// kapag binago ang pricing dito (walang duplicate na numero).
+function getCloudTokenPackages() {
+    const packages = {};
+    for (const tier of CLOUD_TOKEN_PACKAGES) {
+        const plan = CLOUD_BACKUP_PLANS[tier];
+        if (!plan) continue;
+        const amountPHP = plan.price.monthly;
+        packages[tier] = {
+            tier,
+            name: plan.name,
+            tokens: amountPHP, 
+            amountPHP,
+            tagline: `Sapat na para sa humigit-kumulang 1 buwan ng ${plan.name.replace('Cloud Backup — ', '')} auto-sync sa normal na dalas.`
+        };
+    }
+    return packages;
+}
+// Presyo (sa tokens) kada ISANG successful sync ng kasalukuyang tier —
+// (buwanang presyo) / (inaasahang bilang ng auto-syncs kada buwan),
+// pinapalago pataas (Math.ceil) para hindi kailanman ma-undercharge,
+// minimum 1 token kada sync.
+function getCloudTokenCostPerSync(tier) {
+    const plan = CLOUD_BACKUP_PLANS[tier] || CLOUD_BACKUP_PLANS.basic;
+    const monthlyPrice = plan.price.monthly;
+    const expectedSyncsPerMonth = Math.max(1, Math.round((30 * 24 * 60 * 60 * 1000) / plan.autoBackupIntervalMs));
+    return Math.max(1, Math.ceil(monthlyPrice / expectedSyncsPerMonth));
+}
+// ===================================================================
+// PAYMENT PROVIDERS — dating PayMongo lang ang suportado dito. Ngayon,
+// isang "registry" ng maraming posibleng online payment/banking
+// provider (PayMongo, Xendit, Stripe, PayPal) — ANG BAWAT ISA AY
+// AWTOMATIKONG "AVAILABLE" LANG kapag kumpleto ang env var(s) na
+// kailangan nito (nakalagay sa Render environment). Kung wala/hindi
+// nakalagay ang env var ng isang provider, hindi ito lalabas sa listahan
+// ng GET /relay/cloud-tokens/packages — kaya ang OMNIPOS lang ay
+// magpapakita/magpapapili ng mga paraan ng bayad na TALAGANG naka-configure
+// dito sa relay. Walang kailangang baguhin sa OMNIPOS kapag nagdagdag o
+// nag-alis ng provider/env var dito — sumusunod na lang ito.
+//
+// Env vars na kinikilala (lahat optional — piliin lang ang gusto mong
+// i-enable, i-set sa Render > Environment):
+//   PAYMONGO_SECRET_KEY, PAYMONGO_WEBHOOK_SECRET        -> GCash/Maya/Online Banking (PayMongo)
+//   XENDIT_SECRET_KEY,   XENDIT_WEBHOOK_TOKEN           -> GCash/Maya/GrabPay/Bank Transfer/Card (Xendit Invoice)
+//   STRIPE_SECRET_KEY,   STRIPE_WEBHOOK_SECRET          -> Credit/Debit Card (Stripe Checkout)
+//   PAYPAL_CLIENT_ID,    PAYPAL_CLIENT_SECRET, PAYPAL_WEBHOOK_ID, PAYPAL_ENV (sandbox|live) -> PayPal
+//   DRAGONPAY_MERCHANT_ID, DRAGONPAY_SECRET_KEY, DRAGONPAY_ENV (test|live)
+//     -> GCash / Bank Transfer via InstaPay & PESONet / Over-the-Counter
+//        (7-Eleven, Cebuana Lhuillier, LBC, atbp.) sa pamamagitan ng
+//        Dragonpay's hosted checkout (maraming channel sa iisang provider,
+//        kagaya ng Xendit sa itaas).
+//
+// PAALALA tungkol sa "InstaPay" at "Pisonet":
+//   - Ang InstaPay (at PESONet) ay hindi isang payment GATEWAY na
+//     maaaring direktang i-integrate gamit ang sarili nitong API key —
+//     ito ay isang real-time interbank transfer RAIL na pinapatakbo ng
+//     BSP/PhilPaSS, at napapasukan lang sa pamamagitan ng bangko, e-money
+//     issuer, o isang aggregator/PSP tulad ng Dragonpay o Xendit. Kaya
+//     idinagdag dito ang Dragonpay (sa itaas) — awtomatiko nang kasama
+//     doon ang InstaPay/PESONet bilang isa sa mga channel sa checkout
+//     page nito, hindi na kailangan ng hiwalay na "InstaPay provider".
+//   - Ang "Pisonet" naman ay hindi isang online payment provider — ito ay
+//     tawag sa coin-operated na internet café kiosks/vending machines sa
+//     Pilipinas, walang kinalaman sa pagtanggap ng online payment. Kung
+//     ibang provider ang tinutukoy (hal. Bux.ph, Coins.ph, DirectPay,
+//     Adyen), sabihin lang ang eksaktong pangalan para maidagdag nang
+//     tama at ligtas (kailangan ng eksaktong opisyal na API docs nito
+//     para hindi magkamali ang signature/digest verification).
+// ===================================================================
+
+// ---- PayMongo (GCash / Maya / Online Banking via Direct Online Banking source) ----
+const PAYMONGO_SECRET_KEY = process.env.PAYMONGO_SECRET_KEY || null;
+const PAYMONGO_WEBHOOK_SECRET = process.env.PAYMONGO_WEBHOOK_SECRET || null;
+const PAYMONGO_API_BASE = 'https://api.paymongo.com/v1';
+function paymongoAuthHeader() {
+    return 'Basic ' + Buffer.from(`${PAYMONGO_SECRET_KEY}:`).toString('base64');
+}
+const PAYMONGO_METHOD_TO_SOURCE_TYPE = { gcash: 'gcash', maya: 'paymaya', online_banking: 'dob' };
+async function paymongoCreateSource({ amountPHP, method, redirectSuccessUrl, redirectFailedUrl, description }) {
+    if (!PAYMONGO_SECRET_KEY) {
+        const err = new Error('PAYMONGO_SECRET_KEY is not configured on the relay yet — cannot accept GCash/Maya/Online Banking payments right now.');
+        err.code = 'PAYMONGO_NOT_CONFIGURED';
+        throw err;
+    }
+    const sourceType = PAYMONGO_METHOD_TO_SOURCE_TYPE[method];
+    if (!sourceType) throw new Error(`Unsupported payment method: ${method}`);
+    const resp = await fetch(`${PAYMONGO_API_BASE}/sources`, {
+        method: 'POST',
+        headers: { Authorization: paymongoAuthHeader(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            data: {
+                attributes: {
+                    amount: Math.round(amountPHP * 100),
+                    currency: 'PHP',
+                    type: sourceType,
+                    redirect: { success: redirectSuccessUrl, failed: redirectFailedUrl },
+                    description: description || 'OmniPOS Cloud Backup Tokens'
+                }
+            }
+        })
+    });
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok || !data || !data.data) {
+        const message = (data && data.errors && data.errors[0] && data.errors[0].detail) || `PayMongo error (HTTP ${resp.status})`;
+        throw new Error(message);
+    }
+    return data.data; 
+}
+async function paymongoCreatePayment({ sourceId, amountPHP, description }) {
+    const resp = await fetch(`${PAYMONGO_API_BASE}/payments`, {
+        method: 'POST',
+        headers: { Authorization: paymongoAuthHeader(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            data: {
+                attributes: {
+                    amount: Math.round(amountPHP * 100),
+                    currency: 'PHP',
+                    source: { id: sourceId, type: 'source' },
+                    description: description || 'OmniPOS Cloud Backup Tokens'
+                }
+            }
+        })
+    });
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok || !data || !data.data) {
+        const message = (data && data.errors && data.errors[0] && data.errors[0].detail) || `PayMongo payment error (HTTP ${resp.status})`;
+        throw new Error(message);
+    }
+    return data.data;
+}
+// Kina-verify ang "Paymongo-Signature" header (t=<timestamp>,te=<hmac>,li=<hmac live>)
+// laban sa raw request body, gamit ang PAYMONGO_WEBHOOK_SECRET — pinipigilan nito
+// ang kahit sinong mag-fake ng "successful payment" papunta sa webhook endpoint.
+function verifyPaymongoSignature(rawBody, signatureHeader) {
+    if (!PAYMONGO_WEBHOOK_SECRET || !signatureHeader) return false;
+    const parts = Object.fromEntries(
+        String(signatureHeader).split(',').map((kv) => {
+            const [k, v] = kv.split('=');
+            return [k, v];
+        })
+    );
+    const timestamp = parts.t;
+    const expectedHmac = parts.te || parts.li;
+    if (!timestamp || !expectedHmac) return false;
+    const signedPayload = `${timestamp}.${rawBody}`;
+    const computedHmac = crypto.createHmac('sha256', PAYMONGO_WEBHOOK_SECRET).update(signedPayload).digest('hex');
+    return safeCompare(computedHmac, expectedHmac);
+}
+
+// ---- Xendit (Invoice API — iisang hosted checkout na sumusuporta na sa
+// GCash/Maya/GrabPay/ShopeePay/Bank Transfer/Cards nang walang kailangan
+// pang piliin ang eksaktong channel dito sa relay) ----
+const XENDIT_SECRET_KEY = process.env.XENDIT_SECRET_KEY || null;
+const XENDIT_WEBHOOK_TOKEN = process.env.XENDIT_WEBHOOK_TOKEN || null;
+const XENDIT_API_BASE = 'https://api.xendit.co';
+function xenditAuthHeader() {
+    return 'Basic ' + Buffer.from(`${XENDIT_SECRET_KEY}:`).toString('base64');
+}
+async function xenditCreateInvoice({ amountPHP, purchaseId, redirectSuccessUrl, redirectFailedUrl, description }) {
+    if (!XENDIT_SECRET_KEY) {
+        const err = new Error('XENDIT_SECRET_KEY is not configured on the relay yet.');
+        err.code = 'XENDIT_NOT_CONFIGURED';
+        throw err;
+    }
+    const resp = await fetch(`${XENDIT_API_BASE}/v2/invoices`, {
+        method: 'POST',
+        headers: { Authorization: xenditAuthHeader(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            external_id: purchaseId,
+            amount: amountPHP,
+            currency: 'PHP',
+            description: description || 'OmniPOS Cloud Backup Tokens',
+            success_redirect_url: redirectSuccessUrl,
+            failure_redirect_url: redirectFailedUrl
+        })
+    });
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok || !data || !data.id) {
+        throw new Error((data && data.message) || `Xendit error (HTTP ${resp.status})`);
+    }
+    return data; 
+}
+// Simpleng token-comparison lang ang webhook verification ng Xendit
+// (header na "x-callback-token" laban sa XENDIT_WEBHOOK_TOKEN na naka-set
+// sa Xendit dashboard) — hindi HMAC ng raw body kaya OK lang ang default
+// JSON body parser dito.
+function verifyXenditWebhookToken(headerToken) {
+    if (!XENDIT_WEBHOOK_TOKEN || !headerToken) return false;
+    return safeCompare(String(headerToken), XENDIT_WEBHOOK_TOKEN);
+}
+
+// ---- Stripe (Checkout Session — internasyonal na credit/debit card) ----
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || null;
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || null;
+const STRIPE_API_BASE = 'https://api.stripe.com/v1';
+async function stripeCreateCheckoutSession({ amountPHP, purchaseId, redirectSuccessUrl, redirectFailedUrl, description }) {
+    if (!STRIPE_SECRET_KEY) {
+        const err = new Error('STRIPE_SECRET_KEY is not configured on the relay yet.');
+        err.code = 'STRIPE_NOT_CONFIGURED';
+        throw err;
+    }
+    const body = new URLSearchParams();
+    body.append('mode', 'payment');
+    body.append('success_url', redirectSuccessUrl);
+    body.append('cancel_url', redirectFailedUrl);
+    body.append('client_reference_id', purchaseId);
+    body.append('line_items[0][quantity]', '1');
+    body.append('line_items[0][price_data][currency]', 'php');
+    body.append('line_items[0][price_data][unit_amount]', String(Math.round(amountPHP * 100)));
+    body.append('line_items[0][price_data][product_data][name]', description || 'OmniPOS Cloud Backup Tokens');
+    const resp = await fetch(`${STRIPE_API_BASE}/checkout/sessions`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + STRIPE_SECRET_KEY, 'Content-Type': 'application/x-www-form-urlencoded' },
+        body
+    });
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok || !data || !data.id) {
+        const message = (data && data.error && data.error.message) || `Stripe error (HTTP ${resp.status})`;
+        throw new Error(message);
+    }
+    return data; 
+}
+// Kina-verify ang "Stripe-Signature" header (t=<timestamp>,v1=<hmac>) laban
+// sa raw request body, gamit ang STRIPE_WEBHOOK_SECRET — kaparehong pattern
+// ng PayMongo sa itaas.
+function verifyStripeSignature(rawBody, signatureHeader) {
+    if (!STRIPE_WEBHOOK_SECRET || !signatureHeader) return false;
+    const parts = Object.fromEntries(
+        String(signatureHeader).split(',').map((kv) => {
+            const [k, v] = kv.split('=');
+            return [k, v];
+        })
+    );
+    const timestamp = parts.t;
+    const expectedHmac = parts.v1;
+    if (!timestamp || !expectedHmac) return false;
+    const signedPayload = `${timestamp}.${rawBody}`;
+    const computedHmac = crypto.createHmac('sha256', STRIPE_WEBHOOK_SECRET).update(signedPayload).digest('hex');
+    return safeCompare(computedHmac, expectedHmac);
+}
+
+// ---- PayPal (Orders v2 API) ----
+const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID || null;
+const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET || null;
+const PAYPAL_WEBHOOK_ID = process.env.PAYPAL_WEBHOOK_ID || null;
+const PAYPAL_API_BASE = process.env.PAYPAL_ENV === 'live' ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com';
+async function paypalAccessToken() {
+    const resp = await fetch(`${PAYPAL_API_BASE}/v1/oauth2/token`, {
+        method: 'POST',
+        headers: {
+            Authorization: 'Basic ' + Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_CLIENT_SECRET}`).toString('base64'),
+            'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: 'grant_type=client_credentials'
+    });
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok || !data || !data.access_token) throw new Error('Could not authenticate with PayPal.');
+    return data.access_token;
+}
+async function paypalCreateOrder({ amountPHP, purchaseId, redirectSuccessUrl, redirectFailedUrl, description }) {
+    if (!PAYPAL_CLIENT_ID || !PAYPAL_CLIENT_SECRET) {
+        const err = new Error('PAYPAL_CLIENT_ID / PAYPAL_CLIENT_SECRET is not configured on the relay yet.');
+        err.code = 'PAYPAL_NOT_CONFIGURED';
+        throw err;
+    }
+    const token = await paypalAccessToken();
+    const resp = await fetch(`${PAYPAL_API_BASE}/v2/checkout/orders`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            intent: 'CAPTURE',
+            purchase_units: [{
+                reference_id: purchaseId,
+                description: description || 'OmniPOS Cloud Backup Tokens',
+                amount: { currency_code: 'PHP', value: amountPHP.toFixed(2) }
+            }],
+            application_context: {
+                return_url: redirectSuccessUrl,
+                cancel_url: redirectFailedUrl,
+                brand_name: 'OmniPOS',
+                user_action: 'PAY_NOW'
+            }
+        })
+    });
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok || !data || !data.id) {
+        throw new Error((data && data.message) || `PayPal error (HTTP ${resp.status})`);
+    }
+    const approveLink = (data.links || []).find((l) => l.rel === 'approve');
+    return { id: data.id, approveUrl: approveLink && approveLink.href };
+}
+async function paypalCaptureOrder(orderId) {
+    const token = await paypalAccessToken();
+    const resp = await fetch(`${PAYPAL_API_BASE}/v2/checkout/orders/${orderId}/capture`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }
+    });
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok || !data) throw new Error('Could not capture the PayPal order.');
+    return data;
+}
+// PayPal webhook signatures ay hindi simpleng HMAC — kailangang tawagan
+// ang "verify-webhook-signature" endpoint mismo ng PayPal, na binibigyan
+// ng mga "Paypal-*" headers galing sa orihinal na webhook request kasama
+// ng naka-parse (JSON) na event body.
+async function verifyPaypalWebhook(headers, parsedBody) {
+    if (!PAYPAL_WEBHOOK_ID) return false;
+    try {
+        const token = await paypalAccessToken();
+        const resp = await fetch(`${PAYPAL_API_BASE}/v1/notifications/verify-webhook-signature`, {
+            method: 'POST',
+            headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                auth_algo: headers['paypal-auth-algo'],
+                cert_url: headers['paypal-cert-url'],
+                transmission_id: headers['paypal-transmission-id'],
+                transmission_sig: headers['paypal-transmission-sig'],
+                transmission_time: headers['paypal-transmission-time'],
+                webhook_id: PAYPAL_WEBHOOK_ID,
+                webhook_event: parsedBody
+            })
+        });
+        const data = await resp.json().catch(() => null);
+        return !!(data && data.verification_status === 'SUCCESS');
+    } catch (err) {
+        console.error('⚠️  PayPal webhook verification failed:', err.message);
+        return false;
+    }
+}
+
+// ---- Dragonpay (hosted checkout — GCash / InstaPay & PESONet bank
+// transfer / Over-the-Counter sa 7-Eleven, Cebuana Lhuillier, LBC, atbp.,
+// lahat sa IISANG "Request Payment" redirect, kaparehong konsepto ng
+// Xendit Invoice sa itaas) ----
+const DRAGONPAY_MERCHANT_ID = process.env.DRAGONPAY_MERCHANT_ID || null;
+const DRAGONPAY_SECRET_KEY = process.env.DRAGONPAY_SECRET_KEY || null;
+// "test" (default, gamit ang test.dragonpay.ph sandbox) o "live".
+const DRAGONPAY_ENV = process.env.DRAGONPAY_ENV === 'live' ? 'live' : 'test';
+const DRAGONPAY_API_BASE = DRAGONPAY_ENV === 'live' ? 'https://gw.dragonpay.ph' : 'https://test.dragonpay.ph';
+// Ginagamit sa pareho ng (a) pagbuo ng Request Payment digest — bago
+// mag-redirect ang customer papunta sa Dragonpay — at (b) pag-verify ng
+// Postback digest na pinapadala PABALIK ni Dragonpay pagkatapos magbayad.
+// Colon(":")-joined ang mga input bago i-SHA1, base sa opisyal na
+// Dragonpay Merchant Integration Guide — I-DOBLE-CHECK LANG ito laban
+// sa pinakabagong guide na ibinigay sa iyo ni Dragonpay pagka-sign-up,
+// dahil kritikal na tama ang eksaktong pagkakasunod-sunod ng fields
+// para gumana ang signature.
+function dragonpaySha1(input) {
+    return crypto.createHash('sha1').update(input).digest('hex');
+}
+async function dragonpayCreateTransaction({ amountPHP, purchaseId, redirectSuccessUrl, description, email }) {
+    if (!DRAGONPAY_MERCHANT_ID || !DRAGONPAY_SECRET_KEY) {
+        const err = new Error('DRAGONPAY_MERCHANT_ID / DRAGONPAY_SECRET_KEY is not configured on the relay yet.');
+        err.code = 'DRAGONPAY_NOT_CONFIGURED';
+        throw err;
+    }
+    const amount = Number(amountPHP).toFixed(2);
+    const ccy = 'PHP';
+    const desc = String(description || 'OmniPOS Cloud Backup Tokens').slice(0, 100);
+    const payerEmail = email || 'customer@omnipos.local';
+    const digest = dragonpaySha1(`${DRAGONPAY_MERCHANT_ID}:${purchaseId}:${amount}:${ccy}:${desc}:${payerEmail}:${DRAGONPAY_SECRET_KEY}`);
+    const params = new URLSearchParams({
+        merchantid: DRAGONPAY_MERCHANT_ID,
+        txnid: purchaseId,
+        amount,
+        ccy,
+        description: desc,
+        email: payerEmail,
+        digest,
+        // Balikan ang parehong "return" landing page na ginagamit na ng
+        // lahat ng ibang provider sa itaas — ang totoong pag-credit ng
+        // tokens ay nasa Postback pa rin (server-to-server), hindi dito.
+        redirecturl: redirectSuccessUrl
+    });
+    return { id: purchaseId, checkoutUrl: `${DRAGONPAY_API_BASE}/Pay.aspx?${params.toString()}` };
+}
+// Postback digest (server-to-server, mula Dragonpay papunta sa
+// DRAGONPAY_WEBHOOK_PATH sa ibaba): SHA1(txnid:refno:status:message:secretkey).
+// Status codes ng Dragonpay: S=Success, F=Failure, P=Pending, U=Unknown,
+// R=Refund, K=Chargeback, V=Void, A=Authorized (pre-auth lang).
+function verifyDragonpayPostbackDigest({ txnid, refno, status, message, digest }) {
+    if (!DRAGONPAY_SECRET_KEY || !digest) return false;
+    const expected = dragonpaySha1(`${txnid}:${refno}:${status}:${message}:${DRAGONPAY_SECRET_KEY}`);
+    return safeCompare(String(digest).toLowerCase(), expected);
+}
+
+// ---- Payment method catalog + registry ----
+// Ito ang TANGING lugar na kailangang baguhin kapag may idadagdag pang
+// bagong provider/method — awtomatiko nang susunod dito ang lahat ng
+// endpoint (packages list, purchase/create, availability check).
+const PAYMENT_METHOD_CATALOG = [
+    { id: 'gcash', provider: 'paymongo', label: 'GCash' },
+    { id: 'maya', provider: 'paymongo', label: 'Maya' },
+    { id: 'online_banking', provider: 'paymongo', label: 'Online Banking (PayMongo)' },
+    { id: 'xendit_checkout', provider: 'xendit', label: 'GCash / Maya / Bank Transfer / Card (Xendit)' },
+    { id: 'card', provider: 'stripe', label: 'Credit/Debit Card (Stripe)' },
+    { id: 'paypal', provider: 'paypal', label: 'PayPal' },
+    { id: 'dragonpay_checkout', provider: 'dragonpay', label: 'GCash / InstaPay / PESONet / Over-the-Counter (Dragonpay)' }
+];
+const PAYMENT_PROVIDERS_CONFIGURED = {
+    paymongo: () => !!PAYMONGO_SECRET_KEY,
+    xendit: () => !!XENDIT_SECRET_KEY,
+    stripe: () => !!STRIPE_SECRET_KEY,
+    paypal: () => !!(PAYPAL_CLIENT_ID && PAYPAL_CLIENT_SECRET),
+    dragonpay: () => !!(DRAGONPAY_MERCHANT_ID && DRAGONPAY_SECRET_KEY)
+};
+function findPaymentMethod(methodId) {
+    return PAYMENT_METHOD_CATALOG.find((m) => m.id === methodId) || null;
+}
+function isPaymentMethodAvailable(methodId) {
+    const m = findPaymentMethod(methodId);
+    if (!m) return false;
+    const check = PAYMENT_PROVIDERS_CONFIGURED[m.provider];
+    return !!(check && check());
+}
+// Ibinabalik lang ang mga method na TALAGANG naka-configure ang env
+// var(s) nito sa Render ngayon — ito mismo ang isasagawa ng OMNIPOS
+// bilang listahan sa dropdown/select ng "paraan ng bayad".
+function getAvailablePaymentMethods() {
+    return PAYMENT_METHOD_CATALOG.filter((m) => isPaymentMethodAvailable(m.id)).map((m) => ({ id: m.id, label: m.label, provider: m.provider }));
+}
+async function createPaymentCheckout({ method, amountPHP, purchaseId, base, description }) {
+    const m = findPaymentMethod(method);
+    if (!m) {
+        const err = new Error('Invalid payment method.');
+        err.code = 'UNSUPPORTED_METHOD';
+        throw err;
+    }
+    if (!isPaymentMethodAvailable(method)) {
+        const err = new Error(`${m.label} is not configured on the relay right now.`);
+        err.code = 'PROVIDER_NOT_CONFIGURED';
+        throw err;
+    }
+    const redirectSuccessUrl = `${base}/relay/cloud-tokens/return?purchaseId=${encodeURIComponent(purchaseId)}&result=success`;
+    const redirectFailedUrl = `${base}/relay/cloud-tokens/return?purchaseId=${encodeURIComponent(purchaseId)}&result=failed`;
+    if (m.provider === 'paymongo') {
+        const source = await paymongoCreateSource({ amountPHP, method, redirectSuccessUrl, redirectFailedUrl, description });
+        return { provider: 'paymongo', providerRefId: source.id, checkoutUrl: source.attributes.redirect.checkout_url };
+    }
+    if (m.provider === 'xendit') {
+        const invoice = await xenditCreateInvoice({ amountPHP, purchaseId, redirectSuccessUrl, redirectFailedUrl, description });
+        return { provider: 'xendit', providerRefId: invoice.id, checkoutUrl: invoice.invoice_url };
+    }
+    if (m.provider === 'stripe') {
+        const session = await stripeCreateCheckoutSession({ amountPHP, purchaseId, redirectSuccessUrl, redirectFailedUrl, description });
+        return { provider: 'stripe', providerRefId: session.id, checkoutUrl: session.url };
+    }
+    if (m.provider === 'paypal') {
+        const order = await paypalCreateOrder({ amountPHP, purchaseId, redirectSuccessUrl, redirectFailedUrl, description });
+        if (!order.approveUrl) throw new Error('PayPal did not return an approval link.');
+        return { provider: 'paypal', providerRefId: order.id, checkoutUrl: order.approveUrl };
+    }
+    if (m.provider === 'dragonpay') {
+        const txn = await dragonpayCreateTransaction({ amountPHP, purchaseId, redirectSuccessUrl, description });
+        return { provider: 'dragonpay', providerRefId: txn.id, checkoutUrl: txn.checkoutUrl };
+    }
+    throw new Error('Unhandled payment provider.');
+}
+async function ensureCloudTokenSchema() {
+    if (!pgPool) return;
+    await pgPool.query(`
+        CREATE TABLE IF NOT EXISTS cloud_token_wallets (
+            installation_id TEXT PRIMARY KEY,
+            balance_tokens  NUMERIC NOT NULL DEFAULT 0,
+            auto_sync_enabled BOOLEAN NOT NULL DEFAULT true,
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+    `);
+    await pgPool.query(`
+        CREATE TABLE IF NOT EXISTS cloud_token_ledger (
+            id              BIGSERIAL PRIMARY KEY,
+            installation_id TEXT NOT NULL,
+            type            TEXT NOT NULL, 
+            tokens          NUMERIC NOT NULL,
+            balance_after   NUMERIC,
+            note            TEXT,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+    `);
+    await pgPool.query(`
+        CREATE TABLE IF NOT EXISTS cloud_token_purchases (
+            purchase_id     TEXT PRIMARY KEY,
+            installation_id TEXT NOT NULL,
+            package_id      TEXT,
+            tokens          NUMERIC NOT NULL,
+            amount_php      NUMERIC NOT NULL,
+            method          TEXT NOT NULL,
+            source_id       TEXT,
+            status          TEXT NOT NULL DEFAULT 'pending', 
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+    `);
+    // AYOS: dating PayMongo lang, kaya walang "provider" column pa dati —
+    // idinagdag ito para malaman ng webhook kung aling provider (PayMongo,
+    // Xendit, Stripe, PayPal, ...) ang gumawa ng source_id/providerRefId na
+    // naka-imbak sa row na ito.
+    await pgPool.query(`ALTER TABLE cloud_token_purchases ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'paymongo';`);
+    console.log('✅ Cloud Token wallet Postgres schema ready (cloud_token_wallets, cloud_token_ledger, cloud_token_purchases).');
+}
+async function getOrCreateCloudTokenWallet(installationId) {
+    const result = await queryWithRetry(pgPool, 'SELECT installation_id, balance_tokens, auto_sync_enabled FROM cloud_token_wallets WHERE installation_id = $1', [installationId]);
+    if (result.rows[0]) return result.rows[0];
+    const inserted = await queryWithRetry(
+        pgPool,
+        `INSERT INTO cloud_token_wallets (installation_id, balance_tokens, auto_sync_enabled) VALUES ($1, 0, true)
+         ON CONFLICT (installation_id) DO UPDATE SET installation_id = EXCLUDED.installation_id
+         RETURNING installation_id, balance_tokens, auto_sync_enabled`,
+        [installationId]
+    );
+    return inserted.rows[0];
+}
+async function creditCloudTokens(installationId, tokens, note) {
+    await getOrCreateCloudTokenWallet(installationId);
+    const result = await queryWithRetry(
+        pgPool,
+        `UPDATE cloud_token_wallets SET balance_tokens = balance_tokens + $2, updated_at = now()
+         WHERE installation_id = $1 RETURNING balance_tokens`,
+        [installationId, tokens]
+    );
+    const balanceAfter = result.rows[0] ? Number(result.rows[0].balance_tokens) : null;
+    await queryWithRetry(
+        pgPool,
+        `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note) VALUES ($1, 'purchase', $2, $3, $4)`,
+        [installationId, tokens, balanceAfter, note || null]
+    );
+    return balanceAfter;
 }
 const MODULE_SUBSCRIPTION_FEATURE_IDS = ['rbac_management', 'multi_branch'];
 function isModuleSubscriptionFeature(featureId) {
@@ -3954,6 +4522,357 @@ app.get('/relay/cloud-backup/usage', requireApiKey, requireAllowedDevice, rateLi
         res.status(500).json({ success: false, message: err.message });
     }
 });
+// ===================================================================
+// CLOUD BACKUP TOKENS — mga endpoint na ginagamit ng bagong
+// "Cloud Tokens" admin-only page sa OMNIPOS (Google App Verification +
+// token/diamond wallet). Lahat ng balance/ledger ay nakatira DITO sa
+// RELAY (hindi sa OMNIPOS/kliyente) para hindi ito ma-tamper — ang
+// OMNIPOS lang ang basta magta-trigger ng purchase/check-and-consume.
+// ===================================================================
+app.get('/relay/cloud-tokens/packages', requireApiKey, rateLimit('cloud-tokens-packages', 120, 60 * 60 * 1000), (req, res) => {
+    const packages = getCloudTokenPackages();
+    const tokenCostPerSync = {};
+    for (const tier of Object.keys(CLOUD_BACKUP_PLANS)) {
+        tokenCostPerSync[tier] = getCloudTokenCostPerSync(tier);
+    }
+    // AYOS: dating hard-coded (GCash/Maya/Online Banking) ang select sa
+    // OMNIPOS. Ngayon, ibinabalik dito ang paymentMethods — LISTAHAN NG MGA
+    // PARAAN NG BAYAD NA TALAGANG NAKA-CONFIGURE (env vars) sa relay
+    // ngayon — ito mismo ang gagamitin ng OMNIPOS para buuin ang dropdown,
+    // kaya kung ano lang ang naka-set sa Render env, iyon lang ang
+    // lalabas/mapipili.
+    const paymentMethods = getAvailablePaymentMethods();
+    res.json({ success: true, packages, tokenCostPerSync, tokensPerPeso: 1, paymentMethods });
+});
+app.get('/relay/cloud-tokens/wallet', requireApiKey, requireAllowedDevice, rateLimit('cloud-tokens-wallet', 120, 60 * 60 * 1000, (req) => req.query?.installationId), async (req, res) => {
+    const installationId = String(req.query.installationId || '').trim();
+    if (!installationId) return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
+    try {
+        const wallet = await getOrCreateCloudTokenWallet(installationId);
+        const ledgerResult = await queryWithRetry(
+            pgPool,
+            'SELECT type, tokens, balance_after, note, created_at FROM cloud_token_ledger WHERE installation_id = $1 ORDER BY id DESC LIMIT 20',
+            [installationId]
+        );
+        const pendingResult = await queryWithRetry(
+            pgPool,
+            `SELECT purchase_id, package_id, tokens, amount_php, method, status, created_at FROM cloud_token_purchases
+             WHERE installation_id = $1 AND status = 'pending' ORDER BY created_at DESC LIMIT 5`,
+            [installationId]
+        );
+        res.json({
+            success: true,
+            balanceTokens: Number(wallet.balance_tokens),
+            ledger: ledgerResult.rows,
+            pendingPurchases: pendingResult.rows
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+app.post('/relay/cloud-tokens/purchase/create', requireApiKey, requireAllowedDevice, rateLimit('cloud-tokens-purchase-create', 20, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    const { installationId, packageId, customTokens, method, returnBaseUrl } = req.body;
+    if (!installationId) return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
+    // AYOS: dating PayMongo lang ang tinatanggap dito. Ngayon, tinitignan
+    // sa PAYMENT_METHOD_CATALOG/PAYMENT_PROVIDERS_CONFIGURED (env-based)
+    // kung valid AT available ang hiniling na method — anumang provider
+    // ang nasa likod nito (PayMongo, Xendit, Stripe, PayPal, ...).
+    if (!isPaymentMethodAvailable(method)) {
+        const available = getAvailablePaymentMethods().map((m) => m.label).join(', ') || 'wala pang naka-configure na paraan ng bayad';
+        return res.status(400).json({ success: false, message: `Invalid o hindi available ang payment method na ito. Available ngayon: ${available}.` });
+    }
+    let tokens;
+    let resolvedPackageId = null;
+    if (packageId && getCloudTokenPackages()[packageId]) {
+        const pkg = getCloudTokenPackages()[packageId];
+        tokens = pkg.tokens;
+        resolvedPackageId = packageId;
+    } else if (typeof customTokens === 'number' && customTokens >= 50) {
+        tokens = Math.round(customTokens);
+    } else {
+        return res.status(400).json({ success: false, message: 'Piliin ang Basic/Standard/Pro na package, o maglagay ng custom na halaga (minimum 50 tokens/₱50).' });
+    }
+    const amountPHP = tokens; 
+    const purchaseId = `TKN-${installationId.slice(0, 8)}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+    const base = (returnBaseUrl && /^https?:\/\//.test(returnBaseUrl)) ? returnBaseUrl.replace(/\/$/, '') : `${req.protocol}://${req.get('host')}`;
+    try {
+        const checkout = await createPaymentCheckout({
+            method,
+            amountPHP,
+            purchaseId,
+            base,
+            description: `OmniPOS Cloud Backup Tokens (${tokens} token/s)`
+        });
+        await queryWithRetry(
+            pgPool,
+            `INSERT INTO cloud_token_purchases (purchase_id, installation_id, package_id, tokens, amount_php, method, source_id, provider, status)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')`,
+            [purchaseId, installationId, resolvedPackageId, tokens, amountPHP, method, checkout.providerRefId, checkout.provider]
+        );
+        logActivity(installationId, 'cloud_token_purchase_created', { purchaseId, tokens, amountPHP, method, provider: checkout.provider });
+        res.json({ success: true, purchaseId, checkoutUrl: checkout.checkoutUrl, tokens, amountPHP });
+    } catch (err) {
+        const isConfigErr = err.code === 'PAYMONGO_NOT_CONFIGURED' || err.code === 'XENDIT_NOT_CONFIGURED' || err.code === 'STRIPE_NOT_CONFIGURED' || err.code === 'PAYPAL_NOT_CONFIGURED' || err.code === 'DRAGONPAY_NOT_CONFIGURED' || err.code === 'PROVIDER_NOT_CONFIGURED';
+        res.status(isConfigErr ? 503 : 502).json({ success: false, message: err.message });
+    }
+});
+// Simpleng "processing" page na binabalikan ng checkout ng kahit anong
+// naka-configure na provider (PayMongo/Xendit/Stripe/PayPal) pagkatapos
+// magbayad ang customer — ang TUNAY na pagcredit ng tokens ay nasa
+// webhook lang (mas mapagkakatiwalaan, hindi client-side redirect). Dito
+// lang ito nagpapakita ng malinaw na mensahe at nagsasabing balikan na
+// lang ang OMNIPOS admin panel.
+app.get('/relay/cloud-tokens/return', (req, res) => {
+    const result = req.query.result === 'success' ? 'success' : 'failed';
+    const title = result === 'success' ? 'Payment Received' : 'Payment Not Completed';
+    const message = result === 'success'
+        ? 'Salamat! Kinukumpirma pa ng system ang bayad na ito — makikita ang updated token balance sa OmniPOS admin panel (Cloud Tokens page) sa loob ng ilang segundo hanggang isang minuto.'
+        : 'Hindi natapos o kinansela ang bayad na ito. Wala pang na-deduct/na-charge. Pwede mo ulit subukan sa OmniPOS admin panel (Cloud Tokens page).';
+    res.set('Content-Type', 'text/html; charset=utf-8').send(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title>
+<style>body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px;text-align:center;}
+.card{max-width:420px;background:#1e293b;border-radius:16px;padding:32px 24px;box-shadow:0 10px 30px rgba(0,0,0,.3);}
+h1{font-size:1.25rem;margin:0 0 12px;color:${result === 'success' ? '#4ade80' : '#f87171'};}
+p{line-height:1.5;color:#cbd5e1;}</style></head>
+<body><div class="card"><h1>${result === 'success' ? '✅' : '⚠️'} ${title}</h1><p>${message}</p></div></body></html>`);
+});
+app.post('/relay/webhooks/paymongo', express.raw({ type: '*/*', limit: '1mb' }), async (req, res) => {
+    const rawBody = req.body ? req.body.toString('utf8') : '';
+    const signatureHeader = req.headers['paymongo-signature'];
+    if (!verifyPaymongoSignature(rawBody, signatureHeader)) {
+        console.error('⚠️  PayMongo webhook: invalid/missing signature — tinanggihan.');
+        return res.status(400).json({ success: false, message: 'Invalid webhook signature.' });
+    }
+    let event;
+    try {
+        event = JSON.parse(rawBody);
+    } catch (err) {
+        return res.status(400).json({ success: false, message: 'Invalid JSON.' });
+    }
+    const eventType = event && event.data && event.data.attributes && event.data.attributes.type;
+    const resource = event && event.data && event.data.attributes && event.data.attributes.data;
+    try {
+        if (eventType === 'source.chargeable' && resource && resource.id) {
+            const sourceId = resource.id;
+            const purchaseResult = await queryWithRetry(
+                pgPool,
+                `SELECT * FROM cloud_token_purchases WHERE source_id = $1 AND status = 'pending'`,
+                [sourceId]
+            );
+            const purchase = purchaseResult.rows[0];
+            if (!purchase) {
+                return res.json({ success: true, ignored: true, message: 'No matching pending purchase for this source.' });
+            }
+            const payment = await paymongoCreatePayment({
+                sourceId,
+                amountPHP: Number(purchase.amount_php),
+                description: `OmniPOS Cloud Backup Tokens (${purchase.tokens} token/s)`
+            });
+            const paymentStatus = payment && payment.attributes && payment.attributes.status;
+            if (paymentStatus === 'paid') {
+                await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'paid', updated_at = now() WHERE purchase_id = $1`, [purchase.purchase_id]);
+                const newBalance = await creditCloudTokens(purchase.installation_id, Number(purchase.tokens), `Purchase ${purchase.purchase_id} (${purchase.method})`);
+                logActivity(purchase.installation_id, 'cloud_token_purchase_paid', { purchaseId: purchase.purchase_id, tokens: Number(purchase.tokens), newBalance });
+                sendTelegramNotification(`💎 Cloud Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via ${purchase.method} — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
+            } else {
+                await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'failed', updated_at = now() WHERE purchase_id = $1`, [purchase.purchase_id]);
+            }
+        } else if (eventType === 'payment.failed' && resource && resource.attributes) {
+            const sourceId = resource.attributes.source && resource.attributes.source.id;
+            if (sourceId) {
+                await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'failed', updated_at = now() WHERE source_id = $1 AND status = 'pending'`, [sourceId]);
+            }
+        }
+        res.json({ success: true });
+    } catch (err) {
+        console.error('⚠️  PayMongo webhook processing error:', err.message);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+// ---- Xendit webhook (invoice.paid) ----
+app.post('/relay/webhooks/xendit', async (req, res) => {
+    const headerToken = req.headers['x-callback-token'];
+    if (!verifyXenditWebhookToken(headerToken)) {
+        console.error('⚠️  Xendit webhook: invalid/missing callback token — tinanggihan.');
+        return res.status(400).json({ success: false, message: 'Invalid webhook token.' });
+    }
+    const event = req.body || {};
+    const invoiceId = event.id;
+    const status = event.status; 
+    try {
+        if (!invoiceId) return res.json({ success: true, ignored: true });
+        const purchaseResult = await queryWithRetry(
+            pgPool,
+            `SELECT * FROM cloud_token_purchases WHERE source_id = $1 AND provider = 'xendit' AND status = 'pending'`,
+            [invoiceId]
+        );
+        const purchase = purchaseResult.rows[0];
+        if (!purchase) return res.json({ success: true, ignored: true, message: 'No matching pending purchase for this invoice.' });
+        if (status === 'PAID' || status === 'SETTLED') {
+            await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'paid', updated_at = now() WHERE purchase_id = $1`, [purchase.purchase_id]);
+            const newBalance = await creditCloudTokens(purchase.installation_id, Number(purchase.tokens), `Purchase ${purchase.purchase_id} (${purchase.method})`);
+            logActivity(purchase.installation_id, 'cloud_token_purchase_paid', { purchaseId: purchase.purchase_id, tokens: Number(purchase.tokens), newBalance });
+            sendTelegramNotification(`💎 Cloud Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via Xendit (${purchase.method}) — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
+        } else if (status === 'EXPIRED') {
+            await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'failed', updated_at = now() WHERE purchase_id = $1`, [purchase.purchase_id]);
+        }
+        res.json({ success: true });
+    } catch (err) {
+        console.error('⚠️  Xendit webhook processing error:', err.message);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+// ---- Stripe webhook (checkout.session.completed) ----
+app.post('/relay/webhooks/stripe', express.raw({ type: '*/*', limit: '1mb' }), async (req, res) => {
+    const rawBody = req.body ? req.body.toString('utf8') : '';
+    const signatureHeader = req.headers['stripe-signature'];
+    if (!verifyStripeSignature(rawBody, signatureHeader)) {
+        console.error('⚠️  Stripe webhook: invalid/missing signature — tinanggihan.');
+        return res.status(400).json({ success: false, message: 'Invalid webhook signature.' });
+    }
+    let event;
+    try {
+        event = JSON.parse(rawBody);
+    } catch (err) {
+        return res.status(400).json({ success: false, message: 'Invalid JSON.' });
+    }
+    try {
+        const session = event && event.data && event.data.object;
+        if (event.type === 'checkout.session.completed' && session && session.id) {
+            const purchaseResult = await queryWithRetry(
+                pgPool,
+                `SELECT * FROM cloud_token_purchases WHERE source_id = $1 AND provider = 'stripe' AND status = 'pending'`,
+                [session.id]
+            );
+            const purchase = purchaseResult.rows[0];
+            if (!purchase) return res.json({ success: true, ignored: true, message: 'No matching pending purchase for this session.' });
+            if (session.payment_status === 'paid') {
+                await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'paid', updated_at = now() WHERE purchase_id = $1`, [purchase.purchase_id]);
+                const newBalance = await creditCloudTokens(purchase.installation_id, Number(purchase.tokens), `Purchase ${purchase.purchase_id} (${purchase.method})`);
+                logActivity(purchase.installation_id, 'cloud_token_purchase_paid', { purchaseId: purchase.purchase_id, tokens: Number(purchase.tokens), newBalance });
+                sendTelegramNotification(`💎 Cloud Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via Stripe (card) — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
+            }
+        } else if (event.type === 'checkout.session.expired' && session && session.id) {
+            await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'failed', updated_at = now() WHERE source_id = $1 AND provider = 'stripe' AND status = 'pending'`, [session.id]);
+        }
+        res.json({ success: true });
+    } catch (err) {
+        console.error('⚠️  Stripe webhook processing error:', err.message);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+// ---- PayPal webhook (PAYMENT.CAPTURE.COMPLETED / CHECKOUT.ORDER.APPROVED) ----
+app.post('/relay/webhooks/paypal', async (req, res) => {
+    const event = req.body || {};
+    try {
+        const verified = await verifyPaypalWebhook(req.headers, event);
+        if (!verified) {
+            console.error('⚠️  PayPal webhook: invalid/unverifiable signature — tinanggihan.');
+            return res.status(400).json({ success: false, message: 'Invalid webhook signature.' });
+        }
+        const eventType = event.event_type;
+        const orderId = event.resource && (event.resource.id || (event.resource.supplementary_data && event.resource.supplementary_data.related_ids && event.resource.supplementary_data.related_ids.order_id));
+        if (eventType === 'CHECKOUT.ORDER.APPROVED' && orderId) {
+            const purchaseResult = await queryWithRetry(
+                pgPool,
+                `SELECT * FROM cloud_token_purchases WHERE source_id = $1 AND provider = 'paypal' AND status = 'pending'`,
+                [orderId]
+            );
+            const purchase = purchaseResult.rows[0];
+            if (!purchase) return res.json({ success: true, ignored: true, message: 'No matching pending purchase for this order.' });
+            const capture = await paypalCaptureOrder(orderId);
+            const captureStatus = capture && capture.status;
+            if (captureStatus === 'COMPLETED') {
+                await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'paid', updated_at = now() WHERE purchase_id = $1`, [purchase.purchase_id]);
+                const newBalance = await creditCloudTokens(purchase.installation_id, Number(purchase.tokens), `Purchase ${purchase.purchase_id} (${purchase.method})`);
+                logActivity(purchase.installation_id, 'cloud_token_purchase_paid', { purchaseId: purchase.purchase_id, tokens: Number(purchase.tokens), newBalance });
+                sendTelegramNotification(`💎 Cloud Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via PayPal — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
+            } else {
+                await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'failed', updated_at = now() WHERE purchase_id = $1`, [purchase.purchase_id]);
+            }
+        }
+        res.json({ success: true });
+    } catch (err) {
+        console.error('⚠️  PayPal webhook processing error:', err.message);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+// ---- Dragonpay Postback (server-to-server, itinakda sa Dragonpay
+// merchant back-office bilang "Postback URL") ----
+// AYOS: Dragonpay ay NAGPAPADALA rin ng katulad na request papunta sa
+// "Return URL"/browser redirect (na ginamit na nating
+// /relay/cloud-tokens/return sa itaas, kagaya ng ibang provider) —
+// pero HINDI dapat doon nakabatay ang pag-credit ng tokens (madaling
+// i-fake ng kliyente ang isang plain browser redirect). Ang Postback
+// dito lang, na naka-verify gamit ang SHA1 digest, ang PINAGKAKATIWALAAN
+// na batayan.
+app.post(DRAGONPAY_WEBHOOK_PATH, express.urlencoded({ extended: false, limit: '256kb' }), async (req, res) => {
+    const { txnid, refno, status, message, digest } = req.body || {};
+    if (!verifyDragonpayPostbackDigest({ txnid, refno, status, message, digest })) {
+        console.error('⚠️  Dragonpay postback: invalid/missing digest — tinanggihan.');
+        // Text lang (hindi JSON) ang inaasahan ni Dragonpay bilang response.
+        return res.status(400).type('text/plain').send('result=INVALID');
+    }
+    try {
+        if (!txnid) return res.type('text/plain').send('result=OK');
+        const purchaseResult = await queryWithRetry(
+            pgPool,
+            `SELECT * FROM cloud_token_purchases WHERE source_id = $1 AND provider = 'dragonpay' AND status = 'pending'`,
+            [txnid]
+        );
+        const purchase = purchaseResult.rows[0];
+        if (!purchase) return res.type('text/plain').send('result=OK');
+        if (status === 'S') {
+            await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'paid', updated_at = now() WHERE purchase_id = $1`, [purchase.purchase_id]);
+            const newBalance = await creditCloudTokens(purchase.installation_id, Number(purchase.tokens), `Purchase ${purchase.purchase_id} (${purchase.method})`);
+            logActivity(purchase.installation_id, 'cloud_token_purchase_paid', { purchaseId: purchase.purchase_id, tokens: Number(purchase.tokens), newBalance });
+            sendTelegramNotification(`💎 Cloud Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via Dragonpay (refno ${refno || 'n/a'}) — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
+        } else if (status === 'F' || status === 'V' || status === 'K') {
+            await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'failed', updated_at = now() WHERE purchase_id = $1`, [purchase.purchase_id]);
+        }
+        // Kung P (Pending), U (Unknown), o A (Authorized) — hindi muna
+        // ginagalaw, hihintayin na lang ang susunod na Postback ng
+        // Dragonpay pagbago ng status.
+        res.type('text/plain').send('result=OK');
+    } catch (err) {
+        console.error('⚠️  Dragonpay webhook processing error:', err.message);
+        res.status(500).type('text/plain').send('result=ERROR');
+    }
+});
+app.post('/relay/cloud-tokens/check-and-consume', requireApiKey, requireAllowedDevice, rateLimit('cloud-tokens-consume', 300, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    const { installationId, tokens, note } = req.body;
+    if (!installationId) return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+    if (typeof tokens !== 'number' || tokens <= 0) return res.status(400).json({ success: false, message: 'Invalid tokens amount.' });
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
+    try {
+        await getOrCreateCloudTokenWallet(installationId);
+        const result = await queryWithRetry(
+            pgPool,
+            `UPDATE cloud_token_wallets SET balance_tokens = balance_tokens - $2, updated_at = now()
+             WHERE installation_id = $1 AND balance_tokens >= $2 RETURNING balance_tokens`,
+            [installationId, tokens]
+        );
+        if (!result.rows[0]) {
+            const currentResult = await queryWithRetry(pgPool, 'SELECT balance_tokens FROM cloud_token_wallets WHERE installation_id = $1', [installationId]);
+            return res.status(402).json({
+                success: false,
+                insufficient: true,
+                balanceTokens: currentResult.rows[0] ? Number(currentResult.rows[0].balance_tokens) : 0,
+                message: 'Insufficient Cloud Backup tokens. Please buy more tokens to keep syncing.'
+            });
+        }
+        const balanceAfter = Number(result.rows[0].balance_tokens);
+        await queryWithRetry(
+            pgPool,
+            `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note) VALUES ($1, 'consume', $2, $3, $4)`,
+            [installationId, -tokens, balanceAfter, note || null]
+        );
+        res.json({ success: true, balanceTokens: balanceAfter });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 // Ang bahaging ito lang ang makikita ng isang OMNIPOS installation sa
 // sarili niyang admin panel: kanya-kanyang share sa TOTAL na Neon cost
 // (base sa proporsyon ng laki ng data at dalas ng backup), dagdag ang
@@ -6014,7 +6933,8 @@ async function bootstrapStores() {
         ensureCloudBackupSchema(),
         ensureDeviceLicenseSchema(),
         ensureKvSchema(),
-        ensureBuildKvSchema()
+        ensureBuildKvSchema(),
+        ensureCloudTokenSchema()
     ]);
     // Ibalik agad sa disk ang release zip (kung meron na naka-save sa Neon build
     // DB) bago pa man tumanggap ng unang download request — para hindi na
