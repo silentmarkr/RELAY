@@ -97,6 +97,12 @@
   .btn-save:hover { background: var(--accent); color: var(--accent-text); }
   .btn-reset { color: var(--muted); }
   .btn-reset:hover { border-color: var(--red-line); color: var(--red); }
+  .fee-bar {
+    display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap; margin-bottom: 24px;
+    background: var(--card); border: 1.5px solid var(--border); border-radius: var(--radius-lg); padding: 16px;
+  }
+  .fee-bar .field { width: 220px; }
+  .fee-bar .btn { flex: 0 0 auto; }
   #toast {
     position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
     background: var(--bg-raise); border: 1.5px solid var(--border-soft); color: var(--text);
@@ -110,6 +116,9 @@
     .topbar { padding: 12px 14px; flex-wrap: wrap; gap: 10px; }
     .topbar-actions { flex-wrap: wrap; width: 100%; gap: 8px; }
     .topbar-actions .icon-btn { flex: 1 1 auto; justify-content: center; font-size: .82rem; padding: 9px 10px; }
+    .fee-bar { flex-direction: column; align-items: stretch; gap: 12px; padding: 14px; }
+    .fee-bar .field { width: 100%; }
+    .fee-bar .btn { width: 100%; justify-content: center; }
   }
 </style>
 </head>
@@ -149,6 +158,22 @@
       <a href="feature-pricing.html" style="color:var(--accent);">separate Feature Pricing page</a>.
     </p>
     <div id="plansGrid" class="plans-grid"></div>
+
+    <h2 style="font-family:var(--font-heading);font-size:1rem;color:var(--accent);margin:34px 0 6px;">Maintenance &amp; Monitoring Fee</h2>
+    <p class="intro" style="margin-bottom:16px;">
+      A flat fee (your own markup for monitoring/support — not a Neon charge) added on top of the
+      Neon usage cost, shown to every OmniPOS installation on the Cloud Backup cost-share widget
+      and on the tier picker below. This is the DEFAULT for every client; per-client overrides are
+      still set individually on the
+      <a href="client-cost-allocation.html" style="color:var(--accent);">Client Cost Allocation page</a>.
+    </p>
+    <div class="fee-bar">
+      <div class="field">
+        <label>Default maintenance fee (₱ / client / month)</label>
+        <input type="number" min="0" step="1" id="defaultMaintenanceFeeInput">
+      </div>
+      <button class="btn btn-save" onclick="saveDefaultMaintenanceFee()">Save default</button>
+    </div>
 
     <h2 style="font-family:var(--font-heading);font-size:1rem;color:var(--accent);margin:34px 0 6px;">Module Subscriptions</h2>
     <p class="intro" style="margin-bottom:16px;">
@@ -312,11 +337,36 @@ async function loadPricing() {
   overrides = data.cloudBackupPlanOverrides || {};
   renderPlans();
 
+  document.getElementById('defaultMaintenanceFeeInput').value = data.defaultMaintenanceFeePHP != null ? data.defaultMaintenanceFeePHP : 0;
+
   moduleSubPlansBase = data.moduleSubscriptionPlansBase || {};
   moduleSubPlansEffective = data.moduleSubscriptionPlans || {};
   moduleSubOverrides = data.moduleSubscriptionOverrides || {};
   renderModuleSubPlans();
 }
+
+async function saveDefaultMaintenanceFee() {
+  const val = Number(document.getElementById('defaultMaintenanceFeeInput').value);
+  if (!isFinite(val) || val < 0) {
+    toast('Default maintenance fee must be a non-negative number.', 'error');
+    return;
+  }
+  try {
+    // Parehong endpoint na ginagamit na ng Client Cost Allocation page para
+    // sa default fee — dito lang inilipat ang UI, hindi ang backend/storage
+    // (client-maintenance-fee.json), para hindi masira ang existing
+    // per-client overrides doon.
+    await api('/relay/admin/api/client-cost-allocation/maintenance-fee', {
+      method: 'POST',
+      body: JSON.stringify({ defaultFeePHP: val })
+    });
+    toast('Saved default maintenance fee.');
+    await loadPricing();
+  } catch (err) {
+    if (err.message !== 'forbidden') toast(err.message, 'error');
+  }
+}
+
 
 function moduleSubFieldIsCustom(featureId, key) {
   const ov = moduleSubOverrides[featureId] || {};

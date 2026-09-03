@@ -1144,6 +1144,46 @@ function getMaintenanceFeeForClient(installationId) {
     const v = override[installationId];
     return typeof v === 'number' && isFinite(v) ? v : (clientMaintenanceFeeConfig.defaultFeePHP || 0);
 }
+// AYOS: sa unang successful na Cloud Backup subscribe/renew (confirm-unlock,
+// tingnan sa /relay/confirm-unlock), naka-"paid" na ang maintenance fee
+// hanggang sa mismong petsa ng pag-expire ng subscription period na iyon
+// (parehong petsa ng subscription token mismo) — kaya HINDI na ito
+// idinadagdag sa "total" na babayaran habang aktibo pa ang subscription.
+// Pag-expire (walang na-renew), awtomatiko itong "babalik" bilang bahagi ng
+// dapat bayaran sa susunod na total — walang extra na "reset" step, oras
+// lang mismo (Date.now() vs paidUntil) ang sinusunod.
+const CLIENT_MAINTENANCE_FEE_PAID_UNTIL_PATH = path.join(__dirname, 'client-maintenance-fee-paid-until.json');
+async function loadClientMaintenanceFeePaidUntil() {
+    const fromRedis = await redisGetJSON('client-maintenance-fee-paid-until', null);
+    if (fromRedis !== null) return fromRedis;
+    try {
+        return JSON.parse(fs.readFileSync(CLIENT_MAINTENANCE_FEE_PAID_UNTIL_PATH, 'utf8'));
+    } catch (err) {
+        return {};
+    }
+}
+function saveClientMaintenanceFeePaidUntil(obj) {
+    if (pgPoolDevices || pgPool || redisClient) {
+        redisSetJSON('client-maintenance-fee-paid-until', obj);
+        return;
+    }
+    try {
+        fs.writeFileSync(CLIENT_MAINTENANCE_FEE_PAID_UNTIL_PATH, JSON.stringify(obj, null, 2));
+    } catch (err) {
+        console.error('Hindi ma-save ang client-maintenance-fee-paid-until.json:', err);
+    }
+}
+let clientMaintenanceFeePaidUntil = {}; 
+function markMaintenanceFeePaidUntil(installationId, paidUntilMs) {
+    if (!installationId || typeof paidUntilMs !== 'number' || !isFinite(paidUntilMs)) return;
+    clientMaintenanceFeePaidUntil[installationId] = paidUntilMs;
+    saveClientMaintenanceFeePaidUntil(clientMaintenanceFeePaidUntil);
+}
+function isMaintenanceFeePaidForClient(installationId) {
+    const paidUntil = clientMaintenanceFeePaidUntil[installationId];
+    return typeof paidUntil === 'number' && Date.now() < paidUntil;
+}
+
 // ===================================================================
 // USD -> PHP exchange rate (live, may cache + fallback)
 // ===================================================================
@@ -1417,7 +1457,17 @@ async function computeClientCostAllocation() {
         const storageCostPHP = totalStorageCostPHP * storageShare;
         const computeCostPHP = totalComputeCostPHP * computeShare;
         const baseCostPHP = storageCostPHP + computeCostPHP;
-        const maintenanceFeePHP = getMaintenanceFeeForClient(r.installation_id);
+        // AYOS: kung "paid" pa ang client (naka-subscribe/nag-renew sila
+        // kamakailan lang — tingnan ang markMaintenanceFeePaidUntil sa
+        // /relay/confirm-unlock), HINDI muna idinadagdag sa total ang
+        // maintenance fee habang aktibo pa ang subscription period na iyon.
+        // Ang maintenanceFeeStandardPHP ang normal/karaniwang halaga (para
+        // sa display kahit "paid" — para makita pa rin kung magkano ito),
+        // habang ang maintenanceFeePHP ang ACTUAL na idinadagdag sa
+        // finalPricePHP (0 habang "paid").
+        const maintenanceFeeStandardPHP = getMaintenanceFeeForClient(r.installation_id);
+        const maintenanceFeePaid = isMaintenanceFeePaidForClient(r.installation_id);
+        const maintenanceFeePHP = maintenanceFeePaid ? 0 : maintenanceFeeStandardPHP;
         return {
             installationId: r.installation_id,
             // AYOS: idinagdag ang label (mula sa Devices page, `deviceLabels`
@@ -1439,6 +1489,9 @@ async function computeClientCostAllocation() {
             computeCostPHP,
             baseCostPHP,
             maintenanceFeePHP,
+            maintenanceFeeStandardPHP,
+            maintenanceFeePaid,
+            maintenanceFeePaidUntil: clientMaintenanceFeePaidUntil[r.installation_id] || null,
             finalPricePHP: baseCostPHP + maintenanceFeePHP
         };
     });
@@ -2392,6 +2445,14 @@ app.get('/relay/admin/api/pricing', requireAdminKey, (req, res) => {
         cloudBackupPlans: CLOUD_BACKUP_PLANS,
         cloudBackupPlansBase: CLOUD_BACKUP_PLANS_BASE,
         cloudBackupPlanOverrides,
+        // AYOS: kasama na rin dito ang maintenance/monitoring fee (default),
+        // dahil kahit na nakatago pa rin ito sa clientMaintenanceFeeConfig
+        // (client-maintenance-fee.json — hindi ito ginalaw para hindi masira
+        // ang existing per-client overrides), dito na ito sa Cloud Backup
+        // Pricing page (pricing.html) mismo ie-edit ng admin, hindi na sa
+        // Client Cost Allocation page — doon na lang mananatili ang
+        // per-client override list, pero ang DEFAULT ay dito na sa pricing.
+        defaultMaintenanceFeePHP: clientMaintenanceFeeConfig.defaultFeePHP || 0,
         billingDays: CLOUD_BACKUP_BILLING_DAYS,
         moduleSubscriptionPlans: MODULE_SUBSCRIPTION_PLANS,
         moduleSubscriptionPlansBase: MODULE_SUBSCRIPTION_PLANS_BASE,
@@ -2924,6 +2985,13 @@ app.post('/relay/admin/api/devices/:installationId/activate', requireAdminKey, (
         const tokenDurationMs = isThisCloudBackup ? cloudBackupDurationMs : (isThisModuleSubscription ? moduleSubscriptionDurationMs : durationMs);
         const token = issueSignedToken(installationId, id, tokenDurationMs);
         tokens[id] = token;
+        // AYOS: parehong "paid" marking gaya ng sa OTP flow (tingnan
+        // /relay/confirm-unlock) — kapag Cloud Backup ang manually
+        // ina-activate ng admin dito, dapat din itong mag-mark na "paid"
+        // ang maintenance fee hanggang sa expiry ng ibinigay na duration.
+        if (isThisCloudBackup && token.payload.expiresAt) {
+            markMaintenanceFeePaidUntil(installationId, token.payload.expiresAt);
+        }
         const priceForThisFeature = isThisCloudBackup
             ? cloudBackupPrice
             : isThisModuleSubscription
@@ -3295,6 +3363,16 @@ app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 100
     res.json({
         success: true,
         cloudBackupPlans: CLOUD_BACKUP_PLANS,
+        // AYOS: idinagdag ang defaultMaintenanceFeePHP dito para ito na rin
+        // ang iisang pinagmumulan (single source of truth) ng "Maintenance &
+        // monitoring" fee na ipinapakita sa OMNIPOS side — kapareho mismo ng
+        // clientMaintenanceFeeConfig.defaultFeePHP na ginagamit na sa
+        // computeClientCostAllocation() (widget/cost-share) at sa Client Cost
+        // Allocation admin page dito sa RELAY. Dati ay wala nito ang
+        // /relay/pricing kaya hiwalay ang lumalabas na numero sa Cloud Backup
+        // tier modal (walang maintenance fee doon) kumpara sa cost-share
+        // widget — ngayon parehong susundan nila itong iisang value.
+        defaultMaintenanceFeePHP: clientMaintenanceFeeConfig.defaultFeePHP || 0,
         billingDays: CLOUD_BACKUP_BILLING_DAYS,
         featureCatalog,
         upgradeTiers,
@@ -4276,6 +4354,14 @@ app.post('/relay/confirm-unlock', requireApiKey, requireAllowedDevice, rateLimit
         tier: pending.tier || null,
         billingCycle: pending.billingCycle || null
     });
+    // AYOS: sa unang successful na subscribe/renew ng Cloud Backup, i-mark
+    // na "paid" ang maintenance fee hanggang sa pag-expire ng subscription
+    // period na ito mismo (parehong petsa ng token.payload.expiresAt) —
+    // tingnan ang computeClientCostAllocation() para sa paggamit nito sa
+    // pag-exclude ng maintenance fee sa "total" habang aktibo pa ito.
+    if (featureId === 'cloud_backup' && token.payload.expiresAt) {
+        markMaintenanceFeePaidUntil(installationId, token.payload.expiresAt);
+    }
     logActivity(installationId, 'unlock_issued', { featureId, featureName: pending.featureName, source: 'otp', tier: pending.tier || null, billingCycle: pending.billingCycle || null });
     pendingOtps.delete(key);
     res.json({
@@ -5886,7 +5972,8 @@ async function bootstrapStores() {
         SUGGESTED_DISCOUNT_PERCENT,
         neonPricingOverrides,
         neonConfiguredPlans,
-        clientMaintenanceFeeConfig
+        clientMaintenanceFeeConfig,
+        clientMaintenanceFeePaidUntil
     ] = await Promise.all([
         loadAllowedDevices(),
         loadDeviceLabels(),
@@ -5910,7 +5997,8 @@ async function bootstrapStores() {
         loadSuggestedDiscountPercent(),
         loadNeonPricingOverrides(),
         loadNeonConfiguredPlans(),
-        loadClientMaintenanceFeeConfig()
+        loadClientMaintenanceFeeConfig(),
+        loadClientMaintenanceFeePaidUntil()
     ]);
     recomputeFeatureCatalog();
     if (Object.keys(featureCatalogOverrides).length > 0) {

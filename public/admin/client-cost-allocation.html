@@ -278,8 +278,12 @@
       share of total sync activity (<code>sync_count</code>) — so a bigger, busier store pays
       more of the real Neon cost, and a small quiet one pays less. The rounded shares always add
       back up to the exact total Neon cost. A flat <strong>maintenance fee</strong> (your own
-      markup for monitoring/support — not a Neon charge) is added on top per client, and can be
-      overridden individually below.
+      markup for monitoring/support — not a Neon charge) is added on top per client. The default
+      is set on the <a href="pricing.html" style="color:var(--accent);">Cloud Backup Pricing
+      page</a>; it can still be overridden individually below. On a client's first successful
+      Cloud Backup subscribe/renew, this fee is marked <strong>Paid</strong> and excluded from
+      their total for the rest of that billing period — it reappears in their total once that
+      period expires without a renewal.
     </p>
 
     <div class="error-banner" id="errorBanner">
@@ -321,10 +325,10 @@
     <div class="fee-bar">
       <div class="field">
         <label>Default maintenance fee (₱ / client / month)</label>
-        <input type="number" min="0" step="1" id="defaultFeeInput">
+        <div id="defaultFeeReadout" style="padding:8px 10px;border-radius:var(--radius);border:1.5px solid var(--border);background:var(--bg-raise);font-family:var(--font-mono);font-size:.95rem;width:160px;">₱—</div>
       </div>
-      <button class="btn btn-save" onclick="saveDefaultFee()">Save default</button>
-      <div class="stat-sub" style="align-self:center;">Applies to every client without an individual override below.</div>
+      <button class="icon-btn" onclick="window.location.href='pricing.html'">💳 Edit in Cloud Backup Pricing</button>
+      <div class="stat-sub" style="align-self:center;">Now edited on the Cloud Backup Pricing page — applies to every client without an individual override below.</div>
     </div>
 
     <div id="clientsWrap">
@@ -485,9 +489,9 @@ function renderAllocation(data) {
     ? 'as of ' + new Date(data.checkedAt).toLocaleString()
     : '—';
 
-  const defaultFeeInput = document.getElementById('defaultFeeInput');
-  if (document.activeElement !== defaultFeeInput) {
-    defaultFeeInput.value = data.defaultMaintenanceFeePHP != null ? data.defaultMaintenanceFeePHP : 0;
+  const defaultFeeReadout = document.getElementById('defaultFeeReadout');
+  if (defaultFeeReadout) {
+    defaultFeeReadout.textContent = '₱' + (data.defaultMaintenanceFeePHP != null ? data.defaultMaintenanceFeePHP : 0);
   }
 
   const grid = document.getElementById('clientGrid');
@@ -531,10 +535,17 @@ function getFilteredSortedClients() {
 }
 
 function renderClientCard(c) {
-  const isOverridden = lastAllocation.defaultMaintenanceFeePHP != null && c.maintenanceFeePHP !== lastAllocation.defaultMaintenanceFeePHP;
+  // AYOS: ginagamit ang maintenanceFeeStandardPHP dito (ang naka-configure/
+  // override na halaga) sa halip na c.maintenanceFeePHP, dahil ang huli ay
+  // 0 na ngayon habang "paid" pa ang client (tingnan ang
+  // markMaintenanceFeePaidUntil sa server.js) — gusto pa rin nating makita
+  // at ma-edit ang tunay na naka-set na fee kahit "paid" ang kasalukuyang
+  // status.
+  const standardFee = typeof c.maintenanceFeeStandardPHP === 'number' ? c.maintenanceFeeStandardPHP : c.maintenanceFeePHP;
+  const isOverridden = lastAllocation.defaultMaintenanceFeePHP != null && standardFee !== lastAllocation.defaultMaintenanceFeePHP;
   const feeValue = Object.prototype.hasOwnProperty.call(dirtyFees, c.installationId)
     ? dirtyFees[c.installationId]
-    : c.maintenanceFeePHP;
+    : standardFee;
   const safeId = escapeHtml(c.installationId);
   // AYOS: hiniling na makita rin sa Client Cost Allocation kung ano ang
   // naka-label sa device sa Allowed Devices page, hindi lang basta
@@ -545,6 +556,13 @@ function renderClientCard(c) {
   const idBlock = displayLabel
     ? `<div class="client-card-label">${escapeHtml(displayLabel)}</div><div class="mono client-card-id has-label">${safeId}</div>`
     : `<div class="mono client-card-id">${safeId}</div>`;
+  // AYOS: badge na nagpapakita kung "paid" pa ang maintenance fee ng
+  // client na ito ngayong buwan (kaka-subscribe/renew lang) — hindi pa ito
+  // kasama sa Total / month habang aktibo pa ito, babalik lang ito pagka-
+  // expire ng subscription period na iyon.
+  const paidBadge = c.maintenanceFeePaid
+    ? `<span class="mono" style="color:#16a34a;font-size:11px;" title="${c.maintenanceFeePaidUntil ? 'Paid until ' + new Date(c.maintenanceFeePaidUntil).toLocaleDateString() : 'Paid'}">✓ Paid (excluded from total)</span>`
+    : '';
   return `
     <div class="client-card" data-installation-id="${safeId}">
       <div>
@@ -575,7 +593,7 @@ function renderClientCard(c) {
       </div>
 
       <div class="client-card-line">
-        <span class="client-card-line-label">Maintenance fee</span>
+        <span class="client-card-line-label">Maintenance fee ${paidBadge}</span>
         <div class="client-fee-edit">
           <input
             type="number" min="0" step="1"
@@ -668,24 +686,6 @@ async function saveClientFee(installationId) {
     });
     delete dirtyFees[installationId];
     toast(`Saved maintenance fee for ${installationId}.`);
-    await loadAllocation();
-  } catch (err) {
-    if (err.message !== 'forbidden') toast(err.message, 'error');
-  }
-}
-
-async function saveDefaultFee() {
-  const val = Number(document.getElementById('defaultFeeInput').value);
-  if (!isFinite(val) || val < 0) {
-    toast('Default fee must be a non-negative number.', 'error');
-    return;
-  }
-  try {
-    await api('/relay/admin/api/client-cost-allocation/maintenance-fee', {
-      method: 'POST',
-      body: JSON.stringify({ defaultFeePHP: val })
-    });
-    toast('Saved default maintenance fee.');
     await loadAllocation();
   } catch (err) {
     if (err.message !== 'forbidden') toast(err.message, 'error');
