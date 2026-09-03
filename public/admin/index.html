@@ -190,15 +190,11 @@ code {
 .icon-btn-logout { padding: 8px 10px; color: var(--muted); }
 .icon-btn-logout svg { width: 16px; height: 16px; display: block; }
 .icon-btn-logout:hover { border-color: var(--red-line); background: var(--red-bg); color: var(--red); }
-.icon-btn-matrix { padding: 8px 10px; color: var(--muted); }
-.icon-btn-matrix svg { width: 16px; height: 16px; display: block; }
-.icon-btn-matrix:hover { border-color: var(--accent-dim); background: var(--card-hover); color: var(--accent-bright); }
-.icon-btn-matrix.is-on { color: var(--accent-bright, #22e5ff); border-color: var(--accent-dim); }
 @media (max-width: 680px) {
   .topbar { flex-wrap: wrap; row-gap: 10px; }
   .topbar-brand { flex-basis: 100%; }
   .topbar-actions { width: 100%; justify-content: flex-start; }
-  .topbar-actions .icon-btn:not(.icon-btn-matrix):not(.icon-btn-logout) {
+  .topbar-actions .icon-btn:not(.icon-btn-logout) {
     flex: 1 1 auto;
     justify-content: center;
   }
@@ -822,17 +818,6 @@ a:focus-visible,
 }
 .footer-note a { color: var(--muted); text-decoration: underline; }
 .footer-note a:hover { color: var(--accent-bright); }
-#matrixCanvas {
-  position: fixed;
-  inset: 0;
-  z-index: 2;
-  pointer-events: none;
-  mix-blend-mode: screen;
-  opacity: .55;
-}
-@media (prefers-reduced-motion: reduce) {
-  #matrixCanvas { display: none; }
-}
 .hud-corner {
   position: fixed;
   width: 22px; height: 22px;
@@ -930,13 +915,6 @@ a:focus-visible,
   overflow: hidden;
 }
 #bootOverlay.boot-hidden { opacity: 0; visibility: hidden; pointer-events: none; }
-#bootMatrixCanvas {
-  position: absolute; inset: 0; z-index: 0;
-}
-@media (prefers-reduced-motion: reduce) {
-  #bootMatrixCanvas { display: none; }
-}
-#bootOverlay > *:not(#bootMatrixCanvas) { position: relative; z-index: 1; }
 .boot-logo {
   width: 46px; height: 46px; border-radius: 12px;
   border: 1px solid var(--border-soft);
@@ -1025,13 +1003,11 @@ a:focus-visible,
 </style>
 </head>
 <body>
-<canvas id="matrixCanvas"></canvas>
 <div class="hud-corner tl"></div>
 <div class="hud-corner tr"></div>
 <div class="hud-corner bl"></div>
 <div class="hud-corner br"></div>
 <div id="bootOverlay">
-  <canvas id="bootMatrixCanvas"></canvas>
   <img src="icons/icon-192.png" alt="" class="boot-logo">
   <div class="boot-line" id="bootLine">INITIALIZING RELAY UPLINK<span class="boot-cursor"></span></div>
   <div class="boot-bar"><div class="boot-bar-fill"></div></div>
@@ -1066,12 +1042,6 @@ a:focus-visible,
       <button id="pricingBtn" class="icon-btn" onclick="window.location.href='pricing.html'" title="Cloud Backup pricing" aria-label="Cloud Backup pricing">💳 Pricing</button>
       <button id="featurePricingBtn" class="icon-btn" onclick="window.location.href='feature-pricing.html'" title="Theme/Module pricing" aria-label="Theme/Module pricing">🎨 Feature Pricing</button>
       <button id="clientCostAllocationBtn" class="icon-btn" onclick="window.location.href='client-cost-allocation.html'" title="Per-client Neon cost allocation" aria-label="Per-client Neon cost allocation">📊 Client Cost Allocation</button>
-      <button id="matrixToggleBtn" class="icon-btn icon-btn-matrix" onclick="toggleMatrixRain()" title="Toggle matrix animation" aria-label="Toggle matrix animation">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="3" y="3" width="18" height="18" rx="2"/>
-          <path d="M8 8h.01M12 8h.01M16 8h.01M8 12h.01M12 12h.01M16 12h.01M8 16h.01M12 16h.01M16 16h.01"/>
-        </svg>
-      </button>
       <button id="logoutBtn" class="icon-btn icon-btn-logout" onclick="logout()" title="Log out" aria-label="Log out">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 2v10"/>
@@ -1543,9 +1513,23 @@ const selectedForReset = new Set();
 function withScrollPreserved(fn) {
   return async function (...args) {
     const scrollY = window.scrollY;
+    // AYOS: dating basta binabalik ang scroll sa lumang posisyon (scrollY sa
+    // simula) pagkatapos mag-refresh, kahit na-scroll na mismo ang user
+    // habang tumatakbo ang async refresh na ito (hal. tuwing 8s/15s auto-
+    // poll) — kaya biglang sumasablay/lumilipat pabalik ang view sa gitna
+    // ng pag-scroll ng user, parang mabilis na "blink" na nawawala ang
+    // dapat niyang nakikita. Ngayon, sinusubaybayan ang bawat manual na
+    // 'scroll' event habang tumatakbo ang refresh — kung na-detect na
+    // gumalaw ang user (hindi ito galing sa sarili nating scrollTo), hindi
+    // na babalik ang view sa lumang posisyon, irerespeto na lang ang bagong
+    // scroll position ng user.
+    let userScrolled = false;
+    const onScroll = () => { userScrolled = true; };
+    window.addEventListener('scroll', onScroll, { passive: true });
     const result = await fn.apply(this, args);
     requestAnimationFrame(() => {
-      if (Math.abs(window.scrollY - scrollY) > 0) window.scrollTo(0, scrollY);
+      window.removeEventListener('scroll', onScroll);
+      if (!userScrolled && Math.abs(window.scrollY - scrollY) > 0) window.scrollTo(0, scrollY);
     });
     return result;
   };
@@ -1920,10 +1904,17 @@ function createProgressController(ids) {
   }
   function withScrollHold(fn) {
     const scrollY = window.scrollY;
+    // Parehong ayos gaya ng withScrollPreserved sa itaas — irespeto ang
+    // manual na scroll ng user kung sakaling naka-scroll siya sa maiksing
+    // sandali sa pagitan ng pag-show/hide ng widget na ito.
+    let userScrolled = false;
+    const onScroll = () => { userScrolled = true; };
+    window.addEventListener('scroll', onScroll, { passive: true });
     fn();
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        if (Math.abs(window.scrollY - scrollY) > 0) window.scrollTo(0, scrollY);
+        window.removeEventListener('scroll', onScroll);
+        if (!userScrolled && Math.abs(window.scrollY - scrollY) > 0) window.scrollTo(0, scrollY);
       });
     });
   }
@@ -3844,142 +3835,6 @@ if ('serviceWorker' in navigator) {
       .catch((err) => console.warn('[Admin] SW registration failed:', err));
   });
 }
-function createMatrixRain(canvas, opts) {
-  if (!canvas) return { stop() {} };
-  const prefersReduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  if (prefersReduced) return { stop() {} };
-  const ctx = canvas.getContext('2d');
-  const settings = Object.assign({
-    fontSize: 5,
-    speedMin: 0.6,
-    speedMax: 2.2,
-    fade: 0.10,        
-    headColor: '#eafcff',
-    bodyColors: ['#22e5ff', '#7cf3ff', '#22e5ff', '#ff2ee6'], 
-    glow: 1.5,
-    lineCount: 16,      
-    lineLenMin: 8,
-    lineLenMax: 16
-  }, opts || {});
-  const glyphs = ['0', '1']; 
-  let lines = [], w = 0, h = 0, raf = null;
-  function randomText(len) {
-    let s = '';
-    for (let i = 0; i < len; i++) s += glyphs[(Math.random() * 2) | 0];
-    return s;
-  }
-  function makeLine() {
-    const dir = Math.random() < 0.5 ? 'v' : 'h'; 
-    const len = (settings.lineLenMin + Math.random() * (settings.lineLenMax - settings.lineLenMin)) | 0;
-    const speed = settings.speedMin + Math.random() * (settings.speedMax - settings.speedMin);
-    const color = settings.bodyColors[(Math.random() * settings.bodyColors.length) | 0];
-    if (dir === 'v') {
-      return { dir, cross: Math.random() * w, progress: -len * settings.fontSize - Math.random() * h, speed, color, text: randomText(len), len };
-    }
-    return { dir, cross: Math.random() * h, progress: -len * settings.fontSize - Math.random() * w, speed, color, text: randomText(len), len };
-  }
-  let resizeDebounceTimer = null;
-  let lastResizeW = 0, lastResizeH = 0;
-  const RESIZE_HEIGHT_IGNORE_THRESHOLD = 120;
-  function doResize() {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    w = canvas.clientWidth || canvas.parentElement.clientWidth;
-    h = canvas.clientHeight || canvas.parentElement.clientHeight;
-    canvas.width = w * dpr;
-    canvas.height = h * dpr;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    lines = new Array(settings.lineCount).fill(0).map(makeLine);
-    lastResizeW = w;
-    lastResizeH = h;
-  }
-  function resize() {
-    if (resizeDebounceTimer) clearTimeout(resizeDebounceTimer);
-    resizeDebounceTimer = setTimeout(() => {
-      resizeDebounceTimer = null;
-      const newW = canvas.clientWidth || canvas.parentElement.clientWidth;
-      const newH = canvas.clientHeight || canvas.parentElement.clientHeight;
-      const widthChanged = lastResizeW > 0 && newW !== lastResizeW;
-      const heightChangedALot = lastResizeH > 0 && Math.abs(newH - lastResizeH) >= RESIZE_HEIGHT_IGNORE_THRESHOLD;
-      if (!widthChanged && !heightChangedALot && lastResizeW > 0) {
-        return;
-      }
-      doResize();
-    }, 150);
-  }
-  function frame() {
-    ctx.fillStyle = `rgba(5, 7, 13, ${settings.fade})`;
-    ctx.fillRect(0, 0, w, h);
-    ctx.font = `${settings.fontSize}px 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace`;
-    ctx.textBaseline = 'top';
-    for (const ln of lines) {
-      const bound = ln.dir === 'v' ? h : w;
-      for (let i = 0; i < ln.len; i++) {
-        const p = ln.progress - i * ln.speed - i * settings.fontSize * 0.4;
-        if (p < -settings.fontSize || p > bound) continue;
-        const ch = ln.text[i];
-        const isHead = i === 0;
-        ctx.shadowBlur = isHead ? settings.glow * 1.5 : settings.glow * 0.5;
-        ctx.shadowColor = isHead ? settings.headColor : ln.color;
-        ctx.fillStyle = isHead ? settings.headColor : ln.color;
-        if (ln.dir === 'v') ctx.fillText(ch, ln.cross, p);
-        else ctx.fillText(ch, p, ln.cross);
-      }
-      ctx.shadowBlur = 0;
-      ln.progress += ln.speed;
-      if (ln.progress - ln.len * settings.fontSize > bound) {
-        Object.assign(ln, makeLine(), { progress: -ln.len * settings.fontSize });
-      }
-    }
-    raf = requestAnimationFrame(frame);
-  }
-  doResize();
-  ctx.fillStyle = '#05070d';
-  ctx.fillRect(0, 0, w, h);
-  raf = requestAnimationFrame(frame);
-  window.addEventListener('resize', resize);
-  return {
-    stop() {
-      if (raf) cancelAnimationFrame(raf);
-      if (resizeDebounceTimer) clearTimeout(resizeDebounceTimer);
-      window.removeEventListener('resize', resize);
-    }
-  };
-}
-const AMBIENT_MATRIX_OPTS = {
-  fontSize: 5,
-  speedMin: 0.5,
-  speedMax: 1.6,
-  fade: 0.07,
-  lineCount: 12,
-  glow: 1.5
-};
-let ambientMatrixRain = null;
-let matrixRainEnabled = localStorage.getItem('relayMatrixRainOff') !== '1';
-function startAmbientMatrixRain() {
-  const canvas = document.getElementById('matrixCanvas');
-  if (!canvas || ambientMatrixRain) return;
-  canvas.style.display = '';
-  ambientMatrixRain = createMatrixRain(canvas, AMBIENT_MATRIX_OPTS);
-}
-function stopAmbientMatrixRain() {
-  const canvas = document.getElementById('matrixCanvas');
-  if (ambientMatrixRain) { ambientMatrixRain.stop(); ambientMatrixRain = null; }
-  if (canvas) canvas.style.display = 'none';
-}
-function updateMatrixToggleBtn() {
-  const btn = document.getElementById('matrixToggleBtn');
-  if (!btn) return;
-  btn.classList.toggle('is-on', matrixRainEnabled);
-  btn.title = matrixRainEnabled ? 'Matrix animation: ON (click to turn off)' : 'Matrix animation: OFF (click to turn on)';
-}
-function toggleMatrixRain() {
-  matrixRainEnabled = !matrixRainEnabled;
-  localStorage.setItem('relayMatrixRainOff', matrixRainEnabled ? '0' : '1');
-  if (matrixRainEnabled) startAmbientMatrixRain(); else stopAmbientMatrixRain();
-  updateMatrixToggleBtn();
-}
-if (matrixRainEnabled) startAmbientMatrixRain();
-updateMatrixToggleBtn();
 (function cyborgBootSequence() {
   const overlay = document.getElementById('bootOverlay');
   const line = document.getElementById('bootLine');
@@ -3991,21 +3846,12 @@ updateMatrixToggleBtn();
     'VERIFYING DEVICE FINGERPRINTS',
     'SYSTEM ONLINE'
   ];
-  const bootRain = matrixRainEnabled ? createMatrixRain(document.getElementById('bootMatrixCanvas'), {
-    fontSize: 5,
-    speedMin: 1.2,
-    speedMax: 3,
-    fade: 0.12,
-    lineCount: 22,
-    glow: 2
-  }) : { stop() {} };
   function hideOverlay() {
     overlay.classList.add('boot-hidden');
     sessionStorage.setItem('relayBooted', '1');
-    setTimeout(() => { bootRain.stop(); overlay.remove(); }, 450);
+    setTimeout(() => { overlay.remove(); }, 450);
   }
   if (prefersReduced || alreadyBooted) {
-    bootRain.stop();
     hideOverlay();
     return;
   }
