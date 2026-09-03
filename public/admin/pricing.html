@@ -159,21 +159,13 @@
     </p>
     <div id="plansGrid" class="plans-grid"></div>
 
-    <h2 style="font-family:var(--font-heading);font-size:1rem;color:var(--accent);margin:34px 0 6px;">Maintenance &amp; Monitoring Fee</h2>
     <p class="intro" style="margin-bottom:16px;">
-      A flat fee (your own markup for monitoring/support — not a Neon charge) added on top of the
-      Neon usage cost, shown to every OmniPOS installation on the Cloud Backup cost-share widget
-      and on the tier picker below. This is the DEFAULT for every client; per-client overrides are
-      still set individually on the
+      There is no separate "maintenance fee" anymore — the Monthly/Yearly price of whichever tier
+      (Basic/Standard/Pro) a client actually subscribed to, set above, IS what's shown as their
+      maintenance &amp; monitoring fee on the Cloud Backup cost-share widget, the tier picker, and the
       <a href="client-cost-allocation.html" style="color:var(--accent);">Client Cost Allocation page</a>.
+      Edit a tier's price above and it applies to every client currently on that tier.
     </p>
-    <div class="fee-bar">
-      <div class="field">
-        <label>Default maintenance fee (₱ / client / month)</label>
-        <input type="number" min="0" step="1" id="defaultMaintenanceFeeInput">
-      </div>
-      <button class="btn btn-save" onclick="saveDefaultMaintenanceFee()">Save default</button>
-    </div>
 
     <h2 style="font-family:var(--font-heading);font-size:1rem;color:var(--accent);margin:34px 0 6px;">Module Subscriptions</h2>
     <p class="intro" style="margin-bottom:16px;">
@@ -337,36 +329,11 @@ async function loadPricing() {
   overrides = data.cloudBackupPlanOverrides || {};
   renderPlans();
 
-  document.getElementById('defaultMaintenanceFeeInput').value = data.defaultMaintenanceFeePHP != null ? data.defaultMaintenanceFeePHP : 0;
-
   moduleSubPlansBase = data.moduleSubscriptionPlansBase || {};
   moduleSubPlansEffective = data.moduleSubscriptionPlans || {};
   moduleSubOverrides = data.moduleSubscriptionOverrides || {};
   renderModuleSubPlans();
 }
-
-async function saveDefaultMaintenanceFee() {
-  const val = Number(document.getElementById('defaultMaintenanceFeeInput').value);
-  if (!isFinite(val) || val < 0) {
-    toast('Default maintenance fee must be a non-negative number.', 'error');
-    return;
-  }
-  try {
-    // Parehong endpoint na ginagamit na ng Client Cost Allocation page para
-    // sa default fee — dito lang inilipat ang UI, hindi ang backend/storage
-    // (client-maintenance-fee.json), para hindi masira ang existing
-    // per-client overrides doon.
-    await api('/relay/admin/api/client-cost-allocation/maintenance-fee', {
-      method: 'POST',
-      body: JSON.stringify({ defaultFeePHP: val })
-    });
-    toast('Saved default maintenance fee.');
-    await loadPricing();
-  } catch (err) {
-    if (err.message !== 'forbidden') toast(err.message, 'error');
-  }
-}
-
 
 function moduleSubFieldIsCustom(featureId, key) {
   const ov = moduleSubOverrides[featureId] || {};

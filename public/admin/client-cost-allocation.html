@@ -323,12 +323,11 @@
     </div>
 
     <div class="fee-bar">
-      <div class="field">
-        <label>Default maintenance fee (₱ / client / month)</label>
-        <div id="defaultFeeReadout" style="padding:8px 10px;border-radius:var(--radius);border:1.5px solid var(--border);background:var(--bg-raise);font-family:var(--font-mono);font-size:.95rem;width:160px;">₱—</div>
+      <div class="stat-sub" style="align-self:center;">
+        Each client's maintenance fee below is simply the Monthly/Yearly price of the Cloud Backup
+        tier (Basic/Standard/Pro) they subscribed to — not a separate flat fee anymore.
       </div>
-      <button class="icon-btn" onclick="window.location.href='pricing.html'">💳 Edit in Cloud Backup Pricing</button>
-      <div class="stat-sub" style="align-self:center;">Now edited on the Cloud Backup Pricing page — applies to every client without an individual override below.</div>
+      <button class="icon-btn" onclick="window.location.href='pricing.html'">💳 Edit tier pricing</button>
     </div>
 
     <div id="clientsWrap">
@@ -360,7 +359,6 @@
 <script>
 let adminKey = sessionStorage.getItem('relayAdminKey') || '';
 let lastAllocation = null;
-const dirtyFees = {}; // installationId -> pending fee value (string from input) not yet saved
 let clientSearchQuery = '';
 let clientSortKey = 'totalDesc';
 const CLIENT_PAGE_SIZE = 20; // how many client cards to render at a time — avoids one giant scroll at scale
@@ -489,11 +487,6 @@ function renderAllocation(data) {
     ? 'as of ' + new Date(data.checkedAt).toLocaleString()
     : '—';
 
-  const defaultFeeReadout = document.getElementById('defaultFeeReadout');
-  if (defaultFeeReadout) {
-    defaultFeeReadout.textContent = '₱' + (data.defaultMaintenanceFeePHP != null ? data.defaultMaintenanceFeePHP : 0);
-  }
-
   const grid = document.getElementById('clientGrid');
   const emptyState = document.getElementById('emptyState');
   const toolbar = document.getElementById('clientToolbar');
@@ -535,17 +528,6 @@ function getFilteredSortedClients() {
 }
 
 function renderClientCard(c) {
-  // AYOS: ginagamit ang maintenanceFeeStandardPHP dito (ang naka-configure/
-  // override na halaga) sa halip na c.maintenanceFeePHP, dahil ang huli ay
-  // 0 na ngayon habang "paid" pa ang client (tingnan ang
-  // markMaintenanceFeePaidUntil sa server.js) — gusto pa rin nating makita
-  // at ma-edit ang tunay na naka-set na fee kahit "paid" ang kasalukuyang
-  // status.
-  const standardFee = typeof c.maintenanceFeeStandardPHP === 'number' ? c.maintenanceFeeStandardPHP : c.maintenanceFeePHP;
-  const isOverridden = lastAllocation.defaultMaintenanceFeePHP != null && standardFee !== lastAllocation.defaultMaintenanceFeePHP;
-  const feeValue = Object.prototype.hasOwnProperty.call(dirtyFees, c.installationId)
-    ? dirtyFees[c.installationId]
-    : standardFee;
   const safeId = escapeHtml(c.installationId);
   // AYOS: hiniling na makita rin sa Client Cost Allocation kung ano ang
   // naka-label sa device sa Allowed Devices page, hindi lang basta
@@ -556,13 +538,23 @@ function renderClientCard(c) {
   const idBlock = displayLabel
     ? `<div class="client-card-label">${escapeHtml(displayLabel)}</div><div class="mono client-card-id has-label">${safeId}</div>`
     : `<div class="mono client-card-id">${safeId}</div>`;
-  // AYOS: badge na nagpapakita kung "paid" pa ang maintenance fee ng
-  // client na ito ngayong buwan (kaka-subscribe/renew lang) — hindi pa ito
-  // kasama sa Total / month habang aktibo pa ito, babalik lang ito pagka-
-  // expire ng subscription period na iyon.
+  // AYOS: badge na nagpapakita kung "paid"/active pa ang Cloud Backup
+  // subscription ng client na ito ngayong buwan (kaka-subscribe/renew
+  // lang, o lifetime) — hindi pa ito kasama sa Total / month habang
+  // aktibo pa ito, babalik lang ito pagka-expire ng subscription period
+  // na iyon.
   const paidBadge = c.maintenanceFeePaid
-    ? `<span class="mono" style="color:#16a34a;font-size:11px;" title="${c.maintenanceFeePaidUntil ? 'Paid until ' + new Date(c.maintenanceFeePaidUntil).toLocaleDateString() : 'Paid'}">✓ Paid (excluded from total)</span>`
+    ? `<span class="mono" style="color:#16a34a;font-size:11px;" title="${c.maintenanceFeePaidUntil ? 'Paid until ' + new Date(c.maintenanceFeePaidUntil).toLocaleDateString() : 'Paid'}">✓ ${c.cloudBackupIsLifetime ? 'Lifetime' : 'Paid'} (excluded from total)</span>`
     : '';
+  // BAGO: hindi na editable/flat na fee — ang "maintenance fee" ay ang
+  // Monthly/Yearly presyo mismo ng tier (Basic/Standard/Pro) na
+  // sinubscribe ng client, kaya read-only na lang ipinapakita dito.
+  const tierLabel = c.cloudBackupTierName || (c.cloudBackupTier ? c.cloudBackupTier : null);
+  const planLine = c.cloudBackupIsLifetime
+    ? `<span class="mono">Lifetime (no recurring fee)</span>`
+    : tierLabel
+      ? `<span class="mono">${escapeHtml(tierLabel)} — ${formatPHP(c.maintenanceFeeMonthlyPHP)}/mo · ${formatPHP(c.maintenanceFeeYearlyPHP)}/yr</span>`
+      : `<span class="mono">No active Cloud Backup plan</span>`;
   return `
     <div class="client-card" data-installation-id="${safeId}">
       <div>
@@ -593,17 +585,8 @@ function renderClientCard(c) {
       </div>
 
       <div class="client-card-line">
-        <span class="client-card-line-label">Maintenance fee ${paidBadge}</span>
-        <div class="client-fee-edit">
-          <input
-            type="number" min="0" step="1"
-            class="fee-input${isOverridden ? ' overridden' : ''}"
-            id="fee-${safeId}"
-            value="${feeValue}"
-            oninput="markFeeDirty('${safeId}', this.value)"
-          >
-          <button class="row-save-btn" id="save-${safeId}" onclick="saveClientFee('${safeId}')">Save</button>
-        </div>
+        <span class="client-card-line-label">Maintenance fee (plan) ${paidBadge}</span>
+        ${planLine}
       </div>
 
       <div class="client-card-total">
@@ -663,33 +646,6 @@ function onClientSortChange(value) {
 function loadMoreClients() {
   clientVisibleCount += CLIENT_PAGE_SIZE;
   renderClientGrid();
-}
-
-function markFeeDirty(installationId, value) {
-  dirtyFees[installationId] = value;
-  const btn = document.getElementById(`save-${installationId}`);
-  if (btn) btn.classList.add('dirty');
-}
-
-async function saveClientFee(installationId) {
-  const input = document.getElementById(`fee-${installationId}`);
-  if (!input) return;
-  const feePHP = Number(input.value);
-  if (!isFinite(feePHP) || feePHP < 0) {
-    toast('Maintenance fee must be a non-negative number.', 'error');
-    return;
-  }
-  try {
-    await api('/relay/admin/api/client-cost-allocation/maintenance-fee', {
-      method: 'POST',
-      body: JSON.stringify({ installationId, feePHP })
-    });
-    delete dirtyFees[installationId];
-    toast(`Saved maintenance fee for ${installationId}.`);
-    await loadAllocation();
-  } catch (err) {
-    if (err.message !== 'forbidden') toast(err.message, 'error');
-  }
 }
 
 async function loadAllocation() {

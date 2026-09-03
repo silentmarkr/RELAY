@@ -1183,6 +1183,42 @@ function isMaintenanceFeePaidForClient(installationId) {
     const paidUntil = clientMaintenanceFeePaidUntil[installationId];
     return typeof paidUntil === 'number' && Date.now() < paidUntil;
 }
+// ===================================================================
+// GAWA/BAGO: TIER-based na "maintenance fee" — kapalit ng flat/admin-
+// configurable na halaga sa itaas (getMaintenanceFeeForClient/
+// clientMaintenanceFeeConfig). Hiniling ito: dapat ang MONTHLY at YEARLY
+// presyo ng aktwal na Cloud Backup tier (basic/standard/pro — mula sa
+// Cloud Backup Pricing / pricing.html, CLOUD_BACKUP_PLANS) na kinuha o
+// sinubscribe ng client ang lumalabas bilang "maintenance fee" sa
+// cost-share widget, tier modal, at Client Cost Allocation admin — HINDI
+// na isang hiwalay/independent na halagang naka-configure lang dito sa
+// itaas. Ang mga lumang function/storage sa itaas (getMaintenanceFeeForClient,
+// clientMaintenanceFeeConfig, atbp.) ay iniwan lang bilang legacy data
+// (kasama pa rin sa admin backup/restore snapshot para hindi masira ang
+// import/export) pero HINDI na ito ginagamit para sa aktwal na
+// pagkukwenta ng bayarin ng kliyente.
+function getCloudBackupSubscriptionForClient(installationId) {
+    const entry = issuedUnlocks[installationId] && issuedUnlocks[installationId]['cloud_backup'];
+    if (!entry) return { tier: null, billingCycle: null, active: false, expiresAt: null, isLifetime: false };
+    const expiresAt = typeof entry.expiresAt === 'number' ? entry.expiresAt : null;
+    const active = expiresAt === null ? true : Date.now() < expiresAt;
+    // Legacy lifetime unlocks (mula bago naging subscription ang Cloud
+    // Backup) ay walang expiresAt AT walang naka-record na tier — hindi na
+    // dapat mag-apply ng buwanang/taunang plan fee sa mga ito kailanman,
+    // dahil bayad na ito nang buo noon pa (one-time).
+    const isLifetime = active && expiresAt === null && !entry.tier;
+    return {
+        tier: entry.tier || (active && !isLifetime ? 'basic' : null),
+        billingCycle: entry.billingCycle || null,
+        active,
+        expiresAt,
+        isLifetime
+    };
+}
+function getCloudBackupTierPricePHP(tier) {
+    const plan = tier && CLOUD_BACKUP_PLANS[tier];
+    return plan ? { monthly: plan.price.monthly, yearly: plan.price.yearly, name: plan.name } : { monthly: 0, yearly: 0, name: null };
+}
 
 // ===================================================================
 // USD -> PHP exchange rate (live, may cache + fallback)
@@ -1457,17 +1493,23 @@ async function computeClientCostAllocation() {
         const storageCostPHP = totalStorageCostPHP * storageShare;
         const computeCostPHP = totalComputeCostPHP * computeShare;
         const baseCostPHP = storageCostPHP + computeCostPHP;
-        // AYOS: kung "paid" pa ang client (naka-subscribe/nag-renew sila
-        // kamakailan lang — tingnan ang markMaintenanceFeePaidUntil sa
-        // /relay/confirm-unlock), HINDI muna idinadagdag sa total ang
-        // maintenance fee habang aktibo pa ang subscription period na iyon.
-        // Ang maintenanceFeeStandardPHP ang normal/karaniwang halaga (para
-        // sa display kahit "paid" — para makita pa rin kung magkano ito),
-        // habang ang maintenanceFeePHP ang ACTUAL na idinadagdag sa
-        // finalPricePHP (0 habang "paid").
-        const maintenanceFeeStandardPHP = getMaintenanceFeeForClient(r.installation_id);
-        const maintenanceFeePaid = isMaintenanceFeePaidForClient(r.installation_id);
-        const maintenanceFeePHP = maintenanceFeePaid ? 0 : maintenanceFeeStandardPHP;
+        // AYOS/BAGO: ang "maintenance fee" ngayon ay ang MONTHLY/YEARLY
+        // presyo mismo ng Cloud Backup tier (basic/standard/pro) na
+        // kinuha/sinubscribe ng client na ito (tingnan ang
+        // getCloudBackupSubscriptionForClient() sa itaas) — HINDI na flat/
+        // admin-configurable na halaga. Kung "active" pa ang subscription
+        // niya ngayong billing period (o lifetime), HINDI muna idinadagdag
+        // sa total ang fee (naibayad na ito nang direkta sa pamamagitan ng
+        // Cloud Backup subscription flow mismo). Kung lapsed/wala pang
+        // na-renew, ipinapakita pa rin ang huling kilalang plan (monthly/
+        // yearly) bilang "dapat bayaran", gamit ang monthly rate nito para
+        // sa idinadagdag sa finalPricePHP.
+        const cbSubscription = getCloudBackupSubscriptionForClient(r.installation_id);
+        const cbTierPrice = getCloudBackupTierPricePHP(cbSubscription.tier);
+        const maintenanceFeeMonthlyPHP = cbTierPrice.monthly;
+        const maintenanceFeeYearlyPHP = cbTierPrice.yearly;
+        const maintenanceFeePaid = cbSubscription.active || cbSubscription.isLifetime;
+        const maintenanceFeePHP = maintenanceFeePaid ? 0 : maintenanceFeeMonthlyPHP;
         return {
             installationId: r.installation_id,
             // AYOS: idinagdag ang label (mula sa Devices page, `deviceLabels`
@@ -1488,10 +1530,17 @@ async function computeClientCostAllocation() {
             storageCostPHP,
             computeCostPHP,
             baseCostPHP,
+            // Bagong tier-aware na fields (ito na ang ginagamit ng widget/
+            // tier modal/allocation admin — tingnan ang paliwanag sa itaas).
+            cloudBackupTier: cbSubscription.tier,
+            cloudBackupTierName: cbTierPrice.name,
+            cloudBackupBillingCycle: cbSubscription.billingCycle,
+            cloudBackupIsLifetime: cbSubscription.isLifetime,
             maintenanceFeePHP,
-            maintenanceFeeStandardPHP,
+            maintenanceFeeMonthlyPHP,
+            maintenanceFeeYearlyPHP,
             maintenanceFeePaid,
-            maintenanceFeePaidUntil: clientMaintenanceFeePaidUntil[r.installation_id] || null,
+            maintenanceFeePaidUntil: cbSubscription.expiresAt,
             finalPricePHP: baseCostPHP + maintenanceFeePHP
         };
     });
@@ -1524,7 +1573,6 @@ async function computeClientCostAllocation() {
         totalStorageCostPHP: Math.round(totalStorageCostPHP * 100) / 100,
         totalCostPHP: roundedTotal,
         clientCount: clients.length,
-        defaultMaintenanceFeePHP: clientMaintenanceFeeConfig.defaultFeePHP || 0,
         clients: clients.sort((a, b) => b.finalPricePHP - a.finalPricePHP)
     };
 }
@@ -3360,19 +3408,43 @@ app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 100
     for (const tier of UPGRADE_TIERS) {
         upgradeTiers[tier.id] = { name: tier.name, bundlePrice: tier.bundlePrice, featureIds: tier.featureIds };
     }
+    // AYOS/BAGO: ang "maintenance fee" na ibinabalik dito ngayon ay
+    // hango na sa MONTHLY/YEARLY presyo mismo ng Cloud Backup tier
+    // (basic/standard/pro — CLOUD_BACKUP_PLANS) na kinuha/sinubscribe ng
+    // client, HINDI na sa dating flat/admin-configurable na
+    // clientMaintenanceFeeConfig — tingnan ang getCloudBackupSubscriptionForClient()/
+    // getCloudBackupTierPricePHP() sa itaas (parehong ginagamit na rin ng
+    // computeClientCostAllocation(), para magkatugma ang tier modal, ang
+    // cost-share widget, at ang Client Cost Allocation admin).
+    // FIX/hardening: bago ibalik ang per-client fields (tier + paid
+    // status), i-check muna kung nasa allowedDevices ang installationId na
+    // ito (parehong gate na ginagamit ng requireAllowedDevice sa ibang mga
+    // per-client na endpoint tulad ng /relay/cloud-backup/cost-allocation).
+    // Hindi natin ginawang buong requireAllowedDevice ang buong route dahil
+    // dapat pa ring makakuha ng generic catalog/plans ang mga bagong device
+    // na hindi pa "allowed" (kailangan nila makita ang tier modal bago pa
+    // sila ma-approve) — ang ipinagbabawal lang dito ay ang pagbunyag ng
+    // per-client tier/paid data ng isang installationId na hindi pa naman
+    // kilalang device.
+    const installationId = String(req.query.installationId || '').trim();
+    const perClientFee = {};
+    if (installationId && allowedDevices.has(installationId)) {
+        const cbSubscription = getCloudBackupSubscriptionForClient(installationId);
+        const cbTierPrice = getCloudBackupTierPricePHP(cbSubscription.tier);
+        const paid = cbSubscription.active || cbSubscription.isLifetime;
+        perClientFee.cloudBackupTier = cbSubscription.tier;
+        perClientFee.cloudBackupBillingCycle = cbSubscription.billingCycle;
+        perClientFee.cloudBackupIsLifetime = cbSubscription.isLifetime;
+        perClientFee.maintenanceFeeMonthlyPHP = cbTierPrice.monthly;
+        perClientFee.maintenanceFeeYearlyPHP = cbTierPrice.yearly;
+        perClientFee.maintenanceFeePHP = paid ? 0 : cbTierPrice.monthly;
+        perClientFee.maintenanceFeePaid = paid;
+        perClientFee.maintenanceFeePaidUntil = cbSubscription.expiresAt;
+    }
     res.json({
         success: true,
         cloudBackupPlans: CLOUD_BACKUP_PLANS,
-        // AYOS: idinagdag ang defaultMaintenanceFeePHP dito para ito na rin
-        // ang iisang pinagmumulan (single source of truth) ng "Maintenance &
-        // monitoring" fee na ipinapakita sa OMNIPOS side — kapareho mismo ng
-        // clientMaintenanceFeeConfig.defaultFeePHP na ginagamit na sa
-        // computeClientCostAllocation() (widget/cost-share) at sa Client Cost
-        // Allocation admin page dito sa RELAY. Dati ay wala nito ang
-        // /relay/pricing kaya hiwalay ang lumalabas na numero sa Cloud Backup
-        // tier modal (walang maintenance fee doon) kumpara sa cost-share
-        // widget — ngayon parehong susundan nila itong iisang value.
-        defaultMaintenanceFeePHP: clientMaintenanceFeeConfig.defaultFeePHP || 0,
+        ...perClientFee,
         billingDays: CLOUD_BACKUP_BILLING_DAYS,
         featureCatalog,
         upgradeTiers,
