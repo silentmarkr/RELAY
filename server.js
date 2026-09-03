@@ -1010,7 +1010,14 @@ function getCloudTokenCostPerSync(tier) {
 //
 // Env vars na kinikilala (lahat optional — piliin lang ang gusto mong
 // i-enable, i-set sa Render > Environment):
-//   PAYMONGO_SECRET_KEY, PAYMONGO_WEBHOOK_SECRET        -> GCash/Maya/Online Banking (PayMongo)
+//   PAYMONGO_ENV (test|live), PAYMONGO_TEST_SECRET_KEY / PAYMONGO_LIVE_SECRET_KEY,
+//   PAYMONGO_TEST_WEBHOOK_SECRET / PAYMONGO_LIVE_WEBHOOK_SECRET
+//     -> GCash/Maya/Online Banking (PayMongo) — HIWALAY na key/secret ang
+//        test at live mode (ito mismo ang dahilan kung bakit MALI ang
+//        ilagay ang dalawa sa IISANG PAYMONGO_SECRET_KEY, hal.
+//        "sk_test_xxx/sk_live_xxx" — hindi ito kikilalanin ni PayMongo
+//        bilang valid na key). Ang PAYMONGO_ENV ang siyang pumipili kung
+//        alin sa dalawang pares ang GAGAMITIN sa ngayon.
 //   XENDIT_SECRET_KEY,   XENDIT_WEBHOOK_TOKEN           -> GCash/Maya/GrabPay/Bank Transfer/Card (Xendit Invoice)
 //   STRIPE_SECRET_KEY,   STRIPE_WEBHOOK_SECRET          -> Credit/Debit Card (Stripe Checkout)
 //   PAYPAL_CLIENT_ID,    PAYPAL_CLIENT_SECRET, PAYPAL_WEBHOOK_ID, PAYPAL_ENV (sandbox|live) -> PayPal
@@ -1039,8 +1046,16 @@ function getCloudTokenCostPerSync(tier) {
 // ===================================================================
 
 // ---- PayMongo (GCash / Maya / Online Banking via Direct Online Banking source) ----
-const PAYMONGO_SECRET_KEY = process.env.PAYMONGO_SECRET_KEY || null;
-const PAYMONGO_WEBHOOK_SECRET = process.env.PAYMONGO_WEBHOOK_SECRET || null;
+// AYOS: dating IISANG PAYMONGO_SECRET_KEY / PAYMONGO_WEBHOOK_SECRET lang
+// (kung saan kadalasang MALING nilalagay ng dalawang key — test AT live —
+// sa iisang env var, hal. "sk_test_xxx/sk_live_xxx", na nagreresulta sa
+// "API key ... does not exist" error mula sa PayMongo). Ngayon, HIWALAY
+// na env var ang test at live mode, at ang PAYMONGO_ENV (test|live, kagaya
+// ng DRAGONPAY_ENV/PAYPAL_ENV sa itaas) ang pumipili kung alin ang
+// gagamitin — hindi na kailangang mag-edit ng code, env var lang.
+const PAYMONGO_ENV = process.env.PAYMONGO_ENV === 'live' ? 'live' : 'test';
+const PAYMONGO_SECRET_KEY = (PAYMONGO_ENV === 'live' ? process.env.PAYMONGO_LIVE_SECRET_KEY : process.env.PAYMONGO_TEST_SECRET_KEY) || null;
+const PAYMONGO_WEBHOOK_SECRET = (PAYMONGO_ENV === 'live' ? process.env.PAYMONGO_LIVE_WEBHOOK_SECRET : process.env.PAYMONGO_TEST_WEBHOOK_SECRET) || null;
 const PAYMONGO_API_BASE = 'https://api.paymongo.com/v1';
 function paymongoAuthHeader() {
     return 'Basic ' + Buffer.from(`${PAYMONGO_SECRET_KEY}:`).toString('base64');
@@ -1048,7 +1063,7 @@ function paymongoAuthHeader() {
 const PAYMONGO_METHOD_TO_SOURCE_TYPE = { gcash: 'gcash', maya: 'paymaya', online_banking: 'dob' };
 async function paymongoCreateSource({ amountPHP, method, redirectSuccessUrl, redirectFailedUrl, description }) {
     if (!PAYMONGO_SECRET_KEY) {
-        const err = new Error('PAYMONGO_SECRET_KEY is not configured on the relay yet — cannot accept GCash/Maya/Online Banking payments right now.');
+        const err = new Error(`PAYMONGO_${PAYMONGO_ENV.toUpperCase()}_SECRET_KEY is not configured on the relay yet (PAYMONGO_ENV=${PAYMONGO_ENV}) — cannot accept GCash/Maya/Online Banking payments right now.`);
         err.code = 'PAYMONGO_NOT_CONFIGURED';
         throw err;
     }
