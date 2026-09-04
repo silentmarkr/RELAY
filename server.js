@@ -1183,6 +1183,130 @@ async function paymongoCreatePayment({ sourceId, amountPHP, description }) {
     }
     return data.data;
 }
+// ---- PayMongo QR Ph — HIWALAY na flow ito kumpara sa Sources API sa
+// itaas (gcash/paymaya/dob), dahil ang QR Ph ay hindi "source" kundi isang
+// Payment Intent + Payment Method (type: "qrph"). Walang redirect/
+// checkout_url dito — sa halip, nagbabalik ito ng larawan ng QR code
+// (next_action.code.image_url) na ipapakita sa OMNIPOS admin panel, at
+// sino mang bank/e-wallet app na sumusuporta sa QR Ph (GCash, Maya,
+// karamihan sa mga banking app) ay puwedeng mag-scan dito para magbayad.
+// Parehong PAYMONGO_LIVE_SECRET_KEY/PAYMONGO_TEST_SECRET_KEY (depende sa
+// PAYMONGO_ENV) at PAYMONGO_*_WEBHOOK_SECRET sa itaas ang ginagamit dito
+// — walang bagong env var na kailangan idagdag para dito.
+const PAYMONGO_QRPH_MIN_AMOUNT_PHP = 1; // BUGFIX: dating ₱100 ang nilagay dito (maling akala) — dokumentado ng PayMongo na ₱1.00 lang ang minimum para sa QR Ph, kaya tama ang mababang custom amount (hal. ₱50 na minimum ng OMNIPOS mismo).
+async function paymongoCreateQrPhIntent({ amountPHP, description }) {
+    if (!PAYMONGO_SECRET_KEY) {
+        const err = new Error(`PAYMONGO_${PAYMONGO_ENV.toUpperCase()}_SECRET_KEY is not configured on the relay yet (PAYMONGO_ENV=${PAYMONGO_ENV}) — cannot accept QR Ph payments right now.`);
+        err.code = 'PAYMONGO_NOT_CONFIGURED';
+        throw err;
+    }
+    if (!(amountPHP >= PAYMONGO_QRPH_MIN_AMOUNT_PHP)) {
+        throw new Error(`Minimum na halaga para sa QR Ph ay ₱${PAYMONGO_QRPH_MIN_AMOUNT_PHP}.`);
+    }
+    const amountCentavos = Math.round(amountPHP * 100);
+    // 1) Gumawa ng Payment Intent na "qrph" lang ang allowed na paraan.
+    const intentResp = await fetch(`${PAYMONGO_API_BASE}/payment_intents`, {
+        method: 'POST',
+        headers: { Authorization: paymongoAuthHeader(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            data: {
+                attributes: {
+                    amount: amountCentavos,
+                    currency: 'PHP',
+                    payment_method_allowed: ['qrph'],
+                    capture_type: 'automatic',
+                    description: description || 'OmniPOS Cloud Backup Tokens'
+                }
+            }
+        })
+    });
+    const intentData = await intentResp.json().catch(() => null);
+    if (!intentResp.ok || !intentData || !intentData.data) {
+        const message = (intentData && intentData.errors && intentData.errors[0] && intentData.errors[0].detail) || `PayMongo error (HTTP ${intentResp.status})`;
+        throw new Error(message);
+    }
+    const intent = intentData.data;
+    const clientKey = intent.attributes.client_key;
+    // 2) Gumawa ng Payment Method na type "qrph". BUGFIX: dating umaasa
+    // ang code dito sa isang "next_action.code.expires_at" field mula sa
+    // PayMongo response para malaman kung kailan mag-e-expire ang QR —
+    // WALANG GANOONG FIELD sa opisyal na PayMongo docs (laging null ito
+    // dati, kaya walang expiry na naipapakita). Sa halip, dito na natin
+    // eksplisitong itinatakda ang expiry_seconds (60–9000 segundo ang
+    // allowed range ng PayMongo, default ay 1800/30 minuto) — at doon na
+    // lang natin kino-compute ang expiresAt sa server side mismo.
+    const QRPH_EXPIRY_SECONDS = 900; // 15 minuto — angkop sa admin-panel na pagbili ng tokens
+    const pmResp = await fetch(`${PAYMONGO_API_BASE}/payment_methods`, {
+        method: 'POST',
+        headers: { Authorization: paymongoAuthHeader(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data: { attributes: { type: 'qrph', expiry_seconds: QRPH_EXPIRY_SECONDS } } })
+    });
+    const pmData = await pmResp.json().catch(() => null);
+    if (!pmResp.ok || !pmData || !pmData.data) {
+        const message = (pmData && pmData.errors && pmData.errors[0] && pmData.errors[0].detail) || `PayMongo error (HTTP ${pmResp.status})`;
+        throw new Error(message);
+    }
+    const paymentMethodId = pmData.data.id;
+    // 3) I-attach ang Payment Method sa Payment Intent — dito na dapat
+    // dumating ang next_action.code.image_url (ang QR code na ipapakita).
+    const attachResp = await fetch(`${PAYMONGO_API_BASE}/payment_intents/${intent.id}/attach`, {
+        method: 'POST',
+        headers: { Authorization: paymongoAuthHeader(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            data: {
+                attributes: {
+                    payment_method: paymentMethodId,
+                    client_key: clientKey
+                }
+            }
+        })
+    });
+    const attachData = await attachResp.json().catch(() => null);
+    if (!attachResp.ok || !attachData || !attachData.data) {
+        const message = (attachData && attachData.errors && attachData.errors[0] && attachData.errors[0].detail) || `PayMongo QR Ph error (HTTP ${attachResp.status})`;
+        throw new Error(message);
+    }
+    const attached = attachData.data;
+    const nextAction = attached.attributes.next_action;
+    const qrImageUrl = nextAction && nextAction.code && nextAction.code.image_url;
+    if (!qrImageUrl) {
+        throw new Error(`Hindi nakabalik ng QR code image ang PayMongo (status: ${attached.attributes.status || 'unknown'}).`);
+    }
+    return {
+        id: attached.id, // ito ang Payment Intent ID (pi_xxx) — ito ang itatago natin bilang source_id/providerRefId
+        qrCodeImageUrl: qrImageUrl,
+        // BUGFIX: server-side na compute base sa expiry_seconds na eksplisito
+        // nating itinakda sa itaas (di na umaasa sa di-umiiral na field).
+        expiresAt: new Date(Date.now() + QRPH_EXPIRY_SECONDS * 1000).toISOString(),
+        status: attached.attributes.status
+    };
+}
+// Ginagamit ito ng webhook sa ibaba para i-credit ang tokens kapag
+// nag-"paid" na ang isang QR Ph Payment Intent — hiwalay na function dahil
+// may ilang posibleng event type/shape na maaaring dumating mula kay
+// PayMongo (payment.paid na may payment_intent_id, o payment_intent.succeeded
+// na direktang ang Payment Intent mismo ang resource) pero pareho lang ang
+// gagawin: hanapin ang pending purchase gamit ang Payment Intent ID
+// (naka-imbak sa source_id column) at i-credit kapag matagumpay na na-claim.
+async function creditPaidPaymentIntent(paymentIntentId, { failed = false } = {}) {
+    if (!paymentIntentId) return;
+    if (failed) {
+        await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'failed', updated_at = now() WHERE source_id = $1 AND status = 'pending'`, [paymentIntentId]);
+        return;
+    }
+    const purchaseResult = await queryWithRetry(
+        pgPool,
+        `SELECT * FROM cloud_token_purchases WHERE source_id = $1 AND status = 'pending'`,
+        [paymentIntentId]
+    );
+    const purchase = purchaseResult.rows[0];
+    if (!purchase) return;
+    const claimResult = await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'paid', updated_at = now() WHERE purchase_id = $1 AND status = 'pending' RETURNING *`, [purchase.purchase_id]);
+    if (!claimResult.rows[0]) return; // naunahan na ng ibang concurrent/duplicate webhook delivery
+    const newBalance = await creditCloudTokens(purchase.installation_id, Number(purchase.tokens), `Purchase ${purchase.purchase_id} (${purchase.method})`);
+    logActivity(purchase.installation_id, 'cloud_token_purchase_paid', { purchaseId: purchase.purchase_id, tokens: Number(purchase.tokens), newBalance });
+    sendTelegramNotification(`💎 Omni Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via ${purchase.method} — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
+}
 // Kina-verify ang "Paymongo-Signature" header (t=<timestamp>,te=<hmac>,li=<hmac live>)
 // laban sa raw request body, gamit ang PAYMONGO_WEBHOOK_SECRET — pinipigilan nito
 // ang kahit sinong mag-fake ng "successful payment" papunta sa webhook endpoint.
@@ -1447,6 +1571,7 @@ const PAYMENT_METHOD_CATALOG = [
     { id: 'gcash', provider: 'paymongo', label: 'GCash' },
     { id: 'maya', provider: 'paymongo', label: 'Maya' },
     { id: 'online_banking', provider: 'paymongo', label: 'Online Banking (PayMongo)' },
+    { id: 'qrph', provider: 'paymongo', label: 'QR Ph (PayMongo)' },
     { id: 'xendit_checkout', provider: 'xendit', label: 'GCash / Maya / Bank Transfer / Card (Xendit)' },
     { id: 'card', provider: 'stripe', label: 'Credit/Debit Card (Stripe)' },
     { id: 'paypal', provider: 'paypal', label: 'PayPal' },
@@ -1489,6 +1614,14 @@ async function createPaymentCheckout({ method, amountPHP, purchaseId, base, desc
     const redirectSuccessUrl = `${base}/relay/cloud-tokens/return?purchaseId=${encodeURIComponent(purchaseId)}&result=success`;
     const redirectFailedUrl = `${base}/relay/cloud-tokens/return?purchaseId=${encodeURIComponent(purchaseId)}&result=failed`;
     if (m.provider === 'paymongo') {
+        // AYOS: QR Ph ay hindi Sources-based (walang redirect/checkout_url)
+        // — Payment Intent + QR code image ang ibinabalik nito sa halip,
+        // kaya hiwalay itong branch (tingnan ang paymongoCreateQrPhIntent
+        // sa itaas para sa detalye).
+        if (method === 'qrph') {
+            const intent = await paymongoCreateQrPhIntent({ amountPHP, description });
+            return { provider: 'paymongo', providerRefId: intent.id, checkoutUrl: null, qrCodeImageUrl: intent.qrCodeImageUrl, expiresAt: intent.expiresAt };
+        }
         const source = await paymongoCreateSource({ amountPHP, method, redirectSuccessUrl, redirectFailedUrl, description });
         return { provider: 'paymongo', providerRefId: source.id, checkoutUrl: source.attributes.redirect.checkout_url };
     }
@@ -4880,7 +5013,10 @@ app.post('/relay/cloud-tokens/purchase/create', requireApiKey, requireAllowedDev
             [purchaseId, installationId, resolvedPackageId, tokens, amountPHP, method, checkout.providerRefId, checkout.provider]
         );
         logActivity(installationId, 'cloud_token_purchase_created', { purchaseId, tokens, amountPHP, method, provider: checkout.provider });
-        res.json({ success: true, purchaseId, checkoutUrl: checkout.checkoutUrl, tokens, amountPHP });
+        // AYOS: idinagdag ang qrCodeImageUrl/expiresAt para sa QR Ph (walang
+        // checkoutUrl ito — larawan ng QR ang ipapakita sa OMNIPOS sa halip
+        // na mag-open ng bagong tab). Null lang ito sa ibang method/provider.
+        res.json({ success: true, purchaseId, checkoutUrl: checkout.checkoutUrl || null, qrCodeImageUrl: checkout.qrCodeImageUrl || null, expiresAt: checkout.expiresAt || null, tokens, amountPHP });
     } catch (err) {
         const isConfigErr = err.code === 'PAYMONGO_NOT_CONFIGURED' || err.code === 'XENDIT_NOT_CONFIGURED' || err.code === 'STRIPE_NOT_CONFIGURED' || err.code === 'PAYPAL_NOT_CONFIGURED' || err.code === 'DRAGONPAY_NOT_CONFIGURED' || err.code === 'PROVIDER_NOT_CONFIGURED';
         res.status(isConfigErr ? 503 : 502).json({ success: false, message: err.message });
@@ -4958,10 +5094,69 @@ app.post('/relay/webhooks/paymongo', express.raw({ type: '*/*', limit: '1mb' }),
             } else {
                 await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'failed', updated_at = now() WHERE purchase_id = $1 AND status = 'pending'`, [purchase.purchase_id]);
             }
+        } else if (eventType === 'payment.paid' && resource && resource.attributes && resource.attributes.source && resource.attributes.source.type === 'qrph') {
+            // BUGFIX: dating ang guard dito ay "!(source present)" — MALI ito.
+            // Na-verify sa opisyal na PayMongo webhook payload samples na ang
+            // payment.paid event PARA MISMO SA QR PH ay MAY "source" object
+            // (type: "qrph", id: "qrph_xxx") — kaya kabaligtaran ang tamang
+            // guard: dapat "source.type === 'qrph'" (hindi absence of source).
+            // Dahil dito, HINDI TALAGA GUMAGANA ang naunang bersyon ng branch
+            // na ito — walang QR Ph payment na na-credit sana kahit successful
+            // na ang bayad sa PayMongo. Ang GCash/Maya/DOB (Sources flow) ay
+            // hindi naaapektuhan nito dahil iba ang source.type nila
+            // ('gcash'/'paymaya'/'dob'), at may sarili na silang
+            // "source.chargeable" branch sa itaas.
+            await creditPaidPaymentIntent(resource.attributes.payment_intent_id, { failed: false });
+        } else if (eventType === 'payment_intent.succeeded' && resource && resource.id) {
+            // Opsyonal na redundant na daan patungo sa parehong resulta sa
+            // itaas — sa ilang PayMongo webhook subscription, ang
+            // "payment_intent.succeeded" (ang Payment Intent mismo ang
+            // resource) ang dumarating sa halip na/kasabay ng "payment.paid".
+            // Ligtas itong tawagin nang dalawang beses (idempotent — atomic
+            // "claim" na lang ang gagana sa unang tumama, tingnan
+            // creditPaidPaymentIntent sa itaas).
+            await creditPaidPaymentIntent(resource.id, { failed: false });
         } else if (eventType === 'payment.failed' && resource && resource.attributes) {
-            const sourceId = resource.attributes.source && resource.attributes.source.id;
+            // BUGFIX: para sa QR Ph, ang resource.attributes.source.id (kung
+            // meron man) ay "qrph_xxx" — HINDI ang Payment Intent ID ("pi_xxx")
+            // na siya namang naka-imbak bilang source_id column ng purchase
+            // na ito. Kaya kailangang tignan muna kung QR Ph ba ito
+            // (source.type === 'qrph') bago piliin kung alin ang gagamiting ID
+            // pang-match — dating palaging source.id muna ang priority, na
+            // sasablay para dito.
+            const isQrPh = resource.attributes.source && resource.attributes.source.type === 'qrph';
+            const sourceId = isQrPh
+                ? resource.attributes.payment_intent_id
+                : ((resource.attributes.source && resource.attributes.source.id) || resource.attributes.payment_intent_id);
             if (sourceId) {
                 await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'failed', updated_at = now() WHERE source_id = $1 AND status = 'pending'`, [sourceId]);
+            }
+        } else if (eventType === 'payment_intent.awaiting_payment_method' && resource && resource.id) {
+            // BUGFIX: dating "payment_intent.payment_failed" ang pinakikinggan
+            // dito — HINDI ito totoong event type ng PayMongo (Stripe naming
+            // convention ito, na-guess lang, hindi na-verify). Ang opisyal at
+            // dokumentadong event na ibinabalik ni PayMongo kapag nag-expire o
+            // nabigo ang isang QR Ph code (nagbabalik ang Payment Intent sa
+            // "awaiting_payment_method") ay "payment_intent.awaiting_payment_method"
+            // — kaya pinalitan ito para talagang ma-mark na 'failed' ang
+            // purchase at makapag-retry ang customer sa OMNIPOS.
+            //
+            // KARAGDAGANG SAFEGUARD: "awaiting_payment_method" din mismo ang
+            // PAUNANG status ng bawat BAGONG Payment Intent bago pa man
+            // i-attach (kumpirmado sa opisyal na PayMongo docs) — kaya kung
+            // sakaling ipinapadala rin pala ng PayMongo ang event na ito sa
+            // mismong paglikha (hindi lang sa pag-"return" dahil sa
+            // failed/expired na attempt), mali agad na ma-mamarkahang
+            // "failed" ang BAWAT QR Ph purchase pagkatapos lang itong gawin.
+            // Kaya dito, tinitignan muna kung may "last_payment_error" —
+            // ang mismong field na sinasabi ng opisyal na PayMongo
+            // troubleshooting docs bilang palatandaan ng TUNAY na
+            // pagkabigo/pag-expire — bago mag-mark ng "failed". Kung wala
+            // pang last_payment_error, ligtas lang na huwag munang gawin
+            // ang UPDATE (mananatiling 'pending' ang purchase, tatapusin
+            // na lang ito ng normal na paid/failed webhook sa itaas).
+            if (resource.attributes && resource.attributes.last_payment_error) {
+                await creditPaidPaymentIntent(resource.id, { failed: true });
             }
         }
         res.json({ success: true });
