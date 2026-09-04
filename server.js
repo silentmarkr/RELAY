@@ -990,11 +990,81 @@ function getCloudTokenPackages() {
 // (buwanang presyo) / (inaasahang bilang ng auto-syncs kada buwan),
 // pinapalago pataas (Math.ceil) para hindi kailanman ma-undercharge,
 // minimum 1 token kada sync.
+// NOTE: ESTIMATE/DISPLAY LANG ito ngayon (ipinapakita sa OMNIPOS admin
+// panel bago pa man mag-sync, at ginagamit bilang paunang "gate" kung
+// sapat kaya ang balance) — HINDI na ito ang aktwal na ginagamit sa
+// pag-charge. Ang totoong pag-charge (exact, hindi pataas ang rounding)
+// ay nasa getCloudTokenCostPerSyncExact() + consumeCloudTokensForSyncExact()
+// sa ibaba.
 function getCloudTokenCostPerSync(tier) {
     const plan = CLOUD_BACKUP_PLANS[tier] || CLOUD_BACKUP_PLANS.basic;
     const monthlyPrice = plan.price.monthly;
     const expectedSyncsPerMonth = Math.max(1, Math.round((30 * 24 * 60 * 60 * 1000) / plan.autoBackupIntervalMs));
     return Math.max(1, Math.ceil(monthlyPrice / expectedSyncsPerMonth));
+}
+// AYOS/BUGFIX: EKSAKTONG (fractional, walang rounding) na presyo kada
+// isang sync — ito na ang totoong batayan ng pag-charge. Kinukuha
+// LIVE mula sa CLOUD_BACKUP_PLANS (parehong pinagmumulan ng presyo ng
+// buong system, kaya awtomatikong sumusunod ito kapag binago ang presyo
+// ng tier dito sa RELAY — walang ibang lugar na kailangan pang i-update).
+function getCloudTokenCostPerSyncExact(tier) {
+    const plan = CLOUD_BACKUP_PLANS[tier] || CLOUD_BACKUP_PLANS.basic;
+    const monthlyPrice = plan.price.monthly;
+    const expectedSyncsPerMonth = Math.max(1, Math.round((30 * 24 * 60 * 60 * 1000) / plan.autoBackupIntervalMs));
+    return monthlyPrice / expectedSyncsPerMonth;
+}
+// AYOS/BUGFIX: atomic, EKSAKTONG pag-charge kada sync (pinapalitan ang
+// dating "ipasa na lang mula OMNIPOS ang Math.ceil na tokens" na paraan).
+// Sa bawat tawag: idinadagdag ang eksaktong (fractional) na presyo ng
+// tier na ito sa naipong "sync_fraction_accrued" ng wallet, tapos isang
+// WHOLE token lang ang aktwal na binabawas sa balance kapag umabot na sa
+// 1.0 pataas ang bagong kabuuan — ang labi (fraction < 1.0) ay
+// naka-imbak lang, hihintayin ng susunod na sync. Sa mahabang panahon,
+// ang KABUUANG tokens na nako-consume ay EKSAKTONG tutumbas (hindi na
+// laging sobra) sa monthly price ng tier — kahit magpalit pa ng presyo
+// dito sa RELAY anumang oras, sumusunod lang ito nang eksakto dahil
+// live na live() kinukuha ang presyo sa bawat tawag.
+// Kapag nagbago ang tier mula sa huling naka-accrue na fraction (hal.
+// nag-upgrade/downgrade ang installation), i-reset muna sa 0 ang
+// fraction bago magdagdag — ibang batayan na kasi ang presyo, hindi na
+// dapat pagsamahin ang natitirang fraction ng lumang tier.
+async function consumeCloudTokensForSyncExact(installationId, tier, note) {
+    const costFraction = getCloudTokenCostPerSyncExact(tier);
+    return runPgWriteTx(pgPool, async (client) => {
+        await client.query(
+            `INSERT INTO cloud_token_wallets (installation_id, balance_tokens, auto_sync_enabled) VALUES ($1, 0, true)
+             ON CONFLICT (installation_id) DO NOTHING`,
+            [installationId]
+        );
+        const walletRes = await client.query(
+            `SELECT balance_tokens, sync_fraction_accrued, sync_fraction_tier FROM cloud_token_wallets WHERE installation_id = $1 FOR UPDATE`,
+            [installationId]
+        );
+        const row = walletRes.rows[0];
+        const baseFraction = (row.sync_fraction_tier === tier) ? Number(row.sync_fraction_accrued) : 0;
+        const newFraction = baseFraction + costFraction;
+        const wholeTokens = Math.floor(newFraction);
+        const remainder = newFraction - wholeTokens;
+        const currentBalance = Number(row.balance_tokens);
+        if (wholeTokens > 0 && currentBalance < wholeTokens) {
+            // Sapat pa ang balance kaysa ma-charge, pero hindi pa kailanman
+            // na-touch ang wallet — walang binabago, para pareho pa rin ang
+            // susunod na pagsubok (walang na-lose na accrued fraction).
+            return { ok: false, insufficient: true, balanceTokens: currentBalance };
+        }
+        const newBalance = currentBalance - wholeTokens;
+        await client.query(
+            `UPDATE cloud_token_wallets SET balance_tokens = $2, sync_fraction_accrued = $3, sync_fraction_tier = $4, updated_at = now() WHERE installation_id = $1`,
+            [installationId, newBalance, remainder, tier]
+        );
+        if (wholeTokens > 0) {
+            await client.query(
+                `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note) VALUES ($1, 'consume', $2, $3, $4)`,
+                [installationId, -wholeTokens, newBalance, note || null]
+            );
+        }
+        return { ok: true, balanceTokens: newBalance, tokensCharged: wholeTokens };
+    });
 }
 // ===================================================================
 // PAYMENT PROVIDERS — dating PayMongo lang ang suportado dito. Ngayon,
@@ -1481,6 +1551,18 @@ async function ensureCloudTokenSchema() {
     // Xendit, Stripe, PayPal, ...) ang gumawa ng source_id/providerRefId na
     // naka-imbak sa row na ito.
     await pgPool.query(`ALTER TABLE cloud_token_purchases ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'paymongo';`);
+    // AYOS/BUGFIX: dating Math.ceil ang laging ginagamit para sa presyo
+    // (tokens) kada isang sync — kaya lagi at lagi itong LUMALAGO kumpara
+    // sa advertised monthly price ng tier (hal. Pro tier: dapat ₱399/buwan
+    // pero sa Math.ceil, aabot ng ~720 tokens/buwan kung eksaktong
+    // sinundan ang schedule nito — +80%). Ang dalawang column na ito ang
+    // nagbibigay-daan sa EKSAKTONG (fractional) na pag-charge sa halip:
+    // sa bawat sync, idinadagdag lang ang eksaktong bahagi (hindi
+    // pinapalago) sa "sync_fraction_accrued", at isang WHOLE token lamang
+    // ang aktwal na binabawas sa balance kapag umabot na sa 1.0 pataas ang
+    // naipong fraction — tingnan ang consumeCloudTokensForSyncExact().
+    await pgPool.query(`ALTER TABLE cloud_token_wallets ADD COLUMN IF NOT EXISTS sync_fraction_accrued NUMERIC NOT NULL DEFAULT 0;`);
+    await pgPool.query(`ALTER TABLE cloud_token_wallets ADD COLUMN IF NOT EXISTS sync_fraction_tier TEXT;`);
     console.log('✅ Omni Token wallet Postgres schema ready (cloud_token_wallets, cloud_token_ledger, cloud_token_purchases).');
 }
 async function getOrCreateCloudTokenWallet(installationId) {
@@ -4273,7 +4355,7 @@ function armCloudBackupSessionIdleTimer(uploadId) {
     }, CLOUD_BACKUP_CHUNK_SESSION_IDLE_TIMEOUT_MS);
     if (typeof session.idleTimer.unref === 'function') session.idleTimer.unref();
 }
-app.post('/relay/cloud-backup/upload/start', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-upload-start', 30, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
+app.post('/relay/cloud-backup/upload/start', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-upload-start', 30, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
     const { installationId, totalBytes } = req.body || {};
     if (!installationId || typeof totalBytes !== 'number' || totalBytes <= 0) {
         return res.status(400).json({ success: false, message: 'Missing or invalid installationId/totalBytes.' });
@@ -4292,6 +4374,39 @@ app.post('/relay/cloud-backup/upload/start', requireApiKey, requireAllowedDevice
     }
     if (!pgPool) {
         return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured yet on RELAY. Tell the developer to set it.' });
+    }
+    // AYOS/SECURITY FIX: fail-fast na Omni Token check BAGO pa man
+    // tanggapin ang unang chunk. Hindi ito ang aktwal/atomic na gate
+    // (nasa ibaba iyon, sa upload/finish, kaagad bago ang totoong
+    // pagsulat sa Postgres) — ito ay para lang hindi na mag-aksaya ng
+    // bandwidth/memory sa pagtanggap ng buong backup kung alam na
+    // agad na kulang ang balance. Kung sakaling mabilis na nagbago ang
+    // balance sa pagitan nito at ng finish (hal. auto-sync at manual
+    // sync na sabay-sabay), ang finish gate pa rin ang huling
+    // magpapasya — hindi ito papalitan.
+    try {
+        const walletRow = await getOrCreateCloudTokenWallet(installationId);
+        const cloudBackupUnlockForPrecheck = (issuedUnlocks[installationId] || {})['cloud_backup'];
+        const tierForPrecheck = (cloudBackupUnlockForPrecheck && cloudBackupUnlockForPrecheck.tier && CLOUD_BACKUP_PLANS[cloudBackupUnlockForPrecheck.tier]) ? cloudBackupUnlockForPrecheck.tier : 'basic';
+        const minCostForPrecheck = getCloudTokenCostPerSyncExact(tierForPrecheck);
+        if (Number(walletRow.balance_tokens) < minCostForPrecheck) {
+            logActivity(installationId, 'cloud_backup_blocked', { reason: 'insufficient_tokens', balanceTokens: Number(walletRow.balance_tokens) });
+            return res.status(402).json({
+                success: false,
+                insufficientTokens: true,
+                balanceTokens: Number(walletRow.balance_tokens),
+                message: 'Insufficient Cloud Backup (Omni Tokens) balance. Please buy more tokens to keep syncing.'
+            });
+        }
+    } catch (walletErr) {
+        // AYOS: fail-CLOSED dito (hindi tulad ng ibang "balance check" sa
+        // OMNIPOS na fail-open kapag hindi ma-verify) — dahil ang RELAY
+        // mismo ang authoritative source ng balance ngayon, kung sandaling
+        // nabigo ang query (hal. transient Postgres blip), mas ligtas na
+        // sabihin sa client na mag-retry na lang, kaysa tuluyang tanggapin
+        // ang upload nang hindi na-verify ang balance.
+        console.error('⚠️ CLOUD_BACKUP: hindi ma-verify ang Omni Token balance bago mag-start ng upload:', walletErr.message);
+        return res.status(503).json({ success: false, message: 'Could not verify the Omni Tokens balance right now — please try syncing again in a moment.' });
     }
     const existingUploadId = CLOUD_BACKUP_UPLOAD_LOCKS.get(installationId);
     if (existingUploadId && CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS.has(existingUploadId)) {
@@ -4417,6 +4532,48 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
             message: `Cloud backup exceeds your ${CLOUD_BACKUP_PLANS[tier].name} storage allowance (${projectedSizeMB} MB used, ${quotaMB} MB limit). Upgrade your Cloud Backup plan or free up space (e.g., trim old transaction/userlog history) before syncing.`
         });
     }
+    // ===================================================================
+    // AYOS/SECURITY FIX: ito na ang TANGING tunay na gate ng Omni Tokens
+    // para sa cloud backup sync. Dating ang pag-charge (check-and-consume)
+    // ay ginagawa ng OMNIPOS (client-controlled, self-hosted) PAGKATAPOS
+    // lang ng successful upload — ibig sabihin, kahit alisin/i-edit ng
+    // isang client ang balance-check code sa sarili nilang OMNIPOS
+    // server.js (o tawagin nila mismo, direkta, itong RELAY endpoint gamit
+    // ang RELAY_API_KEY na makukuha nila sa sarili nilang .env), TALAGANG
+    // masusulat pa rin ang data nila sa Neon nang walang bayad — walang
+    // technical enforcement, "trust-based" lang.
+    //
+    // Ngayon, DITO MISMO — bago pa man magsimula ang totoong pagsulat sa
+    // Postgres (cloud_backup_modules) sa ibaba — atomic na chine-check AT
+    // sabay ding kina-consume ang Omni Token balance ng installation na
+    // ito. RELAY (developer-owned, HINDI naa-access/hindi na-eedit ng
+    // kliyente) ang tanging pinagmumulan ng katotohanan nito, kaya
+    // WALANG paraan para makatakas ang sinumang client — anuman ang
+    // dumaan (tunay na OMNIPOS, na-edit na OMNIPOS, o direktang HTTP call)
+    // ay dadaan sa gate na ito bago ma-save ang kanilang backup.
+    // ===================================================================
+    let tokenConsumeResult;
+    try {
+        tokenConsumeResult = await consumeCloudTokensForSyncExact(installationId, tier, 'Cloud backup sync');
+    } catch (consumeErr) {
+        // AYOS: fail-CLOSED — kung nabigo ang atomic charge mismo (hal.
+        // transient Postgres error), HUWAG ituloy ang pagsulat ng backup
+        // (hindi natin alam kung na-charge nga o hindi). I-cleanup ang
+        // session at sabihin sa client na mag-retry na lang.
+        cleanupCloudBackupUploadSession(String(uploadId));
+        console.error('⚠️ CLOUD_BACKUP: hindi ma-verify/ma-charge ang Omni Token balance sa upload/finish:', consumeErr.message);
+        return res.status(503).json({ success: false, message: 'Could not verify the Omni Tokens balance right now — no data was written. Please try syncing again in a moment.' });
+    }
+    if (!tokenConsumeResult.ok) {
+        cleanupCloudBackupUploadSession(String(uploadId));
+        logActivity(installationId, 'cloud_backup_blocked', { reason: 'insufficient_tokens', balanceTokens: tokenConsumeResult.balanceTokens });
+        return res.status(402).json({
+            success: false,
+            insufficientTokens: true,
+            balanceTokens: tokenConsumeResult.balanceTokens,
+            message: 'Insufficient Cloud Backup (Omni Tokens) balance. Nothing was written to the cloud — please buy more tokens to keep syncing.'
+        });
+    }
     try {
         let totalSizeBytes = 0;
         let moduleCount = 0;
@@ -4451,6 +4608,15 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
             const friendlyMessage = anyTransient
                 ? `Lost connection to the database while saving ${failedList} (this can happen with very large modules, e.g. many high-resolution product photos). The other module(s) were already saved successfully — please try syncing again; only the module(s) above still need to go through.`
                 : `An error occurred while saving ${failedList} to Postgres: ${failedModules[0].message}`;
+            // Kung may na-charge na WHOLE token para sa sync na ito pero
+            // nabigo pala ang pagsulat, ibalik/i-refund — patuloy na dapat
+            // TANGING successful sync lang ang binabayaran, kahit ngayong
+            // atomic na ang gate.
+            if (tokenConsumeResult.tokensCharged > 0) {
+                await creditCloudTokens(installationId, tokenConsumeResult.tokensCharged, `Refund — failed sync (${failedList})`).catch((refundErr) => {
+                    console.error('⚠️ CLOUD_TOKENS: failed to refund after a failed sync write:', refundErr.message);
+                });
+            }
             return res.status(500).json({ success: false, message: friendlyMessage, failedModules: failedModules.map(f => f.module) });
         }
         await runPgWriteTx(pgPool, async (client) => {
@@ -4482,13 +4648,20 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
             tier: tierForResponse,
             quotaMB: quotaMBForResponse,
             percentUsed: percentUsedForResponse,
-            nearQuota
+            nearQuota,
+            tokensCharged: tokenConsumeResult.tokensCharged,
+            balanceTokens: tokenConsumeResult.balanceTokens
         });
     } catch (err) {
         console.error('⚠️ CLOUD_BACKUP: hindi na-save sa Postgres:', err.message);
         const friendlyMessage = isTransientPgConnectionError(err)
             ? 'Lost connection to the database while saving the cloud backup (this can happen with very large uploads). Please try syncing again — no partial data was saved.'
             : ('An error occurred while saving to Postgres: ' + err.message);
+        if (tokenConsumeResult.tokensCharged > 0) {
+            await creditCloudTokens(installationId, tokenConsumeResult.tokensCharged, `Refund — failed sync (${err.message})`).catch((refundErr) => {
+                console.error('⚠️ CLOUD_TOKENS: failed to refund after a failed sync write:', refundErr.message);
+            });
+        }
         res.status(500).json({ success: false, message: friendlyMessage });
     } finally {
         cleanupCloudBackupUploadSession(String(uploadId));
@@ -4893,35 +5066,35 @@ app.post(DRAGONPAY_WEBHOOK_PATH, express.urlencoded({ extended: false, limit: '2
         res.status(500).type('text/plain').send('result=ERROR');
     }
 });
+// AYOS/BUGFIX: dating tumatanggap ito ng isang PRE-COMPUTED na `tokens`
+// (integer, Math.ceil na) mula sa OMNIPOS — kaya (a) palaging sobra ang
+// aktwal na na-cconsume kada buwan kumpara sa advertised monthly price
+// (tingnan ang comment sa getCloudTokenCostPerSync/Exact sa itaas), at
+// (b) kung sandaling hindi pa naka-refresh ang lokal na cache ng presyo
+// sa OMNIPOS (tingnan ang applyCloudBackupPricingOverlay doon), maaaring
+// magkaiba pa ang presyong ginamit sa pag-charge dito kumpara sa TALAGANG
+// kasalukuyang presyo dito mismo sa RELAY. Ngayon, `tier` na lang
+// (hindi na `tokens`) ang tinatanggap — dito mismo sa RELAY (ang
+// tunay na "may-ari" ng presyo) EKSAKTONG kinukwenta at ina-accrue ang
+// fractional cost kada sync, kaya laging TAMA/EKSAKTO ito kahit
+// magpalit ng presyo ng tier anumang oras, at laging magkatugma ang
+// OMNIPOS at RELAY (iisang pinagmumulan ng presyo na lang).
 app.post('/relay/cloud-tokens/check-and-consume', requireApiKey, requireAllowedDevice, rateLimit('cloud-tokens-consume', 300, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
-    const { installationId, tokens, note } = req.body;
+    const { installationId, tier, note } = req.body;
     if (!installationId) return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
-    if (typeof tokens !== 'number' || tokens <= 0) return res.status(400).json({ success: false, message: 'Invalid tokens amount.' });
+    if (!tier || !CLOUD_BACKUP_PLANS[tier]) return res.status(400).json({ success: false, message: 'Invalid o missing na Cloud Backup tier.' });
     if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
     try {
-        await getOrCreateCloudTokenWallet(installationId);
-        const result = await queryWithRetry(
-            pgPool,
-            `UPDATE cloud_token_wallets SET balance_tokens = balance_tokens - $2, updated_at = now()
-             WHERE installation_id = $1 AND balance_tokens >= $2 RETURNING balance_tokens`,
-            [installationId, tokens]
-        );
-        if (!result.rows[0]) {
-            const currentResult = await queryWithRetry(pgPool, 'SELECT balance_tokens FROM cloud_token_wallets WHERE installation_id = $1', [installationId]);
+        const result = await consumeCloudTokensForSyncExact(installationId, tier, note);
+        if (!result.ok) {
             return res.status(402).json({
                 success: false,
                 insufficient: true,
-                balanceTokens: currentResult.rows[0] ? Number(currentResult.rows[0].balance_tokens) : 0,
+                balanceTokens: result.balanceTokens,
                 message: 'Insufficient Cloud Backup tokens. Please buy more tokens to keep syncing.'
             });
         }
-        const balanceAfter = Number(result.rows[0].balance_tokens);
-        await queryWithRetry(
-            pgPool,
-            `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note) VALUES ($1, 'consume', $2, $3, $4)`,
-            [installationId, -tokens, balanceAfter, note || null]
-        );
-        res.json({ success: true, balanceTokens: balanceAfter });
+        res.json({ success: true, balanceTokens: result.balanceTokens, tokensCharged: result.tokensCharged });
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });
     }
