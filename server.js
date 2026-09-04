@@ -1565,6 +1565,29 @@ async function ensureCloudTokenSchema() {
     await pgPool.query(`ALTER TABLE cloud_token_wallets ADD COLUMN IF NOT EXISTS sync_fraction_tier TEXT;`);
     console.log('✅ Omni Token wallet Postgres schema ready (cloud_token_wallets, cloud_token_ledger, cloud_token_purchases).');
 }
+// AYOS (cost-optimization): i-cache sa memory ang buong /relay/cloud-tokens/wallet
+// response (balance + last-20 ledger + pending purchases) — 3 Neon queries kada
+// tawag dati, at hanggang 120x/oras kada device pwedeng tawagin. Ang cache ay
+// ini-invalidate agad sa mismong sandaling magbago ang balance (check-and-consume,
+// consumeCloudTokensForSyncExact, o successful na payment webhook), kaya hindi ito
+// magiging stale sa totoong paggamit — TTL lang ito bilang huling safety net.
+const WALLET_CACHE_TTL_MS = 45 * 1000; // 45 segundo
+const walletResponseCache = new Map(); // installationId -> { data, expiresAt }
+function getWalletCache(installationId) {
+    const entry = walletResponseCache.get(installationId);
+    if (!entry) return null;
+    if (Date.now() >= entry.expiresAt) {
+        walletResponseCache.delete(installationId);
+        return null;
+    }
+    return entry.data;
+}
+function setWalletCache(installationId, data) {
+    walletResponseCache.set(installationId, { data, expiresAt: Date.now() + WALLET_CACHE_TTL_MS });
+}
+function invalidateWalletCache(installationId) {
+    walletResponseCache.delete(installationId);
+}
 async function getOrCreateCloudTokenWallet(installationId) {
     const result = await queryWithRetry(pgPool, 'SELECT installation_id, balance_tokens, auto_sync_enabled FROM cloud_token_wallets WHERE installation_id = $1', [installationId]);
     if (result.rows[0]) return result.rows[0];
@@ -1591,6 +1614,7 @@ async function creditCloudTokens(installationId, tokens, note) {
         `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note) VALUES ($1, 'purchase', $2, $3, $4)`,
         [installationId, tokens, balanceAfter, note || null]
     );
+    invalidateWalletCache(installationId);
     return balanceAfter;
 }
 const MODULE_SUBSCRIPTION_FEATURE_IDS = ['rbac_management', 'multi_branch'];
@@ -2527,6 +2551,14 @@ function saveBranchSummaries(obj) {
     }
 }
 let branchSummaries = {}; 
+// AYOS (cost-optimization): huwag i-persist sa Neon ang branch-summaries kada
+// checkin kung walang aktwal na nagbago sa summary ng installationId na 'yon.
+// Periodic safety flush pa rin kada BRANCH_PERSIST_MIN_INTERVAL_MS.
+const BRANCH_PERSIST_MIN_INTERVAL_MS = 15 * 60 * 1000; // 15 minuto
+const branchLastPersisted = new Map(); // `${groupHash}|${installationId}` -> { signature, at }
+function branchEntrySignature(branchName, summary) {
+    return `${branchName}|${JSON.stringify(summary)}`;
+}
 const BRANCH_GROUP_HASH_RE = /^[a-f0-9]{64}$/; 
 const BRANCH_NAME_MAX_LEN = 60;
 const BRANCH_SUMMARY_NUMERIC_FIELDS = [
@@ -2632,6 +2664,34 @@ function saveIntegrityStatus(obj) {
     }
 }
 let integrityStatus = {}; 
+// AYOS (cost-optimization): huwag i-persist sa Neon ang integrity-status kada
+// checkin (up to 300x/oras kada device) — buong blob ng LAHAT ng devices kasi
+// ang nire-rewrite ni saveIntegrityStatus(). Isulat lang sa Neon kapag
+// talagang nagbago ang resulta (flagged/counts/watcher) o kapag lumipas na
+// ang INTEGRITY_PERSIST_MIN_INTERVAL_MS mula huling save (periodic safety
+// flush). Ang in-memory `integrityStatus` ay laging updated agad — walang
+// epekto sa live API responses, apektado lang ang dalas ng Neon writes.
+const INTEGRITY_PERSIST_MIN_INTERVAL_MS = 15 * 60 * 1000; // 15 minuto
+const integrityLastPersisted = new Map(); // installationId -> { signature, at }
+function integrityEntrySignature(entry) {
+    if (!entry) return '';
+    return [
+        entry.hasBaseline, entry.flagged, entry.baselineVersion,
+        entry.modifiedCount, entry.deletedCount, entry.addedCount,
+        entry.watcherActive, entry.clearedAt, entry.clearedNote
+    ].join('|');
+}
+function maybePersistIntegrityStatus(installationId, entry) {
+    const sig = integrityEntrySignature(entry);
+    const prev = integrityLastPersisted.get(installationId);
+    const now = Date.now();
+    const changed = !prev || prev.signature !== sig;
+    const dueForFlush = !prev || (now - prev.at) >= INTEGRITY_PERSIST_MIN_INTERVAL_MS;
+    if (changed || dueForFlush) {
+        saveIntegrityStatus(integrityStatus);
+        integrityLastPersisted.set(installationId, { signature: sig, at: now });
+    }
+}
 const pendingIntegrityChecks = new Set();
 const SYSTEM_VERSION_PATH = path.join(__dirname, 'system-version.json');
 const DEFAULT_SYSTEM_VERSION_INFO = { version: '0.0.0', changelog: '', publishedAt: null };
@@ -4181,7 +4241,7 @@ app.post('/relay/integrity-checkin', requireApiKey, requireAllowedDevice, rateLi
             clearedAt: integrityStatus[installationId] ? integrityStatus[installationId].clearedAt || null : null,
             clearedNote: integrityStatus[installationId] ? integrityStatus[installationId].clearedNote || null : null
         };
-        saveIntegrityStatus(integrityStatus);
+        maybePersistIntegrityStatus(installationId, integrityStatus[installationId]);
         return res.json({ success: true, hasBaseline: false, flagged: false, message: `Walang naka-imbak na baseline para sa version "${baselineVersion}" — hindi muna ito na-compare.` });
     }
     const baselineFiles = baseline.files || {};
@@ -4218,7 +4278,7 @@ app.post('/relay/integrity-checkin', requireApiKey, requireAllowedDevice, rateLi
         clearedAt: flagged ? (integrityStatus[installationId] ? integrityStatus[installationId].clearedAt || null : null) : null,
         clearedNote: flagged ? (integrityStatus[installationId] ? integrityStatus[installationId].clearedNote || null : null) : null
     };
-    saveIntegrityStatus(integrityStatus);
+    maybePersistIntegrityStatus(installationId, integrityStatus[installationId]);
     if (flagged) {
         logActivity(installationId, 'integrity_alert', {
             baselineVersion,
@@ -4261,7 +4321,14 @@ app.post('/relay/branch-checkin', requireApiKey, requireAllowedDevice, rateLimit
         summary: cleanSummary,
         updatedAt: Date.now()
     };
-    saveBranchSummaries(branchSummaries);
+    const branchPersistKey = `${branchGroupKeyHash}|${installationId}`;
+    const branchSig = branchEntrySignature(cleanName, cleanSummary);
+    const branchPrev = branchLastPersisted.get(branchPersistKey);
+    const branchDue = !branchPrev || (Date.now() - branchPrev.at) >= BRANCH_PERSIST_MIN_INTERVAL_MS;
+    if (changed || branchDue || !branchPrev || branchPrev.signature !== branchSig) {
+        saveBranchSummaries(branchSummaries);
+        branchLastPersisted.set(branchPersistKey, { signature: branchSig, at: Date.now() });
+    }
     if (changed) {   }
     res.json({ success: true, message: 'Branch check-in recorded.' });
 });
@@ -4555,6 +4622,7 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
     let tokenConsumeResult;
     try {
         tokenConsumeResult = await consumeCloudTokensForSyncExact(installationId, tier, 'Cloud backup sync');
+        invalidateWalletCache(installationId);
     } catch (consumeErr) {
         // AYOS: fail-CLOSED — kung nabigo ang atomic charge mismo (hal.
         // transient Postgres error), HUWAG ituloy ang pagsulat ng backup
@@ -4744,6 +4812,8 @@ app.get('/relay/cloud-tokens/wallet', requireApiKey, requireAllowedDevice, rateL
     const installationId = String(req.query.installationId || '').trim();
     if (!installationId) return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
     if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
+    const cached = getWalletCache(installationId);
+    if (cached) return res.json(cached);
     try {
         const wallet = await getOrCreateCloudTokenWallet(installationId);
         const ledgerResult = await queryWithRetry(
@@ -4757,12 +4827,14 @@ app.get('/relay/cloud-tokens/wallet', requireApiKey, requireAllowedDevice, rateL
              WHERE installation_id = $1 AND status = 'pending' ORDER BY created_at DESC LIMIT 5`,
             [installationId]
         );
-        res.json({
+        const responseBody = {
             success: true,
             balanceTokens: Number(wallet.balance_tokens),
             ledger: ledgerResult.rows,
             pendingPurchases: pendingResult.rows
-        });
+        };
+        setWalletCache(installationId, responseBody);
+        res.json(responseBody);
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });
     }
@@ -5094,6 +5166,7 @@ app.post('/relay/cloud-tokens/check-and-consume', requireApiKey, requireAllowedD
     if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
     try {
         const result = await consumeCloudTokensForSyncExact(installationId, tier, note);
+        invalidateWalletCache(installationId);
         if (!result.ok) {
             return res.status(402).json({
                 success: false,
@@ -5207,6 +5280,7 @@ app.post('/relay/cloud-tokens/activate-cloud-backup', requireApiKey, requireAllo
             return res.status(402).json(insufficientBody);
         }
         const balanceAfter = Number(deductResult.rows[0].balance_tokens);
+        invalidateWalletCache(installationId);
         await queryWithRetry(
             pgPool,
             `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note) VALUES ($1, 'consume', $2, $3, $4)`,
@@ -5337,6 +5411,7 @@ app.post('/relay/cloud-tokens/activate-purchase', requireApiKey, requireAllowedD
             return res.status(402).json(insufficientBody);
         }
         const balanceAfter = Number(deductResult.rows[0].balance_tokens);
+        invalidateWalletCache(installationId);
         const featureNames = featureIds.map(id => (FEATURE_CATALOG[id] && FEATURE_CATALOG[id].name) || (isModuleSubscriptionPurchase && MODULE_SUBSCRIPTION_PLANS[id] && MODULE_SUBSCRIPTION_PLANS[id].name) || id);
         await queryWithRetry(
             pgPool,
