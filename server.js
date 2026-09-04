@@ -1481,7 +1481,7 @@ async function ensureCloudTokenSchema() {
     // Xendit, Stripe, PayPal, ...) ang gumawa ng source_id/providerRefId na
     // naka-imbak sa row na ito.
     await pgPool.query(`ALTER TABLE cloud_token_purchases ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'paymongo';`);
-    console.log('✅ Cloud Token wallet Postgres schema ready (cloud_token_wallets, cloud_token_ledger, cloud_token_purchases).');
+    console.log('✅ Omni Token wallet Postgres schema ready (cloud_token_wallets, cloud_token_ledger, cloud_token_purchases).');
 }
 async function getOrCreateCloudTokenWallet(installationId) {
     const result = await queryWithRetry(pgPool, 'SELECT installation_id, balance_tokens, auto_sync_enabled FROM cloud_token_wallets WHERE installation_id = $1', [installationId]);
@@ -4539,7 +4539,7 @@ app.get('/relay/cloud-backup/usage', requireApiKey, requireAllowedDevice, rateLi
 });
 // ===================================================================
 // CLOUD BACKUP TOKENS — mga endpoint na ginagamit ng bagong
-// "Cloud Tokens" admin-only page sa OMNIPOS (Google App Verification +
+// "Omni Tokens" admin-only page sa OMNIPOS (Google App Verification +
 // token/diamond wallet). Lahat ng balance/ledger ay nakatira DITO sa
 // RELAY (hindi sa OMNIPOS/kliyente) para hindi ito ma-tamper — ang
 // OMNIPOS lang ang basta magta-trigger ng purchase/check-and-consume.
@@ -4643,8 +4643,8 @@ app.get('/relay/cloud-tokens/return', (req, res) => {
     const result = req.query.result === 'success' ? 'success' : 'failed';
     const title = result === 'success' ? 'Payment Received' : 'Payment Not Completed';
     const message = result === 'success'
-        ? 'Salamat! Kinukumpirma pa ng system ang bayad na ito — makikita ang updated token balance sa OmniPOS admin panel (Cloud Tokens page) sa loob ng ilang segundo hanggang isang minuto.'
-        : 'Hindi natapos o kinansela ang bayad na ito. Wala pang na-deduct/na-charge. Pwede mo ulit subukan sa OmniPOS admin panel (Cloud Tokens page).';
+        ? 'Salamat! Kinukumpirma pa ng system ang bayad na ito — makikita ang updated token balance sa OmniPOS admin panel (Omni Tokens page) sa loob ng ilang segundo hanggang isang minuto.'
+        : 'Hindi natapos o kinansela ang bayad na ito. Wala pang na-deduct/na-charge. Pwede mo ulit subukan sa OmniPOS admin panel (Omni Tokens page).';
     res.set('Content-Type', 'text/html; charset=utf-8').send(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title>
 <style>body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px;text-align:center;}
 .card{max-width:420px;background:#1e293b;border-radius:16px;padding:32px 24px;box-shadow:0 10px 30px rgba(0,0,0,.3);}
@@ -4686,12 +4686,24 @@ app.post('/relay/webhooks/paymongo', express.raw({ type: '*/*', limit: '1mb' }),
             });
             const paymentStatus = payment && payment.attributes && payment.attributes.status;
             if (paymentStatus === 'paid') {
-                await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'paid', updated_at = now() WHERE purchase_id = $1`, [purchase.purchase_id]);
+                // BUGFIX: dating SELECT ('pending') -> UPDATE ('paid') -> creditCloudTokens
+                // ang pagkakasunod-sunod dito, na HINDI atomic — kung dalawang magkatabing
+                // pagtawag sa webhook na ito (duplicate delivery/retry ng PayMongo, o
+                // dalawang sabay na request) ay parehong nakabasa ng status='pending' BAGO
+                // pa man matapos ang UNANG UPDATE, doble ang pagcredit ng tokens. Ginagawa
+                // muna dito ang atomic na "claim" (UPDATE ... WHERE status = 'pending') at
+                // credit lang kapag TALAGANG tayo ang nakaclaim (may row na nabago).
+                const claimResult = await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'paid', updated_at = now() WHERE purchase_id = $1 AND status = 'pending' RETURNING *`, [purchase.purchase_id]);
+                if (!claimResult.rows[0]) {
+                    // Naunahan na tayo ng ibang concurrent/duplicate delivery — wala nang
+                    // dapat gawin dito, huwag nang mag-double-credit.
+                    return res.json({ success: true, alreadyProcessed: true });
+                }
                 const newBalance = await creditCloudTokens(purchase.installation_id, Number(purchase.tokens), `Purchase ${purchase.purchase_id} (${purchase.method})`);
                 logActivity(purchase.installation_id, 'cloud_token_purchase_paid', { purchaseId: purchase.purchase_id, tokens: Number(purchase.tokens), newBalance });
-                sendTelegramNotification(`💎 Cloud Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via ${purchase.method} — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
+                sendTelegramNotification(`💎 Omni Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via ${purchase.method} — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
             } else {
-                await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'failed', updated_at = now() WHERE purchase_id = $1`, [purchase.purchase_id]);
+                await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'failed', updated_at = now() WHERE purchase_id = $1 AND status = 'pending'`, [purchase.purchase_id]);
             }
         } else if (eventType === 'payment.failed' && resource && resource.attributes) {
             const sourceId = resource.attributes.source && resource.attributes.source.id;
@@ -4725,12 +4737,18 @@ app.post('/relay/webhooks/xendit', async (req, res) => {
         const purchase = purchaseResult.rows[0];
         if (!purchase) return res.json({ success: true, ignored: true, message: 'No matching pending purchase for this invoice.' });
         if (status === 'PAID' || status === 'SETTLED') {
-            await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'paid', updated_at = now() WHERE purchase_id = $1`, [purchase.purchase_id]);
+            // BUGFIX: same double-credit race as the PayMongo webhook above — claim
+            // atomically (pending -> paid) BEFORE crediting, so a duplicate/concurrent
+            // Xendit delivery can never credit the same purchase twice.
+            const claimResult = await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'paid', updated_at = now() WHERE purchase_id = $1 AND status = 'pending' RETURNING *`, [purchase.purchase_id]);
+            if (!claimResult.rows[0]) {
+                return res.json({ success: true, alreadyProcessed: true });
+            }
             const newBalance = await creditCloudTokens(purchase.installation_id, Number(purchase.tokens), `Purchase ${purchase.purchase_id} (${purchase.method})`);
             logActivity(purchase.installation_id, 'cloud_token_purchase_paid', { purchaseId: purchase.purchase_id, tokens: Number(purchase.tokens), newBalance });
-            sendTelegramNotification(`💎 Cloud Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via Xendit (${purchase.method}) — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
+            sendTelegramNotification(`💎 Omni Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via Xendit (${purchase.method}) — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
         } else if (status === 'EXPIRED') {
-            await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'failed', updated_at = now() WHERE purchase_id = $1`, [purchase.purchase_id]);
+            await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'failed', updated_at = now() WHERE purchase_id = $1 AND status = 'pending'`, [purchase.purchase_id]);
         }
         res.json({ success: true });
     } catch (err) {
@@ -4763,10 +4781,16 @@ app.post('/relay/webhooks/stripe', express.raw({ type: '*/*', limit: '1mb' }), a
             const purchase = purchaseResult.rows[0];
             if (!purchase) return res.json({ success: true, ignored: true, message: 'No matching pending purchase for this session.' });
             if (session.payment_status === 'paid') {
-                await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'paid', updated_at = now() WHERE purchase_id = $1`, [purchase.purchase_id]);
+                // BUGFIX: same double-credit race as the other provider webhooks — claim
+                // atomically (pending -> paid) BEFORE crediting, so a duplicate/concurrent
+                // Stripe delivery can never credit the same purchase twice.
+                const claimResult = await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'paid', updated_at = now() WHERE purchase_id = $1 AND status = 'pending' RETURNING *`, [purchase.purchase_id]);
+                if (!claimResult.rows[0]) {
+                    return res.json({ success: true, alreadyProcessed: true });
+                }
                 const newBalance = await creditCloudTokens(purchase.installation_id, Number(purchase.tokens), `Purchase ${purchase.purchase_id} (${purchase.method})`);
                 logActivity(purchase.installation_id, 'cloud_token_purchase_paid', { purchaseId: purchase.purchase_id, tokens: Number(purchase.tokens), newBalance });
-                sendTelegramNotification(`💎 Cloud Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via Stripe (card) — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
+                sendTelegramNotification(`💎 Omni Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via Stripe (card) — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
             }
         } else if (event.type === 'checkout.session.expired' && session && session.id) {
             await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'failed', updated_at = now() WHERE source_id = $1 AND provider = 'stripe' AND status = 'pending'`, [session.id]);
@@ -4799,12 +4823,18 @@ app.post('/relay/webhooks/paypal', async (req, res) => {
             const capture = await paypalCaptureOrder(orderId);
             const captureStatus = capture && capture.status;
             if (captureStatus === 'COMPLETED') {
-                await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'paid', updated_at = now() WHERE purchase_id = $1`, [purchase.purchase_id]);
+                // BUGFIX: same double-credit race as the other provider webhooks — claim
+                // atomically (pending -> paid) BEFORE crediting, so a duplicate/concurrent
+                // PayPal delivery can never credit the same purchase twice.
+                const claimResult = await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'paid', updated_at = now() WHERE purchase_id = $1 AND status = 'pending' RETURNING *`, [purchase.purchase_id]);
+                if (!claimResult.rows[0]) {
+                    return res.json({ success: true, alreadyProcessed: true });
+                }
                 const newBalance = await creditCloudTokens(purchase.installation_id, Number(purchase.tokens), `Purchase ${purchase.purchase_id} (${purchase.method})`);
                 logActivity(purchase.installation_id, 'cloud_token_purchase_paid', { purchaseId: purchase.purchase_id, tokens: Number(purchase.tokens), newBalance });
-                sendTelegramNotification(`💎 Cloud Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via PayPal — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
+                sendTelegramNotification(`💎 Omni Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via PayPal — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
             } else {
-                await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'failed', updated_at = now() WHERE purchase_id = $1`, [purchase.purchase_id]);
+                await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'failed', updated_at = now() WHERE purchase_id = $1 AND status = 'pending'`, [purchase.purchase_id]);
             }
         }
         res.json({ success: true });
@@ -4839,12 +4869,20 @@ app.post(DRAGONPAY_WEBHOOK_PATH, express.urlencoded({ extended: false, limit: '2
         const purchase = purchaseResult.rows[0];
         if (!purchase) return res.type('text/plain').send('result=OK');
         if (status === 'S') {
-            await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'paid', updated_at = now() WHERE purchase_id = $1`, [purchase.purchase_id]);
+            // BUGFIX: same double-credit race as the other provider webhooks — claim
+            // atomically (pending -> paid) BEFORE crediting. Dragonpay in particular is
+            // known to resend the Postback until it gets an explicit 'result=OK', so
+            // without this guard a slow first response could easily trigger a second,
+            // fully duplicate credit.
+            const claimResult = await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'paid', updated_at = now() WHERE purchase_id = $1 AND status = 'pending' RETURNING *`, [purchase.purchase_id]);
+            if (!claimResult.rows[0]) {
+                return res.type('text/plain').send('result=OK');
+            }
             const newBalance = await creditCloudTokens(purchase.installation_id, Number(purchase.tokens), `Purchase ${purchase.purchase_id} (${purchase.method})`);
             logActivity(purchase.installation_id, 'cloud_token_purchase_paid', { purchaseId: purchase.purchase_id, tokens: Number(purchase.tokens), newBalance });
-            sendTelegramNotification(`💎 Cloud Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via Dragonpay (refno ${refno || 'n/a'}) — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
+            sendTelegramNotification(`💎 Omni Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via Dragonpay (refno ${refno || 'n/a'}) — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
         } else if (status === 'F' || status === 'V' || status === 'K') {
-            await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'failed', updated_at = now() WHERE purchase_id = $1`, [purchase.purchase_id]);
+            await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'failed', updated_at = now() WHERE purchase_id = $1 AND status = 'pending'`, [purchase.purchase_id]);
         }
         // Kung P (Pending), U (Unknown), o A (Authorized) — hindi muna
         // ginagalaw, hihintayin na lang ang susunod na Postback ng
@@ -4892,7 +4930,7 @@ app.post('/relay/cloud-tokens/check-and-consume', requireApiKey, requireAllowedD
 // CLOUD BACKUP — TOKEN-FUNDED SELF-SERVE ACTIVATION
 //
 // Advanced Pro flow: pays for a Cloud Backup plan directly out of the
-// installation's own Cloud Token wallet, instead of the old manual
+// installation's own Omni Token wallet, instead of the old manual
 // "developer approves, then hands the OTP to the client" process used
 // by /relay/request-unlock + /relay/confirm-unlock.
 //
@@ -4910,7 +4948,7 @@ app.post('/relay/cloud-tokens/check-and-consume', requireApiKey, requireAllowedD
 //   1) OMNIPOS checks the wallet balance first via the existing
 //      GET /relay/cloud-tokens/wallet (no new endpoint needed for
 //      this step) — if insufficient, OMNIPOS sends the requestor to
-//      the Cloud Token purchase page and nothing is touched here.
+//      the Omni Token purchase page and nothing is touched here.
 //   2) If sufficient, OMNIPOS sends the OTP straight to the requestor
 //      Gmail and verifies it locally. Only once that succeeds does it
 //      call POST /relay/cloud-tokens/activate-cloud-backup below.
@@ -4923,16 +4961,16 @@ app.post('/relay/cloud-tokens/check-and-consume', requireApiKey, requireAllowedD
 //      request — only a successful call to this endpoint spends
 //      tokens.
 // ===================================================================
-// AYOS/BAGO: idempotency safeguard para dito — kung ma-timeout o mawala
-// ang response sa OMNIPOS PAGKATAPOS na successful na naproseso dito ng
-// RELAY ang activation (bihira, pero posible sa network blips), pwedeng
-// subukan ulit ni OMNIPOS ang parehong confirm request. Kung walang
-// dedupe, doble ang matatanggal na tokens (at ma-a-extend nang doble
-// ang subscription). Ang OMNIPOS confirm handler ay dapat magpasa ng
-// isang matatag/stable na `clientRequestId` (ginawa NOONG request-otp
-// pa lang, hindi bago kada retry) — kung parehas ang id na nakita na
-// dito dati, ibabalik na lang ULIT ang eksaktong parehong resulta,
-// walang bagong deduction.
+// ===================================================================
+// NOTE/idempotency safeguard for this endpoint: if the response to
+// OMNIPOS times out or gets lost AFTER RELAY has already successfully
+// processed the activation (rare, but possible on network blips),
+// OMNIPOS may retry the same confirm request. Without dedupe, tokens
+// would be deducted twice (and the subscription extended twice). The
+// OMNIPOS confirm handler must pass a stable `clientRequestId`
+// (generated back when the request-OTP step ran, not regenerated on
+// each retry) — if the same id was already seen here before, the exact
+// same result is simply replayed, with no new deduction.
 const cloudBackupActivationDedupe = new Map(); // `${installationId}:${clientRequestId}` -> { status, body, expiresAt }
 const CLOUD_BACKUP_ACTIVATION_DEDUPE_TTL_MS = 15 * 60 * 1000;
 setInterval(() => {
@@ -4944,10 +4982,10 @@ setInterval(() => {
 app.post('/relay/cloud-tokens/activate-cloud-backup', requireApiKey, requireAllowedDevice, rateLimit('cloud-tokens-activate-cloud-backup', 30, 10 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
     const { installationId, tier, billingCycle, requestorEmail, clientRequestId } = req.body;
     if (!installationId || !tier || !billingCycle) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId, tier, o billingCycle.' });
+        return res.status(400).json({ success: false, message: 'Missing installationId, tier, or billingCycle.' });
     }
     if (!pgPool) {
-        return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL) — kailangan nito ng Cloud Token wallet.' });
+        return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured — the Omni Token wallet needs it.' });
     }
     const requiredTokens = getCloudBackupPlanPrice(tier, billingCycle);
     if (requiredTokens === null) {
@@ -4959,11 +4997,11 @@ app.post('/relay/cloud-tokens/activate-cloud-backup', requireApiKey, requireAllo
         return res.status(cached.status).json(cached.body);
     }
     try {
-        // AYOS: napaka-importante — iisang atomic UPDATE lang ito
-        // (WHERE balance_tokens >= requiredTokens), kaya alinman dito ang
-        // mangyayari: (a) matagumpay na ma-deduct ang tokens AT ma-isyu
-        // ang activation token, o (b) walang matinag na balance at walang
-        // token na ma-isyu. Walang partial state na posible.
+        // NOTE: this is a single atomic UPDATE (WHERE balance_tokens >=
+        // requiredTokens), so exactly one of two things can happen: (a)
+        // the tokens are successfully deducted AND the activation token
+        // is issued, or (b) the balance is left untouched and no token
+        // is issued. No partial state is possible.
         await getOrCreateCloudTokenWallet(installationId);
         const deductResult = await queryWithRetry(
             pgPool,
@@ -4978,13 +5016,13 @@ app.post('/relay/cloud-tokens/activate-cloud-backup', requireApiKey, requireAllo
                 insufficient: true,
                 balanceTokens: currentResult.rows[0] ? Number(currentResult.rows[0].balance_tokens) : 0,
                 requiredTokens,
-                message: `Insufficient Cloud Tokens. Kailangan ng ${requiredTokens} token/s para sa ${CLOUD_BACKUP_PLANS[tier].name} (${billingCycle}). Bumili muna ng dagdag na Cloud Tokens, pagkatapos subukan ulit.`
+                message: `Insufficient Omni Tokens. ${requiredTokens} token(s) are needed for ${CLOUD_BACKUP_PLANS[tier].name} (${billingCycle}). Please buy more Omni Tokens first, then try again.`
             };
-            // AYOS: HINDI cinache ang "insufficient" bilang idempotent result
-            // — dahil dito, kung bumili ang requestor ng dagdag na tokens at
-            // sinubukan ulit ang parehong clientRequestId, isasagawa pa rin
-            // ang bagong attempt sa halip na basta ibalik ang lumang
-            // "insufficient" na sagot magpakailanman.
+            // NOTE: an "insufficient" result is NOT cached as an
+            // idempotent result — this way, if the requestor buys more
+            // tokens and retries with the same clientRequestId, a fresh
+            // attempt is still made instead of forever replaying the
+            // old "insufficient" response.
             return res.status(402).json(insufficientBody);
         }
         const balanceAfter = Number(deductResult.rows[0].balance_tokens);
@@ -5016,7 +5054,7 @@ app.post('/relay/cloud-tokens/activate-cloud-backup', requireApiKey, requireAllo
         });
         const successBody = {
             success: true,
-            message: `Na-activate ang ${CLOUD_BACKUP_PLANS[tier].name}!`,
+            message: `${CLOUD_BACKUP_PLANS[tier].name} has been activated!`,
             token,
             tier,
             billingCycle,
@@ -5029,6 +5067,162 @@ app.post('/relay/cloud-tokens/activate-cloud-backup', requireApiKey, requireAllo
         res.json(successBody);
     } catch (err) {
         console.error('cloud-tokens/activate-cloud-backup error:', err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+// ===================================================================
+// GENERIC TOKEN-FUNDED SELF-SERVE ACTIVATION — for everything that is
+// NOT Cloud Backup (which has its own dedicated endpoint above, since
+// it alone carries a tier/maintenance-fee side effect). Covers:
+//   - a single Module Subscription (RBAC Management / Multi-Branch) —
+//     pass featureIds: [oneModuleSubscriptionId] + billingCycle
+//   - one or more one-time Pro Themes / à la carte features — pass
+//     featureIds: [...] (no billingCycle). Optional totalPrice lets a
+//     bundle/tier discount be honored (split proportionally across the
+//     items exactly like /relay/confirm-unlock-bulk already does),
+//     otherwise the official à la carte FEATURE_CATALOG price per item
+//     is used.
+// Same atomic-deduct-then-issue guarantee and clientRequestId dedupe as
+// the Cloud Backup endpoint — nothing is ever spent for an
+// abandoned/expired/failed request, only for a confirmed one.
+// ===================================================================
+const featurePurchaseActivationDedupe = new Map(); // `${installationId}:${clientRequestId}` -> { status, body, expiresAt }
+const FEATURE_PURCHASE_ACTIVATION_DEDUPE_TTL_MS = 15 * 60 * 1000;
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of featurePurchaseActivationDedupe) {
+        if (now > entry.expiresAt) featurePurchaseActivationDedupe.delete(key);
+    }
+}, 5 * 60 * 1000).unref();
+app.post('/relay/cloud-tokens/activate-purchase', requireApiKey, requireAllowedDevice, rateLimit('cloud-tokens-activate-purchase', 30, 10 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    const { installationId, featureIds, billingCycle, totalPrice, clientRequestId } = req.body;
+    if (!installationId || !Array.isArray(featureIds) || featureIds.length === 0) {
+        return res.status(400).json({ success: false, message: 'Missing installationId or featureIds.' });
+    }
+    if (featureIds.includes('cloud_backup')) {
+        return res.status(400).json({ success: false, message: 'Cloud Backup has its own activation endpoint (activate-cloud-backup) — it cannot be combined with other items here.' });
+    }
+    const moduleSubIds = featureIds.filter(id => isModuleSubscriptionFeature(id));
+    if (moduleSubIds.length > 1 || (moduleSubIds.length === 1 && featureIds.length > 1)) {
+        return res.status(400).json({ success: false, message: 'A subscription module must be activated on its own, separate from other items.' });
+    }
+    const isModuleSubscriptionPurchase = moduleSubIds.length === 1;
+    if (!pgPool) {
+        return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured — the Omni Token wallet needs it.' });
+    }
+    let requiredTokens;
+    let durationMs = null;
+    if (isModuleSubscriptionPurchase) {
+        if (!MODULE_SUBSCRIPTION_BILLING_DAYS[billingCycle]) {
+            return res.status(400).json({ success: false, message: 'Please choose a valid billing cycle (monthly/yearly).' });
+        }
+        requiredTokens = getModuleSubscriptionPrice(moduleSubIds[0], billingCycle);
+        if (requiredTokens === null) {
+            return res.status(400).json({ success: false, message: 'Invalid subscription module.' });
+        }
+        durationMs = MODULE_SUBSCRIPTION_BILLING_DAYS[billingCycle] * 24 * 60 * 60 * 1000;
+    } else {
+        const alaCarteTotal = featureIds.reduce((sum, id) => sum + ((FEATURE_CATALOG[id] && FEATURE_CATALOG[id].price) || 0), 0);
+        requiredTokens = (typeof totalPrice === 'number' && totalPrice >= 0) ? Math.round(totalPrice) : alaCarteTotal;
+    }
+    if (typeof requiredTokens !== 'number' || requiredTokens < 0 || !isFinite(requiredTokens)) {
+        return res.status(400).json({ success: false, message: 'Could not determine a valid price for this purchase.' });
+    }
+    const dedupeKey = clientRequestId ? `${installationId}:${clientRequestId}` : null;
+    if (dedupeKey && featurePurchaseActivationDedupe.has(dedupeKey)) {
+        const cached = featurePurchaseActivationDedupe.get(dedupeKey);
+        return res.status(cached.status).json(cached.body);
+    }
+    try {
+        await getOrCreateCloudTokenWallet(installationId);
+        // requiredTokens could be 0 for a free/₱0 item — an UPDATE with
+        // "balance_tokens >= 0" always matches (even at 0 balance), which
+        // is the correct behavior (nothing to actually charge).
+        const deductResult = await queryWithRetry(
+            pgPool,
+            `UPDATE cloud_token_wallets SET balance_tokens = balance_tokens - $2, updated_at = now()
+             WHERE installation_id = $1 AND balance_tokens >= $2 RETURNING balance_tokens`,
+            [installationId, requiredTokens]
+        );
+        if (!deductResult.rows[0]) {
+            const currentResult = await queryWithRetry(pgPool, 'SELECT balance_tokens FROM cloud_token_wallets WHERE installation_id = $1', [installationId]);
+            const insufficientBody = {
+                success: false,
+                insufficient: true,
+                balanceTokens: currentResult.rows[0] ? Number(currentResult.rows[0].balance_tokens) : 0,
+                requiredTokens,
+                message: `Insufficient Omni Tokens. ${requiredTokens} token(s) are needed for this purchase. Please buy more Omni Tokens first, then try again.`
+            };
+            return res.status(402).json(insufficientBody);
+        }
+        const balanceAfter = Number(deductResult.rows[0].balance_tokens);
+        const featureNames = featureIds.map(id => (FEATURE_CATALOG[id] && FEATURE_CATALOG[id].name) || (isModuleSubscriptionPurchase && MODULE_SUBSCRIPTION_PLANS[id] && MODULE_SUBSCRIPTION_PLANS[id].name) || id);
+        await queryWithRetry(
+            pgPool,
+            `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note) VALUES ($1, 'consume', $2, $3, $4)`,
+            [installationId, -requiredTokens, balanceAfter, `Purchase — ${featureNames.join(', ')}`]
+        );
+        // Split requiredTokens across items proportionally to their à la
+        // carte price (same allocation approach as /relay/confirm-unlock-bulk),
+        // so per-item records/reporting stay meaningful even when a
+        // bundle discount made requiredTokens less than the à la carte sum.
+        let perFeaturePrice = {};
+        if (isModuleSubscriptionPurchase) {
+            perFeaturePrice[moduleSubIds[0]] = requiredTokens;
+        } else {
+            const alaCartePrices = featureIds.map(id => (FEATURE_CATALOG[id] && FEATURE_CATALOG[id].price) || 0);
+            const alaCarteTotal = alaCartePrices.reduce((s, p) => s + p, 0);
+            if (alaCarteTotal > 0) {
+                let allocated = 0;
+                featureIds.forEach((id, i) => {
+                    const share = Math.floor((requiredTokens * alaCartePrices[i]) / alaCarteTotal);
+                    perFeaturePrice[id] = share;
+                    allocated += share;
+                });
+                const remainder = requiredTokens - allocated;
+                if (remainder !== 0 && featureIds.length > 0) {
+                    const priciestIdx = alaCartePrices.indexOf(Math.max(...alaCartePrices));
+                    perFeaturePrice[featureIds[priciestIdx]] += remainder;
+                }
+            } else {
+                const evenShare = Math.floor(requiredTokens / featureIds.length);
+                let allocated = 0;
+                featureIds.forEach((id) => { perFeaturePrice[id] = evenShare; allocated += evenShare; });
+                perFeaturePrice[featureIds[featureIds.length - 1]] += requiredTokens - allocated;
+            }
+        }
+        const tokens = {};
+        featureIds.forEach((featureId, i) => {
+            const token = issueSignedToken(installationId, featureId, durationMs);
+            tokens[featureId] = token;
+            recordIssuedUnlock(installationId, featureId, token, {
+                featureName: featureNames[i],
+                price: perFeaturePrice[featureId],
+                source: 'cloud_token_selfserve',
+                billingCycle: isModuleSubscriptionPurchase ? billingCycle : null
+            });
+            logActivity(installationId, 'unlock_issued', {
+                featureId,
+                featureName: featureNames[i],
+                source: 'cloud_token_selfserve',
+                billingCycle: isModuleSubscriptionPurchase ? billingCycle : null,
+                tokensSpent: perFeaturePrice[featureId]
+            });
+        });
+        const successBody = {
+            success: true,
+            message: `${featureNames.join(', ')} ${featureNames.length > 1 ? 'have' : 'has'} been activated!`,
+            tokens,
+            billingCycle: isModuleSubscriptionPurchase ? billingCycle : undefined,
+            balanceTokens: balanceAfter,
+            tokensSpent: requiredTokens
+        };
+        if (dedupeKey) {
+            featurePurchaseActivationDedupe.set(dedupeKey, { status: 200, body: successBody, expiresAt: Date.now() + FEATURE_PURCHASE_ACTIVATION_DEDUPE_TTL_MS });
+        }
+        res.json(successBody);
+    } catch (err) {
+        console.error('cloud-tokens/activate-purchase error:', err);
         res.status(500).json({ success: false, message: err.message });
     }
 });
