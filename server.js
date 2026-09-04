@@ -4720,8 +4720,16 @@ app.get('/relay/cloud-backup/usage', requireApiKey, requireAllowedDevice, rateLi
 app.get('/relay/cloud-tokens/packages', requireApiKey, rateLimit('cloud-tokens-packages', 120, 60 * 60 * 1000), (req, res) => {
     const packages = getCloudTokenPackages();
     const tokenCostPerSync = {};
+    // AYOS: bukod sa dating rounded-up (ceil) na estimate, ibinabalik na rin
+    // dito ang EKSAKTONG (fractional) na presyo kada tier — mula sa parehong
+    // getCloudTokenCostPerSyncExact() na siya ring ginagamit sa totoong
+    // pag-charge (consumeCloudTokensForSyncExact). Ito ang dapat ipakita sa
+    // customer bilang "totoong" presyo kada sync (average), hindi na yung
+    // paitaas-palaging ceil na estimate lang.
+    const tokenCostPerSyncExact = {};
     for (const tier of Object.keys(CLOUD_BACKUP_PLANS)) {
         tokenCostPerSync[tier] = getCloudTokenCostPerSync(tier);
+        tokenCostPerSyncExact[tier] = getCloudTokenCostPerSyncExact(tier);
     }
     // AYOS: dating hard-coded (GCash/Maya/Online Banking) ang select sa
     // OMNIPOS. Ngayon, ibinabalik dito ang paymentMethods — LISTAHAN NG MGA
@@ -4730,7 +4738,7 @@ app.get('/relay/cloud-tokens/packages', requireApiKey, rateLimit('cloud-tokens-p
     // kaya kung ano lang ang naka-set sa Render env, iyon lang ang
     // lalabas/mapipili.
     const paymentMethods = getAvailablePaymentMethods();
-    res.json({ success: true, packages, tokenCostPerSync, tokensPerPeso: 1, paymentMethods });
+    res.json({ success: true, packages, tokenCostPerSync, tokenCostPerSyncExact, tokensPerPeso: 1, paymentMethods });
 });
 app.get('/relay/cloud-tokens/wallet', requireApiKey, requireAllowedDevice, rateLimit('cloud-tokens-wallet', 120, 60 * 60 * 1000, (req) => req.query?.installationId), async (req, res) => {
     const installationId = String(req.query.installationId || '').trim();
