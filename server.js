@@ -4888,6 +4888,129 @@ app.post('/relay/cloud-tokens/check-and-consume', requireApiKey, requireAllowedD
         res.status(500).json({ success: false, message: err.message });
     }
 });
+// ============================================================
+// TOKEN-FUNDED CLOUD BACKUP ACTIVATION (self-service, instant).
+//
+// Iba ito sa /relay/request-unlock + /relay/confirm-unlock sa itaas —
+// doon, ipinapadala ang OTP papunta sa developer/admin (RECIPIENT_EMAIL)
+// at kailangan pa ng manual na Approve bago gumana ang code (dahil
+// kailangang i-verify muna ng developer ang proof-of-payment). Dito,
+// ang "proof-of-payment" mismo ay ang balanse ng Cloud Tokens ng client
+// (nabayaran na noong binili ang mga token), kaya't hindi na kailangan
+// ng hiwalay na manual approval — ang OTP dito ay ipinapadala DIRETSO
+// sa Gmail mismo ng requestor (client), sa pamamagitan ng SARILI
+// nilang naka-verify na "OTP Sender Email" (Gmail App Password) na
+// naka-configure sa OMNIPOS (tingnan ang getOtpMailCredentials() /
+// "Receipt Customization > OTP Sender Email" doon) — layunin lang
+// nitong OTP ay patunayan na pag-aari nila ang Gmail address na
+// ipinasok nila, hindi para mag-request ng approval sa amin.
+//
+// Kaya ang buong generate/send/verify ng OTP mismo ay NASA OMNIPOS
+// SERVER na (lokal doon, hindi dito sa RELAY) — ang endpoint na ito
+// ay tinatawag lang ng OMNIPOS PAGKATAPOS na successful na ma-verify
+// ang OTP sa sarili nitong panig. Dito lang nangyayari ang tunay na
+// "pagbabayad": ATOMIC na check-and-deduct ng tokens mula sa wallet
+// (kaparehong pattern ng /relay/cloud-tokens/check-and-consume sa
+// itaas), at kaagad na inilalabas ang naka-sign na activation token
+// KUNG matagumpay lang ang deduction — kaya hindi kailanman
+// nade-deduct ang tokens kung request/OTP-send pa lang (tingnan ang
+// request/confirm endpoints sa OMNIPOS server.js).
+app.post('/relay/cloud-tokens/activate-cloud-backup', requireApiKey, requireAllowedDevice, rateLimit('cloud-tokens-activate-cloud-backup', 20, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    const { installationId, tier, billingCycle, requestorEmail } = req.body;
+    if (!installationId) {
+        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+    }
+    if (!pgPool) {
+        return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
+    }
+    const requiredTokens = getCloudBackupPlanPrice(tier, billingCycle);
+    if (!CLOUD_BACKUP_PLANS[tier] || requiredTokens === null) {
+        return res.status(400).json({ success: false, message: 'Invalid Cloud Backup tier/billingCycle.' });
+    }
+    try {
+        await getOrCreateCloudTokenWallet(installationId);
+        // Atomic check-and-deduct — kaparehong SQL pattern ng
+        // check-and-consume sa itaas: hindi bababa sa zero ang balance
+        // dahil kondisyon mismo ng UPDATE ang sapat na balance, kaya
+        // walang race condition kahit magkasabay na humingi ng activation
+        // gamit ang parehong wallet mula sa magkaibang request.
+        const result = await queryWithRetry(
+            pgPool,
+            `UPDATE cloud_token_wallets SET balance_tokens = balance_tokens - $2, updated_at = now()
+             WHERE installation_id = $1 AND balance_tokens >= $2 RETURNING balance_tokens`,
+            [installationId, requiredTokens]
+        );
+        if (!result.rows[0]) {
+            const currentResult = await queryWithRetry(pgPool, 'SELECT balance_tokens FROM cloud_token_wallets WHERE installation_id = $1', [installationId]);
+            return res.status(402).json({
+                success: false,
+                insufficient: true,
+                balanceTokens: currentResult.rows[0] ? Number(currentResult.rows[0].balance_tokens) : 0,
+                requiredTokens,
+                message: 'Insufficient Cloud Backup tokens for this plan. Please buy more tokens first.'
+            });
+        }
+        const balanceAfter = Number(result.rows[0].balance_tokens);
+        const durationMs = CLOUD_BACKUP_BILLING_DAYS[billingCycle] * 24 * 60 * 60 * 1000;
+        let token;
+        try {
+            token = issueSignedToken(installationId, 'cloud_backup', durationMs);
+        } catch (signErr) {
+            // Kung sakaling mabigo ang pag-sign ng token (hal. missing/
+            // corrupt private key), i-refund kaagad ang na-deduct na
+            // tokens — huwag hayaang ma-charge ang client nang walang
+            // aktwal na naibigay na activation.
+            await queryWithRetry(
+                pgPool,
+                `UPDATE cloud_token_wallets SET balance_tokens = balance_tokens + $2, updated_at = now() WHERE installation_id = $1`,
+                [installationId, requiredTokens]
+            );
+            throw signErr;
+        }
+        await queryWithRetry(
+            pgPool,
+            `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note) VALUES ($1, 'consume', $2, $3, $4)`,
+            [installationId, -requiredTokens, balanceAfter, `Cloud Backup activation (${tier}/${billingCycle}) — self-service via Cloud Tokens + Gmail OTP`]
+        );
+        recordIssuedUnlock(installationId, 'cloud_backup', token, {
+            featureName: CLOUD_BACKUP_PLANS[tier].name,
+            price: requiredTokens,
+            source: 'cloud_tokens',
+            tier: tier || null,
+            billingCycle: billingCycle || null
+        });
+        // Kagaya ng confirm-unlock: i-mark na "paid" ang maintenance fee
+        // hanggang sa pag-expire ng subscription period na ito.
+        if (token.payload.expiresAt) {
+            markMaintenanceFeePaidUntil(installationId, token.payload.expiresAt);
+        }
+        const maskedEmail = (() => {
+            const email = String(requestorEmail || '').trim();
+            if (!email || !email.includes('@')) return null;
+            const [local, domain] = email.split('@');
+            return `${local.slice(0, 2)}***@${domain}`;
+        })();
+        logActivity(installationId, 'unlock_issued', {
+            featureId: 'cloud_backup',
+            featureName: CLOUD_BACKUP_PLANS[tier].name,
+            source: 'cloud_tokens',
+            tier: tier || null,
+            billingCycle: billingCycle || null,
+            tokensSpent: requiredTokens,
+            requestorEmailMasked: maskedEmail
+        });
+        res.json({
+            success: true,
+            message: `Cloud Backup (${CLOUD_BACKUP_PLANS[tier].name}) activated using Cloud Tokens.`,
+            token,
+            tier,
+            billingCycle,
+            balanceTokens: balanceAfter
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 // Ang bahaging ito lang ang makikita ng isang OMNIPOS installation sa
 // sarili niyang admin panel: kanya-kanyang share sa TOTAL na Neon cost
 // (base sa proporsyon ng laki ng data at dalas ng backup), dagdag ang
