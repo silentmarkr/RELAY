@@ -7267,6 +7267,32 @@ async function performBuildReleaseInner(reqBody, req, publishOverride) {
         const imageSearchProvider = (reqBody && reqBody.imageSearchProvider) || process.env.IMAGE_SEARCH_PROVIDER || '';
         const imageSearchApiKey = (reqBody && reqBody.imageSearchApiKey) || process.env.IMAGE_SEARCH_API_KEY || '';
         const imageSearchCx = (reqBody && reqBody.imageSearchCx) || process.env.IMAGE_SEARCH_CX || '';
+        // AYOS: dating 3 segundo ang default na poll interval ng client para sa
+        // /relay/pending-integrity-check (tingnan ang INTEGRITY_CHECK_NOW_POLL_MS
+        // sa OMNIPOS client server.js) — masyadong mataas ang bandwidth/request
+        // volume nito kapag maraming client na (hal. ~860MB/buwan/client sa 3 sec,
+        // laban sa 5GB/buwan na free-tier bandwidth cap ng Render ngayon).
+        // Ginagawa itong 5 minuto (300000ms) dito para awtomatikong ma-apply sa
+        // bawat BAGONG client build/push, nang hindi kailangang baguhin ang
+        // OMNIPOS source code mismo. Pwede itong i-override kada build sa
+        // pamamagitan ng `reqBody.integrityCheckNowPollMs` o ng
+        // RELAY_INTEGRITY_CHECK_NOW_POLL_MS env var dito sa RELAY.
+        const integrityCheckNowPollMs = (reqBody && reqBody.integrityCheckNowPollMs)
+            || process.env.RELAY_INTEGRITY_CHECK_NOW_POLL_MS
+            || 300000;
+        // AYOS DIN: si RELAY_FEATURE_SYNC_INTERVAL_MS (default 30 seg sa OMNIPOS
+        // client) ay nagpapatakbo ng DALAWANG relay request kada cycle
+        // (restore-tokens + check-feature-status) — mas malaki pa ang epekto nito
+        // sa bandwidth kaysa sa integrity poll dahil mas malaki ang payload
+        // (may listahan ng feature IDs). Ginawa ring 5 minuto (300000ms) ito.
+        // Ligtas itong bagalan dahil may hiwalay na ON-DEMAND na endpoint na
+        // pa rin sa client (/api/features/restore-check) na tumatawag agad sa
+        // parehong function — kaya kahit pabagalin ang passive/background
+        // interval, hindi apektado ang mga sitwasyong kailangan ng
+        // agad-agarang sync (hal. pagkatapos bumili/mag-restore).
+        const featureSyncIntervalMs = (reqBody && reqBody.featureSyncIntervalMs)
+            || process.env.RELAY_FEATURE_SYNC_INTERVAL_MS
+            || 300000;
         const clientEnvContent = [
             `RELAY_URL=${relayUrl}`,
             `RELAY_API_KEY=${relayApiKey}`,
@@ -7274,6 +7300,8 @@ async function performBuildReleaseInner(reqBody, req, publishOverride) {
             `IMAGE_SEARCH_PROVIDER=${imageSearchProvider}`,
             `IMAGE_SEARCH_API_KEY=${imageSearchApiKey}`,
             `IMAGE_SEARCH_CX=${imageSearchCx}`,
+            `RELAY_INTEGRITY_CHECK_NOW_POLL_MS=${integrityCheckNowPollMs}`,
+            `RELAY_FEATURE_SYNC_INTERVAL_MS=${featureSyncIntervalMs}`,
             ''
         ].join('\n');
         setBuildProgress({ stage: 'env', percent: BUILD_STEP_END_PERCENT.filter, message: 'Ini-encrypt ang client .env...' });
