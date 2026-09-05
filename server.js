@@ -4118,12 +4118,31 @@ app.post('/relay/restore-tokens', requireApiKey, requireAllowedDevice, rateLimit
     const record = issuedUnlocks[installationId] || {};
     const now = Date.now();
     const tokens = {};
+    // AYOS/BUGFIX: bukod sa token (payload+signature), isinasama na rin
+    // dito ang KASALUKUYANG tier/billingCycle ng bawat subscription
+    // feature (Cloud Backup Basic/Standard/Pro, o module subscription
+    // monthly/yearly) — dati, dito lang sa restore-tokens nire-refresh
+    // ng OMNIPOS ang lokal nitong token pagkatapos mag-expire ang luma,
+    // pero WALANG paraan itong malaman ang bagong tier/billingCycle
+    // dahil hindi kasama sa token payload ang mga iyon. Resulta: pag
+    // nag-renew ang admin (hal. Basic -> Pro) dito sa RELAY, nagbabago
+    // lang ang petsa ng expiry sa OMNIPOS pero nananatiling "Basic" (o
+    // kung ano mang dating tier) ang naka-display/naka-cache doon. Ang
+    // subscriptionMeta na ito ang gagamitin ng OMNIPOS para i-sync ang
+    // sarili nitong lokal na cache (cloudBackupPlan / moduleSubscriptions).
+    const subscriptionMeta = {};
     for (const [featureId, entry] of Object.entries(record)) {
         if (typeof entry.expiresAt === 'number' && now > entry.expiresAt) continue; 
         tokens[featureId] = { payload: entry.payload, signature: entry.signature };
+        if (entry.tier || entry.billingCycle) {
+            subscriptionMeta[featureId] = {
+                tier: entry.tier || null,
+                billingCycle: entry.billingCycle || null
+            };
+        }
     }
     logActivity(installationId, 'restore_checkin', { restoredCount: Object.keys(tokens).length });
-    res.json({ success: true, tokens });
+    res.json({ success: true, tokens, subscriptionMeta });
 });
 app.post('/relay/check-feature-status', requireApiKey, requireAllowedDevice, rateLimit('check-feature-status', 30, 10 * 60 * 1000), (req, res) => {
     const { installationId, featureIds } = req.body;
