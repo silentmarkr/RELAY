@@ -3073,6 +3073,73 @@ app.get('/relay/admin/api/devices', requireAdminKey, async (req, res) => {
         integrityNoBaselineCount: Object.values(integrityStatus).filter(r => r.hasBaseline === false).length
     });
 });
+// BAGO: dating kailangan pang buksan isa-isa ang device detail para
+// makita kung sino ang malapit nang mag-expire sa Cloud Backup, RBAC, o
+// Multi-Branch subscriptions. Isang endpoint na ito na nagsasama-sama ng
+// LAHAT ng active na subscription sa 3 feature na ito (isSubscriptionOnlyFeature),
+// sorted soonest-expiring-first, para agad makita sa isang tingin.
+app.get('/relay/admin/api/subscriptions', requireAdminKey, (req, res) => {
+    const now = Date.now();
+    const SOON_MS = 7 * 24 * 60 * 60 * 1000;
+    const rows = [];
+    for (const [installationId, record] of Object.entries(issuedUnlocks)) {
+        // Kaparehong convention ng /relay/admin/api/analytics: "active"
+        // subscription lang ang binibilang kung naka-Allow pa rin ang
+        // device (hindi lang basta hindi pa expired ang token).
+        if (!allowedDevices.has(installationId)) continue;
+        for (const [featureId, entry] of Object.entries(record)) {
+            if (!isSubscriptionOnlyFeature(featureId)) continue;
+            const isExpired = typeof entry.expiresAt === 'number' && now > entry.expiresAt;
+            // RBAC/Multi-Branch subscriptions get a 7-day grace period after
+            // expiresAt (see MODULE_SUBSCRIPTION_GRACE_PERIOD_MS, ginagamit din
+            // ito sa OMNIPOS client para malaman kung "still active but about
+            // to lose access"). Cloud Backup has no such grace period.
+            // I-uuwi pa rin dito ang mga naka-grace-period (may
+            // inGracePeriod: true) para makita ng admin — hindi lang basta
+            // itapon tulad ng mga tunay nang expired/walang grace period.
+            const inGracePeriod = isExpired
+                && isModuleSubscriptionFeature(featureId)
+                && (now - entry.expiresAt) <= MODULE_SUBSCRIPTION_GRACE_PERIOD_MS;
+            if (isExpired && !inGracePeriod) continue;
+            const meta = seenDevices.get(installationId);
+            const daysLeft = typeof entry.expiresAt === 'number'
+                ? Math.ceil((entry.expiresAt - now) / (24 * 60 * 60 * 1000))
+                : null; // null = walang expiry (hal. legacy lifetime Cloud Backup)
+            rows.push({
+                installationId,
+                label: deviceLabels.get(installationId) || (meta && meta.storeName) || null,
+                featureId,
+                featureName: entry.featureName || (FEATURE_CATALOG[featureId] && FEATURE_CATALOG[featureId].name) || featureId,
+                tier: entry.tier || null,
+                billingCycle: entry.billingCycle || null,
+                issuedAt: entry.issuedAt,
+                expiresAt: entry.expiresAt,
+                isLifetime: entry.expiresAt === null,
+                inGracePeriod,
+                daysLeft,
+                expiringSoon: typeof daysLeft === 'number' && daysLeft <= SOON_MS / (24 * 60 * 60 * 1000)
+            });
+        }
+    }
+    // Soonest-expiring muna; ang mga walang expiry (lifetime) ay nasa
+    // dulo dahil wala namang dapat asikasuhing renewal doon.
+    rows.sort((a, b) => {
+        if (a.daysLeft === null && b.daysLeft === null) return 0;
+        if (a.daysLeft === null) return 1;
+        if (b.daysLeft === null) return -1;
+        return a.daysLeft - b.daysLeft;
+    });
+    const countsByFeature = {};
+    for (const row of rows) {
+        countsByFeature[row.featureId] = (countsByFeature[row.featureId] || 0) + 1;
+    }
+    res.json({
+        success: true,
+        subscriptions: rows,
+        countsByFeature,
+        expiringSoonCount: rows.filter(r => r.expiringSoon).length
+    });
+});
 app.post('/relay/admin/api/devices/allow', requireAdminKey, (req, res) => {
     const { installationId } = req.body;
     if (!installationId) {

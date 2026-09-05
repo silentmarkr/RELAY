@@ -1063,6 +1063,10 @@ a:focus-visible,
       <span class="tab-icon">📦</span><span>Downloads</span>
       <span class="tab-dot" id="tabDotDownloads" style="display:none;"></span>
     </button>
+    <button class="tab-btn" data-tab="subscriptions" onclick="switchTab('subscriptions')">
+      <span class="tab-icon">📅</span><span>Subscriptions</span>
+      <span class="tab-badge" id="tabBadgeSubscriptions" style="display:none;">0</span>
+    </button>
     <button class="tab-btn" data-tab="analytics" onclick="openAnalytics()">
       <span class="tab-icon">📊</span><span>Analytics</span>
     </button>
@@ -1299,6 +1303,43 @@ a:focus-visible,
           <div id="dbHealthList" class="empty">Loading...</div>
           <div class="backup-note" id="dbHealthMeta" style="margin-top:10px;"></div>
         </div>
+      </div>
+    </div>
+    <div class="tab-panel" id="tabPanel-subscriptions" style="display:none;">
+      <div class="stat-strip">
+        <div class="stat-card">
+          <div class="stat-num" id="subStatCloudBackup">—</div>
+          <div class="stat-label">☁️ Cloud Backup active</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-num" id="subStatRbac">—</div>
+          <div class="stat-label">🔐 RBAC active</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-num" id="subStatMultiBranch">—</div>
+          <div class="stat-label">🌿 Multi-Branch active</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-num stat-num-danger" id="subStatExpiringSoon">—</div>
+          <div class="stat-label">⏰ Expiring within 7 days</div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>💳 All Active Subscriptions <span class="count-pill" id="subCountPill">0</span></h2>
+        <div class="filter-bar">
+          <input type="text" id="subFilterInput" placeholder="Search: store or installation ID" oninput="renderSubscriptionsList()">
+          <select id="subFilterFeature" onchange="renderSubscriptionsList()">
+            <option value="all">All subscriptions</option>
+            <option value="cloud_backup">☁️ Cloud Backup only</option>
+            <option value="rbac_management">🔐 RBAC only</option>
+            <option value="multi_branch">🌿 Multi-Branch only</option>
+          </select>
+          <select id="subSortBy" onchange="renderSubscriptionsList()">
+            <option value="expiry">Sort: Soonest to expire</option>
+            <option value="storeName">Sort: Store name</option>
+          </select>
+        </div>
+        <div id="subscriptionsList" class="empty">Loading...</div>
       </div>
     </div>
     <div class="footer-note">
@@ -1647,7 +1688,7 @@ document.getElementById('confirmBackdrop').addEventListener('click', (e) => {
   }
 });
 function switchTab(name) {
-  ['home', 'devices', 'downloads'].forEach(t => {
+  ['home', 'devices', 'downloads', 'subscriptions'].forEach(t => {
     const panel = document.getElementById('tabPanel-' + t);
     if (panel) panel.style.display = (t === name) ? 'block' : 'none';
   });
@@ -1656,6 +1697,9 @@ function switchTab(name) {
   });
   if (name === 'downloads') {
     applyStoredCardCollapse(['cardBackupRestore', 'cardPublishUpdate', 'cardDownloadPackage', 'cardBuildHistory']);
+  }
+  if (name === 'subscriptions') {
+    loadSubscriptions();
   }
 }
 function updateTabBadges() {
@@ -1670,9 +1714,13 @@ function updateTabBadges() {
   const syncBanner = document.getElementById('backupSyncBanner');
   const needsBackupAttention = syncBanner && syncBanner.classList.contains('sync-orange');
   document.getElementById('tabDotDownloads').style.display = needsBackupAttention ? 'block' : 'none';
+  const expiringSoon = parseInt(document.getElementById('subStatExpiringSoon').innerText, 10) || 0;
+  const subsBadge = document.getElementById('tabBadgeSubscriptions');
+  subsBadge.innerText = expiringSoon;
+  subsBadge.style.display = expiringSoon > 0 ? 'flex' : 'none';
 }
 (function () {
-  const SWIPE_TAB_ORDER = ['home', 'devices', 'downloads'];
+  const SWIPE_TAB_ORDER = ['home', 'devices', 'downloads', 'subscriptions'];
   const SWIPE_MIN_DIST = 55;      
   const SWIPE_MAX_OFF_AXIS = 70;  
   const SWIPE_MAX_TIME = 600;     
@@ -2667,8 +2715,87 @@ async function loadDevices() {
   lastLoadedDevices = data.seenDevices;
   document.getElementById('seenCountPill').innerText = data.seenDevices.length;
   renderSeenList();
+  // BAGO: kasama na sa parehong 8s poll na ito ang subscriptions stats
+  // (kailangan ng subStatExpiringSoon bago tawagin ang updateTabBadges()
+  // sa ibaba, para live ang "Subscriptions" tab badge kahit sarado ang
+  // tab na iyon).
+  await loadSubscriptions();
   updateTabBadges();
   applyStoredCardCollapse(['cardAllowedDevices', 'cardRecentlySeen']);
+}
+let lastLoadedSubscriptions = [];
+async function loadSubscriptions() {
+  let data;
+  try {
+    data = await api('/relay/admin/api/subscriptions');
+  } catch (err) {
+    return;
+  }
+  if (!data || !data.success) return;
+  lastLoadedSubscriptions = data.subscriptions || [];
+  const counts = data.countsByFeature || {};
+  document.getElementById('subStatCloudBackup').innerText = counts.cloud_backup || 0;
+  document.getElementById('subStatRbac').innerText = counts.rbac_management || 0;
+  document.getElementById('subStatMultiBranch').innerText = counts.multi_branch || 0;
+  document.getElementById('subStatExpiringSoon').innerText = data.expiringSoonCount || 0;
+  document.getElementById('subCountPill').innerText = lastLoadedSubscriptions.length;
+  renderSubscriptionsList();
+}
+function renderSubscriptionsList() {
+  const listEl = document.getElementById('subscriptionsList');
+  if (!listEl) return;
+  const query = (document.getElementById('subFilterInput').value || '').trim().toLowerCase();
+  const featureFilter = document.getElementById('subFilterFeature').value;
+  const sortBy = document.getElementById('subSortBy').value;
+  let list = [...lastLoadedSubscriptions];
+  if (featureFilter !== 'all') {
+    list = list.filter(s => s.featureId === featureFilter);
+  }
+  if (query) {
+    list = list.filter(s =>
+      (s.label && s.label.toLowerCase().includes(query)) ||
+      s.installationId.toLowerCase().includes(query)
+    );
+  }
+  if (sortBy === 'storeName') {
+    list = [...list].sort((a, b) => (a.label || a.installationId).localeCompare(b.label || b.installationId));
+  }
+  // Kung "expiry" ang sort (default), naka-sort na mula sa server
+  // (soonest-expiring-first, lifetime/no-expiry sa dulo) — hindi na
+  // kailangang mag-re-sort dito.
+  if (list.length === 0) {
+    listEl.innerHTML = '<div class="empty">No active subscriptions match this filter.</div>';
+    return;
+  }
+  const featureIcon = { cloud_backup: '☁️', rbac_management: '🔐', multi_branch: '🌿' };
+  listEl.innerHTML = list.map(s => {
+    const cycleLabel = s.billingCycle === 'yearly' ? 'Yearly' : (s.billingCycle === 'monthly' ? 'Monthly' : '');
+    let daysLabel, urgency;
+    if (s.isLifetime) {
+      daysLabel = 'Lifetime (no renewal)';
+      urgency = '';
+    } else if (s.inGracePeriod) {
+      daysLabel = 'expired — in grace period';
+      urgency = 'urgent';
+    } else if (s.daysLeft <= 7) {
+      daysLabel = s.daysLeft + ' day(s) left';
+      urgency = s.daysLeft <= 2 ? 'urgent' : 'soon';
+    } else {
+      daysLabel = new Date(s.expiresAt).toLocaleDateString('en-PH');
+      urgency = '';
+    }
+    return `<div class="expiring-item">
+      <div>
+        <div class="feature-name">${featureIcon[s.featureId] || ''} ${s.featureName}${cycleLabel ? ' · ' + cycleLabel : ''}${s.tier ? ' · ' + s.tier : ''}</div>
+        <div class="feature-meta">${s.label || 'No label'} · <a href="#" onclick="closeAnalyticsIfOpen(); switchTab('devices'); openDeviceDetail('${s.installationId}'); return false;">open device</a></div>
+      </div>
+      <div class="expiring-days ${urgency}">${daysLabel}</div>
+    </div>`;
+  }).join('');
+}
+function closeAnalyticsIfOpen() {
+  const el = document.getElementById('analyticsScreen');
+  if (el && el.style.display !== 'none') closeAnalytics();
 }
 function renderSeenList() {
   const seenEl = document.getElementById('seenList');
