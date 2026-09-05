@@ -3718,6 +3718,65 @@ app.post('/relay/admin/api/pricing/suggested-discount-percent', requireAdminKey,
     console.log(`💳 Na-update ang default suggested discount % sa ${percent}% via admin panel.`);
     res.json({ success: true, suggestedDiscountPercent: SUGGESTED_DISCOUNT_PERCENT });
 });
+// BAGO: pang-emergency na "kill switch" para sa developer — kung
+// hindi available ang developer para mag-manual approve ng "Send
+// Request" (OTP) unlock requests, pwede muna itong i-disable
+// pansamantala (mananatiling bukas ang "Activate via Omni Tokens" kung
+// gusto). Kabaligtaran naman kung may maintenance/problema sa Omni
+// Token activation (Postgres wallet, etc.) — pwede iyon namang i-disable
+// at "Send Request" na lang muna ang bukas. Pareho itong naka-toggle
+// mula sa Home tab ng admin dashboard, at pareho ring pinapatupad dito
+// mismo sa RELAY (hindi lang sa OMNIPOS client) para tiyak na hindi
+// ito ma-bypass kahit anong gawin sa client.
+let ACTIVATION_FLAGS = { otpRequestsEnabled: true, omniTokenActivationEnabled: true };
+const ACTIVATION_FLAGS_PATH = path.join(__dirname, 'activation-flags.json');
+async function loadActivationFlags() {
+    const fromRedis = await redisGetJSON('activation-flags', null);
+    if (fromRedis && typeof fromRedis === 'object') {
+        return {
+            otpRequestsEnabled: fromRedis.otpRequestsEnabled !== false,
+            omniTokenActivationEnabled: fromRedis.omniTokenActivationEnabled !== false
+        };
+    }
+    try {
+        const parsed = JSON.parse(fs.readFileSync(ACTIVATION_FLAGS_PATH, 'utf8'));
+        if (parsed && typeof parsed === 'object') {
+            return {
+                otpRequestsEnabled: parsed.otpRequestsEnabled !== false,
+                omniTokenActivationEnabled: parsed.omniTokenActivationEnabled !== false
+            };
+        }
+    } catch (err) {   }
+    return { otpRequestsEnabled: true, omniTokenActivationEnabled: true };
+}
+function saveActivationFlags(value) {
+    if (pgPoolDevices || pgPool || redisClient) {
+        redisSetJSON('activation-flags', value);
+        return;
+    }
+    try {
+        fs.writeFileSync(ACTIVATION_FLAGS_PATH, JSON.stringify(value));
+    } catch (err) {
+        console.error('Hindi ma-save ang activation-flags.json:', err);
+    }
+}
+app.get('/relay/admin/api/activation-flags', requireAdminKey, (req, res) => {
+    res.json({ success: true, activationFlags: ACTIVATION_FLAGS });
+});
+app.post('/relay/admin/api/activation-flags', requireAdminKey, (req, res) => {
+    const { otpRequestsEnabled, omniTokenActivationEnabled } = req.body || {};
+    if (otpRequestsEnabled !== undefined && typeof otpRequestsEnabled !== 'boolean') {
+        return res.status(400).json({ success: false, message: 'otpRequestsEnabled must be true or false.' });
+    }
+    if (omniTokenActivationEnabled !== undefined && typeof omniTokenActivationEnabled !== 'boolean') {
+        return res.status(400).json({ success: false, message: 'omniTokenActivationEnabled must be true or false.' });
+    }
+    if (typeof otpRequestsEnabled === 'boolean') ACTIVATION_FLAGS.otpRequestsEnabled = otpRequestsEnabled;
+    if (typeof omniTokenActivationEnabled === 'boolean') ACTIVATION_FLAGS.omniTokenActivationEnabled = omniTokenActivationEnabled;
+    saveActivationFlags(ACTIVATION_FLAGS);
+    console.log(`⚙️  Na-update ang activation flags via admin panel: otpRequestsEnabled=${ACTIVATION_FLAGS.otpRequestsEnabled}, omniTokenActivationEnabled=${ACTIVATION_FLAGS.omniTokenActivationEnabled}.`);
+    res.json({ success: true, activationFlags: ACTIVATION_FLAGS });
+});
 app.get('/relay/admin/api/analytics', requireAdminKey, (req, res) => {
     const now = Date.now();
     const SOON_MS = 7 * 24 * 60 * 60 * 1000; 
@@ -4395,6 +4454,7 @@ app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 100
         moduleSubscriptions: MODULE_SUBSCRIPTION_PLANS,
         moduleSubscriptionBillingDays: MODULE_SUBSCRIPTION_BILLING_DAYS,
         moduleSubscriptionGracePeriodDays: MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS,
+        activationFlags: ACTIVATION_FLAGS,
         fetchedAt: new Date().toISOString()
     });
 });
@@ -5515,6 +5575,9 @@ setInterval(() => {
     }
 }, 5 * 60 * 1000).unref();
 app.post('/relay/cloud-tokens/activate-cloud-backup', requireApiKey, requireAllowedDevice, rateLimit('cloud-tokens-activate-cloud-backup', 30, 10 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    if (!ACTIVATION_FLAGS.omniTokenActivationEnabled) {
+        return res.status(503).json({ success: false, message: '"Activate via Omni Tokens" is temporarily disabled (maintenance/upgrade). Please try "Send Request" instead, or try again later.' });
+    }
     const { installationId, tier, billingCycle, requestorEmail, clientRequestId } = req.body;
     if (!installationId || !tier || !billingCycle) {
         return res.status(400).json({ success: false, message: 'Missing installationId, tier, or billingCycle.' });
@@ -5631,6 +5694,9 @@ setInterval(() => {
     }
 }, 5 * 60 * 1000).unref();
 app.post('/relay/cloud-tokens/activate-purchase', requireApiKey, requireAllowedDevice, rateLimit('cloud-tokens-activate-purchase', 30, 10 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    if (!ACTIVATION_FLAGS.omniTokenActivationEnabled) {
+        return res.status(503).json({ success: false, message: '"Activate via Omni Tokens" is temporarily disabled (maintenance/upgrade). Please try "Send Request" instead, or try again later.' });
+    }
     const { installationId, featureIds, billingCycle, totalPrice, clientRequestId } = req.body;
     if (!installationId || !Array.isArray(featureIds) || featureIds.length === 0) {
         return res.status(400).json({ success: false, message: 'Missing installationId or featureIds.' });
@@ -6124,6 +6190,9 @@ app.post('/relay/admin/api/devices/:installationId/split-clone', requireAdminKey
     });
 });
 app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit('request-unlock', 5, 10 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    if (!ACTIVATION_FLAGS.otpRequestsEnabled) {
+        return res.status(503).json({ success: false, message: 'Manual unlock requests ("Send Request") are temporarily disabled by the developer. Please try "Activate via Omni Tokens" instead, or try again later.' });
+    }
     const { installationId, featureId, featureName, price, username, storeName, photo, tier, billingCycle } = req.body;
     if (!installationId || !featureId) {
         return res.status(400).json({ success: false, message: 'Kulang ang installationId o featureId.' });
@@ -6425,6 +6494,9 @@ app.post('/relay/admin/api/devices/:installationId/activate-demo', requireAdminK
     });
 });
 app.post('/relay/request-unlock-bulk', requireApiKey, requireAllowedDevice, rateLimit('request-unlock-bulk', 5, 10 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    if (!ACTIVATION_FLAGS.otpRequestsEnabled) {
+        return res.status(503).json({ success: false, message: 'Manual unlock requests ("Send Request") are temporarily disabled by the developer. Please try "Activate via Omni Tokens" instead, or try again later.' });
+    }
     const { installationId, featureIds, featureNames, totalPrice, username, storeName, photo } = req.body;
     if (!installationId || !Array.isArray(featureIds) || featureIds.length === 0) {
         return res.status(400).json({ success: false, message: 'Kulang ang installationId o featureIds.' });
@@ -7883,7 +7955,8 @@ async function bootstrapStores() {
         neonPricingOverrides,
         neonConfiguredPlans,
         clientMaintenanceFeeConfig,
-        clientMaintenanceFeePaidUntil
+        clientMaintenanceFeePaidUntil,
+        ACTIVATION_FLAGS
     ] = await Promise.all([
         loadAllowedDevices(),
         loadDeviceLabels(),
@@ -7908,7 +7981,8 @@ async function bootstrapStores() {
         loadNeonPricingOverrides(),
         loadNeonConfiguredPlans(),
         loadClientMaintenanceFeeConfig(),
-        loadClientMaintenanceFeePaidUntil()
+        loadClientMaintenanceFeePaidUntil(),
+        loadActivationFlags()
     ]);
     recomputeFeatureCatalog();
     if (Object.keys(featureCatalogOverrides).length > 0) {

@@ -1074,6 +1074,21 @@ a:focus-visible,
   <div class="wrap">
     <div class="tab-panel" id="tabPanel-home">
       <div id="restrictionStatus" class="status-line"></div>
+      <div class="card" id="cardActivationFlags" style="border: 1px solid var(--red-line, #f5c2c7);">
+        <h2>⚙️ System Controls — Unlock/Activation Switches</h2>
+        <div class="backup-note">
+          Emergency kill-switches. I-disable ang "Send Request" kung hindi ka available para mag-manual approve ng mga unlock OTP (mananatiling bukas ang Omni Tokens kung gusto mong doon lang muna sila). I-disable naman ang "Activate via Omni Tokens" kung may problema/maintenance sa token wallet system. Pareho itong agad na sinusunod ng lahat ng device — hindi na kailangan mag-restart o mag-redeploy.
+        </div>
+        <label class="auto-backup-toggle" style="margin-top:10px;">
+          <input type="checkbox" id="otpRequestsEnabledToggle" onchange="onActivationFlagToggleChange('otpRequestsEnabled', this.checked)">
+          🔑 Allow "Send Request" (manual OTP approval by developer)
+        </label>
+        <label class="auto-backup-toggle" style="margin-top:6px;">
+          <input type="checkbox" id="omniTokenActivationEnabledToggle" onchange="onActivationFlagToggleChange('omniTokenActivationEnabled', this.checked)">
+          💎 Allow "Activate via Omni Tokens" (self-service token activation)
+        </label>
+        <div id="activationFlagsSavedNote" style="font-size:12px; color:var(--success, #69db7c); margin-top:8px; display:none;">Saved ✓</div>
+      </div>
       <div class="stat-strip">
         <div class="stat-card">
           <div class="stat-num" id="statAllowed">—</div>
@@ -2566,6 +2581,50 @@ function renderAutoBackupToggle() {
   if (!el) return;
   el.checked = isAutoBackupOnAllowEnabled();
 }
+// BAGO: emergency kill-switches para sa "Send Request" (manual OTP
+// approval) at "Activate via Omni Tokens" — tingnan ang cardActivationFlags
+// sa Home tab. Server-side ang totoong pinagbabatayan nito (RELAY mismo
+// ang tumatanggi sa mga request kapag naka-disable, hindi lang UI-level),
+// kaya ligtas na i-refresh kahit anong oras.
+async function loadActivationFlags() {
+  let data;
+  try {
+    data = await api('/relay/admin/api/activation-flags');
+  } catch (err) {
+    return;
+  }
+  if (!data || !data.success || !data.activationFlags) return;
+  const otpEl = document.getElementById('otpRequestsEnabledToggle');
+  const tokensEl = document.getElementById('omniTokenActivationEnabledToggle');
+  if (otpEl) otpEl.checked = data.activationFlags.otpRequestsEnabled !== false;
+  if (tokensEl) tokensEl.checked = data.activationFlags.omniTokenActivationEnabled !== false;
+}
+async function onActivationFlagToggleChange(flagName, checked) {
+  const note = document.getElementById('activationFlagsSavedNote');
+  if (note) note.style.display = 'none';
+  let data;
+  try {
+    data = await api('/relay/admin/api/activation-flags', {
+      method: 'POST',
+      body: JSON.stringify({ [flagName]: checked })
+    });
+  } catch (err) {
+    toast('Could not save this setting — please try again.', 'error');
+    loadActivationFlags();
+    return;
+  }
+  if (!data || !data.success) {
+    toast((data && data.message) || 'Could not save this setting.', 'error');
+    loadActivationFlags();
+    return;
+  }
+  if (note) {
+    note.style.display = 'block';
+    setTimeout(() => { note.style.display = 'none'; }, 2500);
+  }
+  const label = flagName === 'otpRequestsEnabled' ? '"Send Request"' : '"Activate via Omni Tokens"';
+  toast(`${label} is now ${checked ? 'ENABLED' : 'DISABLED'} for all devices.`, checked ? 'success' : 'warning');
+}
 function onAutoBackupToggleChange() {
   const el = document.getElementById('autoBackupOnAllowToggle');
   if (!el) return;
@@ -3991,6 +4050,7 @@ function startPolling() {
   loadDownloadCodes();
   loadBuildHistory();
   loadDbStatus();
+  loadActivationFlags();
   if (pollTimer) clearInterval(pollTimer);
   const loadDevicesNoJump = withScrollPreserved(loadDevices);
   pollTimer = setInterval(() => { if (adminKey) loadDevicesNoJump(); }, 8000);
