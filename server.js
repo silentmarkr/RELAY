@@ -970,42 +970,32 @@ const CLOUD_TOKEN_PACKAGES = ['basic', 'standard', 'pro'];
 // (1:1, ₱1 = 1 token) ng buwanang presyo ng kaukulang Cloud Backup tier
 // sa CLOUD_BACKUP_PLANS sa itaas — kaya awtomatiko itong sumusunod
 // kapag binago ang pricing dito (walang duplicate na numero).
-// AYOS/BUGFIX (Sept 2026): dati, `estSyncTokensPerMonth` dito ay basta
-// ginawang KATUMBAS (`= amountPHP`) ng buwanang presyo/maintenance fee
-// "by design" — ibig sabihin, sa tuwing binabago ang maintenance fee sa
-// Cloud Backup Pricing page, kasabay na nagbabagong-buo rin ang
-// ipinapakita na "Est. sync cost", kahit hindi naman TALAGA nagbago ang
-// totoong gastos sa Neon. Ngayon, kinukwenta na ito nang hiwalay gamit
-// ang totoong Neon-cost formula (getCloudTokenCostPerSyncExact — tingnan
-// ang malaking komento roon), kaya hindi na ito basta sumasabay sa
-// presyo ng maintenance fee.
 function getCloudTokenPackages() {
     const packages = {};
     for (const tier of CLOUD_TOKEN_PACKAGES) {
         const plan = CLOUD_BACKUP_PLANS[tier];
         if (!plan) continue;
         const amountPHP = plan.price.monthly;
-        const expectedSyncsPerMonth = Math.max(1, Math.round((30 * 24 * 60 * 60 * 1000) / plan.autoBackupIntervalMs));
         // AYOS/BAGO: dating "Sapat na para sa ~1 buwan ng auto-sync" ang
         // tagline dito — MISLEADING ito dahil ang halagang ito (amountPHP)
         // ay EKSAKTONG katumbas lang ng buwanang MAINTENANCE/ACTIVATION FEE
         // ng tier (ang agad na babawasin sa /relay/cloud-tokens/activate-
         // cloud-backup pagka-subscribe/renew) — HINDI pa kasama ang hiwalay
         // na tokens na kakailanganin para sa aktwal na pag-auto-sync sa
-        // buong buwan. Ginawa nang tapat ang tagline dito + idinagdag ang
+        // buong buwan. At dahil sa disenyo ng cost-per-sync formula
+        // (monthlyPrice / expectedSyncsPerMonth, tapos ibinubuod muli sa
+        // buong buwan), ang TOTOONG kakailanganing tokens para lang sa
+        // pag-sync sa normal na dalas ay humigit-kumulang KATUMBAS din
+        // ng buwanang presyo. Kaya kung 129 lang ang binili at in-activate
+        // agad ang Basic, maaagaw agad ng maintenance fee ang lahat — zero
+        // na ang matitira para sa pag-sync, kahit sabi ng tagline "sapat
+        // na". Ginawa nang tapat ang tagline dito + idinagdag ang
         // breakdown fields (maintenanceFeeTokens/estSyncTokensPerMonth/
         // estTotalMonthlyTokens) para magamit ito ng OMNIPOS UI bilang
         // malinaw na paliwanag bago bumili/mag-activate.
         const maintenanceFeeTokens = amountPHP;
-        // AYOS/BUGFIX: TOTOONG Neon-cost-based na estimate na ngayon (hindi
-        // na basta `= amountPHP`) — walang alam pa dito na partikular na
-        // customer/laki ng data, kaya konserbatibong tantiya lang
-        // (20% ng storage quota ng tier, tingnan ang fallback sa loob ng
-        // getCloudTokenCostPerSyncExact) ang ginamit bilang representative
-        // na laki. Awtomatiko itong tatama sa totoong laki ng data ng
-        // bawat customer sa totoong pag-charge (upload/finish).
-        const estSyncTokensPerMonth = Math.round(getCloudTokenCostPerSyncExact(tier) * expectedSyncsPerMonth * 100) / 100;
-        const estTotalMonthlyTokens = Math.round((maintenanceFeeTokens + estSyncTokensPerMonth) * 100) / 100;
+        const estSyncTokensPerMonth = amountPHP; // by design, tumutugma sa monthly price kapag normal na dalas
+        const estTotalMonthlyTokens = maintenanceFeeTokens + estSyncTokensPerMonth;
         const shortName = plan.name.replace('Cloud Backup — ', '');
         packages[tier] = {
             tier,
@@ -1015,7 +1005,7 @@ function getCloudTokenPackages() {
             maintenanceFeeTokens,
             estSyncTokensPerMonth,
             estTotalMonthlyTokens,
-            tagline: `Sakop lang nito ang buwanang maintenance fee ng ${shortName} — hiwalay pa ang tokens para sa aktwal na auto-sync (tinatayang halaga base sa totoong gastos sa Neon, hindi sa presyo ng plano). Tingnan sa ibaba ang buong breakdown.`
+            tagline: `Sakop lang nito ang buwanang maintenance fee ng ${shortName} — hiwalay pa ang tokens para sa aktwal na auto-sync. Tingnan sa ibaba ang buong breakdown.`
         };
     }
     // GAWA/BAGO: "Starter Bundle" — opsyonal na IISANG-bili na package kada
@@ -1026,20 +1016,11 @@ function getCloudTokenPackages() {
     // pinapalitan o binabago ang halaga ng maintenance fee/allotment sa
     // itaas (mananatili ang mga iyon nang eksakto) — dagdag na CHOICE lang
     // ito sa tabi ng mga ito.
-    // AYOS/BUGFIX: dating `monthlyPrice * 2` ang bundleTokens (dahil dati,
-    // ang estimate ng isang buwan ng sync ay KATUMBAS din ng monthlyPrice
-    // — tingnan ang lumang komento sa itaas), kaya kasabay itong nagbago
-    // kapag binago ang presyo. Ngayon, ginagamit na ang parehong TOTOONG
-    // Neon-cost-based na `estSyncTokensPerMonth` sa itaas bilang basehan,
-    // kaya tumutugma pa rin ito sa aktwal na "1 buwan ng auto-sync" nang
-    // hindi na basta ibinibilang na kalahati ay palaging katumbas ng
-    // maintenance fee.
     for (const tier of CLOUD_TOKEN_PACKAGES) {
         const plan = CLOUD_BACKUP_PLANS[tier];
-        const basePkg = packages[tier];
-        if (!plan || !basePkg) continue;
+        if (!plan) continue;
         const monthlyPrice = plan.price.monthly;
-        const bundleTokens = Math.round((monthlyPrice + basePkg.estSyncTokensPerMonth) * 100) / 100;
+        const bundleTokens = monthlyPrice * 2;
         const shortName = plan.name.replace('Cloud Backup — ', '');
         packages[`${tier}_bundle`] = {
             tier: `${tier}_bundle`,
@@ -1049,102 +1030,39 @@ function getCloudTokenPackages() {
             tokens: bundleTokens,
             amountPHP: bundleTokens,
             maintenanceFeeTokens: monthlyPrice,
-            estSyncTokensPerMonth: basePkg.estSyncTokensPerMonth,
+            estSyncTokensPerMonth: monthlyPrice,
             estTotalMonthlyTokens: bundleTokens,
-            tagline: `All-in: kasama na ang maintenance fee + tinatayang 1 buwan ng auto-sync (base sa totoong gastos sa Neon). Isang bili lang, sakop na ang buong buwan.`
+            tagline: `All-in: kasama na ang maintenance fee + tinatayang 1 buwan ng auto-sync. Isang bili lang, sakop na ang buong buwan.`
         };
     }
     return packages;
 }
-// ===================================================================
-// AYOS/BUGFIX (Sept 2026): dating ang "Est. sync cost" — parehong ang
-// paitaas-palaging estimate (getCloudTokenCostPerSync) at ang eksaktong
-// bersyon na aktwal na ginagamit sa pag-charge (getCloudTokenCostPerSyncExact)
-// — ay direktang hinango sa CLOUD_BACKUP_PLANS[tier].price.monthly, ang
-// EKSAKTONG parehong numero na ipinapakita bilang "maintenance fee".
-// Dahil dito, sa TUWING binabago ang maintenance fee sa Cloud Backup
-// Pricing page (pricing.html), sumasabay ding nagbabago ang "Est. sync
-// cost" — kahit magkaibang bagay talaga ang dalawa: ang maintenance fee
-// ay discretionary/business markup (monitoring/support), samantalang ang
-// sync cost ay dapat ang TOTOONG gastos sa Neon base sa AKTWAL na laki ng
-// data ng customer — hindi dapat basta sumasabay sa presyo.
-//
-// Ngayon, hiwalay na hiwalay ang dalawa. Ang sync cost ay awtomatikong
-// kinukwenta (auto-compute) gamit ang:
-//   1) ang TOTOONG Neon storage rate kada GB/buwan (mula NEON_PRICING,
-//      batay sa Neon plan na naka-configure para sa Cloud Backup project
-//      — tingnan ang seksyong "NEON POSTGRES PRICING" sa itaas), at
-//   2) ang AKTWAL (o pinakamalapit na kilalang) na laki ng data (bytes)
-//      ng customer na iyon.
-// Halimbawa: 5 MB na data, na-a-upload nang isang beses kada araw
-// (autoBackupIntervalMs = 24 oras) = (5 MB sa GB) × (totoong Neon
-// storage rate kada GB/buwan) × (USD→PHP) ÷ 30 na araw — iyon ang
-// totoong dagdag-gastos sa Neon ng isang araw na pag-iimbak ng data na
-// iyon. Hindi na ito apektado kahit ilang beses baguhin ang presyo ng
-// tier dito sa Pricing page.
-// ===================================================================
-function getRealCloudBackupStorageRatePerGBMonthUSD() {
-    const tierId = neonConfiguredPlans.cloudBackup || 'free';
-    const tier = NEON_PRICING[tierId];
-    if (!tier || tier.customPricing || typeof tier.storageRatePerGBMonthUSD !== 'number') return null;
-    return tier.storageRatePerGBMonthUSD;
-}
-// Synchronous/cached na bersyon ng USD->PHP rate (parehong in-memory
-// cache na pinupuno ng async na getUsdToPhpRate() sa ibaba) — kailangan
-// dito dahil sinasadyang SYNCHRONOUS pa rin ang mga sync-cost function na
-// ito (mabilis na ginagamit bilang gate/estimate sa maraming lugar,
-// kasama ang mga request path na hindi dapat maghintay ng karagdagang
-// external HTTP call). Live pa rin ito halos palagi dahil regular nang
-// pinupuno ang cache ng ibang mga endpoint (hal. Client Cost Allocation,
-// Database Health) na tumatawag sa getUsdToPhpRate().
-function getCachedUsdToPhpRateForSyncCost() {
-    return exchangeRateCache.rate || EXCHANGE_RATE_FALLBACK_USD_TO_PHP;
-}
-// Totoong (Neon-cost-based) presyo sa PHP ng ISANG sync, batay sa AKTWAL
-// na laki ng data (bytes) na ino-upload at kung gaano ito kadalas
-// mag-auto-sync (autoBackupIntervalMs). Nagbabalik ng null kung walang
-// alam na rate (hal. "Enterprise"/custom pricing na Neon plan) o kung
-// invalid ang dataSizeBytes na ibinigay.
-function computeRealSyncCostPHP(dataSizeBytes, autoBackupIntervalMs) {
-    const storageRatePerGBMonthUSD = getRealCloudBackupStorageRatePerGBMonthUSD();
-    if (storageRatePerGBMonthUSD === null || typeof dataSizeBytes !== 'number' || !(dataSizeBytes >= 0) || !autoBackupIntervalMs) {
-        return null;
-    }
-    const expectedSyncsPerMonth = Math.max(1, Math.round((30 * 24 * 60 * 60 * 1000) / autoBackupIntervalMs));
-    const dataSizeGB = dataSizeBytes / (1024 * 1024 * 1024);
-    const monthlyRealStorageCostUSD = dataSizeGB * storageRatePerGBMonthUSD;
-    const monthlyRealStorageCostPHP = monthlyRealStorageCostUSD * getCachedUsdToPhpRateForSyncCost();
-    return monthlyRealStorageCostPHP / expectedSyncsPerMonth;
-}
-// Presyo (sa tokens) kada ISANG successful sync — GATING/upper-bound na
-// estimate (ipinapakita bago pa man mag-sync, at ginagamit bilang paunang
-// check kung sapat ang balance). Batay na ngayon sa PINAKAMALAKING
-// posibleng laki ng data sa ilalim ng tier na ito (ang buong
-// storageQuotaMB, bilang worst-case) x ang totoong Neon rate — HINDI na
-// sa presyo/maintenance fee ng tier, kaya hindi na ito apektado kapag
-// binago lang ang presyo sa Cloud Backup Pricing page.
+// Presyo (sa tokens) kada ISANG successful sync ng kasalukuyang tier —
+// (buwanang presyo) / (inaasahang bilang ng auto-syncs kada buwan),
+// pinapalago pataas (Math.ceil) para hindi kailanman ma-undercharge,
+// minimum 1 token kada sync.
+// NOTE: ESTIMATE/DISPLAY LANG ito ngayon (ipinapakita sa OMNIPOS admin
+// panel bago pa man mag-sync, at ginagamit bilang paunang "gate" kung
+// sapat kaya ang balance) — HINDI na ito ang aktwal na ginagamit sa
+// pag-charge. Ang totoong pag-charge (exact, hindi pataas ang rounding)
+// ay nasa getCloudTokenCostPerSyncExact() + consumeCloudTokensForSyncExact()
+// sa ibaba.
 function getCloudTokenCostPerSync(tier) {
     const plan = CLOUD_BACKUP_PLANS[tier] || CLOUD_BACKUP_PLANS.basic;
-    const worstCaseBytes = plan.storageQuotaMB * 1024 * 1024;
-    const real = computeRealSyncCostPHP(worstCaseBytes, plan.autoBackupIntervalMs);
-    return Math.max(1, Math.ceil(real !== null ? real : 1));
+    const monthlyPrice = plan.price.monthly;
+    const expectedSyncsPerMonth = Math.max(1, Math.round((30 * 24 * 60 * 60 * 1000) / plan.autoBackupIntervalMs));
+    return Math.max(1, Math.ceil(monthlyPrice / expectedSyncsPerMonth));
 }
 // AYOS/BUGFIX: EKSAKTONG (fractional, walang rounding) na presyo kada
-// isang sync — ito na ang totoong batayan ng pag-charge. Kung ibinigay
-// ang `dataSizeBytes` (ang AKTWAL na laki ng data na ino-upload/nakaimbak
-// na ng customer na ito), ginagamit iyon nang direkta — kaya per-customer
-// na ngayon ito, hindi lang per-tier. Kung wala pang alam (hal. bago pa
-// lang mag-subscribe, wala pang unang backup, o generic na listahan ng
-// package na wala pang partikular na customer), gumagamit muna ng
-// konserbatibong paunang tantiya (20% ng storage quota ng tier) —
-// awtomatikong tatama ito sa totoong laki simula sa unang aktwal na sync.
-function getCloudTokenCostPerSyncExact(tier, dataSizeBytes) {
+// isang sync — ito na ang totoong batayan ng pag-charge. Kinukuha
+// LIVE mula sa CLOUD_BACKUP_PLANS (parehong pinagmumulan ng presyo ng
+// buong system, kaya awtomatikong sumusunod ito kapag binago ang presyo
+// ng tier dito sa RELAY — walang ibang lugar na kailangan pang i-update).
+function getCloudTokenCostPerSyncExact(tier) {
     const plan = CLOUD_BACKUP_PLANS[tier] || CLOUD_BACKUP_PLANS.basic;
-    const effectiveBytes = (typeof dataSizeBytes === 'number' && dataSizeBytes >= 0)
-        ? dataSizeBytes
-        : Math.round(plan.storageQuotaMB * 1024 * 1024 * 0.2);
-    const real = computeRealSyncCostPHP(effectiveBytes, plan.autoBackupIntervalMs);
-    return real !== null ? real : 0;
+    const monthlyPrice = plan.price.monthly;
+    const expectedSyncsPerMonth = Math.max(1, Math.round((30 * 24 * 60 * 60 * 1000) / plan.autoBackupIntervalMs));
+    return monthlyPrice / expectedSyncsPerMonth;
 }
 // AYOS/BUGFIX: atomic, EKSAKTONG pag-charge kada sync (pinapalitan ang
 // dating "ipasa na lang mula OMNIPOS ang Math.ceil na tokens" na paraan).
@@ -1161,16 +1079,8 @@ function getCloudTokenCostPerSyncExact(tier, dataSizeBytes) {
 // nag-upgrade/downgrade ang installation), i-reset muna sa 0 ang
 // fraction bago magdagdag — ibang batayan na kasi ang presyo, hindi na
 // dapat pagsamahin ang natitirang fraction ng lumang tier.
-// AYOS/BUGFIX: tumatanggap na ngayon ng `dataSizeBytes` — ang AKTWAL na
-// laki ng data ng sync na ito (kapag mayroon, hal. mula sa
-// `projectedSizeBytes`/`totalBytes` na kinukwenta na sa upload/finish o
-// upload/start) — para tumugma ang aktwal na charge sa totoong Neon cost
-// ng totoong laki ng na-upload, hindi na sa presyo/maintenance fee ng
-// tier. Optional pa rin ito (may fallback sa loob ng
-// getCloudTokenCostPerSyncExact) para hindi masira ang mga lumang
-// caller na wala pang alam na eksaktong laki.
-async function consumeCloudTokensForSyncExact(installationId, tier, dataSizeBytes, note) {
-    const costFraction = getCloudTokenCostPerSyncExact(tier, dataSizeBytes);
+async function consumeCloudTokensForSyncExact(installationId, tier, note) {
+    const costFraction = getCloudTokenCostPerSyncExact(tier);
     return runPgWriteTx(pgPool, async (client) => {
         await client.query(
             `INSERT INTO cloud_token_wallets (installation_id, balance_tokens, auto_sync_enabled) VALUES ($1, 0, true)
@@ -4542,7 +4452,7 @@ function rateLimit(bucketName, max, windowMs, keyFn) {
         next();
     };
 }
-app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 1000), async (req, res) => {
+app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 1000), (req, res) => {
     const featureCatalog = {};
     for (const [featureId, entry] of Object.entries(FEATURE_CATALOG)) {
         if (isSubscriptionOnlyFeature(featureId)) continue;
@@ -4584,31 +4494,6 @@ app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 100
         perClientFee.maintenanceFeePHP = paid ? 0 : cbTierPrice.monthly;
         perClientFee.maintenanceFeePaid = paid;
         perClientFee.maintenanceFeePaidUntil = cbSubscription.expiresAt;
-        // AYOS/BUGFIX: idinagdag ang AKTWAL na Neon-cost-based na "Est. sync
-        // cost" ng client na ito, batay sa TOTOONG huling kilalang laki
-        // (size_bytes) ng kanyang cloud backup data — hiwalay na hiwalay ito
-        // sa maintenanceFee* sa itaas (na nagmumula pa rin sa presyo ng
-        // tier). Kung wala pang unang backup ang client (walang laman pa sa
-        // cloud_backup_meta), null lang ito dito — babalik na lang sa
-        // konserbatibong tantiya (20% ng quota) ang OMNIPOS side gamit ang
-        // parehong formula/rate sa ibaba.
-        if (pgPool && cbSubscription.tier) {
-            try {
-                const metaResult = await queryWithRetry(
-                    pgPool,
-                    'SELECT size_bytes FROM cloud_backup_meta WHERE installation_id = $1',
-                    [installationId]
-                );
-                const knownSizeBytes = metaResult.rows[0] ? Number(metaResult.rows[0].size_bytes) || 0 : null;
-                perClientFee.cloudBackupKnownDataSizeBytes = knownSizeBytes;
-                perClientFee.estSyncCostPHP = (knownSizeBytes !== null)
-                    ? Math.round(getCloudTokenCostPerSyncExact(cbSubscription.tier, knownSizeBytes) * 100) / 100
-                    : null;
-            } catch (err) {
-                perClientFee.cloudBackupKnownDataSizeBytes = null;
-                perClientFee.estSyncCostPHP = null;
-            }
-        }
     }
     res.json({
         success: true,
@@ -4621,15 +4506,6 @@ app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 100
         moduleSubscriptionBillingDays: MODULE_SUBSCRIPTION_BILLING_DAYS,
         moduleSubscriptionGracePeriodDays: MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS,
         activationFlags: ACTIVATION_FLAGS,
-        // AYOS/BUGFIX: ibinabalik na rin dito ang TOTOONG Neon storage rate
-        // (kada GB/buwan) at ang kasalukuyang USD->PHP rate na ginagamit ng
-        // real-cost sync formula sa itaas (computeRealSyncCostPHP) — para
-        // magamit ito ng OMNIPOS na lumikha ng sarili niyang lokal (mabilis,
-        // walang karagdagang network round-trip) na "Est. sync cost" gamit
-        // ang KANYANG SARILING alam na aktwal na laki ng data, sa halip na
-        // basta kopyahin ang presyo ng maintenance fee.
-        cloudBackupSyncCostRatePerGBMonthUSD: getRealCloudBackupStorageRatePerGBMonthUSD(),
-        cloudBackupSyncCostUsdToPhpRate: getCachedUsdToPhpRateForSyncCost(),
         fetchedAt: new Date().toISOString()
     });
 });
@@ -4909,11 +4785,7 @@ app.post('/relay/cloud-backup/upload/start', requireApiKey, requireAllowedDevice
         const walletRow = await getOrCreateCloudTokenWallet(installationId);
         const cloudBackupUnlockForPrecheck = (issuedUnlocks[installationId] || {})['cloud_backup'];
         const tierForPrecheck = (cloudBackupUnlockForPrecheck && cloudBackupUnlockForPrecheck.tier && CLOUD_BACKUP_PLANS[cloudBackupUnlockForPrecheck.tier]) ? cloudBackupUnlockForPrecheck.tier : 'basic';
-        // AYOS/BUGFIX: ipinapasa na ang `totalBytes` (ang AKTWAL/deklaradong
-        // laki ng backup na ito) papunta sa real-cost formula, sa halip na
-        // basta ang presyo ng tier — tumutugma na ang precheck na ito sa
-        // totoong gagastusin sa upload/finish sa ibaba.
-        const minCostForPrecheck = getCloudTokenCostPerSyncExact(tierForPrecheck, totalBytes);
+        const minCostForPrecheck = getCloudTokenCostPerSyncExact(tierForPrecheck);
         if (Number(walletRow.balance_tokens) < minCostForPrecheck) {
             logActivity(installationId, 'cloud_backup_blocked', { reason: 'insufficient_tokens', balanceTokens: Number(walletRow.balance_tokens) });
             return res.status(402).json({
@@ -5079,12 +4951,7 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
     // ===================================================================
     let tokenConsumeResult;
     try {
-        // AYOS/BUGFIX: ipinapasa na ang `projectedSizeBytes` — ang AKTWAL na
-        // kabuuang laki (bytes) ng data na kasalukuyang ino-upload/isasave
-        // ng customer na ito, kinwenta na sa itaas — para ang totoong
-        // charge ay batay na sa totoong Neon cost ng totoong laman ng data
-        // nila, hindi na sa presyo/maintenance fee ng tier.
-        tokenConsumeResult = await consumeCloudTokensForSyncExact(installationId, tier, projectedSizeBytes, 'Cloud backup sync');
+        tokenConsumeResult = await consumeCloudTokensForSyncExact(installationId, tier, 'Cloud backup sync');
         invalidateWalletCache(installationId);
     } catch (consumeErr) {
         // AYOS: fail-CLOSED — kung nabigo ang atomic charge mismo (hal.
@@ -5690,12 +5557,7 @@ app.post('/relay/cloud-tokens/check-and-consume', requireApiKey, requireAllowedD
     if (!tier || !CLOUD_BACKUP_PLANS[tier]) return res.status(400).json({ success: false, message: 'Invalid o missing na Cloud Backup tier.' });
     if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
     try {
-        // AYOS: legacy/hindi na tinatawag ng kasalukuyang OMNIPOS (ang
-        // atomic na charge ay sa loob na ng /relay/cloud-backup/upload/
-        // finish, na may alam nang aktwal na laki ng data) — wala pang
-        // aktwal na `dataSizeBytes` dito, kaya babalik muna sa
-        // konserbatibong estimate sa loob ng getCloudTokenCostPerSyncExact.
-        const result = await consumeCloudTokensForSyncExact(installationId, tier, undefined, note);
+        const result = await consumeCloudTokensForSyncExact(installationId, tier, note);
         invalidateWalletCache(installationId);
         if (!result.ok) {
             return res.status(402).json({
