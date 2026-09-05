@@ -976,12 +976,63 @@ function getCloudTokenPackages() {
         const plan = CLOUD_BACKUP_PLANS[tier];
         if (!plan) continue;
         const amountPHP = plan.price.monthly;
+        // AYOS/BAGO: dating "Sapat na para sa ~1 buwan ng auto-sync" ang
+        // tagline dito — MISLEADING ito dahil ang halagang ito (amountPHP)
+        // ay EKSAKTONG katumbas lang ng buwanang MAINTENANCE/ACTIVATION FEE
+        // ng tier (ang agad na babawasin sa /relay/cloud-tokens/activate-
+        // cloud-backup pagka-subscribe/renew) — HINDI pa kasama ang hiwalay
+        // na tokens na kakailanganin para sa aktwal na pag-auto-sync sa
+        // buong buwan. At dahil sa disenyo ng cost-per-sync formula
+        // (monthlyPrice / expectedSyncsPerMonth, tapos ibinubuod muli sa
+        // buong buwan), ang TOTOONG kakailanganing tokens para lang sa
+        // pag-sync sa normal na dalas ay humigit-kumulang KATUMBAS din
+        // ng buwanang presyo. Kaya kung 129 lang ang binili at in-activate
+        // agad ang Basic, maaagaw agad ng maintenance fee ang lahat — zero
+        // na ang matitira para sa pag-sync, kahit sabi ng tagline "sapat
+        // na". Ginawa nang tapat ang tagline dito + idinagdag ang
+        // breakdown fields (maintenanceFeeTokens/estSyncTokensPerMonth/
+        // estTotalMonthlyTokens) para magamit ito ng OMNIPOS UI bilang
+        // malinaw na paliwanag bago bumili/mag-activate.
+        const maintenanceFeeTokens = amountPHP;
+        const estSyncTokensPerMonth = amountPHP; // by design, tumutugma sa monthly price kapag normal na dalas
+        const estTotalMonthlyTokens = maintenanceFeeTokens + estSyncTokensPerMonth;
+        const shortName = plan.name.replace('Cloud Backup — ', '');
         packages[tier] = {
             tier,
             name: plan.name,
-            tokens: amountPHP, 
+            tokens: amountPHP,
             amountPHP,
-            tagline: `Sapat na para sa humigit-kumulang 1 buwan ng ${plan.name.replace('Cloud Backup — ', '')} auto-sync sa normal na dalas.`
+            maintenanceFeeTokens,
+            estSyncTokensPerMonth,
+            estTotalMonthlyTokens,
+            tagline: `Sakop lang nito ang buwanang maintenance fee ng ${shortName} — hiwalay pa ang tokens para sa aktwal na auto-sync. Tingnan sa ibaba ang buong breakdown.`
+        };
+    }
+    // GAWA/BAGO: "Starter Bundle" — opsyonal na IISANG-bili na package kada
+    // tier na sumasakop na sa PAREHONG (a) buwanang maintenance/activation
+    // fee AT (b) tinatayang isang buong buwan ng auto-sync sa normal na
+    // dalas — para sa mga customer na ayaw nang mag-isip ng breakdown at
+    // gusto lang tapos na agad ang buong buwan sa isang bili. Hindi
+    // pinapalitan o binabago ang halaga ng maintenance fee/allotment sa
+    // itaas (mananatili ang mga iyon nang eksakto) — dagdag na CHOICE lang
+    // ito sa tabi ng mga ito.
+    for (const tier of CLOUD_TOKEN_PACKAGES) {
+        const plan = CLOUD_BACKUP_PLANS[tier];
+        if (!plan) continue;
+        const monthlyPrice = plan.price.monthly;
+        const bundleTokens = monthlyPrice * 2;
+        const shortName = plan.name.replace('Cloud Backup — ', '');
+        packages[`${tier}_bundle`] = {
+            tier: `${tier}_bundle`,
+            baseTier: tier,
+            isBundle: true,
+            name: `${shortName} — Starter Bundle`,
+            tokens: bundleTokens,
+            amountPHP: bundleTokens,
+            maintenanceFeeTokens: monthlyPrice,
+            estSyncTokensPerMonth: monthlyPrice,
+            estTotalMonthlyTokens: bundleTokens,
+            tagline: `All-in: kasama na ang maintenance fee + tinatayang 1 buwan ng auto-sync. Isang bili lang, sakop na ang buong buwan.`
         };
     }
     return packages;
