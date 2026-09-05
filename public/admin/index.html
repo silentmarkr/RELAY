@@ -2808,6 +2808,13 @@ function renderOtps(list) {
 async function approveOtp(key, featureLabel, storeName, featureId, presetDurationDays, presetPrice, presetBillingCycle) {
   const isDemo = featureId === '__demo__';
   const isCloudBackup = featureId === 'cloud_backup';
+  const isModuleSubscription = featureId === 'rbac_management' || featureId === 'multi_branch';
+  // Cloud Backup, RBAC, and Multi-Branch are all subscription features
+  // (monthly/yearly billing) — they must all get the same plan-summary
+  // box and the same billing-cycle-aware duration default below, or the
+  // admin ends up approving RBAC/Multi-Branch at a generic 30-day default
+  // that ignores the billing cycle the customer actually selected.
+  const isSubscriptionFeature = isCloudBackup || isModuleSubscription;
   const ok = await confirmAction({
     title: 'Approve the unlock?',
     message: isDemo
@@ -2817,7 +2824,7 @@ async function approveOtp(key, featureLabel, storeName, featureId, presetDuratio
   });
   if (!ok) return;
   let planSummaryHtml = '';
-  if (isCloudBackup) {
+  if (isSubscriptionFeature) {
     const billingLabel = presetBillingCycle === 'yearly' ? 'Yearly' : 'Monthly';
     planSummaryHtml = `<div style="padding:10px 12px; border-radius:8px; background:var(--bg); border:1px solid var(--border-soft); margin-bottom:10px;">` +
       `<strong>${featureLabel}</strong><br>` +
@@ -2827,10 +2834,10 @@ async function approveOtp(key, featureLabel, storeName, featureId, presetDuratio
   const durationDays = isDemo
     ? await promptForDemoDuration(`How long should Demo Mode run before it expires?`)
     : await promptForDuration(
-        isCloudBackup ? `The plan below was selected by the customer. The subscription length is set to match — you can still change it if needed:` : `How long until "${featureLabel}" expires and needs renewal?`,
-        (isCloudBackup && typeof presetDurationDays === 'number') ? String(presetDurationDays) : undefined,
+        isSubscriptionFeature ? `The plan below was selected by the customer. The subscription length is set to match — you can still change it if needed:` : `How long until "${featureLabel}" expires and needs renewal?`,
+        (isSubscriptionFeature && typeof presetDurationDays === 'number') ? String(presetDurationDays) : undefined,
         planSummaryHtml,
-        isCloudBackup ? 'Confirm Cloud Backup plan' : undefined
+        isSubscriptionFeature ? 'Confirm subscription plan' : undefined
       );
   if (durationDays === null) return; 
   try {
@@ -3445,7 +3452,7 @@ function renderDeviceDetail(detail) {
           <div class="feature-meta">${f.category === 'theme' ? 'Pro Theme' : 'Module'}</div>
         </div>
         <div style="display:flex; align-items:center; gap:8px;">
-          <div class="feature-price">${f.featureId === 'cloud_backup' ? 'Subscription' : '₱' + f.price}</div>
+          <div class="feature-price">${f.isSubscription ? 'Subscription' : '₱' + f.price}</div>
           <button class="btn-allow" onclick="activateFeature('${detail.installationId}', '${f.featureId}', '${f.name.replace(/'/g, "\\'")}')">Activate</button>
         </div>
       </div>
@@ -3483,6 +3490,7 @@ async function toggleAllowFromDetail(installationId, currentlyAllowed) {
 }
 async function activateFeature(installationId, featureId, featureName, presetTier, presetBillingCycle) {
   const isCloudBackup = featureId === 'cloud_backup';
+  const isModuleSubscription = featureId === 'rbac_management' || featureId === 'multi_branch';
   const note = await promptForNote(`Activate "${featureName}" for this device right now — no OTP needed. Only use this if you ALREADY HAVE A REFERENCE (already paid/previously unlocked).`);
   if (note === null) return; 
   let tier = null, billingCycle = null, durationDays;
@@ -3495,6 +3503,18 @@ async function activateFeature(installationId, featureId, featureName, presetTie
     tier = plan.tier;
     billingCycle = plan.billingCycle;
     durationDays = 0; 
+  } else if (isModuleSubscription) {
+    // RBAC and Multi-Branch are subscriptions too (same as Cloud Backup),
+    // so they must go through the same billing-cycle-picker modal instead
+    // of the plain duration prompt below — the server rejects activation
+    // of these features without a billingCycle.
+    const plan = await promptForModuleSubscriptionPlan(
+      `Select the billing cycle to activate/renew for this device (pricing is pulled live from the current RELAY pricing):`,
+      featureId, presetBillingCycle
+    );
+    if (plan === null) return;
+    billingCycle = plan.billingCycle;
+    durationDays = 0;
   } else {
     durationDays = await promptForDuration(`How long until "${featureName}" should expire? (Also use this to RENEW — just activate the same feature again with a new duration.)`);
     if (durationDays === null) return; 
@@ -3533,7 +3553,7 @@ async function promptForCloudBackupPlan(message, presetTier, presetBillingCycle)
       `<option value="yearly">Yearly</option>` +
       `</select>` +
       `<div id="cbPlanPriceLine" style="margin-top:8px; color:var(--muted); font-size:.85rem;"></div>`;
-    okBtn.innerText = '✓ Tuloy';
+    okBtn.innerText = '✓ Continue';
     okBtn.className = 'btn-allow';
     backdrop.style.display = 'flex';
     const tierSelect = document.getElementById('cbTierSelect');
@@ -3558,6 +3578,56 @@ async function promptForCloudBackupPlan(message, presetTier, presetBillingCycle)
       resolve(result);
     }
     okBtn.onclick = () => cleanup({ tier: tierSelect.value, billingCycle: billingSelect.value });
+    cancelBtn.onclick = () => cleanup(null);
+  });
+}
+// Same modal pattern as promptForCloudBackupPlan above, minus the tier
+// select — RBAC and Multi-Branch each have a single plan, only the
+// billing cycle (monthly/yearly) needs picking. Kept as its own function
+// (rather than reusing promptForCloudBackupPlan) since these features
+// have no tier concept, but the layout, labels, and flow intentionally
+// match Cloud Backup's modal exactly.
+async function promptForModuleSubscriptionPlan(message, featureId, presetBillingCycle) {
+  let plans;
+  try {
+    const data = await api('/relay/admin/api/pricing');
+    plans = data.moduleSubscriptionPlans;
+  } catch (err) {
+    toast('Could not load module subscription pricing — try again.', 'error');
+    return null;
+  }
+  const plan = plans[featureId];
+  return new Promise((resolve) => {
+    const backdrop = document.getElementById('confirmBackdrop');
+    const okBtn = document.getElementById('confirmActionBtn');
+    const cancelBtn = document.getElementById('confirmCancelBtn');
+    document.getElementById('confirmTitle').innerText = 'Confirm subscription plan';
+    document.getElementById('confirmMessage').innerHTML = `${message}<br><br>` +
+      `<select id="msBillingSelect" style="width:100%; padding:10px; border-radius:8px; border:1px solid var(--border-soft); background:var(--bg); color:var(--text); margin-top:4px;">` +
+      `<option value="monthly">Monthly</option>` +
+      `<option value="yearly">Yearly</option>` +
+      `</select>` +
+      `<div id="msPlanPriceLine" style="margin-top:8px; color:var(--muted); font-size:.85rem;"></div>`;
+    okBtn.innerText = '✓ Continue';
+    okBtn.className = 'btn-allow';
+    backdrop.style.display = 'flex';
+    const billingSelect = document.getElementById('msBillingSelect');
+    const priceLine = document.getElementById('msPlanPriceLine');
+    if (presetBillingCycle) billingSelect.value = presetBillingCycle;
+    function updatePriceLine() {
+      const price = plan.price[billingSelect.value];
+      priceLine.innerText = `₱${price} / ${billingSelect.value === 'yearly' ? 'year' : 'month'}`;
+    }
+    updatePriceLine();
+    billingSelect.onchange = updatePriceLine;
+    function cleanup(result) {
+      backdrop.style.display = 'none';
+      okBtn.onclick = null;
+      cancelBtn.onclick = null;
+      billingSelect.onchange = null;
+      resolve(result);
+    }
+    okBtn.onclick = () => cleanup({ billingCycle: billingSelect.value });
     cancelBtn.onclick = () => cleanup(null);
   });
 }
