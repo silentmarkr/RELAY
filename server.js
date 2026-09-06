@@ -5216,6 +5216,42 @@ app.get('/relay/cloud-tokens/packages', requireApiKey, rateLimit('cloud-tokens-p
         tokenCostPerSync[tier] = await getCloudTokenCostPerSync(CLOUD_BACKUP_SAMPLE_SIZE_BYTES_FOR_CATALOG, tier);
         tokenCostPerSyncExact[tier] = await getCloudTokenCostPerSyncExact(CLOUD_BACKUP_SAMPLE_SIZE_BYTES_FOR_CATALOG, tier);
     }
+    // UPDATE: the package cards used to show "Est. sync cost (1 mo.)" as a
+    // plain copy of the tier's monthly price (maintenanceFeeTokens ===
+    // estSyncTokensPerMonth by design), so it moved in lockstep with the
+    // maintenance fee any time the price was edited in the pricing admin.
+    // It is now decoupled: recomputed here from the same real,
+    // data-size + Neon-rate based formula used by the wallet endpoint
+    // (getCloudTokenCostPerSyncExact), scaled by how many auto-syncs the
+    // tier is expected to run in a month. This is still an illustrative
+    // estimate (it uses CLOUD_BACKUP_SAMPLE_SIZE_BYTES_FOR_CATALOG as a
+    // stand-in size, since there is no real installation here yet), but
+    // it no longer tracks the maintenance fee — only the tier's sync
+    // frequency and the configured Neon rate affect it now. A yearly
+    // estimate (12 renewals + 12 months of syncs) is also added so the
+    // customer can see roughly how much extra balance to keep on top of
+    // the maintenance fee for a full month or a full year.
+    for (const tier of Object.keys(packages)) {
+        const pkg = packages[tier];
+        const planTier = pkg.baseTier || pkg.tier;
+        const plan = CLOUD_BACKUP_PLANS[planTier];
+        if (!plan || typeof pkg.maintenanceFeeTokens !== 'number') continue;
+        const expectedSyncsPerMonth = Math.max(1, Math.round((30 * 24 * 60 * 60 * 1000) / plan.autoBackupIntervalMs));
+        const perSyncCostExact = tokenCostPerSyncExact[planTier];
+        const estSyncTokensPerMonth = Math.max(1, Math.ceil(perSyncCostExact * expectedSyncsPerMonth));
+        const estSyncTokensPerYear = Math.max(1, Math.ceil(perSyncCostExact * expectedSyncsPerMonth * 12));
+        pkg.estSyncTokensPerMonth = estSyncTokensPerMonth;
+        pkg.estSyncTokensPerYear = estSyncTokensPerYear;
+        pkg.estTotalMonthlyTokens = pkg.maintenanceFeeTokens + estSyncTokensPerMonth;
+        pkg.estTotalYearlyTokens = (pkg.maintenanceFeeTokens * 12) + estSyncTokensPerYear;
+        // "Recommended extra balance" = the sync-cost portion only (the
+        // maintenance fee itself is already covered by whichever package
+        // is purchased) — this is the number customers actually need to
+        // keep as spare balance for auto-sync/manual backup to keep
+        // working across the period.
+        pkg.recommendedExtraBalanceMonthly = estSyncTokensPerMonth;
+        pkg.recommendedExtraBalanceYearly = estSyncTokensPerYear;
+    }
     // AYOS: dating hard-coded (GCash/Maya/Online Banking) ang select sa
     // OMNIPOS. Ngayon, ibinabalik dito ang paymentMethods — LISTAHAN NG MGA
     // PARAAN NG BAYAD NA TALAGANG NAKA-CONFIGURE (env vars) sa relay
@@ -5223,7 +5259,21 @@ app.get('/relay/cloud-tokens/packages', requireApiKey, rateLimit('cloud-tokens-p
     // kaya kung ano lang ang naka-set sa Render env, iyon lang ang
     // lalabas/mapipili.
     const paymentMethods = getAvailablePaymentMethods();
-    res.json({ success: true, packages, tokenCostPerSync, tokenCostPerSyncExact, sampleSizeBytesUsed: CLOUD_BACKUP_SAMPLE_SIZE_BYTES_FOR_CATALOG, tokensPerPeso: 1, paymentMethods });
+    res.json({
+        success: true,
+        packages,
+        tokenCostPerSync,
+        tokenCostPerSyncExact,
+        sampleSizeBytesUsed: CLOUD_BACKUP_SAMPLE_SIZE_BYTES_FOR_CATALOG,
+        tokensPerPeso: 1,
+        paymentMethods,
+        // NOTE: estSyncTokensPerMonth/Year, estTotalMonthlyTokens/YearlyTokens,
+        // and recommendedExtraBalanceMonthly/Yearly on each package are
+        // approximate estimates based on a sample backup size — not an
+        // exact forecast. Actual monthly/yearly usage will vary with the
+        // real backup size and the account's real sync frequency.
+        estimateDisclaimer: 'Sync-cost, monthly, and yearly figures are approximate estimates based on a sample backup size — not a guaranteed final cost.'
+    });
 });
 app.get('/relay/cloud-tokens/wallet', requireApiKey, requireAllowedDevice, rateLimit('cloud-tokens-wallet', 120, 60 * 60 * 1000, (req) => req.query?.installationId), async (req, res) => {
     const installationId = String(req.query.installationId || '').trim();
