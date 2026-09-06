@@ -283,7 +283,15 @@
       page</a>; it can still be overridden individually below. On a client's first successful
       Cloud Backup subscribe/renew, this fee is marked <strong>Paid</strong> and excluded from
       their total for the rest of that billing period — it reappears in their total once that
-      period expires without a renewal.
+      period expires without a renewal. Each card also tracks <strong>restore
+      count (last 30 days)</strong>, an <strong>all-time total</strong> for
+      context, and <strong>last restore time</strong> — restores are capped at
+      5/day and charged a small proportional token fee automatically. The
+      ⚠️ flag triggers at 3+ restores within the last 30 days (a rolling
+      window, not a lifetime count — so an occasional legitimate restore
+      years apart won't stay flagged forever); if a client still looks
+      abusive you can use the <strong>⚡ Charge</strong> button to manually
+      deduct extra tokens from their wallet.
     </p>
 
     <div class="error-banner" id="errorBanner">
@@ -341,6 +349,7 @@
           <option value="storageDesc">Storage (high → low)</option>
           <option value="computeDesc">Compute share (high → low)</option>
           <option value="syncsDesc">Syncs (high → low)</option>
+          <option value="restoresDesc">Restores, last 30d (high → low)</option>
         </select>
         <div class="client-count-note" id="clientCountNote"></div>
       </div>
@@ -507,6 +516,26 @@ function renderAllocation(data) {
   renderClientGrid();
 }
 
+async function promptChargeRestore(installationId, label) {
+  const tokensInput = prompt(`How many Omni Tokens do you want to manually charge "${label}" for restore abuse?\n\nThis is on top of the automatic per-restore charge — use it for a client flagged by the Restores count above.`);
+  if (tokensInput === null) return;
+  const tokens = Number(tokensInput);
+  if (!isFinite(tokens) || tokens <= 0) {
+    toast('Enter a positive number of tokens.', 'error');
+    return;
+  }
+  const note = prompt('Optional note for this charge (shown in the client\'s Transaction History):') || '';
+  try {
+    const result = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/charge-restore`, {
+      method: 'POST',
+      body: JSON.stringify({ tokens, note })
+    });
+    toast(`Charged ${tokens} token(s) — new balance: ${result.balanceTokens}`);
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
 function getFilteredSortedClients() {
   const clients = (lastAllocation && Array.isArray(lastAllocation.clients)) ? lastAllocation.clients : [];
   const q = clientSearchQuery.trim().toLowerCase();
@@ -521,7 +550,8 @@ function getFilteredSortedClients() {
     totalAsc: (a, b) => (a.finalPricePHP || 0) - (b.finalPricePHP || 0),
     storageDesc: (a, b) => (b.sizeBytes || 0) - (a.sizeBytes || 0),
     computeDesc: (a, b) => (b.computeSharePercent || 0) - (a.computeSharePercent || 0),
-    syncsDesc: (a, b) => (b.syncCount || 0) - (a.syncCount || 0)
+    syncsDesc: (a, b) => (b.syncCount || 0) - (a.syncCount || 0),
+    restoresDesc: (a, b) => (b.restoreCountRecent30d || 0) - (a.restoreCountRecent30d || 0)
   };
   filtered.sort(sorters[clientSortKey] || sorters.totalDesc);
   return filtered;
@@ -555,6 +585,27 @@ function renderClientCard(c) {
     : tierLabel
       ? `<span class="mono">${escapeHtml(tierLabel)} — ${formatPHP(c.maintenanceFeeMonthlyPHP)}/mo · ${formatPHP(c.maintenanceFeeYearlyPHP)}/yr</span>`
       : `<span class="mono">No active Cloud Backup plan</span>`;
+  // AYOS/BAGO: restore tracking (visibility-only, hindi kasama sa
+  // Neon cost share sa itaas) — para makita agad kung sinong client ang
+  // sobrang dalas mag-restore. Naka-flag/naka-highlight (amber) kapag
+  // ~malapit na o umabot na sa bagong 5/araw na cap, bilang mabilisang
+  // visual cue kung sino ang posibleng abuser.
+  // BUGFIX: restore_count sa itaas ay LIFETIME total — kung ito lang ang
+  // basehan ng ⚠️ flag, isang lehitimong client na 3 beses lang nag-restore
+  // sa loob ng ilang TAON (malayo-layo, disaster recovery lang) ay
+  // permanenteng mananatiling naka-flag magpakailanman. Ang restoreCountRecent30d
+  // (rolling 30-day window, mula sa cloud_token_ledger) na ang ginagamit
+  // ngayon para sa ⚠️ flag — mas makatwiran, dahil "abuse" ay tungkol sa
+  // dalas SA LOOB NG MAIKLING PANAHON, hindi sa lifetime total.
+  const restoreCount = c.restoreCount || 0;
+  const restoreCountRecent = c.restoreCountRecent30d || 0;
+  const restoreFlagged = restoreCountRecent >= 3;
+  const restoreCountDisplay = restoreFlagged
+    ? `<span class="mono" style="color:var(--amber);">${restoreCountRecent} ⚠️</span> <span class="mono" style="color:var(--muted);font-size:.72rem;">(${restoreCount} all-time)</span>`
+    : `<span class="mono">${restoreCountRecent}</span> <span class="mono" style="color:var(--muted);font-size:.72rem;">(${restoreCount} all-time)</span>`;
+  const lastRestoreDisplay = c.lastRestoreAt
+    ? new Date(c.lastRestoreAt).toLocaleString()
+    : 'Never';
   return `
     <div class="client-card" data-installation-id="${safeId}">
       <div>
@@ -587,6 +638,18 @@ function renderClientCard(c) {
       <div class="client-card-line">
         <span class="client-card-line-label">Maintenance fee (plan) ${paidBadge}</span>
         ${planLine}
+      </div>
+
+      <div class="client-card-divider"></div>
+
+      <div class="client-card-line">
+        <span class="client-card-line-label">Restores (last 30 days)</span>
+        <span>${restoreCountDisplay} · <span class="mono" style="color:var(--muted);font-size:.75rem;">last: ${escapeHtml(lastRestoreDisplay)}</span></span>
+      </div>
+
+      <div class="client-card-line">
+        <span class="client-card-line-label" style="font-size:.75rem;color:var(--muted-dim);">Manual charge for restore abuse</span>
+        <button type="button" class="row-save-btn" onclick="promptChargeRestore('${safeId.replace(/'/g, "\\'")}', '${escapeHtml(displayLabel || c.installationId).replace(/'/g, "\\'")}')">⚡ Charge</button>
       </div>
 
       <div class="client-card-total">

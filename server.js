@@ -198,6 +198,12 @@ async function ensureCloudBackupSchema() {
     `);
     await pgPool.query(`ALTER TABLE cloud_backup_modules ADD COLUMN IF NOT EXISTS size_bytes BIGINT NOT NULL DEFAULT 0;`);
     await pgPool.query(`ALTER TABLE cloud_backup_meta ADD COLUMN IF NOT EXISTS size_bytes BIGINT NOT NULL DEFAULT 0;`);
+    // AYOS/BAGO: tracking-only columns (walang kinalaman sa charging) — para
+    // may visibility bago magdesisyon kung mag-charge/hihigpitan pa. Kasama
+    // sa Client Cost Allocation report para makita agad kung sinong client
+    // ang sobrang dalas mag-restore (posibleng abuser).
+    await pgPool.query(`ALTER TABLE cloud_backup_meta ADD COLUMN IF NOT EXISTS restore_count INTEGER NOT NULL DEFAULT 0;`);
+    await pgPool.query(`ALTER TABLE cloud_backup_meta ADD COLUMN IF NOT EXISTS last_restore_at TIMESTAMPTZ;`);
     console.log('✅ Cloud backup Postgres schema ready (cloud_backup_modules, cloud_backup_meta).');
 }
 async function ensureDeviceLicenseSchema() {
@@ -1114,6 +1120,68 @@ async function getCloudTokenCostPerSync(sizeBytes, tier) {
     const exact = await getCloudTokenCostPerSyncExact(sizeBytes, tier);
     return Math.max(1, Math.ceil(exact));
 }
+// ===================================================================
+// RESTORE COST MODEL — same PHP-from-real-Neon-cost approach as
+// computeRealCloudBackupSyncCostPHP() above, but for a RESTORE instead of
+// a sync. A restore is NOT prorated across "expected operations per
+// month" the way a sync is (there is no sane "expected restores per
+// month" — a legitimate restore is rare/unscheduled, disaster-recovery
+// style, unlike auto-sync which runs on a fixed interval). Instead it is
+// priced as ONE full read of the entire backup:
+//   - STORAGE side: uses Neon's own "Instant Restore" rate
+//     (instantRestoreRatePerGBMonthUSD, already defined above under
+//     NEON_PRICING/NEON_PRICING_BASE) — this is the real Neon rate for
+//     point-in-time/restore-style storage, more accurate here than
+//     reusing the regular ongoing storageRatePerGBMonthUSD.
+//   - COMPUTE side: reuses the SAME cloudBackupSyncCompute assumption as
+//     sync — reading X MB back out of Postgres costs roughly the same
+//     compute as writing X MB into it, so there's no need for a separate
+//     self-calibrating assumption just for restores.
+// The goal (per request): give restoring a small real cost to the
+// customer, discourage repeated/abusive restores, and make sure the
+// actual Neon egress/compute cost of a restore is covered rather than
+// eaten by the developer.
+// ===================================================================
+function computeRealCloudBackupRestoreCostPHP(sizeBytes, tier, usdToPhpRate) {
+    const sizeBytesSafe = Math.max(0, Number(sizeBytes) || 0);
+    const sizeGB = sizeBytesSafe / (1024 * 1024 * 1024);
+    const sizeMB = sizeBytesSafe / (1024 * 1024);
+    const restoreStorageRateUSD = (typeof NEON_PRICING.instantRestoreRatePerGBMonthUSD === 'number')
+        ? NEON_PRICING.instantRestoreRatePerGBMonthUSD
+        : NEON_PRICING_BASE.instantRestoreRatePerGBMonthUSD;
+    const restoreStorageCostUSD = sizeGB * restoreStorageRateUSD;
+    const neonPlanId = neonConfiguredPlans.cloudBackup || 'free';
+    let neonTier = NEON_PRICING[neonPlanId];
+    // Same Free-tier fallback reasoning as computeRealCloudBackupSyncCostPHP()
+    // above — $0 Free-tier rates aren't a realistic basis if there's
+    // actually a paid Neon account behind this.
+    if (!neonTier || !neonTier.storageRatePerGBMonthUSD) neonTier = NEON_PRICING.launch;
+    const computeRateUSD = (typeof neonTier.computeRatePerCUHourUSD === 'number' && neonTier.computeRatePerCUHourUSD > 0)
+        ? neonTier.computeRatePerCUHourUSD
+        : NEON_PRICING.launch.computeRatePerCUHourUSD;
+    const computeAssumption = NEON_PRICING.cloudBackupSyncCompute || NEON_PRICING_BASE.cloudBackupSyncCompute;
+    const assumedComputeSeconds = computeAssumption.assumedBaseSeconds + (sizeMB * computeAssumption.assumedSecondsPerMB);
+    const assumedComputeCUHours = computeAssumption.assumedCU * (assumedComputeSeconds / 3600);
+    const restoreComputeCostUSD = assumedComputeCUHours * computeRateUSD;
+    const perRestoreCostUSD = restoreStorageCostUSD + restoreComputeCostUSD;
+    const rate = usdToPhpRate || EXCHANGE_RATE_FALLBACK_USD_TO_PHP;
+    return perRestoreCostUSD * rate;
+}
+// Exact (fractional, no rounding) price for one restore — this is the true
+// basis used for charging. `sizeBytes` should be the installation's actual
+// known backup size (cloud_backup_meta.size_bytes).
+async function getCloudTokenCostPerRestoreExact(sizeBytes, tier) {
+    const { rate } = await getUsdToPhpRate();
+    return computeRealCloudBackupRestoreCostPHP(sizeBytes, tier, rate);
+}
+// Rounded-up (minimum 1 token) price for one restore — used for
+// display/gating and for the actual whole-token deduction (unlike sync,
+// restores are rare enough that we don't bother accruing sub-1-token
+// fractions — every restore charges at least 1 whole token).
+async function getCloudTokenCostPerRestore(sizeBytes, tier) {
+    const exact = await getCloudTokenCostPerRestoreExact(sizeBytes, tier);
+    return Math.max(1, Math.ceil(exact));
+}
 // AYOS/BUGFIX: atomic, EKSAKTONG pag-charge kada sync (pinapalitan ang
 // dating "ipasa na lang mula OMNIPOS ang Math.ceil na tokens" na paraan).
 // Sa bawat tawag: idinadagdag ang eksaktong (fractional) na presyo — batay
@@ -1176,6 +1244,40 @@ async function consumeCloudTokensForSyncExact(installationId, sizeBytes, tier, n
             );
         }
         return { ok: true, balanceTokens: newBalance, tokensCharged: wholeTokens };
+    });
+}
+// AYOS/BAGO: atomic charge for a RESTORE (see computeRealCloudBackupRestoreCostPHP()
+// above for the pricing rationale). Simpler than consumeCloudTokensForSyncExact() —
+// no fractional accrual bucket, since restores are rare (capped at 5/day)
+// and always charge at least 1 whole token immediately. Fails closed
+// (insufficient: true) without touching the balance if the wallet doesn't
+// have enough.
+async function consumeCloudTokensForRestore(installationId, sizeBytes, tier, note) {
+    const costTokens = await getCloudTokenCostPerRestore(sizeBytes, tier);
+    return runPgWriteTx(pgPool, async (client) => {
+        await client.query(
+            `INSERT INTO cloud_token_wallets (installation_id, balance_tokens, auto_sync_enabled) VALUES ($1, 0, true)
+             ON CONFLICT (installation_id) DO NOTHING`,
+            [installationId]
+        );
+        const walletRes = await client.query(
+            `SELECT balance_tokens FROM cloud_token_wallets WHERE installation_id = $1 FOR UPDATE`,
+            [installationId]
+        );
+        const currentBalance = Number(walletRes.rows[0].balance_tokens);
+        if (currentBalance < costTokens) {
+            return { ok: false, insufficient: true, balanceTokens: currentBalance, costTokens };
+        }
+        const newBalance = currentBalance - costTokens;
+        await client.query(
+            `UPDATE cloud_token_wallets SET balance_tokens = $2, updated_at = now() WHERE installation_id = $1`,
+            [installationId, newBalance]
+        );
+        await client.query(
+            `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note, category, trigger_type) VALUES ($1, 'consume', $2, $3, $4, 'RESTORE_CHARGE', 'manual')`,
+            [installationId, -costTokens, newBalance, note || null]
+        );
+        return { ok: true, balanceTokens: newBalance, tokensCharged: costTokens };
     });
 }
 // ===================================================================
@@ -1859,6 +1961,7 @@ const CLOUD_TOKEN_LEDGER_CATEGORIES = {
     ADDON_PURCHASE: 'Add-on Purchase',      // bumili ng karagdagang module/feature (à la carte) gamit tokens
     SYNC_CHARGE: 'Cloud Sync Charge',       // WHOLE token na na-deduct mula sa isang sync (manual o auto)
     SYNC_FRACTION: 'Auto-Sync Activity',    // fractional cost lang, WALANG na-deduct na buong token pa
+    RESTORE_CHARGE: 'Cloud Restore Charge', // WHOLE token na na-deduct mula sa isang cloud restore (auto-charge or manual admin charge)
     REFUND: 'Refund'                        // ibinalik na tokens dahil sa failed/incomplete sync
 };
 // AYOS (cost-optimization): i-cache sa memory ang buong /relay/cloud-tokens/wallet
@@ -2615,9 +2718,38 @@ async function computeClientCostAllocation() {
 
     const { rows } = await queryWithRetry(
         pgPool,
-        'SELECT installation_id, store_name, size_bytes, sync_count, total_records, last_sync_at FROM cloud_backup_meta ORDER BY size_bytes DESC',
+        'SELECT installation_id, store_name, size_bytes, sync_count, total_records, last_sync_at, restore_count, last_restore_at FROM cloud_backup_meta ORDER BY size_bytes DESC',
         []
     );
+    // BUGFIX: restore_count sa cloud_backup_meta ay LIFETIME cumulative
+    // counter (hindi na-reset kailanman) — kaya kung ito lang ang basehan
+    // ng "⚠️ flagged" na abuse indicator, isang lehitimong client na
+    // 3 beses lang nag-restore sa loob ng ilang TAON (hal. disaster
+    // recovery, bagong device kada matagal-tagal) ay MAGIGING PERMANENTENG
+    // naka-flag magpakailanman, kahit malayo-layo ang mga pagkakataon at
+    // hindi naman talaga abuse. Kinukuha rito ang bilang ng restore CHARGES
+    // (RESTORE_CHARGE, trigger_type='manual' — galing sa awtomatikong
+    // per-restore charge, hindi kasama ang manual admin charge) sa loob NG
+    // HULING 30 ARAW LANG mula sa cloud_token_ledger (may created_at) —
+    // rolling window, hindi lifetime — ito na ang tamang basehan ng "⚠️
+    // flagged" sa client-cost-allocation.html. Ang restore_count column mula
+    // sa cloud_backup_meta ay itinatago pa rin bilang "all-time total" para
+    // sa konteksto, pero HINDI na ito ginagamit para sa pag-flag.
+    // NOTE: trigger_type = 'manual' dito ay ang ginagamit ng
+    // consumeCloudTokensForRestore() para sa AWTOMATIKONG per-restore
+    // charge (ang totoong restore EVENT) — HINDI kapareho ng
+    // trigger_type = 'manual_admin', na isang hiwalay/punitive na
+    // deduction lang mula sa ⚡ Charge button (walang kaakibat na aktwal
+    // na restore), kaya sinasadyang HINDI kasama rito.
+    const restoreRecentResult = await queryWithRetry(
+        pgPool,
+        `SELECT installation_id, COUNT(*)::int AS recent_count
+         FROM cloud_token_ledger
+         WHERE category = 'RESTORE_CHARGE' AND trigger_type = 'manual' AND created_at > now() - interval '30 days'
+         GROUP BY installation_id`,
+        []
+    );
+    const restoreCountRecentByClient = new Map(restoreRecentResult.rows.map(r => [r.installation_id, Number(r.recent_count) || 0]));
     const totalSizeBytes = rows.reduce((sum, r) => sum + (Number(r.size_bytes) || 0), 0);
     const totalSyncCount = rows.reduce((sum, r) => sum + (Number(r.sync_count) || 0), 0);
     const n = rows.length;
@@ -2662,6 +2794,18 @@ async function computeClientCostAllocation() {
             syncCount,
             totalRecords: r.total_records,
             lastSyncAt: r.last_sync_at,
+            // AYOS/BAGO: tracking-only fields (hindi kasama sa charging
+            // computation sa itaas) — para makita kaagad kung sinong client
+            // ang sobrang dalas mag-restore (posibleng abuser) bago
+            // magdesisyon kung mag-charge pa/hihigpitan pa.
+            restoreCount: Number(r.restore_count) || 0,
+            // BUGFIX: idinagdag ang rolling 30-day count — ITO na ang
+            // dapat gamitin ng UI para sa "⚠️ flagged" (tingnan ang
+            // paliwanag sa itaas, malapit sa restoreRecentResult query).
+            // Ang restoreCount naman sa itaas ay nananatiling lifetime
+            // total, para lang sa konteksto/reference.
+            restoreCountRecent30d: restoreCountRecentByClient.get(r.installation_id) || 0,
+            lastRestoreAt: r.last_restore_at || null,
             storageSharePercent: Math.round(storageShare * 10000) / 100,
             computeSharePercent: Math.round(computeShare * 10000) / 100,
             storageCostPHP,
@@ -5423,9 +5567,21 @@ app.get('/relay/cloud-tokens/packages', requireApiKey, rateLimit('cloud-tokens-p
     // isang partikular na installation (batay sa aktwal nilang laki ng
     // datos) ay nasa /relay/cloud-tokens/wallet.
     const tokenCostPerSyncExact = {};
+    // AYOS/BAGO: kaparehong sample-size-based na catalog view, pero para sa
+    // RESTORE (tingnan ang computeRealCloudBackupRestoreCostPHP() sa itaas)
+    // — para makita ng customer, kahit bago pa lang mag-subscribe, kung
+    // gaano karaming extra tokens ang dapat panatilihing "reserve" kung
+    // sakaling kailanganin nilang mag-restore (rare/disaster-recovery lang,
+    // kaya hindi ito pinaparami kada buwan/taon tulad ng sync — isang
+    // beses lang ang tinatantya, tingnan ang estRestoreTokensPerRestore sa
+    // ibaba).
+    const tokenCostPerRestore = {};
+    const tokenCostPerRestoreExact = {};
     for (const tier of Object.keys(CLOUD_BACKUP_PLANS)) {
         tokenCostPerSync[tier] = await getCloudTokenCostPerSync(CLOUD_BACKUP_SAMPLE_SIZE_BYTES_FOR_CATALOG, tier);
         tokenCostPerSyncExact[tier] = await getCloudTokenCostPerSyncExact(CLOUD_BACKUP_SAMPLE_SIZE_BYTES_FOR_CATALOG, tier);
+        tokenCostPerRestore[tier] = await getCloudTokenCostPerRestore(CLOUD_BACKUP_SAMPLE_SIZE_BYTES_FOR_CATALOG, tier);
+        tokenCostPerRestoreExact[tier] = await getCloudTokenCostPerRestoreExact(CLOUD_BACKUP_SAMPLE_SIZE_BYTES_FOR_CATALOG, tier);
     }
     // UPDATE: the package cards used to show "Est. sync cost (1 mo.)" as a
     // plain copy of the tier's monthly price (maintenanceFeeTokens ===
@@ -5471,6 +5627,24 @@ app.get('/relay/cloud-tokens/packages', requireApiKey, rateLimit('cloud-tokens-p
         // working across the period.
         pkg.recommendedExtraBalanceMonthly = estSyncTokensPerMonth;
         pkg.recommendedExtraBalanceYearly = estSyncTokensPerYear;
+        // AYOS/BAGO: restore cost reference (per-request, hindi bahagi ng
+        // sinusundan/recurring na "recommended extra balance" sa itaas — ang
+        // restore ay hindi nangyayari on a schedule, kaya walang tamang
+        // "per month" o "per year" na bilang para dito). Isang beses lang
+        // ang tinatantya (estRestoreTokensPerRestore) gamit ang parehong
+        // CLOUD_BACKUP_SAMPLE_SIZE_BYTES_FOR_CATALOG na sample size sa
+        // itaas. Idinagdag din ang "kung sakaling kailanganin ng isang
+        // restore" na variant ng monthly/yearly total (...WithOneRestore)
+        // para makita agad ng customer, sa parehong monthly/yearly
+        // breakdown, kung magkano ang dapat panatilihing reserve kung sa
+        // palagay nila malamang kakailanganin nila ng restore sa loob ng
+        // period na iyon — HINDI ito otomatikong idinadagdag sa
+        // estTotalMonthlyTokens/estTotalYearlyTokens mismo (hindi
+        // guaranteed na mangyayari ang isang restore), purely reference lang.
+        pkg.estRestoreTokensPerRestore = tokenCostPerRestore[planTier];
+        pkg.estRestoreTokensPerRestoreExact = Math.round(tokenCostPerRestoreExact[planTier] * 1000) / 1000;
+        pkg.estTotalMonthlyTokensWithOneRestore = pkg.estTotalMonthlyTokens + pkg.estRestoreTokensPerRestore;
+        pkg.estTotalYearlyTokensWithOneRestore = pkg.estTotalYearlyTokens + pkg.estRestoreTokensPerRestore;
     }
     // AYOS: dating hard-coded (GCash/Maya/Online Banking) ang select sa
     // OMNIPOS. Ngayon, ibinabalik dito ang paymentMethods — LISTAHAN NG MGA
@@ -5484,15 +5658,21 @@ app.get('/relay/cloud-tokens/packages', requireApiKey, rateLimit('cloud-tokens-p
         packages,
         tokenCostPerSync,
         tokenCostPerSyncExact,
+        tokenCostPerRestore,
+        tokenCostPerRestoreExact,
         sampleSizeBytesUsed: CLOUD_BACKUP_SAMPLE_SIZE_BYTES_FOR_CATALOG,
         tokensPerPeso: 1,
         paymentMethods,
         // NOTE: estSyncTokensPerMonth/Year, estTotalMonthlyTokens/YearlyTokens,
-        // and recommendedExtraBalanceMonthly/Yearly on each package are
+        // recommendedExtraBalanceMonthly/Yearly, estRestoreTokensPerRestore(Exact),
+        // and estTotalMonthly/YearlyTokensWithOneRestore on each package are
         // approximate estimates based on a sample backup size — not an
         // exact forecast. Actual monthly/yearly usage will vary with the
-        // real backup size and the account's real sync frequency.
-        estimateDisclaimer: 'Sync-cost, monthly, and yearly figures are approximate estimates based on a sample backup size — not a guaranteed final cost.'
+        // real backup size and the account's real sync frequency. The
+        // restore figures are a reference only (restores are rare/unscheduled
+        // events, not a recurring monthly/yearly cost) — they are NOT
+        // included in estTotalMonthlyTokens/estTotalYearlyTokens by default.
+        estimateDisclaimer: 'Sync-cost, monthly, and yearly figures are approximate estimates based on a sample backup size — not a guaranteed final cost. Restore-cost figures are a reference only, in case a restore is needed; restores are not scheduled/recurring, so they are shown separately from — and not included in — the monthly/yearly totals.'
     });
 });
 // ===================================================================
@@ -5599,6 +5779,15 @@ app.get('/relay/cloud-tokens/wallet', requireApiKey, requireAllowedDevice, rateL
         const tierForWallet = (cloudBackupUnlockForWallet && cloudBackupUnlockForWallet.tier && CLOUD_BACKUP_PLANS[cloudBackupUnlockForWallet.tier]) ? cloudBackupUnlockForWallet.tier : 'basic';
         const realSyncCostTokensExact = Math.round((await getCloudTokenCostPerSyncExact(sizeBytesForRealCost, tierForWallet)) * 100) / 100;
         const realSyncCostTokens = await getCloudTokenCostPerSync(sizeBytesForRealCost, tierForWallet);
+        // AYOS/BAGO: kaparehong estimate pero para sa RESTORE (tingnan ang
+        // computeRealCloudBackupRestoreCostPHP() sa itaas) — magkaibang
+        // pricing model kaysa sync (Instant Restore rate, hindi prorated sa
+        // "expected operations per month"), kaya hiwalay na field ito.
+        // Ginagamit ito ng OMNIPOS bilang pre-check estimate bago pa man
+        // subukan ang aktwal na restore (na siyang TALAGANG nagcha-charge,
+        // sa RELAY /relay/cloud-backup/restore).
+        const realRestoreCostTokensExact = Math.round((await getCloudTokenCostPerRestoreExact(sizeBytesForRealCost, tierForWallet)) * 1000) / 1000;
+        const realRestoreCostTokens = await getCloudTokenCostPerRestore(sizeBytesForRealCost, tierForWallet);
         const responseBody = {
             success: true,
             balanceTokens: Number(wallet.balance_tokens),
@@ -5607,7 +5796,11 @@ app.get('/relay/cloud-tokens/wallet', requireApiKey, requireAllowedDevice, rateL
             realSyncCostTokens,
             realSyncCostTokensExact,
             realSyncCostBasedOnKnownSize: knownSizeBytes > 0,
-            realSyncCostSizeBytesUsed: sizeBytesForRealCost
+            realSyncCostSizeBytesUsed: sizeBytesForRealCost,
+            realRestoreCostTokens,
+            realRestoreCostTokensExact,
+            realRestoreCostBasedOnKnownSize: knownSizeBytes > 0,
+            realRestoreCostSizeBytesUsed: sizeBytesForRealCost
         };
         setWalletCache(installationId, responseBody);
         res.json(responseBody);
@@ -6419,6 +6612,65 @@ app.get('/relay/admin/api/client-cost-allocation', requireAdminKey, async (req, 
         res.status(500).json({ success: false, message: 'Could not compute client cost allocation.' });
     }
 });
+// AYOS/BAGO: manual "Charge" button (Client Cost Allocation admin page) —
+// para sa developer na gustong mano-manong i-charge ang isang client na
+// naka-flag bilang abuser base sa restore_count/last_restore_at tracking
+// sa itaas (hindi kailangan hintayin ang susunod na restore attempt).
+// Hiwalay ito sa awtomatikong per-restore charge (consumeCloudTokensForRestore(),
+// tinatawag sa loob ng /relay/cloud-backup/restore) — ginagamit ito para sa
+// karagdagang/punitive na charge na direktang desisyon ng developer, halimbawa
+// kung sa tingin niya hindi sapat ang standard na per-restore charge para sa
+// isang paulit-ulit na abuser.
+app.post('/relay/admin/api/devices/:installationId/charge-restore', requireAdminKey, async (req, res) => {
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured.' });
+    const { installationId } = req.params;
+    const tokens = Number(req.body?.tokens);
+    const note = (req.body?.note || '').toString().trim();
+    if (!installationId) return res.status(400).json({ success: false, message: 'Missing installationId.' });
+    if (!isFinite(tokens) || tokens <= 0) {
+        return res.status(400).json({ success: false, message: 'Provide a positive number of tokens to charge.' });
+    }
+    try {
+        const result = await runPgWriteTx(pgPool, async (client) => {
+            await client.query(
+                `INSERT INTO cloud_token_wallets (installation_id, balance_tokens, auto_sync_enabled) VALUES ($1, 0, true)
+                 ON CONFLICT (installation_id) DO NOTHING`,
+                [installationId]
+            );
+            const walletRes = await client.query(
+                `SELECT balance_tokens FROM cloud_token_wallets WHERE installation_id = $1 FOR UPDATE`,
+                [installationId]
+            );
+            const currentBalance = Number(walletRes.rows[0].balance_tokens);
+            if (currentBalance < tokens) {
+                return { ok: false, insufficient: true, balanceTokens: currentBalance };
+            }
+            const newBalance = currentBalance - tokens;
+            await client.query(
+                `UPDATE cloud_token_wallets SET balance_tokens = $2, updated_at = now() WHERE installation_id = $1`,
+                [installationId, newBalance]
+            );
+            await client.query(
+                `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note, category, trigger_type) VALUES ($1, 'consume', $2, $3, $4, 'RESTORE_CHARGE', 'manual_admin')`,
+                [installationId, -tokens, newBalance, note ? `Manual restore-abuse charge (admin): ${note}` : 'Manual restore-abuse charge (admin)']
+            );
+            return { ok: true, balanceTokens: newBalance };
+        });
+        if (!result.ok) {
+            return res.status(402).json({
+                success: false,
+                insufficientTokens: true,
+                balanceTokens: result.balanceTokens,
+                message: `This client's balance (${result.balanceTokens}) is lower than the ${tokens} token(s) you tried to charge.`
+            });
+        }
+        invalidateWalletCache(installationId);
+        logActivity(installationId, 'cloud_backup_restore_manual_charge', { tokens, note: note || null, balanceAfter: result.balanceTokens });
+        res.json({ success: true, tokensCharged: tokens, balanceTokens: result.balanceTokens });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 app.post('/relay/admin/api/client-cost-allocation/maintenance-fee', requireAdminKey, (req, res) => {
     const { defaultFeePHP, installationId, feePHP } = req.body || {};
     if (typeof defaultFeePHP === 'number' && isFinite(defaultFeePHP) && defaultFeePHP >= 0) {
@@ -6496,7 +6748,13 @@ app.get('/relay/admin/api/cloud-backup/:installationId/download', requireAdminKe
         res.status(500).json({ success: false, message: err.message });
     }
 });
-app.post('/relay/cloud-backup/restore', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-restore', 10, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+// TIGHTENED CAP: a legitimate restore (new device setup, disaster
+// recovery) is a rare, one-off event for a real customer — it should never
+// need to repeat many times in a single hour. Lowered from 10/hour to
+// 5/day per installationId, which still comfortably covers any real
+// recovery scenario while making repeated/scripted restore abuse far
+// harder to pull off.
+app.post('/relay/cloud-backup/restore', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-restore', 5, 24 * 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
     const { installationId, hardwareFingerprint } = req.body;
     if (!installationId || !hardwareFingerprint) {
         return res.status(400).json({ success: false, message: 'Kulang ang installationId o hardwareFingerprint.' });
@@ -6544,12 +6802,45 @@ app.post('/relay/cloud-backup/restore', requireApiKey, requireAllowedDevice, rat
         if (!metaResult.rows[0]) {
             return res.status(404).json({ success: false, message: 'Walang cloud backup na nakita para sa installation na ito.' });
         }
+        // AYOS/BAGO: proportional-to-size token charge for the restore
+        // itself (same PHP-from-real-Neon-cost model as sync — see
+        // computeRealCloudBackupRestoreCostPHP() above). This gives the
+        // restore a small real cost to the customer, discourages
+        // repeated/abusive restores, and covers the actual Neon
+        // compute/egress cost of pulling the whole backup back out.
+        const subscriptionForRestoreCharge = getCloudBackupSubscriptionForClient(installationId);
+        const tierForRestoreCharge = subscriptionForRestoreCharge.tier || 'basic';
+        const sizeBytesForRestoreCharge = Number(metaResult.rows[0].size_bytes) || 0;
+        const chargeResult = await consumeCloudTokensForRestore(installationId, sizeBytesForRestoreCharge, tierForRestoreCharge, 'Cloud Backup restore');
+        if (!chargeResult.ok) {
+            logActivity(installationId, 'cloud_backup_restore_blocked', { reason: 'insufficient_tokens', balanceTokens: chargeResult.balanceTokens });
+            const tokenCostPerRestoreExact = Math.round((await getCloudTokenCostPerRestoreExact(sizeBytesForRestoreCharge, tierForRestoreCharge)) * 1000) / 1000;
+            return res.status(402).json({
+                success: false,
+                insufficientTokens: true,
+                balanceTokens: chargeResult.balanceTokens,
+                tokenCostPerRestore: chargeResult.costTokens,
+                tokenCostPerRestoreExact,
+                message: `Insufficient Cloud Backup tokens (balance: ${chargeResult.balanceTokens}, needed: ~${tokenCostPerRestoreExact} for this restore). Please buy more Omni Tokens on the Omni Tokens page.`
+            });
+        }
         const modulesResult = await queryWithRetry(pgPool, 'SELECT module, data, record_count FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
         const modules = {};
         modulesResult.rows.forEach((r) => { modules[r.module] = r.data; });
+        // AYOS/BAGO: tracking-only (walang kinalaman sa charging sa itaas) —
+        // para may visibility kung sino ang sobrang dalas mag-restore, bago
+        // magdesisyon kung mas hihigpitan pa/mas taasan ang charge. Makikita
+        // ito sa Client Cost Allocation report (computeClientCostAllocation()).
+        await queryWithRetry(
+            pgPool,
+            'UPDATE cloud_backup_meta SET restore_count = restore_count + 1, last_restore_at = now() WHERE installation_id = $1',
+            [installationId]
+        );
         logActivity(installationId, 'cloud_backup_restored', {
             moduleCount: modulesResult.rows.length,
-            lastSyncAt: metaResult.rows[0].last_sync_at
+            lastSyncAt: metaResult.rows[0].last_sync_at,
+            tokensCharged: chargeResult.tokensCharged,
+            balanceAfter: chargeResult.balanceTokens
         });
         res.json({
             success: true,
@@ -6561,7 +6852,9 @@ app.post('/relay/cloud-backup/restore', requireApiKey, requireAllowedDevice, rat
                 lastSyncAt: metaResult.rows[0].last_sync_at
             },
             modules,
-            redactedFieldsByModule: CLOUD_BACKUP_REDACTED_FIELDS_BY_MODULE
+            redactedFieldsByModule: CLOUD_BACKUP_REDACTED_FIELDS_BY_MODULE,
+            tokensCharged: chargeResult.tokensCharged,
+            balanceTokens: chargeResult.balanceTokens
         });
     } catch (err) {
         console.error('⚠️ CLOUD_BACKUP: hindi na-kuha mula sa Postgres:', err.message);
