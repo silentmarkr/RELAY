@@ -1,6 +1,7 @@
 
 const express = require('express');
 const crypto = require('crypto');
+const zlib = require('zlib');
 const nodemailer = require('nodemailer');
 const path = require('path');
 const fs = require('fs');
@@ -5165,6 +5166,20 @@ app.post('/relay/cloud-backup/upload/start', requireApiKey, requireAllowedDevice
     if (!installationId || typeof totalBytes !== 'number' || totalBytes <= 0) {
         return res.status(400).json({ success: false, message: 'Missing or invalid installationId/totalBytes.' });
     }
+    // AYOS/BAGO: kung gzip-compressed ang papadalang buong backup (bagong
+    // OMNIPOS client), `totalBytes` dito ay ang COMPRESSED na laki (ito
+    // ang aktwal na bytes na ipapasa sa /upload/chunk). Kung ibinigay ng
+    // client ang `uncompressedSizeBytes` (ang tunay na decompressed na
+    // laki), gamitin natin ITO para sa mga pre-check sa ibaba (token
+    // balance estimate, storage quota) — mas tumpak ito kaysa sa
+    // compressed size. Kung wala namang naipasa (mas lumang client na
+    // hindi pa naka-gzip), babalik lang ito sa totalBytes gaya ng dati —
+    // walang pagbabago sa behavior nila.
+    const compressed = req.body && req.body.compressed === true;
+    const uncompressedSizeBytesRaw = req.body ? req.body.uncompressedSizeBytes : undefined;
+    const sizeBytesForPrecheck = (typeof uncompressedSizeBytesRaw === 'number' && uncompressedSizeBytesRaw > 0)
+        ? uncompressedSizeBytesRaw
+        : totalBytes;
     if (!isFeatureCurrentlyUnlocked(installationId, 'cloud_backup')) {
         logActivity(installationId, 'cloud_backup_blocked', { reason: 'feature_not_unlocked' });
         return res.status(402).json({
@@ -5196,7 +5211,7 @@ app.post('/relay/cloud-backup/upload/start', requireApiKey, requireAllowedDevice
         // AYOS/BUGFIX: `totalBytes` na ang AKTWAL na deklaradong laki ng
         // upload na ito (hindi na basta tier-derived/maintenance-fee-based
         // na estimate) — tingnan ang comment sa getCloudTokenCostPerSyncExact().
-        const minCostForPrecheck = await getCloudTokenCostPerSyncExact(totalBytes, tierForPrecheck);
+        const minCostForPrecheck = await getCloudTokenCostPerSyncExact(sizeBytesForPrecheck, tierForPrecheck);
         if (Number(walletRow.balance_tokens) < minCostForPrecheck) {
             logActivity(installationId, 'cloud_backup_blocked', { reason: 'insufficient_tokens', balanceTokens: Number(walletRow.balance_tokens) });
             return res.status(402).json({
@@ -5227,7 +5242,7 @@ app.post('/relay/cloud-backup/upload/start', requireApiKey, requireAllowedDevice
     const cloudBackupUnlockForQuota = (issuedUnlocks[installationId] || {})['cloud_backup'];
     const tier = (cloudBackupUnlockForQuota && cloudBackupUnlockForQuota.tier && CLOUD_BACKUP_PLANS[cloudBackupUnlockForQuota.tier]) ? cloudBackupUnlockForQuota.tier : 'basic';
     const quotaMB = CLOUD_BACKUP_PLANS[tier].storageQuotaMB;
-    const totalMB = Math.round((totalBytes / (1024 * 1024)) * 100) / 100;
+    const totalMB = Math.round((sizeBytesForPrecheck / (1024 * 1024)) * 100) / 100;
     if (totalMB > quotaMB) {
         logActivity(installationId, 'cloud_backup_blocked', { reason: 'storage_quota_exceeded', tier, quotaMB, sizeMB: totalMB });
         return res.status(413).json({
@@ -5244,6 +5259,7 @@ app.post('/relay/cloud-backup/upload/start', requireApiKey, requireAllowedDevice
     CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS.set(uploadId, {
         installationId,
         totalBytes,
+        compressed,
         receivedBytes: 0,
         chunks: [],
         tier,
@@ -5296,7 +5312,15 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
     let parsedBody;
     try {
         const fullBuffer = Buffer.concat(session.chunks, session.receivedBytes);
-        parsedBody = JSON.parse(fullBuffer.toString('utf8'));
+        // AYOS/BAGO: kung na-flag bilang gzip-compressed ang upload session
+        // na ito (mula sa upload/start — tingnan ang `compressed` doon),
+        // i-decompress muna bago i-JSON.parse. Kung hindi naman naka-flag
+        // (mas lumang client, walang gzip), plain JSON pa rin ang inaasahan
+        // gaya ng dati — walang pagbabago sa kanilang behavior. Anumang
+        // error dito (sirang gzip, corrupted JSON) ay nahuhuli pa rin ng
+        // parehong catch block sa ibaba — walang bagong failure mode.
+        const rawBuffer = session.compressed ? zlib.gunzipSync(fullBuffer) : fullBuffer;
+        parsedBody = JSON.parse(rawBuffer.toString('utf8'));
     } catch (err) {
         cleanupCloudBackupUploadSession(String(uploadId));
         return res.status(400).json({ success: false, message: 'Could not parse the assembled backup data as JSON — the upload may have been corrupted in transit. Please try syncing again.' });
@@ -6842,7 +6866,7 @@ app.post('/relay/cloud-backup/restore', requireApiKey, requireAllowedDevice, rat
             tokensCharged: chargeResult.tokensCharged,
             balanceAfter: chargeResult.balanceTokens
         });
-        res.json({
+        const restoreResponseBody = {
             success: true,
             message: 'Nakuha ang cloud backup para sa installation na ito.',
             meta: {
@@ -6855,7 +6879,26 @@ app.post('/relay/cloud-backup/restore', requireApiKey, requireAllowedDevice, rat
             redactedFieldsByModule: CLOUD_BACKUP_REDACTED_FIELDS_BY_MODULE,
             tokensCharged: chargeResult.tokensCharged,
             balanceTokens: chargeResult.balanceTokens
-        });
+        };
+        // AYOS/BAGO: i-gzip ang buong restore payload (ito ang pinakamalaking
+        // response sa buong RELAY — kasing-laki ng buong backup) gamit ang
+        // STANDARD na HTTP `Content-Encoding: gzip` header, hindi custom na
+        // format. Anumang normal na HTTP client (kasama na ang built-in
+        // fetch() ng Node na ginagamit ng OMNIPOS) ay awtomatikong
+        // nagde-decode nito bago pa man umabot sa JSON.parse — kaya walang
+        // kailangang baguhin sa client side. Kung sakaling may consumer sa
+        // hinaharap na hindi marunong mag-decode ng gzip (hal. curl na
+        // walang --compressed flag), makikita nila ito bilang binary
+        // garbage sa halip na JSON — pero ang TANGING kilalang consumer ng
+        // endpoint na ito ngayon ay ang OMNIPOS server mismo, kaya ligtas
+        // ito. Kung may error/rejection response naman (402/403/404/atbp.),
+        // hindi ito dinadaanan — plain/uncompressed JSON pa rin ang mga
+        // 'yon gaya ng dati.
+        const restoreResponseJson = JSON.stringify(restoreResponseBody);
+        const restoreResponseGzipped = zlib.gzipSync(restoreResponseJson);
+        res.set('Content-Type', 'application/json; charset=utf-8');
+        res.set('Content-Encoding', 'gzip');
+        res.send(restoreResponseGzipped);
     } catch (err) {
         console.error('⚠️ CLOUD_BACKUP: hindi na-kuha mula sa Postgres:', err.message);
         res.status(500).json({ success: false, message: 'May error habang kinukuha mula sa Postgres: ' + err.message });
