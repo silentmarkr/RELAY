@@ -1037,50 +1037,99 @@ function getCloudTokenPackages() {
     }
     return packages;
 }
-// Presyo (sa tokens) kada ISANG successful sync ng kasalukuyang tier —
-// (buwanang presyo) / (inaasahang bilang ng auto-syncs kada buwan),
-// pinapalago pataas (Math.ceil) para hindi kailanman ma-undercharge,
-// minimum 1 token kada sync.
-// NOTE: ESTIMATE/DISPLAY LANG ito ngayon (ipinapakita sa OMNIPOS admin
+// AYOS/BUGFIX: dating ang presyo (sa tokens) kada isang sync ay derived
+// sa MAINTENANCE FEE ng tier (plan.price.monthly / inaasahang bilang ng
+// auto-syncs kada buwan) — kaya kapag binago ang maintenance fee dito sa
+// RELAY pricing admin, KASABAY na ring nagbabago ang "Est. sync cost"/
+// "Cost per sync" kahit hindi naman talaga nagbago ang laki ng data ng
+// customer. Ngayon, HIWALAY na ito sa maintenance fee: batay na lang sa
+// AKTWAL na laki (bytes) ng datos na sini-sync at sa TOTOONG Neon storage
+// rate (₱/GB/buwan, mula sa Neon plan na naka-configure para sa Cloud
+// Backup — tingnan ang NEON_PRICING/neonConfiguredPlans sa itaas), pinag-
+// prorate lang ayon sa dalas ng auto-sync ng tier (autoBackupIntervalMs,
+// hal. isang upload bawat araw sa Basic) para makuha ang presyo kada
+// ISANG sync. Ang tier ay ginagamit LANG dito para sa dalas ng pag-sync
+// (hindi na para sa presyo) — kaya ang pagbabago ng maintenance fee sa
+// pricing admin ay hindi na makakaapekto rito kailanman.
+function computeRealCloudBackupSyncCostPHP(sizeBytes, tier, usdToPhpRate) {
+    const plan = CLOUD_BACKUP_PLANS[tier] || CLOUD_BACKUP_PLANS.basic;
+    const sizeBytesSafe = Math.max(0, Number(sizeBytes) || 0);
+    const sizeGB = sizeBytesSafe / (1024 * 1024 * 1024);
+    const sizeMB = sizeBytesSafe / (1024 * 1024);
+    const neonPlanId = neonConfiguredPlans.cloudBackup || 'free';
+    let neonTier = NEON_PRICING[neonPlanId];
+    // Ang Free tier ay walang bayad na storage/compute rate ($0) — hindi
+    // ito makatotohanang batayan kung TALAGANG may bayad na Neon account
+    // (mali lang ang naka-configure na dropdown dito sa admin panel).
+    // Gamitin muna ang Launch rate (pinaka-conservative na paid-tier
+    // estimate) kapag ganito — kaparehong pattern ng ginagawa ng
+    // computeNeonRealCost() sa itaas.
+    if (!neonTier || !neonTier.storageRatePerGBMonthUSD) neonTier = NEON_PRICING.launch;
+    // STORAGE component
+    const monthlyStorageCostUSD = sizeGB * neonTier.storageRatePerGBMonthUSD;
+    const expectedSyncsPerMonth = Math.max(1, Math.round((30 * 24 * 60 * 60 * 1000) / plan.autoBackupIntervalMs));
+    const perSyncStorageCostUSD = monthlyStorageCostUSD / expectedSyncsPerMonth;
+    // AYOS/BAGO: COMPUTE component — bukod sa storage, may bayad din ang
+    // Neon sa COMPUTE (CU-hours). Gamit ang admin-configurable na
+    // "cloudBackupSyncCompute" assumption (tingnan ang NEON_PRICING_BASE
+    // sa itaas para sa buong paliwanag), kinukwenta dito ang conservative
+    // na estimate ng compute time na "nagagamit" ng ISANG sync — base
+    // overhead (segundo) + karagdagang oras batay sa laki ng na-upload na
+    // datos (mas malaki ang datos = mas matagal ang assumed na compute
+    // time). Ang computeRatePerCUHourUSD ng Free tier ay $0 rin — parehong
+    // fallback sa Launch rate ang ginagamit dito.
+    const computeRateUSD = (typeof neonTier.computeRatePerCUHourUSD === 'number' && neonTier.computeRatePerCUHourUSD > 0)
+        ? neonTier.computeRatePerCUHourUSD
+        : NEON_PRICING.launch.computeRatePerCUHourUSD;
+    const computeAssumption = NEON_PRICING.cloudBackupSyncCompute || NEON_PRICING_BASE.cloudBackupSyncCompute;
+    const assumedComputeSeconds = computeAssumption.assumedBaseSeconds + (sizeMB * computeAssumption.assumedSecondsPerMB);
+    const assumedComputeCUHours = computeAssumption.assumedCU * (assumedComputeSeconds / 3600);
+    const perSyncComputeCostUSD = assumedComputeCUHours * computeRateUSD;
+    const perSyncCostUSD = perSyncStorageCostUSD + perSyncComputeCostUSD;
+    const rate = usdToPhpRate || EXCHANGE_RATE_FALLBACK_USD_TO_PHP;
+    return perSyncCostUSD * rate;
+}
+// "Ilustratibong" sample size lang (hal. sa packages catalog, kung saan
+// wala pang partikular na installation/aktwal na laki ng datos na
+// mapagbabatayan) — 5MB, katulad ng halimbawang ginamit sa paghingi ng
+// bugfix na ito.
+const CLOUD_BACKUP_SAMPLE_SIZE_BYTES_FOR_CATALOG = 5 * 1024 * 1024;
+// EKSAKTONG (fractional, walang rounding) na presyo kada isang sync — ito
+// na ang totoong batayan ng pag-charge. `sizeBytes` ang AKTWAL na laki ng
+// datos na sini-sync (o pinakahuling kilalang laki, kung estimate/display
+// lang ang layunin) — HINDI na ang buwanang presyo ng tier ang ginagamit.
+async function getCloudTokenCostPerSyncExact(sizeBytes, tier) {
+    const { rate } = await getUsdToPhpRate();
+    return computeRealCloudBackupSyncCostPHP(sizeBytes, tier, rate);
+}
+// Presyo (sa tokens) kada ISANG successful sync, pinapalago pataas
+// (Math.ceil) para hindi kailanman ma-undercharge, minimum 1 token kada
+// sync. NOTE: ESTIMATE/DISPLAY LANG ito (ipinapakita sa OMNIPOS admin
 // panel bago pa man mag-sync, at ginagamit bilang paunang "gate" kung
 // sapat kaya ang balance) — HINDI na ito ang aktwal na ginagamit sa
 // pag-charge. Ang totoong pag-charge (exact, hindi pataas ang rounding)
-// ay nasa getCloudTokenCostPerSyncExact() + consumeCloudTokensForSyncExact()
+// ay nasa getCloudTokenCostPerSyncExact() sa itaas + consumeCloudTokensForSyncExact()
 // sa ibaba.
-function getCloudTokenCostPerSync(tier) {
-    const plan = CLOUD_BACKUP_PLANS[tier] || CLOUD_BACKUP_PLANS.basic;
-    const monthlyPrice = plan.price.monthly;
-    const expectedSyncsPerMonth = Math.max(1, Math.round((30 * 24 * 60 * 60 * 1000) / plan.autoBackupIntervalMs));
-    return Math.max(1, Math.ceil(monthlyPrice / expectedSyncsPerMonth));
-}
-// AYOS/BUGFIX: EKSAKTONG (fractional, walang rounding) na presyo kada
-// isang sync — ito na ang totoong batayan ng pag-charge. Kinukuha
-// LIVE mula sa CLOUD_BACKUP_PLANS (parehong pinagmumulan ng presyo ng
-// buong system, kaya awtomatikong sumusunod ito kapag binago ang presyo
-// ng tier dito sa RELAY — walang ibang lugar na kailangan pang i-update).
-function getCloudTokenCostPerSyncExact(tier) {
-    const plan = CLOUD_BACKUP_PLANS[tier] || CLOUD_BACKUP_PLANS.basic;
-    const monthlyPrice = plan.price.monthly;
-    const expectedSyncsPerMonth = Math.max(1, Math.round((30 * 24 * 60 * 60 * 1000) / plan.autoBackupIntervalMs));
-    return monthlyPrice / expectedSyncsPerMonth;
+async function getCloudTokenCostPerSync(sizeBytes, tier) {
+    const exact = await getCloudTokenCostPerSyncExact(sizeBytes, tier);
+    return Math.max(1, Math.ceil(exact));
 }
 // AYOS/BUGFIX: atomic, EKSAKTONG pag-charge kada sync (pinapalitan ang
 // dating "ipasa na lang mula OMNIPOS ang Math.ceil na tokens" na paraan).
-// Sa bawat tawag: idinadagdag ang eksaktong (fractional) na presyo ng
-// tier na ito sa naipong "sync_fraction_accrued" ng wallet, tapos isang
-// WHOLE token lang ang aktwal na binabawas sa balance kapag umabot na sa
-// 1.0 pataas ang bagong kabuuan — ang labi (fraction < 1.0) ay
-// naka-imbak lang, hihintayin ng susunod na sync. Sa mahabang panahon,
-// ang KABUUANG tokens na nako-consume ay EKSAKTONG tutumbas (hindi na
-// laging sobra) sa monthly price ng tier — kahit magpalit pa ng presyo
-// dito sa RELAY anumang oras, sumusunod lang ito nang eksakto dahil
-// live na live() kinukuha ang presyo sa bawat tawag.
-// Kapag nagbago ang tier mula sa huling naka-accrue na fraction (hal.
-// nag-upgrade/downgrade ang installation), i-reset muna sa 0 ang
-// fraction bago magdagdag — ibang batayan na kasi ang presyo, hindi na
-// dapat pagsamahin ang natitirang fraction ng lumang tier.
-async function consumeCloudTokensForSyncExact(installationId, tier, note) {
-    const costFraction = getCloudTokenCostPerSyncExact(tier);
+// Sa bawat tawag: idinadagdag ang eksaktong (fractional) na presyo — batay
+// na ngayon sa AKTWAL na laki ng datos na sini-sync (`sizeBytes`), HINDI
+// na sa maintenance fee ng tier — sa naipong "sync_fraction_accrued" ng
+// wallet, tapos isang WHOLE token lang ang aktwal na binabawas sa balance
+// kapag umabot na sa 1.0 pataas ang bagong kabuuan — ang labi
+// (fraction < 1.0) ay naka-imbak lang, hihintayin ng susunod na sync.
+// AYOS/BUGFIX: dahil ang batayan ng presyo ngayon ay ang AKTWAL na laki ng
+// datos (natural na nagbabago-bago nang kaunti sa bawat sync) at hindi na
+// isang static na "presyo ng tier", tinanggal na ang dating "i-reset kapag
+// nagbago ang tier" na lohika — hindi na ito naaangkop, dahil wala nang
+// discrete na "presyo ng tier" na pwedeng magbago sa unang lugar. Ang
+// natitirang fraction ay palaging pinagsasama, anuman ang tier.
+async function consumeCloudTokensForSyncExact(installationId, sizeBytes, tier, note) {
+    const costFraction = await getCloudTokenCostPerSyncExact(sizeBytes, tier);
     return runPgWriteTx(pgPool, async (client) => {
         await client.query(
             `INSERT INTO cloud_token_wallets (installation_id, balance_tokens, auto_sync_enabled) VALUES ($1, 0, true)
@@ -1092,7 +1141,7 @@ async function consumeCloudTokensForSyncExact(installationId, tier, note) {
             [installationId]
         );
         const row = walletRes.rows[0];
-        const baseFraction = (row.sync_fraction_tier === tier) ? Number(row.sync_fraction_accrued) : 0;
+        const baseFraction = Number(row.sync_fraction_accrued) || 0;
         const newFraction = baseFraction + costFraction;
         const wholeTokens = Math.floor(newFraction);
         const remainder = newFraction - wholeTokens;
@@ -1913,7 +1962,26 @@ const NEON_PRICING_BASE = {
     },
     // Mga karagdagang rate na hiwalay sa itaas (parehas ito sa Launch at Scale)
     instantRestoreRatePerGBMonthUSD: 0.20,
-    snapshotRatePerGBMonthUSD: 0.09
+    snapshotRatePerGBMonthUSD: 0.09,
+    // AYOS/BAGO: idinagdag ang COMPUTE cost assumption para sa Cloud Backup
+    // per-sync charge (tingnan ang computeRealCloudBackupSyncCostPHP() sa
+    // ibaba). Bukod sa storage, may bayad din ang Neon sa COMPUTE
+    // (CU-hours) — pero dahil SHARED na compute endpoint ito para sa LAHAT
+    // ng Cloud Backup client, hindi praktikal na sukatin ang EKSAKTONG
+    // CU-seconds ng bawat indibidwal na sync sa real time (walang ganitong
+    // API si Neon). Ito ay isang CONSERVATIVE (sadyang medyo mataas, hindi
+    // mababa) na estimate kung gaano karaming compute time ang dapat
+    // iattribute sa ISANG sync — admin-configurable (tingnan ang
+    // GET/POST /relay/admin/api/pricing/neon) para maaring i-verify/i-adjust
+    // ito paminsan-minsan laban sa TOTOONG Neon compute bill (tingnan ang
+    // Client Cost Allocation report, na kumukuha ng aktwal na usage mula sa
+    // Neon account API) — itaas ang mga value na ito kung mas mataas pala
+    // ang totoong bill kumpara sa nako-kolekta.
+    cloudBackupSyncCompute: {
+        assumedCU: 0.25,          // Neon's smallest/minimum compute size
+        assumedBaseSeconds: 3,    // base connection/query overhead kada sync
+        assumedSecondsPerMB: 0.5  // karagdagang segundo kada MB ng na-upload na datos
+    }
 };
 const NEON_PRICING_OVERRIDES_PATH = path.join(__dirname, 'neon-pricing-overrides.json');
 async function loadNeonPricingOverrides() {
@@ -1948,6 +2016,12 @@ function recomputeNeonPricing() {
         ? neonPricingOverrides.instantRestoreRatePerGBMonthUSD : NEON_PRICING_BASE.instantRestoreRatePerGBMonthUSD;
     merged.snapshotRatePerGBMonthUSD = (typeof neonPricingOverrides.snapshotRatePerGBMonthUSD === 'number')
         ? neonPricingOverrides.snapshotRatePerGBMonthUSD : NEON_PRICING_BASE.snapshotRatePerGBMonthUSD;
+    const computeOverride = neonPricingOverrides.cloudBackupSyncCompute || {};
+    merged.cloudBackupSyncCompute = {
+        assumedCU: (typeof computeOverride.assumedCU === 'number') ? computeOverride.assumedCU : NEON_PRICING_BASE.cloudBackupSyncCompute.assumedCU,
+        assumedBaseSeconds: (typeof computeOverride.assumedBaseSeconds === 'number') ? computeOverride.assumedBaseSeconds : NEON_PRICING_BASE.cloudBackupSyncCompute.assumedBaseSeconds,
+        assumedSecondsPerMB: (typeof computeOverride.assumedSecondsPerMB === 'number') ? computeOverride.assumedSecondsPerMB : NEON_PRICING_BASE.cloudBackupSyncCompute.assumedSecondsPerMB
+    };
     NEON_PRICING = merged;
 }
 // Anong Neon plan ang aktwal na ginagamit ngayon para sa bawat database
@@ -4785,7 +4859,10 @@ app.post('/relay/cloud-backup/upload/start', requireApiKey, requireAllowedDevice
         const walletRow = await getOrCreateCloudTokenWallet(installationId);
         const cloudBackupUnlockForPrecheck = (issuedUnlocks[installationId] || {})['cloud_backup'];
         const tierForPrecheck = (cloudBackupUnlockForPrecheck && cloudBackupUnlockForPrecheck.tier && CLOUD_BACKUP_PLANS[cloudBackupUnlockForPrecheck.tier]) ? cloudBackupUnlockForPrecheck.tier : 'basic';
-        const minCostForPrecheck = getCloudTokenCostPerSyncExact(tierForPrecheck);
+        // AYOS/BUGFIX: `totalBytes` na ang AKTWAL na deklaradong laki ng
+        // upload na ito (hindi na basta tier-derived/maintenance-fee-based
+        // na estimate) — tingnan ang comment sa getCloudTokenCostPerSyncExact().
+        const minCostForPrecheck = await getCloudTokenCostPerSyncExact(totalBytes, tierForPrecheck);
         if (Number(walletRow.balance_tokens) < minCostForPrecheck) {
             logActivity(installationId, 'cloud_backup_blocked', { reason: 'insufficient_tokens', balanceTokens: Number(walletRow.balance_tokens) });
             return res.status(402).json({
@@ -4951,7 +5028,10 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
     // ===================================================================
     let tokenConsumeResult;
     try {
-        tokenConsumeResult = await consumeCloudTokensForSyncExact(installationId, tier, 'Cloud backup sync');
+        // AYOS/BUGFIX: `projectedSizeBytes` (ang AKTWAL na laki ng datos na
+        // kasasama lang i-serialize sa itaas) ang ipinapasa ngayon bilang
+        // batayan ng presyo — hindi na ang tier/maintenance fee.
+        tokenConsumeResult = await consumeCloudTokensForSyncExact(installationId, projectedSizeBytes, tier, 'Cloud backup sync');
         invalidateWalletCache(installationId);
     } catch (consumeErr) {
         // AYOS: fail-CLOSED — kung nabigo ang atomic charge mismo (hal.
@@ -5115,7 +5195,7 @@ app.get('/relay/cloud-backup/usage', requireApiKey, requireAllowedDevice, rateLi
 // RELAY (hindi sa OMNIPOS/kliyente) para hindi ito ma-tamper — ang
 // OMNIPOS lang ang basta magta-trigger ng purchase/check-and-consume.
 // ===================================================================
-app.get('/relay/cloud-tokens/packages', requireApiKey, rateLimit('cloud-tokens-packages', 120, 60 * 60 * 1000), (req, res) => {
+app.get('/relay/cloud-tokens/packages', requireApiKey, rateLimit('cloud-tokens-packages', 120, 60 * 60 * 1000), async (req, res) => {
     const packages = getCloudTokenPackages();
     const tokenCostPerSync = {};
     // AYOS: bukod sa dating rounded-up (ceil) na estimate, ibinabalik na rin
@@ -5124,10 +5204,17 @@ app.get('/relay/cloud-tokens/packages', requireApiKey, rateLimit('cloud-tokens-p
     // pag-charge (consumeCloudTokensForSyncExact). Ito ang dapat ipakita sa
     // customer bilang "totoong" presyo kada sync (average), hindi na yung
     // paitaas-palaging ceil na estimate lang.
+    // AYOS/BUGFIX: ito ay isang GENERIC na catalog view (walang partikular
+    // na installationId dito, kaya walang aktwal na laki ng datos na
+    // mapagbabatayan) — gumagamit na lang ito ng CLOUD_BACKUP_SAMPLE_SIZE_BYTES_FOR_CATALOG
+    // (5MB, ilustratibong halimbawa lang) bilang batayan, HINDI na ang
+    // maintenance fee ng tier. Ang totoong/eksaktong presyo kada sync ng
+    // isang partikular na installation (batay sa aktwal nilang laki ng
+    // datos) ay nasa /relay/cloud-tokens/wallet.
     const tokenCostPerSyncExact = {};
     for (const tier of Object.keys(CLOUD_BACKUP_PLANS)) {
-        tokenCostPerSync[tier] = getCloudTokenCostPerSync(tier);
-        tokenCostPerSyncExact[tier] = getCloudTokenCostPerSyncExact(tier);
+        tokenCostPerSync[tier] = await getCloudTokenCostPerSync(CLOUD_BACKUP_SAMPLE_SIZE_BYTES_FOR_CATALOG, tier);
+        tokenCostPerSyncExact[tier] = await getCloudTokenCostPerSyncExact(CLOUD_BACKUP_SAMPLE_SIZE_BYTES_FOR_CATALOG, tier);
     }
     // AYOS: dating hard-coded (GCash/Maya/Online Banking) ang select sa
     // OMNIPOS. Ngayon, ibinabalik dito ang paymentMethods — LISTAHAN NG MGA
@@ -5136,7 +5223,7 @@ app.get('/relay/cloud-tokens/packages', requireApiKey, rateLimit('cloud-tokens-p
     // kaya kung ano lang ang naka-set sa Render env, iyon lang ang
     // lalabas/mapipili.
     const paymentMethods = getAvailablePaymentMethods();
-    res.json({ success: true, packages, tokenCostPerSync, tokenCostPerSyncExact, tokensPerPeso: 1, paymentMethods });
+    res.json({ success: true, packages, tokenCostPerSync, tokenCostPerSyncExact, sampleSizeBytesUsed: CLOUD_BACKUP_SAMPLE_SIZE_BYTES_FOR_CATALOG, tokensPerPeso: 1, paymentMethods });
 });
 app.get('/relay/cloud-tokens/wallet', requireApiKey, requireAllowedDevice, rateLimit('cloud-tokens-wallet', 120, 60 * 60 * 1000, (req) => req.query?.installationId), async (req, res) => {
     const installationId = String(req.query.installationId || '').trim();
@@ -5157,11 +5244,33 @@ app.get('/relay/cloud-tokens/wallet', requireApiKey, requireAllowedDevice, rateL
              WHERE installation_id = $1 AND status = 'pending' ORDER BY created_at DESC LIMIT 5`,
             [installationId]
         );
+        // AYOS/BUGFIX: idinagdag ang TOTOONG (data-size-based, hindi na
+        // maintenance-fee-based) na presyo kada sync PARA SA PARTIKULAR NA
+        // INSTALLATION NA ITO — batay sa kanyang huling kilalang aktwal na
+        // laki ng backup (cloud_backup_meta.size_bytes). Kung wala pa itong
+        // naitatalang backup (bagong subscriber), gamitin muna ang 5MB na
+        // ilustratibong sample bilang panandaliang estimate — mapapalitan
+        // na ito ng totoong laki sa unang successful sync.
+        const metaSizeResult = await queryWithRetry(
+            pgPool,
+            'SELECT size_bytes FROM cloud_backup_meta WHERE installation_id = $1',
+            [installationId]
+        );
+        const knownSizeBytes = metaSizeResult.rows[0] ? Number(metaSizeResult.rows[0].size_bytes) || 0 : 0;
+        const sizeBytesForRealCost = knownSizeBytes > 0 ? knownSizeBytes : CLOUD_BACKUP_SAMPLE_SIZE_BYTES_FOR_CATALOG;
+        const cloudBackupUnlockForWallet = (issuedUnlocks[installationId] || {})['cloud_backup'];
+        const tierForWallet = (cloudBackupUnlockForWallet && cloudBackupUnlockForWallet.tier && CLOUD_BACKUP_PLANS[cloudBackupUnlockForWallet.tier]) ? cloudBackupUnlockForWallet.tier : 'basic';
+        const realSyncCostTokensExact = Math.round((await getCloudTokenCostPerSyncExact(sizeBytesForRealCost, tierForWallet)) * 100) / 100;
+        const realSyncCostTokens = await getCloudTokenCostPerSync(sizeBytesForRealCost, tierForWallet);
         const responseBody = {
             success: true,
             balanceTokens: Number(wallet.balance_tokens),
             ledger: ledgerResult.rows,
-            pendingPurchases: pendingResult.rows
+            pendingPurchases: pendingResult.rows,
+            realSyncCostTokens,
+            realSyncCostTokensExact,
+            realSyncCostBasedOnKnownSize: knownSizeBytes > 0,
+            realSyncCostSizeBytesUsed: sizeBytesForRealCost
         };
         setWalletCache(installationId, responseBody);
         res.json(responseBody);
@@ -5557,7 +5666,15 @@ app.post('/relay/cloud-tokens/check-and-consume', requireApiKey, requireAllowedD
     if (!tier || !CLOUD_BACKUP_PLANS[tier]) return res.status(400).json({ success: false, message: 'Invalid o missing na Cloud Backup tier.' });
     if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
     try {
-        const result = await consumeCloudTokensForSyncExact(installationId, tier, note);
+        // AYOS/BUGFIX: DEPRECATED na endpoint ito (hindi na tinatawag ng
+        // live na flow — tingnan ang comment sa OMNIPOS consumeCloudTokensForSync()).
+        // Wala itong sizeBytes sa request body, kaya gamitin muna ang huling
+        // kilalang aktwal na laki ng backup ng installation na ito (o ang
+        // 5MB na ilustratibong sample kung wala pa) — hindi na ang tier.
+        const legacySizeResult = await queryWithRetry(pgPool, 'SELECT size_bytes FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
+        const legacyKnownSizeBytes = legacySizeResult.rows[0] ? Number(legacySizeResult.rows[0].size_bytes) || 0 : 0;
+        const legacySizeBytes = legacyKnownSizeBytes > 0 ? legacyKnownSizeBytes : CLOUD_BACKUP_SAMPLE_SIZE_BYTES_FOR_CATALOG;
+        const result = await consumeCloudTokensForSyncExact(installationId, legacySizeBytes, tier, note);
         invalidateWalletCache(installationId);
         if (!result.ok) {
             return res.status(402).json({
@@ -7289,6 +7406,49 @@ app.post('/relay/admin/api/pricing/neon/reset', requireAdminKey, (req, res) => {
     recomputeNeonPricing();
     dbHealthCache = { at: 0, payload: null };
     res.json({ success: true, neonPricing: NEON_PRICING[tier] });
+});
+// AYOS/BAGO: admin endpoint para tingnan/i-adjust ang CONSERVATIVE na
+// compute-cost assumption na ginagamit sa REAL-TIME na Cloud Backup
+// per-sync charge (tingnan ang computeRealCloudBackupSyncCostPHP() sa
+// itaas at ang cloudBackupSyncCompute sa NEON_PRICING_BASE para sa buong
+// paliwanag). Gamitin ang Client Cost Allocation report (na kumukuha ng
+// AKTWAL na Neon compute usage mula sa Neon account API) bilang batayan
+// kung dapat itaas ang mga value dito — kung mas mataas ang totoong
+// compute bill kumpara sa nako-kolekta sa mga customer, itaas ang
+// assumedCU/assumedBaseSeconds/assumedSecondsPerMB para mas ligtas
+// (mas malaki ang kolektahin bawat sync).
+app.get('/relay/admin/api/pricing/cloud-backup-sync-compute', requireAdminKey, (req, res) => {
+    res.json({
+        success: true,
+        cloudBackupSyncCompute: NEON_PRICING.cloudBackupSyncCompute,
+        cloudBackupSyncComputeBase: NEON_PRICING_BASE.cloudBackupSyncCompute,
+        cloudBackupSyncComputeOverride: neonPricingOverrides.cloudBackupSyncCompute || null
+    });
+});
+app.post('/relay/admin/api/pricing/cloud-backup-sync-compute', requireAdminKey, (req, res) => {
+    const { assumedCU, assumedBaseSeconds, assumedSecondsPerMB } = req.body || {};
+    const numericFields = { assumedCU, assumedBaseSeconds, assumedSecondsPerMB };
+    for (const [key, val] of Object.entries(numericFields)) {
+        if (val !== undefined && (typeof val !== 'number' || !isFinite(val) || val < 0)) {
+            return res.status(400).json({ success: false, message: `Invalid ${key}.` });
+        }
+    }
+    const existing = neonPricingOverrides.cloudBackupSyncCompute || {};
+    const updated = { ...existing };
+    if (typeof assumedCU === 'number') updated.assumedCU = assumedCU;
+    if (typeof assumedBaseSeconds === 'number') updated.assumedBaseSeconds = assumedBaseSeconds;
+    if (typeof assumedSecondsPerMB === 'number') updated.assumedSecondsPerMB = assumedSecondsPerMB;
+    neonPricingOverrides.cloudBackupSyncCompute = updated;
+    saveNeonPricingOverrides(neonPricingOverrides);
+    recomputeNeonPricing();
+    console.log('🗄️  Na-update ang Cloud Backup per-sync compute-cost assumption via admin panel.');
+    res.json({ success: true, cloudBackupSyncCompute: NEON_PRICING.cloudBackupSyncCompute });
+});
+app.post('/relay/admin/api/pricing/cloud-backup-sync-compute/reset', requireAdminKey, (req, res) => {
+    delete neonPricingOverrides.cloudBackupSyncCompute;
+    saveNeonPricingOverrides(neonPricingOverrides);
+    recomputeNeonPricing();
+    res.json({ success: true, cloudBackupSyncCompute: NEON_PRICING.cloudBackupSyncCompute });
 });
 const BUILD_EXCLUDE_NAMES = new Set([
     '.git', 'node_modules', 'database', 'release', 'uploads_tmp',
