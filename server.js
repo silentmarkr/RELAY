@@ -1,7 +1,33 @@
 
+// AYOS/BAGO: itinaas ang laki ng libuv thread pool (default ay 4 lang)
+// BAGO pa man mag-require ng anumang module. Ito ang thread pool na
+// ginagamit ng async zlib.gzip/gunzip (tingnan sa ibaba) — kung
+// sabay-sabay na nag-sync/restore ang maraming stores nang malalaking
+// backup, posibleng mapuno ang 4 default threads at maghintayan na lang
+// ang mga sumunod na gzip/gunzip job (hindi na naman babalik sa
+// pag-block ng buong event loop — ang epekto lang ay konting pila sa
+// pagitan ng ibang gzip/gunzip operations, hindi sa LAHAT ng requests).
+// Dapat itakda ito nang mas maaga bago pa gumamit ang proseso ng thread
+// pool (kaya nasa pinaka-unang linya ito) — walang epekto kung
+// naka-set na ito sa environment variables mismo (Render dashboard,
+// atbp.), doon pa rin susunod ang proseso.
+if (!process.env.UV_THREADPOOL_SIZE) process.env.UV_THREADPOOL_SIZE = '8';
 const express = require('express');
 const crypto = require('crypto');
 const zlib = require('zlib');
+const { promisify } = require('util');
+// AYOS/BAGO: async (thread-pool) na bersyon ng gzip/gunzip sa halip na
+// ang *Sync variants. Ang zlib.gzipSync/gunzipSync ay tumatakbo sa main
+// thread mismo — kaya habang malaki ang binu-buo/dini-decompress na
+// payload (hal. isang buong store backup na may maraming records),
+// naka-block ang buong Node.js event loop ng RELAY sa loob ng ilang
+// millisecond hanggang segundo, na maaaring magpaantala ng LAHAT ng
+// ibang kasabay na request (kasama ang para sa ibang stores). Ang
+// promisify(zlib.gzip/gunzip) naman ay gumagamit ng libuv thread pool,
+// kaya hindi na-b-block ang main thread habang nagpo-proseso. Walang
+// binago sa format/logic — parehong gzip output/input pa rin.
+const gzipAsync = promisify(zlib.gzip);
+const gunzipAsync = promisify(zlib.gunzip);
 const nodemailer = require('nodemailer');
 const path = require('path');
 const fs = require('fs');
@@ -5319,10 +5345,43 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
         // gaya ng dati — walang pagbabago sa kanilang behavior. Anumang
         // error dito (sirang gzip, corrupted JSON) ay nahuhuli pa rin ng
         // parehong catch block sa ibaba — walang bagong failure mode.
-        const rawBuffer = session.compressed ? zlib.gunzipSync(fullBuffer) : fullBuffer;
+        //
+        // AYOS/SECURITY FIX: `maxOutputLength` bilang proteksyon laban sa
+        // "gzip/zip bomb" — isang maliit na compressed payload (pumasa sa
+        // 5MB-per-chunk limit) na dinisenyo para mag-inflate sa sobrang
+        // laki (GBs) kapag na-decompress, na maaaring maubos ang RAM ng
+        // buong RELAY process at mag-crash ito PARA SA LAHAT ng stores —
+        // mas malala pa ito kaysa sa dating event-loop-blocking na isyu,
+        // dahil hindi na lang delay ang epekto kundi total outage. Ang
+        // session.quotaMB (mula sa upload/start, batay sa NA-SUBSCRIBE-ANG
+        // tier ng installation na ito — hindi client-controlled) ang
+        // ginamit na batayan, na may 20% margin + 5MB buffer para sa JSON
+        // structure overhead (keys, storeName, moduleNames, atbp.) — kaya
+        // walang epekto ito sa mga lehitimong backup sa loob ng quota
+        // nila. Kapag na-exceed, ERR_BUFFER_TOO_LARGE ang itatapon ng
+        // Node zlib — hinuhuli ito sa ibaba at binibigyan ng malinaw na
+        // 413 (kaysa sa generic na "corrupted" message).
+        const maxDecompressedBytes = Math.ceil((Number(session.quotaMB) + 5) * 1.2 * 1024 * 1024);
+        const rawBuffer = session.compressed ? await gunzipAsync(fullBuffer, { maxOutputLength: maxDecompressedBytes }) : fullBuffer;
         parsedBody = JSON.parse(rawBuffer.toString('utf8'));
     } catch (err) {
         cleanupCloudBackupUploadSession(String(uploadId));
+        // AYOS/BAGO: hiwalay/mas malinaw na message kapag ang dahilan ng
+        // pagkabigo ay ang bagong maxOutputLength guard sa itaas (tunay na
+        // masyadong malaki ang na-decompress na laki kumpara sa quota ng
+        // installation na ito), kaysa sa generic na "corrupted" message —
+        // mas madali itong ma-diagnose kung sakaling matawag ang customer
+        // support tungkol dito.
+        if (err && err.code === 'ERR_BUFFER_TOO_LARGE') {
+            logActivity(installationId, 'cloud_backup_blocked', { reason: 'decompressed_size_exceeded_quota', tier: session.tier, quotaMB: session.quotaMB });
+            return res.status(413).json({
+                success: false,
+                storageQuotaExceeded: true,
+                tier: session.tier,
+                quotaMB: session.quotaMB,
+                message: `The uploaded backup decompressed to more data than your ${CLOUD_BACKUP_PLANS[session.tier] ? CLOUD_BACKUP_PLANS[session.tier].name : session.tier} storage allowance (${session.quotaMB} MB limit) allows. Upgrade your Cloud Backup plan or free up space before syncing.`
+            });
+        }
         return res.status(400).json({ success: false, message: 'Could not parse the assembled backup data as JSON — the upload may have been corrupted in transit. Please try syncing again.' });
     }
     const { storeName, modules, moduleNames, totalRecords } = parsedBody || {};
@@ -6895,7 +6954,7 @@ app.post('/relay/cloud-backup/restore', requireApiKey, requireAllowedDevice, rat
         // hindi ito dinadaanan — plain/uncompressed JSON pa rin ang mga
         // 'yon gaya ng dati.
         const restoreResponseJson = JSON.stringify(restoreResponseBody);
-        const restoreResponseGzipped = zlib.gzipSync(restoreResponseJson);
+        const restoreResponseGzipped = await gzipAsync(restoreResponseJson);
         res.set('Content-Type', 'application/json; charset=utf-8');
         res.set('Content-Encoding', 'gzip');
         res.send(restoreResponseGzipped);
