@@ -1128,7 +1128,7 @@ async function getCloudTokenCostPerSync(sizeBytes, tier) {
 // nagbago ang tier" na lohika — hindi na ito naaangkop, dahil wala nang
 // discrete na "presyo ng tier" na pwedeng magbago sa unang lugar. Ang
 // natitirang fraction ay palaging pinagsasama, anuman ang tier.
-async function consumeCloudTokensForSyncExact(installationId, sizeBytes, tier, note) {
+async function consumeCloudTokensForSyncExact(installationId, sizeBytes, tier, note, trigger = 'manual') {
     const costFraction = await getCloudTokenCostPerSyncExact(sizeBytes, tier);
     return runPgWriteTx(pgPool, async (client) => {
         await client.query(
@@ -1159,8 +1159,20 @@ async function consumeCloudTokensForSyncExact(installationId, sizeBytes, tier, n
         );
         if (wholeTokens > 0) {
             await client.query(
-                `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note) VALUES ($1, 'consume', $2, $3, $4)`,
-                [installationId, -wholeTokens, newBalance, note || null]
+                `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note, category, trigger_type) VALUES ($1, 'consume', $2, $3, $4, 'SYNC_CHARGE', $5)`,
+                [installationId, -wholeTokens, newBalance, note || null, trigger]
+            );
+        } else {
+            // AYOS/BAGO: kahit walang WHOLE token na na-deduct (fraction pa
+            // lang), itinatala pa rin ito sa lightweight na
+            // cloud_sync_activity table — para makita ng customer sa
+            // Transaction History ang BAWAT auto-sync, kahit ilang
+            // sentimos-katumbas lang (hal. 0.010 token) ang presyo, sa
+            // halip na maghintay munang umabot sa 1 buong token bago
+            // may makikitang anumang entry.
+            await client.query(
+                `INSERT INTO cloud_sync_activity (installation_id, trigger_type, cost_tokens, accrued_after, size_bytes) VALUES ($1, $2, $3, $4, $5)`,
+                [installationId, trigger, costFraction, remainder, Number(sizeBytes) || null]
             );
         }
         return { ok: true, balanceTokens: newBalance, tokensCharged: wholeTokens };
@@ -1796,8 +1808,59 @@ async function ensureCloudTokenSchema() {
     // naipong fraction — tingnan ang consumeCloudTokensForSyncExact().
     await pgPool.query(`ALTER TABLE cloud_token_wallets ADD COLUMN IF NOT EXISTS sync_fraction_accrued NUMERIC NOT NULL DEFAULT 0;`);
     await pgPool.query(`ALTER TABLE cloud_token_wallets ADD COLUMN IF NOT EXISTS sync_fraction_tier TEXT;`);
-    console.log('✅ Omni Token wallet Postgres schema ready (cloud_token_wallets, cloud_token_ledger, cloud_token_purchases).');
+    // ===================================================================
+    // AYOS/BAGO: idinagdag ang `category` column sa cloud_token_ledger —
+    // dating ang paraan lang ng pag-identify kung anong klaseng entry ito
+    // ay ang MANUAL na pag-parse ng `note` text (hal. maghahanap ng
+    // "Cloud Backup activation" sa string) — mahina ito at madaling
+    // magkamali/mag-overlap (hal. "Purchase" ay ginagamit PAREHO para sa
+    // pagbili ng TOKENS mismo, at para sa pagbili ng isang FEATURE gamit
+    // tokens — magkaibang bagay pero parehong salita). Ngayon, ONE FIXED
+    // KEYWORD lang bawat kategorya (tingnan ang CLOUD_TOKEN_LEDGER_CATEGORIES
+    // sa ibaba) — exact-match filtering, hindi na basta paghahanap sa text.
+    // Ang `trigger_type` naman ay para lang sa mga sync-related na
+    // category (SYNC_CHARGE) — 'manual' o 'automatic'.
+    await pgPool.query(`ALTER TABLE cloud_token_ledger ADD COLUMN IF NOT EXISTS category TEXT;`);
+    await pgPool.query(`ALTER TABLE cloud_token_ledger ADD COLUMN IF NOT EXISTS trigger_type TEXT;`);
+    // AYOS/BAGO: bagong LIGHTWEIGHT na table — para sa mga auto/manual sync
+    // na TOTOONG may presyo (fraction ng token, hal. 0.010) pero HINDI pa
+    // umaabot sa 1 buong token kaya WALANG binabago sa totoong balance.
+    // Sinasadyang HIWALAY ito sa cloud_token_ledger (na siyang OFFICIAL na
+    // audit trail ng TOTOONG pagbabago ng balance) — para hindi bumigat ang
+    // pangunahing ledger ng maraming rows na walang totoong balance impact,
+    // habang nananatiling makikita pa rin ng customer ang BAWAT sync sa
+    // Transaction History (per kahilingan). May automatic na pag-prune ito
+    // (tingnan ang pruneCloudSyncActivity() sa ibaba) para hindi lumaki
+    // nang walang hanggan.
+    await pgPool.query(`
+        CREATE TABLE IF NOT EXISTS cloud_sync_activity (
+            id              BIGSERIAL PRIMARY KEY,
+            installation_id TEXT NOT NULL,
+            trigger_type    TEXT NOT NULL,
+            cost_tokens     NUMERIC NOT NULL,
+            accrued_after   NUMERIC NOT NULL,
+            size_bytes      BIGINT,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+    `);
+    await pgPool.query(`CREATE INDEX IF NOT EXISTS idx_cloud_sync_activity_install ON cloud_sync_activity (installation_id, created_at DESC);`);
+    console.log('✅ Omni Token wallet Postgres schema ready (cloud_token_wallets, cloud_token_ledger, cloud_token_purchases, cloud_sync_activity).');
 }
+// ===================================================================
+// AYOS/BAGO: pinagkasunduang FIXED na listahan ng categories — ito ang
+// EXACT keyword na naka-store sa `category` column, at ito rin ang
+// pinagbabatayan ng filter dropdown sa Transaction History modal (OMNIPOS
+// frontend). Bawat isa ay may sariling malinaw na kahulugan, walang
+// pagkakapareho ng salita sa pagitan ng magkaibang klase ng transaksyon.
+// ===================================================================
+const CLOUD_TOKEN_LEDGER_CATEGORIES = {
+    TOKEN_PURCHASE: 'Token Purchase',       // bumili ng Omni Tokens gamit totoong pera (GCash/atbp.)
+    FEATURE_UNLOCK: 'Feature Activation',   // nag-activate ng bagong paid plan/feature (hal. Cloud Backup) gamit tokens
+    ADDON_PURCHASE: 'Add-on Purchase',      // bumili ng karagdagang module/feature (à la carte) gamit tokens
+    SYNC_CHARGE: 'Cloud Sync Charge',       // WHOLE token na na-deduct mula sa isang sync (manual o auto)
+    SYNC_FRACTION: 'Auto-Sync Activity',    // fractional cost lang, WALANG na-deduct na buong token pa
+    REFUND: 'Refund'                        // ibinalik na tokens dahil sa failed/incomplete sync
+};
 // AYOS (cost-optimization): i-cache sa memory ang buong /relay/cloud-tokens/wallet
 // response (balance + last-20 ledger + pending purchases) — 3 Neon queries kada
 // tawag dati, at hanggang 120x/oras kada device pwedeng tawagin. Ang cache ay
@@ -1821,6 +1884,36 @@ function setWalletCache(installationId, data) {
 function invalidateWalletCache(installationId) {
     walletResponseCache.delete(installationId);
 }
+// ===================================================================
+// AYOS/BAGO: retention policy para sa cloud_sync_activity (fractional
+// auto-sync visibility entries). Bakit 30 ARAW: ito ang tumutugma sa
+// isang buong billing cycle (ang "Est. Total Required Monthly" na
+// makikita sa Omni Tokens page) — sapat na para makita ng customer ang
+// BUONG huling buwan ng sync activity kahit anong dalas ng auto-sync
+// niya, habang pinapanatili ang table na maliit (karaniwang ~30 row
+// bawat installation kung araw-araw ang auto-sync — mabilis i-query,
+// hindi tumataas nang walang hanggan). Time-based (hindi bilang-based)
+// ang retention dahil mas makatarungan ito — pareho ang "1 buwan" na
+// makikita ng lahat, kahit iba-iba ang dalas ng sync ng bawat customer.
+// Hindi ito nakakaapekto sa cloud_token_ledger (ang OFFICIAL audit
+// trail ng totoong balance changes) — permanente pa rin ang mga entries
+// doon.
+// ===================================================================
+const CLOUD_SYNC_ACTIVITY_RETENTION_DAYS = 30;
+async function pruneCloudSyncActivity() {
+    if (!pgPool) return;
+    try {
+        const result = await pgPool.query(
+            `DELETE FROM cloud_sync_activity WHERE created_at < now() - interval '${CLOUD_SYNC_ACTIVITY_RETENTION_DAYS} days'`
+        );
+        if (result.rowCount > 0) {
+            console.log(`🧹 CLOUD_SYNC_ACTIVITY: na-prune ang ${result.rowCount} sync-fraction entry(ies) na mas matanda sa ${CLOUD_SYNC_ACTIVITY_RETENTION_DAYS} araw.`);
+        }
+    } catch (err) {
+        console.error('⚠️ CLOUD_SYNC_ACTIVITY: hindi na-prune:', err.message);
+    }
+}
+setInterval(pruneCloudSyncActivity, 24 * 60 * 60 * 1000);
 async function getOrCreateCloudTokenWallet(installationId) {
     const result = await queryWithRetry(pgPool, 'SELECT installation_id, balance_tokens, auto_sync_enabled FROM cloud_token_wallets WHERE installation_id = $1', [installationId]);
     if (result.rows[0]) return result.rows[0];
@@ -1833,7 +1926,7 @@ async function getOrCreateCloudTokenWallet(installationId) {
     );
     return inserted.rows[0];
 }
-async function creditCloudTokens(installationId, tokens, note) {
+async function creditCloudTokens(installationId, tokens, note, category = 'TOKEN_PURCHASE') {
     await getOrCreateCloudTokenWallet(installationId);
     const result = await queryWithRetry(
         pgPool,
@@ -1844,8 +1937,8 @@ async function creditCloudTokens(installationId, tokens, note) {
     const balanceAfter = result.rows[0] ? Number(result.rows[0].balance_tokens) : null;
     await queryWithRetry(
         pgPool,
-        `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note) VALUES ($1, 'purchase', $2, $3, $4)`,
-        [installationId, tokens, balanceAfter, note || null]
+        `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note, category) VALUES ($1, 'purchase', $2, $3, $4, $5)`,
+        [installationId, tokens, balanceAfter, note || null, category]
     );
     invalidateWalletCache(installationId);
     return balanceAfter;
@@ -5040,6 +5133,12 @@ app.post('/relay/cloud-backup/upload/chunk', requireApiKey, requireAllowedDevice
 });
 app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-upload-finish', 30, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
     const { uploadId, installationId } = req.body || {};
+    // AYOS/BAGO: para malaman kung MANUAL o AUTOMATIC (scheduled) na sync
+    // ito — para sa pag-tag ng SYNC_CHARGE/SYNC_FRACTION entries sa
+    // Transaction History. Ang OMNIPOS mismo ang nagpapasa nito
+    // (performCloudBackupUpload trigger param) — sanitized dito, 'manual'
+    // ang default kung hindi valid/wala.
+    const trigger = (req.body && req.body.trigger === 'automatic') ? 'automatic' : 'manual';
     const session = uploadId && CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS.get(String(uploadId));
     if (!session || session.installationId !== installationId) {
         return res.status(404).json({ success: false, message: 'Unknown or expired upload session. Start a new cloud backup upload.' });
@@ -5128,7 +5227,7 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
         // AYOS/BUGFIX: `projectedSizeBytes` (ang AKTWAL na laki ng datos na
         // kasasama lang i-serialize sa itaas) ang ipinapasa ngayon bilang
         // batayan ng presyo — hindi na ang tier/maintenance fee.
-        tokenConsumeResult = await consumeCloudTokensForSyncExact(installationId, projectedSizeBytes, tier, 'Cloud backup sync');
+        tokenConsumeResult = await consumeCloudTokensForSyncExact(installationId, projectedSizeBytes, tier, 'Cloud backup sync', trigger);
         invalidateWalletCache(installationId);
     } catch (consumeErr) {
         // AYOS: fail-CLOSED — kung nabigo ang atomic charge mismo (hal.
@@ -5193,7 +5292,7 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
             // TANGING successful sync lang ang binabayaran, kahit ngayong
             // atomic na ang gate.
             if (tokenConsumeResult.tokensCharged > 0) {
-                await creditCloudTokens(installationId, tokenConsumeResult.tokensCharged, `Refund — failed sync (${failedList})`).catch((refundErr) => {
+                await creditCloudTokens(installationId, tokenConsumeResult.tokensCharged, `Refund — failed sync (${failedList})`, 'REFUND').catch((refundErr) => {
                     console.error('⚠️ CLOUD_TOKENS: failed to refund after a failed sync write:', refundErr.message);
                 });
             }
@@ -5248,7 +5347,7 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
             ? 'Lost connection to the database while saving the cloud backup (this can happen with very large uploads). Please try syncing again — no partial data was saved.'
             : ('An error occurred while saving to Postgres: ' + err.message);
         if (tokenConsumeResult.tokensCharged > 0) {
-            await creditCloudTokens(installationId, tokenConsumeResult.tokensCharged, `Refund — failed sync (${err.message})`).catch((refundErr) => {
+            await creditCloudTokens(installationId, tokenConsumeResult.tokensCharged, `Refund — failed sync (${err.message})`, 'REFUND').catch((refundErr) => {
                 console.error('⚠️ CLOUD_TOKENS: failed to refund after a failed sync write:', refundErr.message);
             });
         }
@@ -5396,6 +5495,41 @@ app.get('/relay/cloud-tokens/packages', requireApiKey, rateLimit('cloud-tokens-p
         estimateDisclaimer: 'Sync-cost, monthly, and yearly figures are approximate estimates based on a sample backup size — not a guaranteed final cost.'
     });
 });
+// ===================================================================
+// AYOS/BAGO: reusable helper — pinagsasama (UNION) ang cloud_token_ledger
+// (totoong balance movements: TOKEN_PURCHASE, FEATURE_UNLOCK,
+// ADDON_PURCHASE, SYNC_CHARGE, REFUND) at ang cloud_sync_activity
+// (SYNC_FRACTION — fractional-cost auto/manual syncs na wala pang
+// buong token na na-deduct) papunta sa IISANG chronological na listahan.
+// Ginagamit ito PAREHO ng (1) ang maliit na "Recent Activity" widget sa
+// Omni Tokens page (default 5, walang filter) at (2) ang bagong
+// Transaction History modal (may category + date-range filter +
+// pagination).
+// ===================================================================
+async function fetchMergedTransactionHistory(installationId, { category = null, dateFrom = null, dateTo = null, limit = 5, offset = 0 } = {}) {
+    const params = [installationId, category || null, dateFrom || null, dateTo || null, limit, offset];
+    const sql = `
+        SELECT * FROM (
+            SELECT id, category, type, tokens, balance_after, note, trigger_type, created_at
+            FROM cloud_token_ledger
+            WHERE installation_id = $1
+            UNION ALL
+            SELECT id, 'SYNC_FRACTION' AS category, 'consume' AS type, (-cost_tokens) AS tokens,
+                   NULL AS balance_after,
+                   ('Auto-sync activity — cost ~' || ROUND(cost_tokens::numeric, 3) || ' token, accrued so far: ' || ROUND(accrued_after::numeric, 3) || '/1.0 token') AS note,
+                   trigger_type, created_at
+            FROM cloud_sync_activity
+            WHERE installation_id = $1
+        ) combined
+        WHERE ($2::text IS NULL OR category = $2)
+          AND ($3::timestamptz IS NULL OR created_at >= $3)
+          AND ($4::timestamptz IS NULL OR created_at <= $4)
+        ORDER BY created_at DESC
+        LIMIT $5 OFFSET $6
+    `;
+    const result = await queryWithRetry(pgPool, sql, params);
+    return result.rows;
+}
 app.get('/relay/cloud-tokens/wallet', requireApiKey, requireAllowedDevice, rateLimit('cloud-tokens-wallet', 120, 60 * 60 * 1000, (req) => req.query?.installationId), async (req, res) => {
     const installationId = String(req.query.installationId || '').trim();
     if (!installationId) return res.status(400).json({ success: false, message: 'Missing installationId.' });
@@ -5404,11 +5538,13 @@ app.get('/relay/cloud-tokens/wallet', requireApiKey, requireAllowedDevice, rateL
     if (cached) return res.json(cached);
     try {
         const wallet = await getOrCreateCloudTokenWallet(installationId);
-        const ledgerResult = await queryWithRetry(
-            pgPool,
-            'SELECT type, tokens, balance_after, note, created_at FROM cloud_token_ledger WHERE installation_id = $1 ORDER BY id DESC LIMIT 20',
-            [installationId]
-        );
+        // AYOS/BUGFIX: 5 na lang ang default (dating 20) — mas mabilis at
+        // mas magaan sa data, dahil ang customer ay LATEST activity lang
+        // talaga ang gustong makita dito. Ang buong history (kasama ang
+        // fractional na auto-sync entries) ay makikita sa Transaction
+        // History modal (/relay/cloud-tokens/transaction-history sa
+        // ibaba), na may filter at pagination.
+        const ledgerResult = { rows: await fetchMergedTransactionHistory(installationId, { limit: 5 }) };
         const pendingResult = await queryWithRetry(
             pgPool,
             `SELECT purchase_id, package_id, tokens, amount_php, method, status, created_at FROM cloud_token_purchases
@@ -5447,6 +5583,43 @@ app.get('/relay/cloud-tokens/wallet', requireApiKey, requireAllowedDevice, rateL
         res.json(responseBody);
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });
+    }
+});
+// AYOS/BAGO: single source of truth ng category list — ginagamit ito ng
+// OMNIPOS frontend para i-populate ang filter dropdown sa Transaction
+// History modal, para kung magdagdag/magbago man ng category dito sa
+// RELAY, hindi na kailangang i-edit ulit nang hiwalay sa OMNIPOS.
+app.get('/relay/cloud-tokens/transaction-categories', requireApiKey, (req, res) => {
+    res.json({
+        success: true,
+        categories: Object.entries(CLOUD_TOKEN_LEDGER_CATEGORIES).map(([value, label]) => ({ value, label }))
+    });
+});
+// AYOS/BAGO: buong Transaction History — may filter (category, date
+// range) at pagination (limit/offset), hindi tulad ng maliit na
+// "Recent Activity" widget (5 lang, walang filter) sa /wallet endpoint
+// sa itaas. Parehong galing ito sa fetchMergedTransactionHistory() —
+// pinagsama ang totoong balance movements (cloud_token_ledger) at ang
+// fractional na sync visibility entries (cloud_sync_activity).
+app.get('/relay/cloud-tokens/transaction-history', requireApiKey, requireAllowedDevice, rateLimit('cloud-tokens-transaction-history', 120, 60 * 60 * 1000, (req) => req.query?.installationId), async (req, res) => {
+    const installationId = String(req.query.installationId || '').trim();
+    if (!installationId) return res.status(400).json({ success: false, message: 'Missing installationId.' });
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured.' });
+    const rawCategory = String(req.query.category || '').trim().toUpperCase();
+    const category = (rawCategory && rawCategory !== 'ALL' && CLOUD_TOKEN_LEDGER_CATEGORIES[rawCategory]) ? rawCategory : null;
+    // dateFrom/dateTo: inaasahang ISO date/datetime strings (hal.
+    // "2026-08-01" o "2026-08-01T00:00:00Z") — pinapasa lang ito nang
+    // direkta sa Postgres timestamptz cast, kaya kahit anong valid ISO
+    // format ay tatanggapin.
+    const dateFrom = req.query.dateFrom ? String(req.query.dateFrom).trim() : null;
+    const dateTo = req.query.dateTo ? String(req.query.dateTo).trim() : null;
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    try {
+        const rows = await fetchMergedTransactionHistory(installationId, { category, dateFrom, dateTo, limit, offset });
+        res.json({ success: true, transactions: rows, limit, offset, hasMore: rows.length === limit });
+    } catch (err) {
+        res.status(400).json({ success: false, message: `Invalid filter or query error: ${err.message}` });
     }
 });
 app.post('/relay/cloud-tokens/purchase/create', requireApiKey, requireAllowedDevice, rateLimit('cloud-tokens-purchase-create', 20, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
@@ -5966,7 +6139,7 @@ app.post('/relay/cloud-tokens/activate-cloud-backup', requireApiKey, requireAllo
         invalidateWalletCache(installationId);
         await queryWithRetry(
             pgPool,
-            `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note) VALUES ($1, 'consume', $2, $3, $4)`,
+            `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note, category) VALUES ($1, 'consume', $2, $3, $4, 'FEATURE_UNLOCK')`,
             [installationId, -requiredTokens, balanceAfter, `Cloud Backup activation — ${CLOUD_BACKUP_PLANS[tier].name} (${billingCycle}), verified via ${requestorEmail || 'requestor Gmail'}`]
         );
         const durationDays = CLOUD_BACKUP_BILLING_DAYS[billingCycle];
@@ -6101,7 +6274,7 @@ app.post('/relay/cloud-tokens/activate-purchase', requireApiKey, requireAllowedD
         const featureNames = featureIds.map(id => (FEATURE_CATALOG[id] && FEATURE_CATALOG[id].name) || (isModuleSubscriptionPurchase && MODULE_SUBSCRIPTION_PLANS[id] && MODULE_SUBSCRIPTION_PLANS[id].name) || id);
         await queryWithRetry(
             pgPool,
-            `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note) VALUES ($1, 'consume', $2, $3, $4)`,
+            `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note, category) VALUES ($1, 'consume', $2, $3, $4, 'ADDON_PURCHASE')`,
             [installationId, -requiredTokens, balanceAfter, `Purchase — ${featureNames.join(', ')}`]
         );
         // Split requiredTokens across items proportionally to their à la
@@ -8399,6 +8572,7 @@ async function bootstrapStores() {
     if (Object.keys(neonPricingOverrides).length > 0) {
         console.log(`🗄️  Na-load ang custom na Neon pricing override para sa: ${Object.keys(neonPricingOverrides).join(', ')}.`);
     }
+    pruneCloudSyncActivity();
     if (!neonConfiguredPlans || typeof neonConfiguredPlans !== 'object') neonConfiguredPlans = { cloudBackup: 'free', devices: 'free', build: 'free' };
     if (!clientMaintenanceFeeConfig || typeof clientMaintenanceFeeConfig !== 'object') clientMaintenanceFeeConfig = JSON.parse(JSON.stringify(CLIENT_MAINTENANCE_FEE_DEFAULT));
     if (!clientMaintenanceFeeConfig.perClientOverridePHP || typeof clientMaintenanceFeeConfig.perClientOverridePHP !== 'object') clientMaintenanceFeeConfig.perClientOverridePHP = {};
