@@ -5229,6 +5229,7 @@ app.get('/relay/cloud-tokens/wallet', requireApiKey, requireAllowedDevice, rateL
     const installationId = String(req.query.installationId || '').trim();
     if (!installationId) return res.status(400).json({ success: false, message: 'Missing installationId.' });
     if (!pgPool) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured.' });
+    const cached = getWalletCache(installationId);
     if (cached) return res.json(cached);
     try {
         const wallet = await getOrCreateCloudTokenWallet(installationId);
