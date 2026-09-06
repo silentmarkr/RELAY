@@ -1966,21 +1966,29 @@ const NEON_PRICING_BASE = {
     // AYOS/BAGO: idinagdag ang COMPUTE cost assumption para sa Cloud Backup
     // per-sync charge (tingnan ang computeRealCloudBackupSyncCostPHP() sa
     // ibaba). Bukod sa storage, may bayad din ang Neon sa COMPUTE
-    // (CU-hours) — pero dahil SHARED na compute endpoint ito para sa LAHAT
-    // ng Cloud Backup client, hindi praktikal na sukatin ang EKSAKTONG
-    // CU-seconds ng bawat indibidwal na sync sa real time (walang ganitong
-    // API si Neon). Ito ay isang CONSERVATIVE (sadyang medyo mataas, hindi
-    // mababa) na estimate kung gaano karaming compute time ang dapat
-    // iattribute sa ISANG sync — admin-configurable (tingnan ang
-    // GET/POST /relay/admin/api/pricing/neon) para maaring i-verify/i-adjust
-    // ito paminsan-minsan laban sa TOTOONG Neon compute bill (tingnan ang
-    // Client Cost Allocation report, na kumukuha ng aktwal na usage mula sa
-    // Neon account API) — itaas ang mga value na ito kung mas mataas pala
-    // ang totoong bill kumpara sa nako-kolekta.
+    // (CU-hours) — kaya kailangan itong isama sa presyo, hindi puwedeng
+    // basta tanggalin (kung tatanggalin ito, mas mababa ang icha-charge sa
+    // customer kaysa sa TALAGANG binabayaran sa Neon — ang developer/negosyo
+    // na lang ang magpapasan ng pagkakaiba).
+    //
+    // AYOS/SELF-CALIBRATING: `assumedCU` ay direktang kopya ng OFFICIAL
+    // minimum compute size ni Neon (hindi assumption, totoong published
+    // spec). Pero ang `assumedBaseSeconds`/`assumedSecondsPerMB` sa ibaba ay
+    // mga COLD-START SEED lang ngayon — panandaliang gamit habang wala pang
+    // sapat na TOTOONG na-measure na datos. Sa bawat successful sync,
+    // sinusukat na ng RELAY (sa /relay/cloud-backup/upload/finish) ang
+    // AKTWAL na tagal ng pagsulat sa Neon Postgres kumpara sa laking data —
+    // tingnan ang recordCloudBackupSyncTiming() sa ibaba. Kapag umabot na sa
+    // CLOUD_BACKUP_TIMING_MIN_SAMPLES na totoong sample, awtomatiko nang
+    // pinapalitan ng least-squares regression (batay sa totoong measured
+    // duration) ang dalawang value na ito sa neonPricingOverrides —
+    // AGAD itong nagagamit sa SUSUNOD na sync (hindi lang naka-log,
+    // direktang ginagamit na sa pag-charge sa customer). Ang mga seed value
+    // sa ibaba ay ginagamit lang bago pa umabot sa minimum sample count.
     cloudBackupSyncCompute: {
-        assumedCU: 0.25,          // Neon's smallest/minimum compute size
-        assumedBaseSeconds: 3,    // base connection/query overhead kada sync
-        assumedSecondsPerMB: 0.5  // karagdagang segundo kada MB ng na-upload na datos
+        assumedCU: 0.25,          // Neon's smallest/minimum compute size (official, hindi assumption)
+        assumedBaseSeconds: 3,    // SEED LANG — papalitan ng measured value pagkatapos ng ilang totoong sync
+        assumedSecondsPerMB: 0.5  // SEED LANG — papalitan ng measured value pagkatapos ng ilang totoong sync
     }
 };
 const NEON_PRICING_OVERRIDES_PATH = path.join(__dirname, 'neon-pricing-overrides.json');
@@ -2007,6 +2015,95 @@ function saveNeonPricingOverrides(obj) {
 let neonPricingOverrides = {}; 
 let NEON_PRICING = JSON.parse(JSON.stringify(NEON_PRICING_BASE));
 const NEON_PRICING_TIER_IDS = ['free', 'launch', 'scale', 'enterprise'];
+// ===================================================================
+// AYOS/BAGO: SELF-CALIBRATING na measurement ng aktwal na compute time
+// kada Cloud Backup sync — pinapalitan ang hardcoded na
+// assumedBaseSeconds/assumedSecondsPerMB (dating pure guess) ng TOTOONG
+// na-measure na tagal ng pagsulat sa Neon Postgres, batay sa laki ng
+// datos. Ginagamit ang simpleng linear regression (least squares) sa
+// mga sample: durationSeconds ≈ baseSeconds + (secondsPerMB × sizeMB).
+//
+// Bakit hindi lang "logging": ang bawat successful sync ay nagdaragdag
+// ng bagong (sizeMB, durationSeconds) sample sa persisted running sums
+// (neonPricingOverrides.cloudBackupSyncCompute) — pagkatapos, kaagad
+// tinatawag ang recomputeNeonPricing(), kaya ang NA-UPDATE na
+// assumedBaseSeconds/assumedSecondsPerMB ay AGAD na epektibo sa
+// SUSUNOD na sync (na siyang gagamitin ni computeRealCloudBackupSyncCostPHP()
+// para sa presyo na icha-charge sa customer) — hindi na kailangan hintayin
+// ng developer/admin na i-review ang logs at i-adjust nang manual.
+// ===================================================================
+const CLOUD_BACKUP_TIMING_MIN_SAMPLES = 5; // gaano karaming totoong sample bago gamitin ang regression (baguhin/i-tune kung gusto)
+const CLOUD_BACKUP_TIMING_MAX_SAMPLES = 5000; // takip para hindi ma-overflow ang running sums kahit matagal nang tumatakbo
+function recordCloudBackupSyncTiming(sizeMB, durationSeconds) {
+    try {
+        const sizeMBSafe = Math.max(0, Number(sizeMB) || 0);
+        const durationSafe = Math.max(0, Number(durationSeconds) || 0);
+        if (!isFinite(sizeMBSafe) || !isFinite(durationSafe)) return;
+        const existing = neonPricingOverrides.cloudBackupSyncCompute || {};
+        let n = Number(existing.measuredSampleCount) || 0;
+        let sumX = Number(existing.measuredSumSizeMB) || 0;
+        let sumY = Number(existing.measuredSumDurationSec) || 0;
+        let sumXY = Number(existing.measuredSumSizeMBxDurationSec) || 0;
+        let sumXX = Number(existing.measuredSumSizeMBSquared) || 0;
+        n += 1;
+        sumX += sizeMBSafe;
+        sumY += durationSafe;
+        sumXY += sizeMBSafe * durationSafe;
+        sumXX += sizeMBSafe * sizeMBSafe;
+        // AYOS/BUGFIX: dating basta Math.min(n, MAX) lang ang ginagawa —
+        // na-cap si `n` pero PATULOY na tumataas nang walang hanggan ang mga
+        // sums (sumX/sumY/sumXY/sumXX). Kapag na-cap na si `n`, hindi na
+        // ito tumutugma sa TOTOONG dami ng datos na kinakatawan ng mga sums
+        // — sisira nito nang unti-unti ang regression (slope/intercept)
+        // sa mahabang panahon. AYOS: kapag lumagpas sa MAX_SAMPLES, i-scale
+        // pababa ang `n` KASAMA ang lahat ng 4 sums gamit ang parehong
+        // proportion — pinapanatili nito nang EKSAKTO ang parehong
+        // slope/intercept (napapatunayan sa least-squares algebra: kapag
+        // magkakatulad ang scale factor sa n, Σx, Σy, Σxy, at Σx², walang
+        // nababago sa resulta), habang unti-unting binibigyang mas mababang
+        // timbang ang lumang datos — parang "forgetting factor" — sa halip
+        // na basta pabayaang mag-drift ang matematika.
+        if (n > CLOUD_BACKUP_TIMING_MAX_SAMPLES) {
+            const decayFactor = CLOUD_BACKUP_TIMING_MAX_SAMPLES / n;
+            n = CLOUD_BACKUP_TIMING_MAX_SAMPLES;
+            sumX *= decayFactor;
+            sumY *= decayFactor;
+            sumXY *= decayFactor;
+            sumXX *= decayFactor;
+        }
+        const updated = { ...existing, measuredSampleCount: n, measuredSumSizeMB: sumX, measuredSumDurationSec: sumY, measuredSumSizeMBxDurationSec: sumXY, measuredSumSizeMBSquared: sumXX };
+        if (n >= CLOUD_BACKUP_TIMING_MIN_SAMPLES) {
+            const denom = (n * sumXX) - (sumX * sumX);
+            let measuredSecondsPerMB = NEON_PRICING_BASE.cloudBackupSyncCompute.assumedSecondsPerMB;
+            let measuredBaseSeconds = NEON_PRICING_BASE.cloudBackupSyncCompute.assumedBaseSeconds;
+            if (Math.abs(denom) > 1e-9) {
+                const slope = ((n * sumXY) - (sumX * sumY)) / denom;
+                const intercept = (sumY - (slope * sumX)) / n;
+                // I-clamp sa >= 0 — hindi dapat negatibo ang tagal ng compute,
+                // kung negatibo ang lumabas sa regression (madalas dahil sa
+                // ingay/kaunti pang sample), gamitin na lang ang seed default
+                // para hindi ma-undercharge ang mga susunod na sync.
+                measuredSecondsPerMB = (isFinite(slope) && slope >= 0) ? slope : NEON_PRICING_BASE.cloudBackupSyncCompute.assumedSecondsPerMB;
+                measuredBaseSeconds = (isFinite(intercept) && intercept >= 0) ? intercept : NEON_PRICING_BASE.cloudBackupSyncCompute.assumedBaseSeconds;
+            }
+            updated.assumedBaseSeconds = measuredBaseSeconds;
+            updated.assumedSecondsPerMB = measuredSecondsPerMB;
+            updated.calibrated = true;
+        } else {
+            updated.calibrated = false;
+        }
+        neonPricingOverrides.cloudBackupSyncCompute = updated;
+        saveNeonPricingOverrides(neonPricingOverrides);
+        recomputeNeonPricing();
+        if (updated.calibrated) {
+            console.log(`📏 CLOUD_BACKUP_TIMING: na-recalibrate gamit ang ${n} totoong sample — assumedBaseSeconds=${updated.assumedBaseSeconds.toFixed(4)}s, assumedSecondsPerMB=${updated.assumedSecondsPerMB.toFixed(4)}s/MB (agad gagamitin sa susunod na sync).`);
+        } else {
+            console.log(`📏 CLOUD_BACKUP_TIMING: naitala ang sample #${n} (${sizeMBSafe.toFixed(2)}MB, ${durationSafe.toFixed(3)}s) — gagamitin pa muna ang seed values hanggang umabot sa ${CLOUD_BACKUP_TIMING_MIN_SAMPLES} sample.`);
+        }
+    } catch (err) {
+        console.error('⚠️ CLOUD_BACKUP_TIMING: hindi na-record ang timing sample:', err.message);
+    }
+}
 function recomputeNeonPricing() {
     const merged = { ...NEON_PRICING_BASE };
     for (const tier of NEON_PRICING_TIER_IDS) {
@@ -5052,6 +5149,11 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
             message: 'Insufficient Cloud Backup (Omni Tokens) balance. Nothing was written to the cloud — please buy more tokens to keep syncing.'
         });
     }
+    // AYOS/BAGO: itatala ang timestamp bago magsimula ang aktwal na
+    // pagsulat sa Neon Postgres, para masukat kalaunan (kapag successful)
+    // kung gaano talaga katagal ang isang sync na may ganitong laki ng
+    // datos — tingnan ang recordCloudBackupSyncTiming() sa itaas.
+    const writeStartedAtMs = Date.now();
     try {
         let totalSizeBytes = 0;
         let moduleCount = 0;
@@ -5112,6 +5214,16 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
             );
         });
         logActivity(installationId, 'cloud_backup_sync', { moduleCount: Object.keys(modules).length, totalRecords: totalRecords || null, storeName: storeName || null, sizeBytes: totalSizeBytes });
+        // AYOS/BAGO: TAPOS na ang buong pagsulat sa Postgres (successful,
+        // hindi kasama ang mga naunang gate/checks) — dito lang natin
+        // masusukat ang AKTWAL na tagal ng compute na ito. Idinaragdag ito
+        // bilang bagong totoong sample sa self-calibrating na estimate;
+        // kapag umabot na sa minimum sample count, agad na epektibo ang
+        // na-recalibrate na assumedBaseSeconds/assumedSecondsPerMB sa
+        // SUSUNOD na sync na magbabayad ng tokens (hindi na kailangan ng
+        // manual na admin review).
+        const writeDurationSeconds = Math.max(0, (Date.now() - writeStartedAtMs) / 1000);
+        recordCloudBackupSyncTiming(projectedSizeMB, writeDurationSeconds);
         const tierForResponse = tier;
         const quotaMBForResponse = quotaMB;
         const sizeMBForResponse = Math.round((totalSizeBytes / (1024 * 1024)) * 100) / 100;
@@ -7477,11 +7589,21 @@ app.post('/relay/admin/api/pricing/neon/reset', requireAdminKey, (req, res) => {
 // assumedCU/assumedBaseSeconds/assumedSecondsPerMB para mas ligtas
 // (mas malaki ang kolektahin bawat sync).
 app.get('/relay/admin/api/pricing/cloud-backup-sync-compute', requireAdminKey, (req, res) => {
+    const override = neonPricingOverrides.cloudBackupSyncCompute || {};
     res.json({
         success: true,
         cloudBackupSyncCompute: NEON_PRICING.cloudBackupSyncCompute,
         cloudBackupSyncComputeBase: NEON_PRICING_BASE.cloudBackupSyncCompute,
-        cloudBackupSyncComputeOverride: neonPricingOverrides.cloudBackupSyncCompute || null
+        cloudBackupSyncComputeOverride: neonPricingOverrides.cloudBackupSyncCompute || null,
+        // AYOS/BAGO: transparency para sa self-calibrating na measurement —
+        // makikita ng admin kung ilang TOTOONG sync sample na ang na-record,
+        // at kung na-recalibrate na (gamit ang totoong measured duration) o
+        // seed default pa rin ang ginagamit.
+        calibration: {
+            calibrated: !!override.calibrated,
+            sampleCount: Number(override.measuredSampleCount) || 0,
+            minSamplesNeeded: CLOUD_BACKUP_TIMING_MIN_SAMPLES
+        }
     });
 });
 app.post('/relay/admin/api/pricing/cloud-backup-sync-compute', requireAdminKey, (req, res) => {
