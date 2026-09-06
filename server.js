@@ -5801,7 +5801,7 @@ app.get('/relay/cloud-tokens/wallet', requireApiKey, requireAllowedDevice, rateL
         const sizeBytesForRealCost = knownSizeBytes > 0 ? knownSizeBytes : CLOUD_BACKUP_SAMPLE_SIZE_BYTES_FOR_CATALOG;
         const cloudBackupUnlockForWallet = (issuedUnlocks[installationId] || {})['cloud_backup'];
         const tierForWallet = (cloudBackupUnlockForWallet && cloudBackupUnlockForWallet.tier && CLOUD_BACKUP_PLANS[cloudBackupUnlockForWallet.tier]) ? cloudBackupUnlockForWallet.tier : 'basic';
-        const realSyncCostTokensExact = Math.round((await getCloudTokenCostPerSyncExact(sizeBytesForRealCost, tierForWallet)) * 100) / 100;
+        const realSyncCostTokensExact = Math.round((await getCloudTokenCostPerSyncExact(sizeBytesForRealCost, tierForWallet)) * 1000) / 1000;
         const realSyncCostTokens = await getCloudTokenCostPerSync(sizeBytesForRealCost, tierForWallet);
         // AYOS/BAGO: kaparehong estimate pero para sa RESTORE (tingnan ang
         // computeRealCloudBackupRestoreCostPHP() sa itaas) — magkaibang
