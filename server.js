@@ -5510,7 +5510,37 @@ async function fetchMergedTransactionHistory(installationId, { category = null, 
     const params = [installationId, category || null, dateFrom || null, dateTo || null, limit, offset];
     const sql = `
         SELECT * FROM (
-            SELECT id, category, type, tokens, balance_after, note, trigger_type, created_at
+            SELECT id,
+                   -- BUGFIX: dating "category" column lang ang basta ginagamit
+                   -- dito, pero ang column na ito ay hindi pa umiiral noon
+                   -- (ADD COLUMN IF NOT EXISTS category — tingnan sa taas) —
+                   -- kaya lahat ng row na na-insert BAGO idinagdag ang
+                   -- category tracking ay NULL ang category sa DB. Dahil
+                   -- "category = $2" ay HINDI kailanman nagta-TRUE laban sa
+                   -- NULL sa SQL, dati itong mga LUMANG entry ay TULULOY
+                   -- nakikita sa "All categories" (walang filter) pero
+                   -- NAWAWALA/blangko kapag pumili ng KAHIT ANONG specific
+                   -- na category — kahit pa malinaw namang kabilang sila
+                   -- doon (hal. isang "Cloud Backup activation" entry na
+                   -- dapat makita sa "Feature Activation" filter). Ang
+                   -- COALESCE dito ay nag-iinfer ng category PARA LANG SA
+                   -- mga NULL na lumang row (walang epekto sa mga bagong row
+                   -- na may tamang category na), gamit ang parehong
+                   -- type/note na signal na ginagamit din ng frontend bilang
+                   -- fallback (tingnan ang CT_CATEGORY_META sa app.js) —
+                   -- REFUND muna bago ang generic type='purchase' dahil
+                   -- pareho itong 'purchase' ang type sa creditCloudTokens().
+                   COALESCE(
+                       category,
+                       CASE
+                           WHEN type = 'purchase' AND note ILIKE 'Refund%' THEN 'REFUND'
+                           WHEN type = 'purchase' THEN 'TOKEN_PURCHASE'
+                           WHEN note ILIKE 'Cloud Backup activation%' THEN 'FEATURE_UNLOCK'
+                           WHEN note ILIKE 'Purchase —%' THEN 'ADDON_PURCHASE'
+                           ELSE NULL
+                       END
+                   ) AS category,
+                   type, tokens, balance_after, note, trigger_type, created_at
             FROM cloud_token_ledger
             WHERE installation_id = $1
             UNION ALL
