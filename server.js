@@ -5227,9 +5227,8 @@ app.get('/relay/cloud-tokens/packages', requireApiKey, rateLimit('cloud-tokens-p
 });
 app.get('/relay/cloud-tokens/wallet', requireApiKey, requireAllowedDevice, rateLimit('cloud-tokens-wallet', 120, 60 * 60 * 1000, (req) => req.query?.installationId), async (req, res) => {
     const installationId = String(req.query.installationId || '').trim();
-    if (!installationId) return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
-    if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
-    const cached = getWalletCache(installationId);
+    if (!installationId) return res.status(400).json({ success: false, message: 'Missing installationId.' });
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured.' });
     if (cached) return res.json(cached);
     try {
         const wallet = await getOrCreateCloudTokenWallet(installationId);
@@ -5280,15 +5279,15 @@ app.get('/relay/cloud-tokens/wallet', requireApiKey, requireAllowedDevice, rateL
 });
 app.post('/relay/cloud-tokens/purchase/create', requireApiKey, requireAllowedDevice, rateLimit('cloud-tokens-purchase-create', 20, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
     const { installationId, packageId, customTokens, method, returnBaseUrl } = req.body;
-    if (!installationId) return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
-    if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
+    if (!installationId) return res.status(400).json({ success: false, message: 'Missing installationId.' });
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured.' });
     // AYOS: dating PayMongo lang ang tinatanggap dito. Ngayon, tinitignan
     // sa PAYMENT_METHOD_CATALOG/PAYMENT_PROVIDERS_CONFIGURED (env-based)
     // kung valid AT available ang hiniling na method — anumang provider
     // ang nasa likod nito (PayMongo, Xendit, Stripe, PayPal, ...).
     if (!isPaymentMethodAvailable(method)) {
-        const available = getAvailablePaymentMethods().map((m) => m.label).join(', ') || 'wala pang naka-configure na paraan ng bayad';
-        return res.status(400).json({ success: false, message: `Invalid o hindi available ang payment method na ito. Available ngayon: ${available}.` });
+        const available = getAvailablePaymentMethods().map((m) => m.label).join(', ') || 'no payment method configured yet';
+        return res.status(400).json({ success: false, message: `This payment method is invalid or unavailable. Currently available: ${available}.` });
     }
     let tokens;
     let resolvedPackageId = null;
@@ -5299,7 +5298,7 @@ app.post('/relay/cloud-tokens/purchase/create', requireApiKey, requireAllowedDev
     } else if (typeof customTokens === 'number' && customTokens >= 50) {
         tokens = Math.round(customTokens);
     } else {
-        return res.status(400).json({ success: false, message: 'Piliin ang Basic/Standard/Pro na package, o maglagay ng custom na halaga (minimum 50 tokens/₱50).' });
+        return res.status(400).json({ success: false, message: 'Please choose a Basic/Standard/Pro package, or enter a custom amount (minimum 50 tokens/₱50).' });
     }
     const amountPHP = tokens; 
     const purchaseId = `TKN-${installationId.slice(0, 8)}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
