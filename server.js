@@ -5243,7 +5243,16 @@ app.get('/relay/cloud-tokens/packages', requireApiKey, rateLimit('cloud-tokens-p
         pkg.estSyncTokensPerMonth = estSyncTokensPerMonth;
         pkg.estSyncTokensPerYear = estSyncTokensPerYear;
         pkg.estTotalMonthlyTokens = pkg.maintenanceFeeTokens + estSyncTokensPerMonth;
-        pkg.estTotalYearlyTokens = (pkg.maintenanceFeeTokens * 12) + estSyncTokensPerYear;
+        // FIX: the yearly maintenance fee is NOT 12 monthly renewals —
+        // plan.price.yearly is the tier's actual configured yearly price in
+        // the RELAY pricing admin, which is already discounted (e.g. ~2
+        // months off vs. paying monthly 12 times). Using
+        // maintenanceFeeTokens * 12 here overstated the yearly maintenance
+        // cost and ignored that discount. Falls back to *12 only if a
+        // tier somehow has no yearly price configured at all.
+        const maintenanceFeeTokensYearly = (typeof plan.price.yearly === 'number') ? plan.price.yearly : pkg.maintenanceFeeTokens * 12;
+        pkg.maintenanceFeeTokensYearly = maintenanceFeeTokensYearly;
+        pkg.estTotalYearlyTokens = maintenanceFeeTokensYearly + estSyncTokensPerYear;
         // "Recommended extra balance" = the sync-cost portion only (the
         // maintenance fee itself is already covered by whichever package
         // is purchased) — this is the number customers actually need to
