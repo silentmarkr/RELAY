@@ -517,11 +517,21 @@ const STRIPE_WEBHOOK_PATH = '/relay/webhooks/stripe';
 // kaya excluded din ito dito, at gagamit ng express.urlencoded() sa
 // route definition mismo ng /relay/webhooks/dragonpay sa ibaba.
 const DRAGONPAY_WEBHOOK_PATH = '/relay/webhooks/dragonpay';
+// BAGO: ang AI Assistant proxy endpoint ay puwedeng magdala ng isang
+// base64-encoded screenshot sa loob mismo ng JSON body (hanggang ~6MB,
+// tugma sa limitasyon na sinusunod na rin ng OMNIPOS client bago pa
+// ito ipadala) — masyadong maliit para dito ang default 2mb JSON
+// limit sa ibaba, kaya may sarili itong mas malaking parser.
+const AI_ASSISTANT_PROXY_PATH = '/relay/ai-assistant/complete';
 const defaultJsonParser = express.json({ limit: '2mb' });
+const aiAssistantJsonParser = express.json({ limit: '8mb' });
 const cloudBackupChunkRawParser = express.raw({ type: '*/*', limit: '6mb' });
 app.use((req, res, next) => {
     if (req.path === CLOUD_BACKUP_UPLOAD_CHUNK_PATH) {
         return cloudBackupChunkRawParser(req, res, next);
+    }
+    if (req.path === AI_ASSISTANT_PROXY_PATH) {
+        return aiAssistantJsonParser(req, res, next);
     }
     if (req.path === PAYMONGO_WEBHOOK_PATH || req.path === STRIPE_WEBHOOK_PATH || req.path === DRAGONPAY_WEBHOOK_PATH) {
         return next();
@@ -542,6 +552,51 @@ app.use((err, req, res, next) => {
 });
 const PORT = process.env.PORT || 4477;
 const RELAY_API_KEY = process.env.RELAY_API_KEY || null; 
+// BAGO: ang OmniPOS AI Assistant ay dating dumideretso sa Cloudflare
+// Workers AI GAMIT ANG CREDENTIALS NA NAKA-EMBED SA BAWAT client build
+// (encrypted man, kasama pa rin ang decryption key sa parehong package —
+// kaya madaling ma-access ng end customer ang token). Dito na lang sila
+// nakatira ngayon (RELAY, server ng developer lang) — tinatawag na lang
+// ng bawat OMNIPOS client ang isang proxy endpoint dito (tingnan sa
+// ibaba: /relay/ai-assistant/complete) sa halip na direktang tumawag sa
+// Cloudflare gamit ang sariling naka-embed na token.
+const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID || null;
+const CF_AI_API_TOKEN = process.env.CF_AI_API_TOKEN || null;
+const CF_AI_MODEL = process.env.CF_AI_MODEL || '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
+const CF_AI_VISION_MODEL = process.env.CF_AI_VISION_MODEL || '@cf/meta/llama-3.2-11b-vision-instruct';
+function isCfAiConfigured() {
+    return !!(CF_ACCOUNT_ID && CF_AI_API_TOKEN);
+}
+async function callCloudflareWorkersAI(messages, vision) {
+    const model = vision ? CF_AI_VISION_MODEL : CF_AI_MODEL;
+    const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/v1/chat/completions`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), vision ? 30000 : 20000);
+    try {
+        const cfRes = await fetch(url, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${CF_AI_API_TOKEN}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model, messages, max_tokens: 650, temperature: 0.3 }),
+            signal: controller.signal
+        });
+        const raw = await cfRes.text();
+        let data;
+        try { data = JSON.parse(raw); } catch (e) { data = null; }
+        if (!cfRes.ok || !data) {
+            const errMsg = (data && data.errors && data.errors[0] && data.errors[0].message) || `Cloudflare ${vision ? 'Vision ' : ''}AI request failed (HTTP ${cfRes.status}).`;
+            return { success: false, message: errMsg };
+        }
+        const answer = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+        if (!answer || !answer.trim()) {
+            return { success: false, message: `Empty response from ${vision ? 'vision ' : ''}AI provider.` };
+        }
+        return { success: true, answer: answer.trim() };
+    } catch (err) {
+        return { success: false, message: err.name === 'AbortError' ? 'AI request timed out.' : (err.message || 'AI request failed.') };
+    } finally {
+        clearTimeout(timeout);
+    }
+}
 const MAIL_USER = process.env.RELAY_MAIL_USER;
 const MAIL_PASS = process.env.RELAY_MAIL_PASS;
 const RECIPIENT_EMAIL = process.env.RELAY_RECIPIENT_EMAIL; 
@@ -4893,6 +4948,20 @@ function rateLimit(bucketName, max, windowMs, keyFn) {
         next();
     };
 }
+app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, rateLimit('ai-assistant-complete', 40, 5 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    if (!isCfAiConfigured()) {
+        return res.status(503).json({ success: false, message: 'AI Assistant is not configured on the relay server (missing CF_ACCOUNT_ID/CF_AI_API_TOKEN in RELAY .env). Contact the developer.' });
+    }
+    const messages = Array.isArray(req.body?.messages) ? req.body.messages : null;
+    if (!messages || !messages.length) {
+        return res.status(400).json({ success: false, message: 'Missing messages.' });
+    }
+    const result = await callCloudflareWorkersAI(messages, !!req.body?.vision);
+    if (!result.success) {
+        return res.status(502).json(result);
+    }
+    res.json(result);
+});
 app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 1000), (req, res) => {
     const featureCatalog = {};
     for (const [featureId, entry] of Object.entries(FEATURE_CATALOG)) {
