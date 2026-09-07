@@ -1335,6 +1335,10 @@ a:focus-visible,
           <div class="stat-label">🌿 Multi-Branch active</div>
         </div>
         <div class="stat-card">
+          <div class="stat-num" id="subStatAiAssistant">—</div>
+          <div class="stat-label">🤖 AI Assistant active</div>
+        </div>
+        <div class="stat-card">
           <div class="stat-num stat-num-danger" id="subStatExpiringSoon">—</div>
           <div class="stat-label">⏰ Expiring within 7 days</div>
         </div>
@@ -1348,6 +1352,7 @@ a:focus-visible,
             <option value="cloud_backup">☁️ Cloud Backup only</option>
             <option value="rbac_management">🔐 RBAC only</option>
             <option value="multi_branch">🌿 Multi-Branch only</option>
+            <option value="ai_assistant">🤖 AI Assistant only</option>
           </select>
           <select id="subSortBy" onchange="renderSubscriptionsList()">
             <option value="expiry">Sort: Soonest to expire</option>
@@ -2796,6 +2801,7 @@ async function loadSubscriptions() {
   document.getElementById('subStatCloudBackup').innerText = counts.cloud_backup || 0;
   document.getElementById('subStatRbac').innerText = counts.rbac_management || 0;
   document.getElementById('subStatMultiBranch').innerText = counts.multi_branch || 0;
+  document.getElementById('subStatAiAssistant').innerText = counts.ai_assistant || 0;
   document.getElementById('subStatExpiringSoon').innerText = data.expiringSoonCount || 0;
   document.getElementById('subCountPill').innerText = lastLoadedSubscriptions.length;
   renderSubscriptionsList();
@@ -2826,7 +2832,7 @@ function renderSubscriptionsList() {
     listEl.innerHTML = '<div class="empty">No active subscriptions match this filter.</div>';
     return;
   }
-  const featureIcon = { cloud_backup: '☁️', rbac_management: '🔐', multi_branch: '🌿' };
+  const featureIcon = { cloud_backup: '☁️', rbac_management: '🔐', multi_branch: '🌿', ai_assistant: '🤖' };
   listEl.innerHTML = list.map(s => {
     const cycleLabel = s.billingCycle === 'yearly' ? 'Yearly' : (s.billingCycle === 'monthly' ? 'Monthly' : '');
     let daysLabel, urgency;
@@ -2994,7 +3000,7 @@ function renderOtps(list) {
 async function approveOtp(key, featureLabel, storeName, featureId, presetDurationDays, presetPrice, presetBillingCycle) {
   const isDemo = featureId === '__demo__';
   const isCloudBackup = featureId === 'cloud_backup';
-  const isModuleSubscription = featureId === 'rbac_management' || featureId === 'multi_branch';
+  const isModuleSubscription = featureId === 'rbac_management' || featureId === 'multi_branch' || featureId === 'ai_assistant';
   // Cloud Backup, RBAC, and Multi-Branch are all subscription features
   // (monthly/yearly billing) — they must all get the same plan-summary
   // box and the same billing-cycle-aware duration default below, or the
@@ -3676,7 +3682,7 @@ async function toggleAllowFromDetail(installationId, currentlyAllowed) {
 }
 async function activateFeature(installationId, featureId, featureName, presetTier, presetBillingCycle) {
   const isCloudBackup = featureId === 'cloud_backup';
-  const isModuleSubscription = featureId === 'rbac_management' || featureId === 'multi_branch';
+  const isModuleSubscription = featureId === 'rbac_management' || featureId === 'multi_branch' || featureId === 'ai_assistant';
   const note = await promptForNote(`Activate "${featureName}" for this device right now — no OTP needed. Only use this if you ALREADY HAVE A REFERENCE (already paid/previously unlocked).`);
   if (note === null) return; 
   let tier = null, billingCycle = null, durationDays;

@@ -922,6 +922,7 @@ const FEATURE_CATALOG_BASE = {
     shift_management: { name: 'Multi-Cashier Shift Oversight & Z-Reading Reports', price: 699, category: 'module' },
     rbac_management: { name: 'Roles & Permissions (RBAC) Management', price: null, category: 'module', isSubscription: true },
     multi_branch: { name: 'Multi-Branch Dashboard', price: null, category: 'module', isSubscription: true },
+    ai_assistant: { name: 'OmniPOS AI Assistant', price: null, category: 'module', isSubscription: true },
     cloud_backup: { name: 'Cloud Backup (Postgres)', price: null, category: 'module', isSubscription: true }
 };
 const CLOUD_BACKUP_PLANS_BASE = {
@@ -2073,7 +2074,7 @@ async function creditCloudTokens(installationId, tokens, note, category = 'TOKEN
     invalidateWalletCache(installationId);
     return balanceAfter;
 }
-const MODULE_SUBSCRIPTION_FEATURE_IDS = ['rbac_management', 'multi_branch'];
+const MODULE_SUBSCRIPTION_FEATURE_IDS = ['rbac_management', 'multi_branch', 'ai_assistant'];
 function isModuleSubscriptionFeature(featureId) {
     return MODULE_SUBSCRIPTION_FEATURE_IDS.includes(featureId);
 }
@@ -2090,6 +2091,11 @@ const MODULE_SUBSCRIPTION_PLANS_BASE = {
         id: 'multi_branch',
         name: 'Multi-Branch Dashboard',
         price: { monthly: 199, yearly: 1990 }
+    },
+    ai_assistant: {
+        id: 'ai_assistant',
+        name: 'OmniPOS AI Assistant',
+        price: { monthly: 179, yearly: 1790 }
     }
 };
 const MODULE_SUBSCRIPTION_BILLING_DAYS = { monthly: 30, yearly: 365 };
@@ -3989,7 +3995,7 @@ app.get('/relay/admin/api/pricing/module-subscriptions', requireAdminKey, (req, 
 app.post('/relay/admin/api/pricing/module-subscriptions', requireAdminKey, (req, res) => {
     const { featureId, name, monthly, yearly } = req.body || {};
     if (!featureId || !MODULE_SUBSCRIPTION_PLANS_BASE[featureId]) {
-        return res.status(400).json({ success: false, message: 'Invalid or missing featureId (rbac_management/multi_branch).' });
+        return res.status(400).json({ success: false, message: 'Invalid or missing featureId (rbac_management/multi_branch/ai_assistant).' });
     }
     if (monthly !== undefined && (typeof monthly !== 'number' || !isFinite(monthly) || monthly < 0)) {
         return res.status(400).json({ success: false, message: 'Invalid monthly price.' });
@@ -4018,7 +4024,7 @@ app.post('/relay/admin/api/pricing/module-subscriptions', requireAdminKey, (req,
 app.post('/relay/admin/api/pricing/module-subscriptions/reset', requireAdminKey, (req, res) => {
     const { featureId } = req.body || {};
     if (!featureId || !MODULE_SUBSCRIPTION_PLANS_BASE[featureId]) {
-        return res.status(400).json({ success: false, message: 'Invalid or missing featureId (rbac_management/multi_branch).' });
+        return res.status(400).json({ success: false, message: 'Invalid or missing featureId (rbac_management/multi_branch/ai_assistant).' });
     }
     delete moduleSubscriptionOverrides[featureId];
     saveModuleSubscriptionOverrides(moduleSubscriptionOverrides);
@@ -4047,7 +4053,7 @@ app.get('/relay/admin/api/pricing/features', requireAdminKey, (req, res) => {
 app.post('/relay/admin/api/pricing/features', requireAdminKey, (req, res) => {
     const { featureId, name, price } = req.body || {};
     if (!featureId || isSubscriptionOnlyFeature(featureId) || !FEATURE_CATALOG[featureId]) {
-        return res.status(400).json({ success: false, message: 'Invalid or unknown featureId (or it is a subscription feature — cloud_backup/rbac_management/multi_branch — which has its own dedicated pricing editor).' });
+        return res.status(400).json({ success: false, message: 'Invalid or unknown featureId (or it is a subscription feature — cloud_backup/rbac_management/multi_branch/ai_assistant — which has its own dedicated pricing editor).' });
     }
     if (price !== undefined && (typeof price !== 'number' || !isFinite(price) || price < 0)) {
         return res.status(400).json({ success: false, message: 'Invalid price.' });
