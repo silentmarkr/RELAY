@@ -8271,6 +8271,8 @@ const RELEASE_CLIENT_TARGETS = new Set([
     path.join('public', 'bt-printer.js'),
     path.join('public', 'faq-engine.js'),
     path.join('public', 'faq-knowledge.js'),
+    path.join('public', 'faq-knowledge.en.js'),
+    path.join('public', 'faq-lang.js'),
 ]);
 const RELEASE_ENV_LOADER_FILENAME = 'env-loader.js';
 const RELEASE_ENV_KEY_FILENAME = '.env.key';
