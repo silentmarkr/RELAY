@@ -292,7 +292,52 @@ async function ensureDeviceLicenseSchema() {
             split_at            TIMESTAMPTZ NOT NULL DEFAULT now()
         );
     `);
-    console.log('✅ Device/license Postgres schema ready (relay_devices, relay_device_fingerprints, relay_clone_splits).');
+    await pgPoolDevices.query(`
+        CREATE TABLE IF NOT EXISTS relay_ai_credit_usage (
+            installation_id TEXT NOT NULL,
+            month_key       TEXT NOT NULL,
+            used_credits    INTEGER NOT NULL DEFAULT 0 CHECK (used_credits >= 0),
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (installation_id, month_key)
+        );
+    `);
+    await pgPoolDevices.query(`
+        CREATE TABLE IF NOT EXISTS relay_ai_credit_requests (
+            installation_id TEXT NOT NULL,
+            month_key       TEXT NOT NULL,
+            request_id      TEXT NOT NULL,
+            credit_cost     INTEGER NOT NULL CHECK (credit_cost > 0),
+            status          TEXT NOT NULL DEFAULT 'reserved',
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (installation_id, month_key, request_id)
+        );
+    `);
+    await pgPoolDevices.query(`
+        CREATE TABLE IF NOT EXISTS relay_ai_credit_settings (
+            installation_id TEXT PRIMARY KEY,
+            monthly_credits INTEGER NOT NULL CHECK (monthly_credits >= 1),
+            text_cost       INTEGER NOT NULL CHECK (text_cost >= 1),
+            file_cost       INTEGER NOT NULL CHECK (file_cost >= 1),
+            image_cost      INTEGER NOT NULL CHECK (image_cost >= 1),
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+    `);
+    await pgPoolDevices.query(`
+        CREATE INDEX IF NOT EXISTS idx_relay_ai_credit_usage_month
+        ON relay_ai_credit_usage (month_key);
+    `);
+    const defaultMonthly = Math.max(1, parseInt(process.env.RELAY_AI_MONTHLY_CREDITS, 10) || 300);
+    const defaultText = Math.max(1, parseInt(process.env.RELAY_AI_TEXT_CREDIT_COST, 10) || 1);
+    const defaultFile = Math.max(defaultText, parseInt(process.env.RELAY_AI_FILE_CREDIT_COST, 10) || 2);
+    const defaultImage = Math.max(defaultFile, parseInt(process.env.RELAY_AI_IMAGE_CREDIT_COST, 10) || 3);
+    await pgPoolDevices.query(
+        `INSERT INTO relay_ai_credit_settings (installation_id, monthly_credits, text_cost, file_cost, image_cost)
+         VALUES ('__default__', $1, $2, $3, $4)
+         ON CONFLICT (installation_id) DO NOTHING`,
+        [defaultMonthly, defaultText, defaultFile, defaultImage]
+    );
+    console.log('✅ AI credit schema ready (usage + requests + editable settings) — RELAY ang authoritative source.');
 }
 // ===================================================================
 // GENERIC PERSISTENT KEY-VALUE STORE (Neon Postgres) — dito na-save
@@ -5052,19 +5097,345 @@ function rateLimit(bucketName, max, windowMs, keyFn) {
         next();
     };
 }
+// ===================================================================
+// RELAY-AUTHORITATIVE AI CREDITS
+// ===================================================================
+// Ang OMNIPOS .env/local storage ay UI/client configuration lamang.
+// Hindi ito ginagamit bilang security gate. Ang RELAY + Neon ang source
+// of truth para sa subscription at monthly AI credit consumption.
+const RELAY_AI_DEFAULT_MONTHLY_CREDITS = Math.max(1, parseInt(process.env.RELAY_AI_MONTHLY_CREDITS, 10) || 300);
+const RELAY_AI_DEFAULT_TEXT_CREDIT_COST = Math.max(1, parseInt(process.env.RELAY_AI_TEXT_CREDIT_COST, 10) || 1);
+const RELAY_AI_DEFAULT_FILE_CREDIT_COST = Math.max(RELAY_AI_DEFAULT_TEXT_CREDIT_COST, parseInt(process.env.RELAY_AI_FILE_CREDIT_COST, 10) || 2);
+const RELAY_AI_DEFAULT_IMAGE_CREDIT_COST = Math.max(RELAY_AI_DEFAULT_FILE_CREDIT_COST, parseInt(process.env.RELAY_AI_IMAGE_CREDIT_COST, 10) || 3);
+const RELAY_AI_DEFAULT_SETTINGS_ID = '__default__';
+
+function relayAiMonthKey() {
+    const d = new Date();
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+function getRelayAiCost(body, config) {
+    const messages = Array.isArray(body?.messages) ? body.messages : [];
+    const hasImagePayload = !!body?.vision || messages.some(m => Array.isArray(m?.content) && m.content.some(c => c && c.type === 'image_url'));
+    if (hasImagePayload) return config.imageCost;
+    if (body?.attachmentType === 'file') return config.fileCost;
+    return config.textCost;
+}
+function hasActiveRelayAiSubscription(installationId) {
+    const entry = (issuedUnlocks[installationId] || {}).ai_assistant;
+    if (!entry) return false;
+    const expiresAt = Number(entry.expiresAt || (entry.payload && entry.payload.expiresAt) || 0);
+    return !expiresAt || expiresAt > Date.now();
+}
+function normalizeRelayAiSettingNumber(value, fallback, min = 1, max = 1000000000) {
+    const n = Number(value);
+    if (!Number.isInteger(n) || n < min || n > max) return fallback;
+    return n;
+}
+function normalizeRelayAiSettings(body, base = {}) {
+    const monthlyCredits = normalizeRelayAiSettingNumber(body?.monthlyCredits, base.monthlyCredits || RELAY_AI_DEFAULT_MONTHLY_CREDITS, 1);
+    const textCost = normalizeRelayAiSettingNumber(body?.textCost, base.textCost || RELAY_AI_DEFAULT_TEXT_CREDIT_COST, 1);
+    const fileCost = normalizeRelayAiSettingNumber(body?.fileCost, base.fileCost || RELAY_AI_DEFAULT_FILE_CREDIT_COST, textCost);
+    const imageCost = normalizeRelayAiSettingNumber(body?.imageCost, base.imageCost || RELAY_AI_DEFAULT_IMAGE_CREDIT_COST, fileCost);
+    return { monthlyCredits, textCost, fileCost, imageCost };
+}
+async function getRelayAiDefaultSettings(clientOrPool = pgPoolDevices) {
+    if (!clientOrPool) throw new Error('AI credit database is not configured on the RELAY.');
+    const result = await clientOrPool.query(
+        `SELECT monthly_credits, text_cost, file_cost, image_cost, updated_at\n         FROM relay_ai_credit_settings WHERE installation_id = $1`,
+        [RELAY_AI_DEFAULT_SETTINGS_ID]
+    );
+    if (!result.rows[0]) {
+        return {
+            monthlyCredits: RELAY_AI_DEFAULT_MONTHLY_CREDITS,
+            textCost: RELAY_AI_DEFAULT_TEXT_CREDIT_COST,
+            fileCost: RELAY_AI_DEFAULT_FILE_CREDIT_COST,
+            imageCost: RELAY_AI_DEFAULT_IMAGE_CREDIT_COST,
+            updatedAt: null,
+            source: 'env-default'
+        };
+    }
+    const row = result.rows[0];
+    return {
+        monthlyCredits: Number(row.monthly_credits),
+        textCost: Number(row.text_cost),
+        fileCost: Number(row.file_cost),
+        imageCost: Number(row.image_cost),
+        updatedAt: row.updated_at,
+        source: 'relay-default'
+    };
+}
+async function getRelayAiSettings(installationId, clientOrPool = pgPoolDevices) {
+    if (!clientOrPool) throw new Error('AI credit database is not configured on the RELAY.');
+    const defaults = await getRelayAiDefaultSettings(clientOrPool);
+    if (!installationId || installationId === RELAY_AI_DEFAULT_SETTINGS_ID) return defaults;
+    const result = await clientOrPool.query(
+        `SELECT monthly_credits, text_cost, file_cost, image_cost, updated_at\n         FROM relay_ai_credit_settings WHERE installation_id = $1`,
+        [installationId]
+    );
+    if (!result.rows[0]) return { ...defaults, source: 'relay-default', override: false };
+    const row = result.rows[0];
+    return {
+        monthlyCredits: Number(row.monthly_credits),
+        textCost: Number(row.text_cost),
+        fileCost: Number(row.file_cost),
+        imageCost: Number(row.image_cost),
+        updatedAt: row.updated_at,
+        source: 'installation-override',
+        override: true
+    };
+}
+async function getRelayAiCreditStatus(installationId, clientOrPool = pgPoolDevices) {
+    if (!clientOrPool) throw new Error('AI credit database is not configured on the RELAY.');
+    const monthKey = relayAiMonthKey();
+    const settings = await getRelayAiSettings(installationId, clientOrPool);
+    const result = await clientOrPool.query(
+        `SELECT used_credits FROM relay_ai_credit_usage WHERE installation_id = $1 AND month_key = $2`,
+        [installationId, monthKey]
+    );
+    const used = result.rows[0] ? Number(result.rows[0].used_credits) || 0 : 0;
+    return {
+        month: monthKey,
+        used,
+        limit: settings.monthlyCredits,
+        remaining: Math.max(0, settings.monthlyCredits - used),
+        settings
+    };
+}
+async function reserveRelayAiCredits(installationId, requestId, body) {
+    if (!pgPoolDevices) return { ok: false, reason: 'AI credit database is not configured on the RELAY.' };
+    const monthKey = relayAiMonthKey();
+    const client = await pgPoolDevices.connect();
+    try {
+        await client.query('BEGIN');
+        // Lock the effective settings for this transaction so an admin change
+        // cannot create a half-old/half-new credit reservation.
+        const settingsRows = await client.query(
+            `SELECT installation_id, monthly_credits, text_cost, file_cost, image_cost\n             FROM relay_ai_credit_settings\n             WHERE installation_id IN ($1, $2)\n             ORDER BY CASE WHEN installation_id = $1 THEN 0 ELSE 1 END\n             FOR UPDATE`,
+            [installationId, RELAY_AI_DEFAULT_SETTINGS_ID]
+        );
+        const defaultRow = settingsRows.rows.find(r => r.installation_id === RELAY_AI_DEFAULT_SETTINGS_ID);
+        const overrideRow = settingsRows.rows.find(r => r.installation_id === installationId);
+        const settings = overrideRow ? {
+            monthlyCredits: Number(overrideRow.monthly_credits), textCost: Number(overrideRow.text_cost),
+            fileCost: Number(overrideRow.file_cost), imageCost: Number(overrideRow.image_cost),
+            updatedAt: null, source: 'installation-override', override: true
+        } : {
+            monthlyCredits: Number(defaultRow?.monthly_credits || RELAY_AI_DEFAULT_MONTHLY_CREDITS),
+            textCost: Number(defaultRow?.text_cost || RELAY_AI_DEFAULT_TEXT_CREDIT_COST),
+            fileCost: Number(defaultRow?.file_cost || RELAY_AI_DEFAULT_FILE_CREDIT_COST),
+            imageCost: Number(defaultRow?.image_cost || RELAY_AI_DEFAULT_IMAGE_CREDIT_COST),
+            updatedAt: null, source: 'relay-default', override: false
+        };
+        const cost = getRelayAiCost(body, settings);
+        const existing = await client.query(
+            `SELECT credit_cost, status FROM relay_ai_credit_requests\n             WHERE installation_id = $1 AND month_key = $2 AND request_id = $3 FOR UPDATE`,
+            [installationId, monthKey, requestId]
+        );
+        if (existing.rows[0]) {
+            const row = existing.rows[0];
+            const originalCost = Number(row.credit_cost);
+            if (row.status === 'completed' || row.status === 'retrying' || row.status === 'reserved') {
+                await client.query('ROLLBACK');
+                return { ok: false, reason: 'request_reuse' };
+            }
+            // A failed logical request may retry once with the SAME requestId.
+            // Reuse the original charged cost even if an admin changed pricing
+            // between attempts. This prevents a mid-request config change from
+            // causing a false mismatch/double charge.
+            if (row.status === 'failed') {
+                const usage = await client.query(
+                    `SELECT used_credits FROM relay_ai_credit_usage WHERE installation_id = $1 AND month_key = $2`,
+                    [installationId, monthKey]
+                );
+                const used = usage.rows[0] ? Number(usage.rows[0].used_credits) || 0 : 0;
+                await client.query('COMMIT');
+                return { ok: true, reused: true, cost: originalCost, status: {
+                    month: monthKey, used, limit: settings.monthlyCredits,
+                    remaining: Math.max(0, settings.monthlyCredits - used), settings
+                } };
+            }
+            await client.query('ROLLBACK');
+            return { ok: false, reason: 'request_reuse' };
+        }
+        const upsert = await client.query(
+            `INSERT INTO relay_ai_credit_usage (installation_id, month_key, used_credits)\n             VALUES ($1, $2, $3)\n             ON CONFLICT (installation_id, month_key) DO UPDATE\n             SET used_credits = relay_ai_credit_usage.used_credits + EXCLUDED.used_credits, updated_at = now()\n             WHERE relay_ai_credit_usage.used_credits + EXCLUDED.used_credits <= $4\n             RETURNING used_credits`,
+            [installationId, monthKey, cost, settings.monthlyCredits]
+        );
+        if (!upsert.rows[0]) {
+            const usage = await client.query(
+                `SELECT used_credits FROM relay_ai_credit_usage WHERE installation_id = $1 AND month_key = $2`,
+                [installationId, monthKey]
+            );
+            const used = usage.rows[0] ? Number(usage.rows[0].used_credits) || 0 : 0;
+            await client.query('ROLLBACK');
+            return { ok: false, reason: 'exhausted', status: {
+                month: monthKey, used, limit: settings.monthlyCredits,
+                remaining: Math.max(0, settings.monthlyCredits - used), settings
+            }, cost };
+        }
+        await client.query(
+            `INSERT INTO relay_ai_credit_requests (installation_id, month_key, request_id, credit_cost, status)\n             VALUES ($1, $2, $3, $4, 'reserved')`,
+            [installationId, monthKey, requestId, cost]
+        );
+        const used = Number(upsert.rows[0].used_credits) || 0;
+        await client.query('COMMIT');
+        return { ok: true, reused: false, cost, status: {
+            month: monthKey, used, limit: settings.monthlyCredits,
+            remaining: Math.max(0, settings.monthlyCredits - used), settings
+        } };
+    } catch (err) {
+        try { await client.query('ROLLBACK'); } catch (_) {}
+        throw err;
+    } finally {
+        client.release();
+    }
+}
+async function markRelayAiRequestStatus(installationId, requestId, status) {
+    if (!pgPoolDevices || !requestId) return;
+    const monthKey = relayAiMonthKey();
+    await queryWithRetry(pgPoolDevices,
+        `UPDATE relay_ai_credit_requests SET status = $4, updated_at = now() WHERE installation_id = $1 AND month_key = $2 AND request_id = $3`,
+        [installationId, monthKey, requestId, status]);
+}
+
 app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, rateLimit('ai-assistant-complete', 40, 5 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    const installationId = String(req.body?.installationId || '').trim();
+    const requestId = String(req.body?.requestId || '').trim();
+    if (!installationId) return res.status(400).json({ success: false, message: 'Missing installationId.' });
+    if (!requestId || requestId.length > 120) return res.status(400).json({ success: false, message: 'Missing or invalid requestId.' });
+    if (!hasActiveRelayAiSubscription(installationId)) {
+        return res.status(403).json({ success: false, subscriptionRequired: true, message: 'Walang active OmniPOS AI Assistant subscription para sa device na ito.' });
+    }
     if (!isCfAiConfigured()) {
         return res.status(503).json({ success: false, message: 'AI Assistant is not configured on the relay server (missing CF_ACCOUNT_ID/CF_AI_API_TOKEN in RELAY .env). Contact the developer.' });
     }
     const messages = Array.isArray(req.body?.messages) ? req.body.messages : null;
-    if (!messages || !messages.length) {
-        return res.status(400).json({ success: false, message: 'Missing messages.' });
+    if (!messages || !messages.length) return res.status(400).json({ success: false, message: 'Missing messages.' });
+    try {
+        const reservation = await reserveRelayAiCredits(installationId, requestId, req.body);
+        if (!reservation.ok) {
+            if (reservation.reason === 'exhausted') {
+                return res.status(402).json({ success: false, creditsExhausted: true, creditCost: reservation.cost, ...reservation.status, message: `Naubos na ang buwanang AI credits (${reservation.status.used}/${reservation.status.limit}). Mare-reset ito sa susunod na buwan.` });
+            }
+            if (reservation.reason === 'request_mismatch' || reservation.reason === 'request_reuse') return res.status(409).json({ success: false, message: 'Invalid AI request reuse.' });
+            return res.status(503).json({ success: false, message: reservation.reason });
+        }
+        // The same requestId is deliberately reusable once for the OMNIPOS
+        // vision->text fallback. It prevents a failed vision attempt from
+        // charging the same user question twice.
+        if (reservation.reused) {
+            await markRelayAiRequestStatus(installationId, requestId, 'retrying');
+        }
+        const result = await callCloudflareWorkersAI(messages, !!req.body?.vision);
+        if (!result.success) {
+            // Keep the single reservation for this logical user request.
+            // OMNIPOS may use the same requestId once for its vision->text
+            // fallback without charging a second time. A later unrelated
+            // request always receives a fresh requestId and is charged normally.
+            await markRelayAiRequestStatus(installationId, requestId, 'failed');
+            return res.status(502).json({ ...result, creditCost: reservation.cost, credits: reservation.status });
+        }
+        await markRelayAiRequestStatus(installationId, requestId, 'completed');
+        res.json({ ...result, creditCost: reservation.cost, credits: reservation.status });
+    } catch (err) {
+        console.error('⚠️ RELAY AI credit/request error:', err.message);
+        return res.status(503).json({ success: false, message: 'AI credit service temporarily unavailable.' });
     }
-    const result = await callCloudflareWorkersAI(messages, !!req.body?.vision);
-    if (!result.success) {
-        return res.status(502).json(result);
+});
+app.get('/relay/ai-assistant/usage', requireApiKey, requireAllowedDevice, rateLimit('ai-assistant-usage', 120, 60 * 60 * 1000, (req) => req.query?.installationId), async (req, res) => {
+    const installationId = String(req.query?.installationId || '').trim();
+    if (!installationId) return res.status(400).json({ success: false, message: 'Missing installationId.' });
+    if (!hasActiveRelayAiSubscription(installationId)) return res.status(403).json({ success: false, subscriptionRequired: true, message: 'Walang active OmniPOS AI Assistant subscription para sa device na ito.' });
+    try {
+        const credits = await getRelayAiCreditStatus(installationId);
+        return res.json({ success: true, ...credits });
+    } catch (err) {
+        return res.status(503).json({ success: false, message: err.message || 'AI credit service unavailable.' });
     }
-    res.json(result);
+});
+// ===================================================================
+// ADMIN: RELAY AI CREDIT SETTINGS
+// ===================================================================
+// Ito ang editable source of truth. Ang customer/OMNIPOS .env ay hindi
+// makakapagpalit ng monthly limit o per-request cost dito.
+app.get('/relay/admin/api/ai-credits/settings', requireAdminKey, async (req, res) => {
+    try {
+        if (!pgPoolDevices) return res.status(503).json({ success: false, message: 'Devices/License database is not configured.' });
+        const defaults = await getRelayAiDefaultSettings();
+        const monthKey = relayAiMonthKey();
+        const rows = await pgPoolDevices.query(
+            `SELECT s.installation_id, s.monthly_credits, s.text_cost, s.file_cost, s.image_cost, s.updated_at,\n                    COALESCE(u.used_credits, 0) AS used_credits\n             FROM relay_ai_credit_settings s\n             LEFT JOIN relay_ai_credit_usage u\n               ON u.installation_id = s.installation_id AND u.month_key = $1\n             WHERE s.installation_id <> $2\n             ORDER BY s.updated_at DESC`,
+            [monthKey, RELAY_AI_DEFAULT_SETTINGS_ID]
+        );
+        const overrides = rows.rows.map(r => ({
+            installationId: r.installation_id,
+            monthlyCredits: Number(r.monthly_credits),
+            textCost: Number(r.text_cost),
+            fileCost: Number(r.file_cost),
+            imageCost: Number(r.image_cost),
+            used: Number(r.used_credits) || 0,
+            remaining: Math.max(0, Number(r.monthly_credits) - (Number(r.used_credits) || 0)),
+            updatedAt: r.updated_at
+        }));
+        return res.json({ success: true, month: monthKey, defaults, overrides });
+    } catch (err) {
+        console.error('AI credit settings GET error:', err.message);
+        return res.status(503).json({ success: false, message: 'Unable to load AI credit settings.' });
+    }
+});
+app.post('/relay/admin/api/ai-credits/default', requireAdminKey, async (req, res) => {
+    try {
+        if (!pgPoolDevices) return res.status(503).json({ success: false, message: 'Devices/License database is not configured.' });
+        const current = await getRelayAiDefaultSettings();
+        const settings = normalizeRelayAiSettings(req.body, current);
+        await pgPoolDevices.query(
+            `INSERT INTO relay_ai_credit_settings (installation_id, monthly_credits, text_cost, file_cost, image_cost, updated_at)\n             VALUES ($1, $2, $3, $4, $5, now())\n             ON CONFLICT (installation_id) DO UPDATE SET\n               monthly_credits = EXCLUDED.monthly_credits, text_cost = EXCLUDED.text_cost,\n               file_cost = EXCLUDED.file_cost, image_cost = EXCLUDED.image_cost, updated_at = now()`,
+            [RELAY_AI_DEFAULT_SETTINGS_ID, settings.monthlyCredits, settings.textCost, settings.fileCost, settings.imageCost]
+        );
+        const saved = await getRelayAiDefaultSettings();
+        console.log(`🤖 AI credit defaults updated via admin: ${saved.monthlyCredits} monthly / text ${saved.textCost} / file ${saved.fileCost} / image ${saved.imageCost}`);
+        return res.json({ success: true, settings: saved });
+    } catch (err) {
+        console.error('AI credit default update error:', err.message);
+        return res.status(503).json({ success: false, message: 'Unable to save AI credit defaults.' });
+    }
+});
+app.post('/relay/admin/api/ai-credits/installation', requireAdminKey, async (req, res) => {
+    try {
+        if (!pgPoolDevices) return res.status(503).json({ success: false, message: 'Devices/License database is not configured.' });
+        const installationId = String(req.body?.installationId || '').trim();
+        if (!installationId || installationId === RELAY_AI_DEFAULT_SETTINGS_ID || installationId.length > 200) {
+            return res.status(400).json({ success: false, message: 'Valid installationId is required.' });
+        }
+        const current = await getRelayAiSettings(installationId);
+        const settings = normalizeRelayAiSettings(req.body, current);
+        await pgPoolDevices.query(
+            `INSERT INTO relay_ai_credit_settings (installation_id, monthly_credits, text_cost, file_cost, image_cost, updated_at)\n             VALUES ($1, $2, $3, $4, $5, now())\n             ON CONFLICT (installation_id) DO UPDATE SET\n               monthly_credits = EXCLUDED.monthly_credits, text_cost = EXCLUDED.text_cost,\n               file_cost = EXCLUDED.file_cost, image_cost = EXCLUDED.image_cost, updated_at = now()`,
+            [installationId, settings.monthlyCredits, settings.textCost, settings.fileCost, settings.imageCost]
+        );
+        const saved = await getRelayAiSettings(installationId);
+        console.log(`🤖 AI credit override updated for ${installationId}: ${saved.monthlyCredits} monthly`);
+        return res.json({ success: true, installationId, settings: saved });
+    } catch (err) {
+        console.error('AI credit installation update error:', err.message);
+        return res.status(503).json({ success: false, message: 'Unable to save installation AI credit override.' });
+    }
+});
+app.post('/relay/admin/api/ai-credits/installation/reset', requireAdminKey, async (req, res) => {
+    try {
+        if (!pgPoolDevices) return res.status(503).json({ success: false, message: 'Devices/License database is not configured.' });
+        const installationId = String(req.body?.installationId || '').trim();
+        if (!installationId || installationId === RELAY_AI_DEFAULT_SETTINGS_ID) {
+            return res.status(400).json({ success: false, message: 'Valid installationId is required.' });
+        }
+        await pgPoolDevices.query(`DELETE FROM relay_ai_credit_settings WHERE installation_id = $1`, [installationId]);
+        const effective = await getRelayAiSettings(installationId);
+        console.log(`🤖 AI credit override reset for ${installationId}; default is active again.`);
+        return res.json({ success: true, installationId, settings: effective });
+    } catch (err) {
+        console.error('AI credit installation reset error:', err.message);
+        return res.status(503).json({ success: false, message: 'Unable to reset installation AI credit override.' });
+    }
 });
 app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 1000), (req, res) => {
     const featureCatalog = {};

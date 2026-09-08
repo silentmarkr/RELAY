@@ -1089,6 +1089,37 @@ a:focus-visible,
         </label>
         <div id="activationFlagsSavedNote" style="font-size:12px; color:var(--success, #69db7c); margin-top:8px; display:none;">Saved ✓</div>
       </div>
+      <div class="card" id="cardAiCredits" style="border:1px solid var(--accent-dim);">
+        <h2>🤖 AI Credits — RELAY Authority</h2>
+        <div class="backup-note">
+          Dito mismo sa RELAY/Neon naka-save ang tunay na AI credit limit at per-request cost. Hindi ito kinokontrol ng OMNIPOS client .env. Ang <b>Default</b> ay para sa lahat ng walang custom override; puwedeng magtakda ng sariling limit para sa isang installation/customer.
+        </div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; margin-top:12px;">
+          <label style="font-size:12px; color:var(--muted);">Monthly credits<input type="number" min="1" step="1" id="aiDefaultMonthly" style="width:100%; margin-top:4px;"></label>
+          <label style="font-size:12px; color:var(--muted);">Text cost<input type="number" min="1" step="1" id="aiDefaultText" style="width:100%; margin-top:4px;"></label>
+          <label style="font-size:12px; color:var(--muted);">File cost<input type="number" min="1" step="1" id="aiDefaultFile" style="width:100%; margin-top:4px;"></label>
+          <label style="font-size:12px; color:var(--muted);">Image cost<input type="number" min="1" step="1" id="aiDefaultImage" style="width:100%; margin-top:4px;"></label>
+        </div>
+        <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+          <button class="btn-primary" onclick="saveAiDefaultSettings()">💾 Save Default AI Credits</button>
+          <span id="aiDefaultMeta" class="meta"></span>
+        </div>
+        <hr style="border:0; border-top:1px solid var(--line); margin:14px 0;">
+        <div style="font-size:12px; font-weight:700; margin-bottom:6px;">Customer / Installation Override</div>
+        <input type="text" id="aiOverrideInstallation" placeholder="Installation ID" maxlength="200" style="width:100%;">
+        <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; margin-top:8px;">
+          <label style="font-size:12px; color:var(--muted);">Monthly credits<input type="number" min="1" step="1" id="aiOverrideMonthly" style="width:100%; margin-top:4px;"></label>
+          <label style="font-size:12px; color:var(--muted);">Text cost<input type="number" min="1" step="1" id="aiOverrideText" style="width:100%; margin-top:4px;"></label>
+          <label style="font-size:12px; color:var(--muted);">File cost<input type="number" min="1" step="1" id="aiOverrideFile" style="width:100%; margin-top:4px;"></label>
+          <label style="font-size:12px; color:var(--muted);">Image cost<input type="number" min="1" step="1" id="aiOverrideImage" style="width:100%; margin-top:4px;"></label>
+        </div>
+        <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="btn-primary" onclick="saveAiInstallationSettings()">💾 Save Customer Override</button>
+          <button class="btn-ghost" onclick="resetAiInstallationSettings()">↩️ Use Default</button>
+          <button class="btn-ghost" onclick="loadAiCreditSettings()">🔄 Refresh</button>
+        </div>
+        <div id="aiOverrideList" style="margin-top:12px;" class="empty">Loading...</div>
+      </div>
       <div class="stat-strip">
         <div class="stat-card">
           <div class="stat-num" id="statAllowed">—</div>
@@ -1596,7 +1627,7 @@ function withScrollPreserved(fn) {
   };
 }
 function escapeAttr(str) {
-  return String(str).replace(/'/g, "\\'").replace(/"/g, '&quot;');
+  return String(str).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
 }
 const COLLAPSE_STORAGE_PREFIX = 'relay-admin-collapsed:';
 function toggleCardCollapse(cardId) {
@@ -2586,7 +2617,7 @@ function renderAutoBackupToggle() {
   if (!el) return;
   el.checked = isAutoBackupOnAllowEnabled();
 }
-// BAGO: emergency kill-switches para sa "Send Request" (manual OTP
+// RELAY AI CREDIT SETTINGS — server/Neon is authoritative.\nlet relayAiCreditSettingsCache = null;\nfunction fillAiSettingInputs(prefix, settings) {\n  if (!settings) return;\n  const map = { monthly: settings.monthlyCredits, text: settings.textCost, file: settings.fileCost, image: settings.imageCost };\n  Object.entries(map).forEach(([key, value]) => {\n    const el = document.getElementById(`ai${prefix}${key[0].toUpperCase()}${key.slice(1)}`);\n    if (el) el.value = value;\n  });\n}\nfunction readAiSettingInputs(prefix) {\n  const get = (key) => Number(document.getElementById(`ai${prefix}${key[0].toUpperCase()}${key.slice(1)}`)?.value);\n  return { monthlyCredits: get('monthly'), textCost: get('text'), fileCost: get('file'), imageCost: get('image') };\n}\nfunction validateAiSettingInputs(settings) {\n  if (!Object.values(settings).every(Number.isInteger) || settings.monthlyCredits < 1 || settings.textCost < 1 || settings.fileCost < settings.textCost || settings.imageCost < settings.fileCost) {\n    toast('Invalid AI credit values. Required: monthly ≥ 1, text ≥ 1, file ≥ text, image ≥ file.', 'error');\n    return false;\n  }\n  return true;\n}\nasync function loadAiCreditSettings() {\n  let data;\n  try { data = await api('/relay/admin/api/ai-credits/settings'); } catch (err) { return; }\n  if (!data?.success) { toast(data?.message || 'Could not load AI credit settings.', 'error'); return; }\n  relayAiCreditSettingsCache = data;\n  fillAiSettingInputs('Default', data.defaults);\n  const meta = document.getElementById('aiDefaultMeta');\n  if (meta) meta.innerText = `Current month: ${data.month} · Default ${data.defaults.source || 'Relay'}`;\n  const list = document.getElementById('aiOverrideList');\n  if (!list) return;\n  if (!data.overrides?.length) { list.innerHTML = '<div class="empty">No customer overrides. Everyone uses the Default.</div>'; return; }\n  list.innerHTML = `<div style="font-size:11px;color:var(--muted);margin-bottom:6px;">Customer overrides (${data.overrides.length})</div>` + data.overrides.map(o => `\n    <div class="row" style="margin-bottom:6px; padding:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; cursor:pointer;" onclick="selectAiOverride('${escapeAttr(o.installationId)}')">\n      <code style="flex:1 1 240px;">${escapeHtml(o.installationId)}</code>\n      <span>${o.monthlyCredits}/mo</span><span>used ${o.used}</span><span>left ${o.remaining}</span>\n      <span class="meta">T${o.textCost} · F${o.fileCost} · I${o.imageCost}</span>\n    </div>`).join('');\n}\nfunction escapeHtml(str) {\n  return String(str).replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));\n}\nfunction selectAiOverride(installationId) {\n  const o = (relayAiCreditSettingsCache?.overrides || []).find(x => x.installationId === installationId);\n  const idEl = document.getElementById('aiOverrideInstallation');\n  if (idEl) idEl.value = installationId;\n  if (o) {\n    fillAiSettingInputs('Override', o);\n    toast('Loaded customer override.', 'info');\n  }\n}\nasync function saveAiDefaultSettings() {\n  const settings = readAiSettingInputs('Default');\n  if (!validateAiSettingInputs(settings)) return;\n  try {\n    const data = await api('/relay/admin/api/ai-credits/default', { method:'POST', body:JSON.stringify(settings) });\n    if (!data?.success) throw new Error(data?.message || 'Save failed');\n    toast('Default AI credits saved on RELAY/Neon.', 'success');\n    loadAiCreditSettings();\n  } catch (err) { toast(err.message || 'Could not save AI credit default.', 'error'); }\n}\nasync function saveAiInstallationSettings() {\n  const id = document.getElementById('aiOverrideInstallation')?.value.trim();\n  if (!id) { toast('Enter an installation ID first.', 'error'); return; }\n  const settings = readAiSettingInputs('Override');\n  if (!validateAiSettingInputs(settings)) return;\n  try {\n    const data = await api('/relay/admin/api/ai-credits/installation', { method:'POST', body:JSON.stringify({ installationId:id, ...settings }) });\n    if (!data?.success) throw new Error(data?.message || 'Save failed');\n    toast(`AI credit override saved for ${id}.`, 'success');\n    loadAiCreditSettings();\n  } catch (err) { toast(err.message || 'Could not save customer override.', 'error'); }\n}\nasync function resetAiInstallationSettings() {\n  const id = document.getElementById('aiOverrideInstallation')?.value.trim();\n  if (!id) { toast('Enter an installation ID first.', 'error'); return; }\n  const ok = await confirmAction({ title:'Use Default AI Credits?', message:`This removes the custom AI credit override for ${id}. The customer will immediately use the RELAY Default settings.`, confirmLabel:'Yes, use Default', danger:false });\n  if (!ok) return;\n  try {\n    const data = await api('/relay/admin/api/ai-credits/installation/reset', { method:'POST', body:JSON.stringify({ installationId:id}) });\n    if (!data?.success) throw new Error(data?.message || 'Reset failed');\n    toast('Customer override removed; Default is active.', 'success');\n    loadAiCreditSettings();\n  } catch (err) { toast(err.message || 'Could not reset customer override.', 'error'); }\n}\n// BAGO: emergency kill-switches para sa "Send Request" (manual OTP
 // approval) at "Activate via Omni Tokens" — tingnan ang cardActivationFlags
 // sa Home tab. Server-side ang totoong pinagbabatayan nito (RELAY mismo
 // ang tumatanggi sa mga request kapag naka-disable, hindi lang UI-level),
@@ -4057,6 +4088,7 @@ function startPolling() {
   loadBuildHistory();
   loadDbStatus();
   loadActivationFlags();
+  loadAiCreditSettings();
   if (pollTimer) clearInterval(pollTimer);
   const loadDevicesNoJump = withScrollPreserved(loadDevices);
   pollTimer = setInterval(() => { if (adminKey) loadDevicesNoJump(); }, 8000);

@@ -11,7 +11,7 @@
 // at hindi na basta nagre-reset kapag address bar lang ng mobile browser
 // ang lumitaw/nawala habang nag-sscroll — parte pa rin ng "biglang
 // nag-a-auto-scroll/parang nag-reload" na series of fixes).
-const CACHE_VERSION = 'relay-admin-shell-v13';
+const CACHE_VERSION = 'relay-admin-shell-v14-ai-credits';
 
 // Mga static shell file lang — walang laman na dynamic/sensitive data.
 const SHELL_FILES = [
