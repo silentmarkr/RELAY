@@ -594,10 +594,11 @@ function isCfAiConfigured() {
     return !!(CF_ACCOUNT_ID && CF_AI_API_TOKEN);
 }
 async function callCloudflareWorkersAI(messages, vision) {
-    const model = vision ? CF_AI_VISION_MODEL : CF_AI_MODEL;
+    if (vision) return callCloudflareVisionAI(messages);
+    const model = CF_AI_MODEL;
     const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/v1/chat/completions`;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), vision ? 30000 : 20000);
+    const timeout = setTimeout(() => controller.abort(), 20000);
     try {
         const cfRes = await fetch(url, {
             method: 'POST',
@@ -609,16 +610,93 @@ async function callCloudflareWorkersAI(messages, vision) {
         let data;
         try { data = JSON.parse(raw); } catch (e) { data = null; }
         if (!cfRes.ok || !data) {
-            const errMsg = (data && data.errors && data.errors[0] && data.errors[0].message) || `Cloudflare ${vision ? 'Vision ' : ''}AI request failed (HTTP ${cfRes.status}).`;
+            const errMsg = (data && data.errors && data.errors[0] && data.errors[0].message) || `Cloudflare AI request failed (HTTP ${cfRes.status}).`;
             return { success: false, message: errMsg };
         }
         const answer = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
         if (!answer || !answer.trim()) {
-            return { success: false, message: `Empty response from ${vision ? 'vision ' : ''}AI provider.` };
+            return { success: false, message: 'Empty response from AI provider.' };
         }
         return { success: true, answer: answer.trim() };
     } catch (err) {
         return { success: false, message: err.name === 'AbortError' ? 'AI request timed out.' : (err.message || 'AI request failed.') };
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+// FIX: ang /ai/v1/chat/completions (OpenAI-compatible) endpoint ay may
+// bug/limitation para sa @cf/meta/llama-3.2-11b-vision-instruct kapag
+// naka-embed ang larawan sa loob ng "content" array (OpenAI multimodal
+// style: [{type:'text',...},{type:'image_url',...}]) — sa panloob na
+// conversion papunta sa sariling native format ni Cloudflare, minsan
+// "nawawala" ang buong text message, kaya lumalabas ang:
+//   "AiError: Unable to add image when there are no user-supplied nor
+//    system-supplied messages."
+// Ang ayos: gamitin ang NATIVE na /ai/run/{model} endpoint sa halip,
+// kung saan HIWALAY na field ang larawan ("image": raw byte array —
+// hindi base64 string/data URL) sa "messages" (plain text content
+// lang, walang image_url sa loob).
+async function callCloudflareVisionAI(messages) {
+    const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/${CF_AI_VISION_MODEL}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
+    try {
+        // Hanapin ang message na may array content (kung saan naka-embed
+        // ang image_url) — kunin ang larawan (data URL) at ang text
+        // portion, at gawing plain-string content ang LAHAT ng messages
+        // (kailangan ito ng native endpoint — hindi array).
+        let imageDataUrl = null;
+        const plainMessages = [];
+        for (const m of messages) {
+            if (Array.isArray(m.content)) {
+                let textPart = '';
+                for (const part of m.content) {
+                    if (part && part.type === 'text') textPart += part.text || '';
+                    else if (part && part.type === 'image_url' && part.image_url && part.image_url.url) {
+                        imageDataUrl = part.image_url.url;
+                    }
+                }
+                plainMessages.push({ role: m.role, content: textPart });
+            } else {
+                plainMessages.push({ role: m.role, content: m.content });
+            }
+        }
+        if (!imageDataUrl) {
+            return { success: false, message: 'No image found in vision request messages.' };
+        }
+        const commaIdx = imageDataUrl.indexOf(',');
+        const base64Payload = commaIdx !== -1 ? imageDataUrl.slice(commaIdx + 1) : imageDataUrl;
+        let imageBuf;
+        try {
+            imageBuf = Buffer.from(base64Payload, 'base64');
+        } catch (e) {
+            return { success: false, message: 'Could not decode the attached image.' };
+        }
+        const imageBytes = Array.from(imageBuf);
+        const cfRes = await fetch(url, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${CF_AI_API_TOKEN}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image: imageBytes, messages: plainMessages, max_tokens: 650 }),
+            signal: controller.signal
+        });
+        const raw = await cfRes.text();
+        let data;
+        try { data = JSON.parse(raw); } catch (e) { data = null; }
+        if (!cfRes.ok || !data) {
+            const errMsg = (data && data.errors && data.errors[0] && data.errors[0].message) || `Cloudflare Vision AI request failed (HTTP ${cfRes.status}).`;
+            return { success: false, message: errMsg };
+        }
+        if (data.success === false) {
+            const errMsg = (data.errors && data.errors[0] && data.errors[0].message) || 'Cloudflare Vision AI request failed.';
+            return { success: false, message: errMsg };
+        }
+        const answer = data.result && data.result.response;
+        if (!answer || !answer.trim()) {
+            return { success: false, message: 'Empty response from vision AI provider.' };
+        }
+        return { success: true, answer: answer.trim() };
+    } catch (err) {
+        return { success: false, message: err.name === 'AbortError' ? 'AI image analysis timed out.' : (err.message || 'AI image analysis failed.') };
     } finally {
         clearTimeout(timeout);
     }
