@@ -12,6 +12,32 @@
 // naka-set na ito sa environment variables mismo (Render dashboard,
 // atbp.), doon pa rin susunod ang proseso.
 if (!process.env.UV_THREADPOOL_SIZE) process.env.UV_THREADPOOL_SIZE = '8';
+// FIX: RELAY never actually loaded .env into process.env (walang
+// dotenv, walang custom loader tulad ng OMNIPOS/env-loader.js) — kaya
+// ang CF_ACCOUNT_ID/CF_AI_API_TOKEN na nakalagay sa RELAY/.env ay
+// hindi talaga nagagamit maliban na lang kung manual mong ini-export
+// sa mismong shell bago mo pinatakbo ang `node server.js`. Ito ang
+// dahilan kung bakit "not configured" pa rin ang vision AI kahit
+// naka-set na ang .env at naka-agree na sa Cloudflare model terms.
+(function loadDotEnvFile() {
+    const fs = require('fs');
+    const path = require('path');
+    const envPath = path.join(__dirname, '.env');
+    if (!fs.existsSync(envPath)) return;
+    const lines = fs.readFileSync(envPath, 'utf8').split('\n');
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const idx = trimmed.indexOf('=');
+        if (idx === -1) continue;
+        const key = trimmed.slice(0, idx).trim();
+        let val = trimmed.slice(idx + 1).trim();
+        if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+            val = val.slice(1, -1);
+        }
+        if (!(key in process.env)) process.env[key] = val;
+    }
+})();
 const express = require('express');
 const crypto = require('crypto');
 const zlib = require('zlib');
