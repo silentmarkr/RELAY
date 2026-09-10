@@ -1334,8 +1334,10 @@ a:focus-visible,
         <div class="collapse-body">
           <div class="backup-row" style="margin-bottom:8px;">
             <button class="btn-revoke" onclick="loadDbStatus()" id="refreshDbStatusBtn" style="background:var(--accent-bg,#12293b); color:var(--accent,#6cf); border-color:var(--accent-line,#1f4a63);">🔄 Refresh</button>
+            <button class="btn-revoke" onclick="sendTestAlert()" id="testAlertBtn" style="background:var(--gray-bg,#2a2a2a); color:var(--muted); border-color:var(--border,#3a3a3a);" title="Magpadala ng test alert (Telegram/webhook) para ma-verify ang setup mo">🔔 Test Alert</button>
             <span id="dbStatusCheckedAt" style="font-size:11px; color:var(--muted-dim);"></span>
           </div>
+          <div id="testAlertResult" style="font-size:11px; color:var(--muted); margin-bottom:6px;"></div>
           <div id="dbStatusList" class="empty">Loading...</div>
         </div>
       </div>
@@ -2297,6 +2299,27 @@ async function loadDbStatus() {
     if (btn) btn.disabled = false;
   }
 }
+// GAWA/BAGO: manual test button para sa RELAY_ALERT_TELEGRAM_*/
+// RELAY_ALERT_WEBHOOK_URL setup — tingnan ang runCostAlertSweep() sa
+// server.js para sa buong paliwanag ng proactive alert system.
+async function sendTestAlert() {
+  const btn = document.getElementById('testAlertBtn');
+  const resultEl = document.getElementById('testAlertResult');
+  if (btn) btn.disabled = true;
+  if (resultEl) resultEl.innerText = 'Nagpapadala...';
+  try {
+    const data = await api('/relay/admin/api/alerts/test', { method: 'POST' });
+    if (resultEl) {
+      resultEl.innerText = data.configured
+        ? '✅ Naipadala ang test alert — tingnan ang Telegram/webhook mo.'
+        : '⚠️ Walang naka-configure na RELAY_ALERT_TELEGRAM_BOT_TOKEN/CHAT_ID o RELAY_ALERT_WEBHOOK_URL — na-log lang sa server console.';
+    }
+  } catch (err) {
+    if (resultEl) resultEl.innerText = `❌ ${err.message}`;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
 let dbHealthInFlight = false;
 let dbHealthPollTimer = null;
 let lastDbHealthEntries = {};
@@ -2510,10 +2533,12 @@ async function loadDbHealth(force) {
     }
     const metaEl = document.getElementById('dbHealthMeta');
     if (metaEl) {
+      const staleness = data.pricingMeta.staleness;
       metaEl.innerHTML =
         `💱 USD→PHP: ₱${phpRate.toFixed(4)} (${data.exchangeRate.source})<br>` +
         `🗓️ Neon pricing verified: ${data.pricingMeta.verifiedAt} — <a href="${NEON_PRICING_SOURCE_URL_JS}" target="_blank" rel="noopener" style="color:var(--accent,#6cf);">source</a>` +
         `${data.pricingMeta.hasOverrides ? ' (may custom override na naka-apply)' : ''}<br>` +
+        `${staleness && staleness.isStale ? `<span style="color:var(--amber,#f5a623);">⚠️ ${staleness.monthsSinceVerified} buwan na ang nakalipas simula huling na-verify — posibleng luma na ito, i-double check sa source link sa itaas.</span><br>` : ''}` +
         `${data.pricingMeta.hasNeonApiKey ? '🔌 Nakakonekta sa Neon account API — real usage.<br>' : ''}` +
         `<span style="font-size:11px;">${data.pricingMeta.exampleComputeAssumptionNote}</span>`;
     }
@@ -2875,6 +2900,7 @@ async function loadDevices() {
     adminResetData = await api('/relay/admin/api/pending-admin-resets');
     receiptResetData = await api('/relay/admin/api/pending-receipt-resets');
   } catch (err) {
+    return; // BUGFIX: bail out — without this, a failed call above (wrong admin key, network blip, rate limit) left data/otpData undefined and every line below crashed trying to read .pendingOtps/.allowedDevices off them.
   }
   renderOtps(otpData.pendingOtps);
   document.getElementById('otpCountPill').innerText = otpData.pendingOtps.length;

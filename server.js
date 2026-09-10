@@ -344,7 +344,7 @@ async function ensureDeviceLicenseSchema() {
 // ang LAHAT ng admin settings/lists na dating Redis-or-local-file lang
 // (download codes, pricing overrides, device unlocks, activity log,
 // atbp. — bawat load*()/save*() function pair sa buong file na
-// dumadaan sa redisGetJSON/redisSetJSON sa ibaba). Ginamit ang
+// dumadaan sa getPersistentJSON/setPersistentJSON sa ibaba). Ginamit ang
 // parehong Neon Postgres na ginagamit na rin ng Cloud Backup/Devices
 // data — walang extra service (Redis/Upstash) na kailangan pang i-set
 // up, at HINDI ito mawawala kapag nag-restart/natulog ang Render web
@@ -353,7 +353,7 @@ async function ensureDeviceLicenseSchema() {
 // Redis pa rin ang unang susubukan KUNG naka-configure ito (para hindi
 // biglang mawala ang datos ng mga umiiral nang gumagamit ng Redis),
 // pero Postgres na ang PANGUNAHING target ng LAHAT ng bagong save mula
-// ngayon — tingnan ang redisGetJSON/redisSetJSON sa ibaba.
+// ngayon — tingnan ang getPersistentJSON/setPersistentJSON sa ibaba.
 async function ensureKvSchema() {
     const pool = pgPoolDevices || pgPool;
     if (!pool) return;
@@ -476,7 +476,7 @@ async function ensureReleasePackageFreshOnDisk() {
         return fs.existsSync(RELEASE_PACKAGE_PATH);
     }
 }
-// Parehong pattern ng redisGetJSON/redisSetJSON sa itaas, pero NAKATUON
+// Parehong pattern ng getPersistentJSON/setPersistentJSON sa itaas, pero NAKATUON
 // lang sa pgPoolBuild (hiwalay na Neon database) — walang Redis fallback
 // dito dahil sadyang isolated na dapat itong storage, at walang
 // pag-fallback sa pgPool/pgPoolDevices (iyon mismo ang iniiwasan).
@@ -509,7 +509,7 @@ function buildKvSetJSON(key, value) {
         return false;
     });
 }
-async function redisGetJSON(key, fallback) {
+async function getPersistentJSON(key, fallback) {
     // 1) Neon Postgres — pangunahing storage ngayon, laging persistent.
     const pool = pgPoolDevices || pgPool;
     if (pool) {
@@ -528,7 +528,7 @@ async function redisGetJSON(key, fallback) {
             const raw = await redisClient.get(REDIS_KEY_PREFIX + key);
             if (raw !== null) {
                 const parsed = JSON.parse(raw);
-                if (pool) redisSetJSON(key, parsed); 
+                if (pool) setPersistentJSON(key, parsed); 
                 return parsed;
             }
         } catch (err) {
@@ -539,7 +539,7 @@ async function redisGetJSON(key, fallback) {
     // hawak-hawak na ito ng bawat load*() function sa ibaba).
     return fallback;
 }
-function redisSetJSON(key, value) {
+function setPersistentJSON(key, value) {
     const pool = pgPoolDevices || pgPool;
     if (pool) {
         pool.query(
@@ -1149,8 +1149,8 @@ const CLOUD_BACKUP_MAX_AUTO_BACKUP_INTERVAL_MS = 30 * 24 * 60 * 60 * 1000;
 const CLOUD_BACKUP_BILLING_DAYS = { monthly: 30, yearly: 365 };
 const CLOUD_BACKUP_PLAN_OVERRIDES_PATH = path.join(__dirname, 'cloud-backup-plan-overrides.json');
 async function loadCloudBackupPlanOverrides() {
-    const fromRedis = await redisGetJSON('cloud-backup-plan-overrides', null);
-    if (fromRedis !== null) return fromRedis;
+    const fromStore = await getPersistentJSON('cloud-backup-plan-overrides', null);
+    if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(fs.readFileSync(CLOUD_BACKUP_PLAN_OVERRIDES_PATH, 'utf8'));
     } catch (err) {
@@ -1159,7 +1159,7 @@ async function loadCloudBackupPlanOverrides() {
 }
 function saveCloudBackupPlanOverrides(obj) {
     if (pgPoolDevices || pgPool || redisClient) {
-        redisSetJSON('cloud-backup-plan-overrides', obj);
+        setPersistentJSON('cloud-backup-plan-overrides', obj);
         return;
     }
     try {
@@ -2307,8 +2307,8 @@ const MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS = 7;
 const MODULE_SUBSCRIPTION_GRACE_PERIOD_MS = MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS * 24 * 60 * 60 * 1000;
 const MODULE_SUBSCRIPTION_OVERRIDES_PATH = path.join(__dirname, 'module-subscription-overrides.json');
 async function loadModuleSubscriptionOverrides() {
-    const fromRedis = await redisGetJSON('module-subscription-overrides', null);
-    if (fromRedis !== null) return fromRedis;
+    const fromStore = await getPersistentJSON('module-subscription-overrides', null);
+    if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(fs.readFileSync(MODULE_SUBSCRIPTION_OVERRIDES_PATH, 'utf8'));
     } catch (err) {
@@ -2317,7 +2317,7 @@ async function loadModuleSubscriptionOverrides() {
 }
 function saveModuleSubscriptionOverrides(obj) {
     if (pgPoolDevices || pgPool || redisClient) {
-        redisSetJSON('module-subscription-overrides', obj);
+        setPersistentJSON('module-subscription-overrides', obj);
         return;
     }
     try {
@@ -2359,6 +2359,22 @@ function getModuleSubscriptionPrice(featureId, billingCycle) {
 // /relay/admin/api/db-health sa susunod na request, walang redeploy
 // na kailangan.
 const NEON_PRICING_VERIFIED_AT = '2026-08';
+// GAWA/BAGO: staleness check — kung matagal nang hindi na-verify ang
+// NEON_PRICING_VERIFIED_AT (>6 buwan), posibleng luma na ang mga rate
+// dito kumpara sa aktwal na kasalukuyang presyo ni Neon. Ginagamit sa
+// db-health/pricing-neon payload para may makitang warning sa UI.
+function getNeonPricingStaleness() {
+    const [y, m] = NEON_PRICING_VERIFIED_AT.split('-').map(Number);
+    const verifiedAtMs = Date.UTC(y, m - 1, 1);
+    const monthsSince = (Date.now() - verifiedAtMs) / (30.44 * 24 * 60 * 60 * 1000);
+    const STALE_THRESHOLD_MONTHS = 6;
+    return {
+        verifiedAt: NEON_PRICING_VERIFIED_AT,
+        monthsSinceVerified: Math.round(monthsSince * 10) / 10,
+        isStale: monthsSince >= STALE_THRESHOLD_MONTHS,
+        staleThresholdMonths: STALE_THRESHOLD_MONTHS
+    };
+}
 const NEON_PRICING_SOURCE_URL = 'https://neon.com/docs/introduction/plans';
 const NEON_PRICING_BASE = {
     free: {
@@ -2426,8 +2442,8 @@ const NEON_PRICING_BASE = {
 };
 const NEON_PRICING_OVERRIDES_PATH = path.join(__dirname, 'neon-pricing-overrides.json');
 async function loadNeonPricingOverrides() {
-    const fromRedis = await redisGetJSON('neon-pricing-overrides', null);
-    if (fromRedis !== null) return fromRedis;
+    const fromStore = await getPersistentJSON('neon-pricing-overrides', null);
+    if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(fs.readFileSync(NEON_PRICING_OVERRIDES_PATH, 'utf8'));
     } catch (err) {
@@ -2436,7 +2452,7 @@ async function loadNeonPricingOverrides() {
 }
 function saveNeonPricingOverrides(obj) {
     if (pgPoolDevices || pgPool || redisClient) {
-        redisSetJSON('neon-pricing-overrides', obj);
+        setPersistentJSON('neon-pricing-overrides', obj);
         return;
     }
     try {
@@ -2563,18 +2579,28 @@ function recomputeNeonPricing() {
 // (kung free) o rate (kung paid) ang dapat gamitin sa computation.
 const NEON_CONFIGURED_PLAN_PATH = path.join(__dirname, 'neon-configured-plans.json');
 async function loadNeonConfiguredPlans() {
-    const fromRedis = await redisGetJSON('neon-configured-plans', null);
-    if (fromRedis !== null) return fromRedis;
+    const fromStore = await getPersistentJSON('neon-configured-plans', null);
+    if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(fs.readFileSync(NEON_CONFIGURED_PLAN_PATH, 'utf8'));
     } catch (err) {
         return { cloudBackup: 'free', devices: 'free', build: 'free' };
     }
 }
+// AYOS/BAGO: dating "Redis OR file" lang ang save logic dito — ibig
+// sabihin kapag naka-Postgres/Redis ka (karaniwan sa production), HINDI
+// KAILANMAN nasusulat ang lokal na JSON file bilang backup. Kung ma-lose
+// ang Postgres KV row (hal. maling migration, na-clear ang table) o wala
+// pang Postgres/Redis configured, babalik ito sa hardcoded default
+// (["free","free","free"]) NANG TAHIMIK sa susunod na restart — ito
+// mismo ang inilarawan nating "butas" kanina (tingnan ang usapan
+// tungkol sa computeNeonRealCost). Ngayon, laging sinusulat sa PAREHONG
+// Postgres/Redis (setPersistentJSON — pangunahing storage talaga ngayon ay
+// Postgres, "Redis" na lang ang pangalan) AT sa lokal na backup file,
+// kaya may pagbabalikan kung ma-lose man ang isa.
 function saveNeonConfiguredPlans(obj) {
     if (pgPoolDevices || pgPool || redisClient) {
-        redisSetJSON('neon-configured-plans', obj);
-        return;
+        setPersistentJSON('neon-configured-plans', obj);
     }
     try {
         fs.writeFileSync(NEON_CONFIGURED_PLAN_PATH, JSON.stringify(obj, null, 2));
@@ -2596,8 +2622,8 @@ let neonConfiguredPlans = { cloudBackup: 'free', devices: 'free', build: 'free' 
 const CLIENT_MAINTENANCE_FEE_PATH = path.join(__dirname, 'client-maintenance-fee.json');
 const CLIENT_MAINTENANCE_FEE_DEFAULT = { defaultFeePHP: 150, perClientOverridePHP: {} };
 async function loadClientMaintenanceFeeConfig() {
-    const fromRedis = await redisGetJSON('client-maintenance-fee', null);
-    if (fromRedis !== null) return fromRedis;
+    const fromStore = await getPersistentJSON('client-maintenance-fee', null);
+    if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(fs.readFileSync(CLIENT_MAINTENANCE_FEE_PATH, 'utf8'));
     } catch (err) {
@@ -2606,7 +2632,7 @@ async function loadClientMaintenanceFeeConfig() {
 }
 function saveClientMaintenanceFeeConfig(obj) {
     if (pgPoolDevices || pgPool || redisClient) {
-        redisSetJSON('client-maintenance-fee', obj);
+        setPersistentJSON('client-maintenance-fee', obj);
         return;
     }
     try {
@@ -2631,8 +2657,8 @@ function getMaintenanceFeeForClient(installationId) {
 // lang mismo (Date.now() vs paidUntil) ang sinusunod.
 const CLIENT_MAINTENANCE_FEE_PAID_UNTIL_PATH = path.join(__dirname, 'client-maintenance-fee-paid-until.json');
 async function loadClientMaintenanceFeePaidUntil() {
-    const fromRedis = await redisGetJSON('client-maintenance-fee-paid-until', null);
-    if (fromRedis !== null) return fromRedis;
+    const fromStore = await getPersistentJSON('client-maintenance-fee-paid-until', null);
+    if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(fs.readFileSync(CLIENT_MAINTENANCE_FEE_PAID_UNTIL_PATH, 'utf8'));
     } catch (err) {
@@ -2641,7 +2667,7 @@ async function loadClientMaintenanceFeePaidUntil() {
 }
 function saveClientMaintenanceFeePaidUntil(obj) {
     if (pgPoolDevices || pgPool || redisClient) {
-        redisSetJSON('client-maintenance-fee-paid-until', obj);
+        setPersistentJSON('client-maintenance-fee-paid-until', obj);
         return;
     }
     try {
@@ -3096,8 +3122,8 @@ async function computeClientCostAllocation() {
 }
 const FEATURE_CATALOG_OVERRIDES_PATH = path.join(__dirname, 'feature-catalog-overrides.json');
 async function loadFeatureCatalogOverrides() {
-    const fromRedis = await redisGetJSON('feature-catalog-overrides', null);
-    if (fromRedis !== null) return fromRedis;
+    const fromStore = await getPersistentJSON('feature-catalog-overrides', null);
+    if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(fs.readFileSync(FEATURE_CATALOG_OVERRIDES_PATH, 'utf8'));
     } catch (err) {
@@ -3106,7 +3132,7 @@ async function loadFeatureCatalogOverrides() {
 }
 function saveFeatureCatalogOverrides(obj) {
     if (pgPoolDevices || pgPool || redisClient) {
-        redisSetJSON('feature-catalog-overrides', obj);
+        setPersistentJSON('feature-catalog-overrides', obj);
         return;
     }
     try {
@@ -3118,8 +3144,8 @@ function saveFeatureCatalogOverrides(obj) {
 let featureCatalogOverrides = {}; 
 const FEATURE_PRICING_OVERRIDES_PATH = path.join(__dirname, 'feature-pricing-overrides.json');
 async function loadFeaturePricingOverrides() {
-    const fromRedis = await redisGetJSON('feature-pricing-overrides', null);
-    if (fromRedis !== null) return fromRedis;
+    const fromStore = await getPersistentJSON('feature-pricing-overrides', null);
+    if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(fs.readFileSync(FEATURE_PRICING_OVERRIDES_PATH, 'utf8'));
     } catch (err) {
@@ -3128,7 +3154,7 @@ async function loadFeaturePricingOverrides() {
 }
 function saveFeaturePricingOverrides(obj) {
     if (pgPoolDevices || pgPool || redisClient) {
-        redisSetJSON('feature-pricing-overrides', obj);
+        setPersistentJSON('feature-pricing-overrides', obj);
         return;
     }
     try {
@@ -3140,8 +3166,8 @@ function saveFeaturePricingOverrides(obj) {
 const UPGRADE_TIER_BUNDLE_PRICE_BASE = { basic: 999, standard: 1999, pro: 3599 };
 const UPGRADE_TIER_PRICING_OVERRIDES_PATH = path.join(__dirname, 'upgrade-tier-pricing-overrides.json');
 async function loadUpgradeTierPricingOverrides() {
-    const fromRedis = await redisGetJSON('upgrade-tier-pricing-overrides', null);
-    if (fromRedis !== null) return fromRedis;
+    const fromStore = await getPersistentJSON('upgrade-tier-pricing-overrides', null);
+    if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(fs.readFileSync(UPGRADE_TIER_PRICING_OVERRIDES_PATH, 'utf8'));
     } catch (err) {
@@ -3150,7 +3176,7 @@ async function loadUpgradeTierPricingOverrides() {
 }
 function saveUpgradeTierPricingOverrides(obj) {
     if (pgPoolDevices || pgPool || redisClient) {
-        redisSetJSON('upgrade-tier-pricing-overrides', obj);
+        setPersistentJSON('upgrade-tier-pricing-overrides', obj);
         return;
     }
     try {
@@ -3231,8 +3257,8 @@ function registerFeatureIfUnknown(featureId, meta = {}, installationId = null) {
 }
 const ISSUED_UNLOCKS_PATH = path.join(__dirname, 'issued-unlocks.json');
 async function loadIssuedUnlocks() {
-    const fromRedis = await redisGetJSON('issued-unlocks', null);
-    if (fromRedis !== null) return fromRedis;
+    const fromStore = await getPersistentJSON('issued-unlocks', null);
+    if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(fs.readFileSync(ISSUED_UNLOCKS_PATH, 'utf8'));
     } catch (err) {
@@ -3241,7 +3267,7 @@ async function loadIssuedUnlocks() {
 }
 function saveIssuedUnlocks(obj) {
     if (pgPoolDevices || pgPool || redisClient) {
-        redisSetJSON('issued-unlocks', obj);
+        setPersistentJSON('issued-unlocks', obj);
         return;
     }
     try {
@@ -3271,8 +3297,8 @@ function recordIssuedUnlock(installationId, featureId, token, meta = {}) {
 const ACTIVITY_LOG_PATH = path.join(__dirname, 'activity-log.json');
 const ACTIVITY_LOG_MAX = 500;
 async function loadActivityLog() {
-    const fromRedis = await redisGetJSON('activity-log', null);
-    if (fromRedis !== null) return fromRedis;
+    const fromStore = await getPersistentJSON('activity-log', null);
+    if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(fs.readFileSync(ACTIVITY_LOG_PATH, 'utf8'));
     } catch (err) {
@@ -3281,7 +3307,7 @@ async function loadActivityLog() {
 }
 function saveActivityLog(arr) {
     if (pgPoolDevices || pgPool || redisClient) {
-        redisSetJSON('activity-log', arr);
+        setPersistentJSON('activity-log', arr);
         return;
     }
     try {
@@ -3338,8 +3364,8 @@ function logActivity(installationId, type, details = {}) {
 }
 const BACKUP_CHECKINS_PATH = path.join(__dirname, 'backup-checkins.json');
 async function loadBackupCheckins() {
-    const fromRedis = await redisGetJSON('backup-checkins', null);
-    if (fromRedis !== null) return fromRedis;
+    const fromStore = await getPersistentJSON('backup-checkins', null);
+    if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(fs.readFileSync(BACKUP_CHECKINS_PATH, 'utf8'));
     } catch (err) {
@@ -3348,7 +3374,7 @@ async function loadBackupCheckins() {
 }
 function saveBackupCheckins(obj) {
     if (pgPoolDevices || pgPool || redisClient) {
-        redisSetJSON('backup-checkins', obj);
+        setPersistentJSON('backup-checkins', obj);
         return;
     }
     try {
@@ -3360,8 +3386,8 @@ function saveBackupCheckins(obj) {
 let backupCheckins = {}; 
 const BRANCH_SUMMARIES_PATH = path.join(__dirname, 'branch-summaries.json');
 async function loadBranchSummaries() {
-    const fromRedis = await redisGetJSON('branch-summaries', null);
-    if (fromRedis !== null) return fromRedis;
+    const fromStore = await getPersistentJSON('branch-summaries', null);
+    if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(fs.readFileSync(BRANCH_SUMMARIES_PATH, 'utf8'));
     } catch (err) {
@@ -3370,7 +3396,7 @@ async function loadBranchSummaries() {
 }
 function saveBranchSummaries(obj) {
     if (pgPoolDevices || pgPool || redisClient) {
-        redisSetJSON('branch-summaries', obj);
+        setPersistentJSON('branch-summaries', obj);
         return;
     }
     try {
@@ -4289,8 +4315,8 @@ app.post('/relay/admin/api/pricing/features/reset', requireAdminKey, (req, res) 
 let SUGGESTED_DISCOUNT_PERCENT = 30;
 const SUGGESTED_DISCOUNT_PERCENT_PATH = path.join(__dirname, 'suggested-discount-percent.json');
 async function loadSuggestedDiscountPercent() {
-    const fromRedis = await redisGetJSON('suggested-discount-percent', null);
-    if (fromRedis !== null && typeof fromRedis === 'number') return fromRedis;
+    const fromStore = await getPersistentJSON('suggested-discount-percent', null);
+    if (fromStore !== null && typeof fromStore === 'number') return fromStore;
     try {
         const parsed = JSON.parse(fs.readFileSync(SUGGESTED_DISCOUNT_PERCENT_PATH, 'utf8'));
         if (typeof parsed === 'number') return parsed;
@@ -4299,7 +4325,7 @@ async function loadSuggestedDiscountPercent() {
 }
 function saveSuggestedDiscountPercent(value) {
     if (pgPoolDevices || pgPool || redisClient) {
-        redisSetJSON('suggested-discount-percent', value);
+        setPersistentJSON('suggested-discount-percent', value);
         return;
     }
     try {
@@ -4427,11 +4453,11 @@ app.post('/relay/admin/api/pricing/suggested-discount-percent', requireAdminKey,
 let ACTIVATION_FLAGS = { otpRequestsEnabled: true, omniTokenActivationEnabled: true };
 const ACTIVATION_FLAGS_PATH = path.join(__dirname, 'activation-flags.json');
 async function loadActivationFlags() {
-    const fromRedis = await redisGetJSON('activation-flags', null);
-    if (fromRedis && typeof fromRedis === 'object') {
+    const fromStore = await getPersistentJSON('activation-flags', null);
+    if (fromStore && typeof fromStore === 'object') {
         return {
-            otpRequestsEnabled: fromRedis.otpRequestsEnabled !== false,
-            omniTokenActivationEnabled: fromRedis.omniTokenActivationEnabled !== false
+            otpRequestsEnabled: fromStore.otpRequestsEnabled !== false,
+            omniTokenActivationEnabled: fromStore.omniTokenActivationEnabled !== false
         };
     }
     try {
@@ -4447,7 +4473,7 @@ async function loadActivationFlags() {
 }
 function saveActivationFlags(value) {
     if (pgPoolDevices || pgPool || redisClient) {
-        redisSetJSON('activation-flags', value);
+        setPersistentJSON('activation-flags', value);
         return;
     }
     try {
@@ -7245,11 +7271,477 @@ app.get('/relay/admin/api/client-cost-allocation', requireAdminKey, async (req, 
         res.status(500).json({ success: false, message: 'Could not compute client cost allocation.' });
     }
 });
-// AYOS/BAGO: manual "Charge" button (Client Cost Allocation admin page) —
-// para sa developer na gustong mano-manong i-charge ang isang client na
-// naka-flag bilang abuser base sa restore_count/last_restore_at tracking
-// sa itaas (hindi kailangan hintayin ang susunod na restore attempt).
-// Hiwalay ito sa awtomatikong per-restore charge (consumeCloudTokensForRestore(),
+// ===================================================================
+// GAWA/BAGO: RECONCILIATION REPORT — sinasagot nito ang "lugi ba ako?"
+// gamit ang TOTOONG pera, hindi estimate/projection. Kumukuha ng
+// KABUUANG na-charge sa mga customer para sa Cloud Backup (mula sa
+// cloud_token_ledger mismo — SYNC_CHARGE + RESTORE_CHARGE +
+// FEATURE_UNLOCK, bawas ang anumang REFUND) sa loob ng isang buwan, at
+// pinagkukumpara ito sa TOTOONG binayaran mo kay Neon (na mano-manong
+// ilalagay mo dito bawat buwan mula sa aktwal na Neon invoice — walang
+// public API si Neon para sa historical invoice amount, kaya hindi ito
+// awtomatikong makukuha). Dahil ₱1 = 1 Omni Token (tingnan ang
+// getCloudTokenPackages() sa itaas), direktang PHP na ang mga token
+// amount sa ledger — walang kailangang i-convert pa.
+// ===================================================================
+const CLOUD_BACKUP_ACTUAL_BILLS_PATH = path.join(__dirname, 'cloud-backup-actual-bills.json');
+async function loadCloudBackupActualBills() {
+    const fromStore = await getPersistentJSON('cloud-backup-actual-bills', null);
+    if (fromStore !== null) return fromStore;
+    try {
+        return JSON.parse(fs.readFileSync(CLOUD_BACKUP_ACTUAL_BILLS_PATH, 'utf8'));
+    } catch (err) {
+        return {};
+    }
+}
+// AYOS/BAGO: pareho ng bug na nahanap sa saveNeonConfiguredPlans() sa
+// itaas — dating "return" agad pagkatapos ng redis/Postgres save, kaya
+// walang lokal na file backup. Delikado ito dahil ITO MISMO ang totoong
+// Neon invoice data na ginagamit ng Reconciliation report para sagutin
+// ang "lugi ba ako?" — kaya dapat protektado rin ito ng dual-write.
+function saveCloudBackupActualBills(obj) {
+    if (pgPoolDevices || pgPool || redisClient) {
+        setPersistentJSON('cloud-backup-actual-bills', obj);
+    }
+    try {
+        fs.writeFileSync(CLOUD_BACKUP_ACTUAL_BILLS_PATH, JSON.stringify(obj, null, 2));
+    } catch (err) {
+        console.error('Hindi ma-save ang cloud-backup-actual-bills.json:', err);
+    }
+}
+let cloudBackupActualBills = {}; // keyed by 'YYYY-MM' -> { actualBillUSD, exchangeRateUsed, actualBillPHP, note, enteredAt }
+function monthRangeUtc(monthStr) {
+    // monthStr = 'YYYY-MM'. Ibinabalik ang [startMs, endMs) sa UTC.
+    const [y, m] = monthStr.split('-').map(Number);
+    if (!y || !m || m < 1 || m > 12) return null;
+    const start = Date.UTC(y, m - 1, 1);
+    const end = Date.UTC(m === 12 ? y + 1 : y, m === 12 ? 0 : m, 1);
+    return { start, end };
+}
+function currentMonthStr() {
+    const d = new Date();
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+// I-save/i-update ang TOTOONG Neon invoice amount (USD) para sa isang
+// buwan — mano-mano itong ilalagay ng developer/admin base sa aktwal na
+// billing statement ng Neon. Ang PHP equivalent ay LOCKED IN gamit ang
+// exchange rate NGAYONG oras ng pag-e-enter (hindi na babagu-bago kahit
+// magbago pa ang live rate sa susunod na tingin dito).
+app.post('/relay/admin/api/cloud-backup/actual-bill', requireAdminKey, async (req, res) => {
+    const { month, actualBillUSD, note } = req.body || {};
+    const range = monthRangeUtc(String(month || ''));
+    if (!range) return res.status(400).json({ success: false, message: 'Invalid month format — dapat "YYYY-MM" (hal. "2026-09").' });
+    const billUSD = Number(actualBillUSD);
+    if (!isFinite(billUSD) || billUSD < 0) return res.status(400).json({ success: false, message: 'Invalid actualBillUSD.' });
+    const { rate } = await getUsdToPhpRate();
+    cloudBackupActualBills[month] = {
+        actualBillUSD: billUSD,
+        exchangeRateUsed: rate,
+        actualBillPHP: Math.round(billUSD * rate * 100) / 100,
+        note: note || null,
+        enteredAt: Date.now()
+    };
+    saveCloudBackupActualBills(cloudBackupActualBills);
+    res.json({ success: true, month, entry: cloudBackupActualBills[month] });
+});
+// Kabuuang reconciliation para sa isang buwan (default: kasalukuyang
+// buwan) — totoong charged-to-customers vs totoong Neon bill.
+app.get('/relay/admin/api/cloud-backup/reconciliation', requireAdminKey, async (req, res) => {
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured.' });
+    const month = String(req.query.month || currentMonthStr());
+    const range = monthRangeUtc(month);
+    if (!range) return res.status(400).json({ success: false, message: 'Invalid month format — dapat "YYYY-MM".' });
+    try {
+        const { rows } = await queryWithRetry(
+            pgPool,
+            `SELECT
+                COALESCE(SUM(CASE WHEN type = 'consume' AND category IN ('SYNC_CHARGE','RESTORE_CHARGE','FEATURE_UNLOCK') THEN -tokens ELSE 0 END), 0) AS gross_charged_php,
+                COALESCE(SUM(CASE WHEN type = 'purchase' AND category = 'REFUND' THEN tokens ELSE 0 END), 0) AS refunded_php,
+                COUNT(*) FILTER (WHERE category = 'SYNC_CHARGE') AS sync_charge_count,
+                COUNT(*) FILTER (WHERE category = 'RESTORE_CHARGE') AS restore_charge_count,
+                COUNT(*) FILTER (WHERE category = 'FEATURE_UNLOCK') AS activation_count
+             FROM cloud_token_ledger
+             WHERE created_at >= to_timestamp($1 / 1000.0) AND created_at < to_timestamp($2 / 1000.0)`,
+            [range.start, range.end]
+        );
+        const r = rows[0] || {};
+        const grossChargedPHP = Math.round(Number(r.gross_charged_php || 0) * 100) / 100;
+        const refundedPHP = Math.round(Number(r.refunded_php || 0) * 100) / 100;
+        const netChargedPHP = Math.round((grossChargedPHP - refundedPHP) * 100) / 100;
+        const actualBillEntry = cloudBackupActualBills[month] || null;
+        const actualBillPHP = actualBillEntry ? actualBillEntry.actualBillPHP : null;
+        const profitLossPHP = actualBillPHP !== null ? Math.round((netChargedPHP - actualBillPHP) * 100) / 100 : null;
+        res.json({
+            success: true,
+            month,
+            netChargedPHP,
+            grossChargedPHP,
+            refundedPHP,
+            syncChargeCount: Number(r.sync_charge_count || 0),
+            restoreChargeCount: Number(r.restore_charge_count || 0),
+            activationCount: Number(r.activation_count || 0),
+            actualBill: actualBillEntry,
+            profitLossPHP,
+            status: profitLossPHP === null ? 'unknown' : (profitLossPHP >= 0 ? 'kumikita' : 'lugi'),
+            allMonthsWithActualBill: Object.keys(cloudBackupActualBills).sort().reverse()
+        });
+    } catch (err) {
+        console.error('⚠️  /relay/admin/api/cloud-backup/reconciliation error:', err.message);
+        res.status(500).json({ success: false, message: 'Could not compute reconciliation.' });
+    }
+});
+// ===================================================================
+// GAWA/BAGO: RETENTION REVIEW — hinahanap ang mga installation na may
+// naka-store pa ring Cloud Backup data sa Neon (patuloy na gumagastos
+// ng storage) pero HINDI na active/bayad ang subscription nila nang
+// matagal na (>= graceDays, default 90 araw). Kailanman ay hindi
+// kasama ang Lifetime purchases (bayad na nang buo, dapat manatili
+// habang buhay). Read-only lang ang endpoint na ito — HINDI awtomatikong
+// nagde-delete; ang aktwal na pagbura ay hiwalay na endpoint
+// (retention-purge, sa ibaba) na kailangan pang i-confirm nang mano-mano
+// per-installation — sinasadya ito, dahil delikado/hindi na-uundo ang
+// pagbura ng customer data kung basta na lang awtomatiko.
+// ===================================================================
+const CLOUD_BACKUP_RETENTION_DEFAULT_GRACE_DAYS = 90;
+app.get('/relay/admin/api/cloud-backup/retention-review', requireAdminKey, async (req, res) => {
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured.' });
+    const graceDays = Number(req.query.graceDays) > 0 ? Number(req.query.graceDays) : CLOUD_BACKUP_RETENTION_DEFAULT_GRACE_DAYS;
+    try {
+        const { rows } = await queryWithRetry(
+            pgPool,
+            'SELECT installation_id, store_name, size_bytes, last_sync_at, module_count FROM cloud_backup_meta ORDER BY size_bytes DESC',
+            []
+        );
+        const { rate } = await getUsdToPhpRate();
+        const neonPlanId = neonConfiguredPlans.cloudBackup || 'free';
+        let neonTier = NEON_PRICING[neonPlanId];
+        if (!neonTier || !neonTier.storageRatePerGBMonthUSD) neonTier = NEON_PRICING.launch;
+        const now = Date.now();
+        const candidates = [];
+        for (const r of rows) {
+            const sub = getCloudBackupSubscriptionForClient(r.installation_id);
+            if (sub.isLifetime || sub.active) continue; // huwag kailanman i-touch ang Lifetime o currently-active
+            const expiryKnown = sub.expiresAt !== null;
+            const referenceMs = expiryKnown ? sub.expiresAt : new Date(r.last_sync_at).getTime();
+            if (!isFinite(referenceMs)) continue;
+            const daysSince = Math.floor((now - referenceMs) / (24 * 60 * 60 * 1000));
+            if (daysSince < graceDays) continue;
+            const sizeBytes = Number(r.size_bytes) || 0;
+            const sizeGB = sizeBytes / (1024 * 1024 * 1024);
+            const estMonthlyStorageCostUSD = sizeGB * neonTier.storageRatePerGBMonthUSD;
+            candidates.push({
+                installationId: r.installation_id,
+                label: deviceLabels.get(r.installation_id) || null,
+                storeName: r.store_name || null,
+                sizeMB: Math.round((sizeBytes / (1024 * 1024)) * 100) / 100,
+                moduleCount: r.module_count,
+                lastSyncAt: r.last_sync_at,
+                expiryKnown,
+                referenceDate: new Date(referenceMs).toISOString(),
+                daysSinceExpiry: daysSince,
+                estMonthlyStorageCostUSD: Math.round(estMonthlyStorageCostUSD * 1000) / 1000,
+                estMonthlyStorageCostPHP: Math.round(estMonthlyStorageCostUSD * rate * 100) / 100
+            });
+        }
+        candidates.sort((a, b) => b.daysSinceExpiry - a.daysSinceExpiry);
+        res.json({
+            success: true,
+            checkedAt: now,
+            graceDays,
+            candidateCount: candidates.length,
+            totalEstMonthlyWasteMB: Math.round(candidates.reduce((s, c) => s + c.sizeMB, 0) * 100) / 100,
+            totalEstMonthlyWastePHP: Math.round(candidates.reduce((s, c) => s + c.estMonthlyStorageCostPHP, 0) * 100) / 100,
+            candidates
+        });
+    } catch (err) {
+        console.error('⚠️  /relay/admin/api/cloud-backup/retention-review error:', err.message);
+        res.status(500).json({ success: false, message: 'Could not compute retention review.' });
+    }
+});
+// Aktwal na pagbura — kailangan pa ring i-confirm nang mano-mano
+// per-installation (tingnan ang paalala sa itaas). Binubura ang
+// cloud_backup_modules AT cloud_backup_meta — hindi na-touch ang
+// cloud_token_wallets/ledger (transaction history mananatili).
+app.post('/relay/admin/api/cloud-backup/retention-purge', requireAdminKey, async (req, res) => {
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured.' });
+    const { installationId, confirm } = req.body || {};
+    if (!installationId) return res.status(400).json({ success: false, message: 'Missing installationId.' });
+    if (confirm !== true) return res.status(400).json({ success: false, message: 'Kailangan ng confirm:true — hindi na-uundo ang pagbura.' });
+    const sub = getCloudBackupSubscriptionForClient(installationId);
+    if (sub.isLifetime || sub.active) {
+        return res.status(400).json({ success: false, message: 'Ligtas na hinarang ang pagbura — Lifetime o kasalukuyang active pa ang subscription na ito.' });
+    }
+    try {
+        await runPgWriteTx(pgPool, async (client) => {
+            await client.query('DELETE FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
+            await client.query('DELETE FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
+        });
+        logActivity(installationId, 'cloud_backup_retention_purge', { purgedBy: 'admin', graceReason: 'expired subscription retention sweep' });
+        res.json({ success: true, message: `Nabura na ang Cloud Backup data ng installation ${installationId}.` });
+    } catch (err) {
+        console.error('⚠️  /relay/admin/api/cloud-backup/retention-purge error:', err.message);
+        res.status(500).json({ success: false, message: 'Could not purge this installation\'s cloud backup data.' });
+    }
+});
+// ===================================================================
+// GAWA/BAGO: PROACTIVE ALERTS — dati, kailangan mo pang buksan mismo
+// ang admin panel para malaman kung UNREACHABLE ang NEON_API_KEY o
+// kung naka-fallback (hindi na-detect ang totoong plan) ang isa sa 3
+// database. Ngayon, may background sweep (tuwing 15 minuto) na
+// awtomatikong magpapadala ng Telegram message at/o generic webhook
+// kapag:
+//   1. UNREACHABLE ang Neon Account API nang >= 30 minuto (tuloy-tuloy)
+//   2. Naka-fallback ang plan detection ng isa sa 3 Neon database
+//      nang >= 2 oras (tuloy-tuloy) — ibig sabihin posibleng maling
+//      rate/₱0 ang "REAL na usage" report na iyon sa loob ng mahabang
+//      panahon nang walang nakakaalam
+// May "resolved" na follow-up alert din kapag bumalik sa normal, at
+// paulit-ulit na reminder (hindi lang minsan) habang patuloy pa ring
+// down, para hindi ito ma-miss/malimutan.
+//
+// SETUP (opsyonal — pareho o isa lang sa dalawa, wala ring epekto sa
+// normal na operation kung wala man):
+//   RELAY_ALERT_TELEGRAM_BOT_TOKEN + RELAY_ALERT_TELEGRAM_CHAT_ID
+//     — gumawa ng bot via @BotFather sa Telegram, kunin ang token, at
+//       ang chat ID mo (hal. via @userinfobot o /getUpdates).
+//   RELAY_ALERT_WEBHOOK_URL
+//     — kahit anong URL na tumatanggap ng POST JSON {text: "..."},
+//       gumagana rin ito sa Slack/Discord incoming webhooks.
+// Kung wala man itong dalawa naka-set, laging naka-console.warn/error
+// pa rin ang mga alert na ito sa server logs bilang huling fallback.
+// ===================================================================
+const ALERT_NEON_API_KEY_DOWN_THRESHOLD_MS = 30 * 60 * 1000;      // 30 minuto
+const ALERT_NEON_API_KEY_REMINDER_MS = 6 * 60 * 60 * 1000;        // 6 oras
+const ALERT_FALLBACK_PLAN_THRESHOLD_MS = 2 * 60 * 60 * 1000;      // 2 oras
+const ALERT_FALLBACK_PLAN_REMINDER_MS = 12 * 60 * 60 * 1000;      // 12 oras
+let pricingStalenessAlerted = false;
+const costAlertState = {
+    neonApiKey: { downSince: null, lastAlertAt: null },
+    fallbackPlan: {
+        cloudBackup: { downSince: null, lastAlertAt: null },
+        devices: { downSince: null, lastAlertAt: null },
+        build: { downSince: null, lastAlertAt: null }
+    }
+};
+async function sendCostAlert(title, message) {
+    const fullText = `⚠️ RELAY Cost Alert — ${title}\n\n${message}`;
+    console.warn(`\n${'='.repeat(60)}\n${fullText}\n${'='.repeat(60)}\n`);
+    const tasks = [];
+    if (process.env.RELAY_ALERT_TELEGRAM_BOT_TOKEN && process.env.RELAY_ALERT_TELEGRAM_CHAT_ID) {
+        tasks.push(
+            fetch(`https://api.telegram.org/bot${process.env.RELAY_ALERT_TELEGRAM_BOT_TOKEN}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ chat_id: process.env.RELAY_ALERT_TELEGRAM_CHAT_ID, text: fullText })
+            }).catch(err => console.error('⚠️ Hindi napadala ang Telegram alert:', err.message))
+        );
+    }
+    if (process.env.RELAY_ALERT_WEBHOOK_URL) {
+        tasks.push(
+            fetch(process.env.RELAY_ALERT_WEBHOOK_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: fullText, title, message })
+            }).catch(err => console.error('⚠️ Hindi napadala ang webhook alert:', err.message))
+        );
+    }
+    if (tasks.length > 0) await Promise.allSettled(tasks);
+}
+// Generic helper para sa "down since X, alert kapag lumagpas sa
+// threshold, paulit-ulit na reminder, at resolved-alert pag bumalik" —
+// ginagamit ng parehong Neon API key check at fallback-plan check sa
+// ibaba, para hindi paulit-ulit ang parehong logic.
+async function evaluateAlertCondition(state, isDown, thresholdMs, reminderMs, onAlert, onResolved) {
+    const now = Date.now();
+    if (isDown) {
+        if (state.downSince === null) {
+            state.downSince = now; // unang beses na na-detect ang problema
+            return;
+        }
+        const downForMs = now - state.downSince;
+        if (downForMs < thresholdMs) return; // hindi pa umaabot sa threshold, huwag pa mag-alert
+        const dueForReminder = state.lastAlertAt === null || (now - state.lastAlertAt) >= reminderMs;
+        if (dueForReminder) {
+            await onAlert(downForMs);
+            state.lastAlertAt = now;
+        }
+    } else if (state.downSince !== null) {
+        // bumalik sa normal matapos ang isang problema — isang beses na
+        // "resolved" alert, tapos i-reset ang state
+        const wasDownForMs = now - state.downSince;
+        if (state.lastAlertAt !== null) await onResolved(wasDownForMs); // alert lang na "resolved" kung may naipadalang alert dati
+        state.downSince = null;
+        state.lastAlertAt = null;
+    }
+}
+function formatDuration(ms) {
+    const hours = ms / (60 * 60 * 1000);
+    if (hours < 1) return `${Math.round(ms / 60000)} minuto`;
+    if (hours < 24) return `${hours.toFixed(1)} oras`;
+    return `${(hours / 24).toFixed(1)} araw`;
+}
+async function runCostAlertSweep() {
+    try {
+        // 0) Pricing staleness — isang beses lang mag-a-alert kapag
+        // biglang naging stale (hindi paulit-ulit, dahil buwan-buwan lang
+        // ito nagbabago at hindi urgent gaya ng downtime).
+        const staleness = getNeonPricingStaleness();
+        if (staleness.isStale && !pricingStalenessAlerted) {
+            await sendCostAlert(
+                'Neon Pricing — Posibleng Luma Na',
+                `Huling na-verify ang Neon pricing rates noong ${staleness.verifiedAt} (${staleness.monthsSinceVerified} buwan na ang nakalipas). ` +
+                `Posibleng nagbago na ang totoong presyo ni Neon. I-check ang ${NEON_PRICING_SOURCE_URL} at i-update kung kinakailangan (Pricing admin panel).`
+            );
+            pricingStalenessAlerted = true;
+        } else if (!staleness.isStale) {
+            pricingStalenessAlerted = false;
+        }
+        // 1) Neon Account API key reachability
+        const keyCheck = await checkNeonApiKeyReachable();
+        const keyIsDown = keyCheck.configured && !keyCheck.reachable;
+        await evaluateAlertCondition(
+            costAlertState.neonApiKey,
+            keyIsDown,
+            ALERT_NEON_API_KEY_DOWN_THRESHOLD_MS,
+            ALERT_NEON_API_KEY_REMINDER_MS,
+            async (downForMs) => sendCostAlert(
+                'Neon Account API UNREACHABLE',
+                `Hindi na-reach ang Neon Account API (NEON_API_KEY) sa loob ng ${formatDuration(downForMs)}.\n` +
+                `Error: ${keyCheck.error || 'unknown'}\n\n` +
+                `Habang ganito, TAHIMIK gagamitin ang fallback/dropdown plan (hindi ang totoong plan) sa "REAL na usage" breakdown — posibleng maling ₱0 o maling rate ang lalabas. Puntahan ang Database Health sa admin panel para i-verify.`
+            ),
+            async (wasDownForMs) => sendCostAlert(
+                'Neon Account API — RESOLVED',
+                `Bumalik na sa REACHABLE ang Neon Account API matapos ang ${formatDuration(wasDownForMs)}.`
+            )
+        );
+        // 2) Fallback-plan detection, per configured Neon database
+        const projectIds = {
+            cloudBackup: NEON_CLOUD_BACKUP_PROJECT_ID,
+            devices: NEON_DEVICES_PROJECT_ID,
+            build: NEON_BUILD_PROJECT_ID
+        };
+        const labels = { cloudBackup: 'Cloud Backup DB', devices: 'Devices/License DB', build: 'Build/Push DB' };
+        for (const key of Object.keys(projectIds)) {
+            if (!projectIds[key]) continue; // hindi naka-configure ang project na ito, laktawan
+            // AYOS/BAGO: dati, "usedFallback" lang (galing sa computeNeonRealCost)
+            // ang sinusuri — pero kung mali/hindi tugma ang SPECIFIC na project
+            // ID ng database na ito habang tama pa rin ang NEON_API_KEY mismo
+            // (hal. na-typo, o na-delete/na-transfer ang project sa Neon), null
+            // lang ang ibabalik ng getNeonProjectUsage() — hindi "fallback"
+            // technically, pero pareho rin ang epekto: blangko/maling REAL na
+            // usage report para dito. Sinama na rin ito sa parehong alert.
+            let usageMissing = false;
+            let usedFallback = false;
+            try {
+                const usage = await getNeonProjectUsage(projectIds[key]);
+                usageMissing = !usage;
+                const realCost = usage ? computeNeonRealCost(usage, neonConfiguredPlans[key] || 'free') : null;
+                usedFallback = !!(realCost && realCost.usedFallbackPlan);
+            } catch (err) {
+                usageMissing = true;
+            }
+            const isDown = usedFallback || usageMissing;
+            await evaluateAlertCondition(
+                costAlertState.fallbackPlan[key],
+                isDown,
+                ALERT_FALLBACK_PLAN_THRESHOLD_MS,
+                ALERT_FALLBACK_PLAN_REMINDER_MS,
+                async (downForMs) => sendCostAlert(
+                    `${labels[key]} — ${usageMissing ? 'Walang Real Usage Data' : 'Fallback Plan'} sa loob ng ${formatDuration(downForMs)}`,
+                    usageMissing
+                        ? `Walang naibabalik na usage data mula sa Neon para sa ${labels[key]} sa loob ng ${formatDuration(downForMs)}, kahit tila REACHABLE ang Neon Account API key sa pangkalahatan. Posibleng mali/na-delete/na-transfer ang project ID nito — i-verify sa Database Health.`
+                        : `Hindi na-detect ang totoong Neon plan para sa ${labels[key]} sa loob ng ${formatDuration(downForMs)} — gamit na lang ang admin dropdown ("${neonConfiguredPlans[key] || 'free'}") bilang batayan.\n\nKung mali ang naka-set na dropdown na 'yan (hal. "Free" pero may bayad ka na talaga), maling numero ang lumalabas sa "REAL na usage" report. I-verify sa Database Health.`
+                ),
+                async (wasDownForMs) => sendCostAlert(
+                    `${labels[key]} — Plan Detection RESOLVED`,
+                    `Bumalik na sa normal ang plan detection para sa ${labels[key]} matapos ang ${formatDuration(wasDownForMs)}.`
+                )
+            );
+        }
+    } catch (err) {
+        console.error('⚠️ runCostAlertSweep error:', err.message);
+    }
+}
+setInterval(runCostAlertSweep, 15 * 60 * 1000);
+setTimeout(runCostAlertSweep, 60 * 1000); // unang check, 1 minuto pagkatapos mag-boot
+// Manual na test button sa admin panel — para ma-verify agad kung
+// tama ang Telegram/webhook setup, hindi na kailangan hintayin pa ang
+// susunod na aktwal na problema.
+app.post('/relay/admin/api/alerts/test', requireAdminKey, async (req, res) => {
+    const configured = !!((process.env.RELAY_ALERT_TELEGRAM_BOT_TOKEN && process.env.RELAY_ALERT_TELEGRAM_CHAT_ID) || process.env.RELAY_ALERT_WEBHOOK_URL);
+    await sendCostAlert('Test Alert', 'Ito ay test message lang — kung nakita mo ito, gumagana ang alert setup mo.');
+    res.json({ success: true, configured, message: configured ? 'Naipadala ang test alert.' : 'Walang naka-configure na Telegram/webhook — na-log lang sa server console (tingnan sa terminal/logs).' });
+});
+app.get('/relay/admin/api/alerts/config', requireAdminKey, (req, res) => {
+    res.json({
+        success: true,
+        telegramConfigured: !!(process.env.RELAY_ALERT_TELEGRAM_BOT_TOKEN && process.env.RELAY_ALERT_TELEGRAM_CHAT_ID),
+        webhookConfigured: !!process.env.RELAY_ALERT_WEBHOOK_URL,
+        currentState: costAlertState
+    });
+});
+// ===================================================================
+// GAWA/BAGO: NEAR-QUOTA UPSELL — mga PAYING (active o lifetime) na
+// subscriber na malapit na o nasa quota na ng kasalukuyang tier nila.
+// Hindi ito tungkol sa "lugi" mismo (may-bayad naman sila), kundi
+// revenue opportunity: bago pa sila mag-storage-exceeded error,
+// puwede mo na silang i-suggest na mag-upgrade — mas maganda ito
+// kaysa first time nilang malaman pag nag-error na ang sync nila.
+// ===================================================================
+app.get('/relay/admin/api/cloud-backup/near-quota-review', requireAdminKey, async (req, res) => {
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured.' });
+    const thresholdPercent = Number(req.query.thresholdPercent) > 0 ? Number(req.query.thresholdPercent) : 80;
+    const CLOUD_BACKUP_TIER_ORDER = ['basic', 'standard', 'pro'];
+    try {
+        const { rows } = await queryWithRetry(
+            pgPool,
+            'SELECT installation_id, store_name, size_bytes, last_sync_at FROM cloud_backup_meta ORDER BY size_bytes DESC',
+            []
+        );
+        const candidates = [];
+        for (const r of rows) {
+            const sub = getCloudBackupSubscriptionForClient(r.installation_id);
+            if (!sub.active && !sub.isLifetime) continue; // hindi active/bayad — hindi upsell target, tingnan na lang sa retention review
+            const tier = sub.tier || 'basic';
+            const plan = CLOUD_BACKUP_PLANS[tier];
+            if (!plan || !plan.storageQuotaMB) continue;
+            const sizeMB = (Number(r.size_bytes) || 0) / (1024 * 1024);
+            const percentUsed = (sizeMB / plan.storageQuotaMB) * 100;
+            if (percentUsed < thresholdPercent) continue;
+            const tierIdx = CLOUD_BACKUP_TIER_ORDER.indexOf(tier);
+            const nextTier = tierIdx >= 0 && tierIdx < CLOUD_BACKUP_TIER_ORDER.length - 1 ? CLOUD_BACKUP_TIER_ORDER[tierIdx + 1] : null;
+            const nextPlan = nextTier ? CLOUD_BACKUP_PLANS[nextTier] : null;
+            candidates.push({
+                installationId: r.installation_id,
+                label: deviceLabels.get(r.installation_id) || null,
+                storeName: r.store_name || null,
+                currentTier: tier,
+                currentTierName: plan.name,
+                sizeMB: Math.round(sizeMB * 100) / 100,
+                quotaMB: plan.storageQuotaMB,
+                percentUsed: Math.round(percentUsed * 10) / 10,
+                lastSyncAt: r.last_sync_at,
+                atMaxTier: !nextPlan,
+                suggestedTier: nextPlan ? nextPlan.id : null,
+                suggestedTierName: nextPlan ? nextPlan.name : null,
+                suggestedTierMonthlyPHP: nextPlan ? nextPlan.price.monthly : null
+            });
+        }
+        candidates.sort((a, b) => b.percentUsed - a.percentUsed);
+        res.json({
+            success: true,
+            checkedAt: Date.now(),
+            thresholdPercent,
+            candidateCount: candidates.length,
+            candidates
+        });
+    } catch (err) {
+        console.error('⚠️  /relay/admin/api/cloud-backup/near-quota-review error:', err.message);
+        res.status(500).json({ success: false, message: 'Could not compute near-quota review.' });
+    }
+});
+
 // tinatawag sa loob ng /relay/cloud-backup/restore) — ginagamit ito para sa
 // karagdagang/punitive na charge na direktang desisyon ng developer, halimbawa
 // kung sa tingin niya hindi sapat ang standard na per-restore charge para sa
@@ -8703,6 +9195,7 @@ app.get('/relay/admin/api/db-health', requireAdminKey, async (req, res) => {
             },
             pricingMeta: {
                 verifiedAt: NEON_PRICING_VERIFIED_AT,
+                staleness: getNeonPricingStaleness(),
                 sourceUrl: NEON_PRICING_SOURCE_URL,
                 hasOverrides: Object.keys(neonPricingOverrides).length > 0,
                 exampleComputeCUHoursAssumed: EXAMPLE_COMPUTE_CU_HOURS,
@@ -8746,6 +9239,7 @@ app.get('/relay/admin/api/pricing/neon', requireAdminKey, (req, res) => {
         neonPricingBase: NEON_PRICING_BASE,
         neonPricingOverrides,
         verifiedAt: NEON_PRICING_VERIFIED_AT,
+        staleness: getNeonPricingStaleness(),
         sourceUrl: NEON_PRICING_SOURCE_URL
     });
 });
@@ -9556,7 +10050,8 @@ async function bootstrapStores() {
         neonConfiguredPlans,
         clientMaintenanceFeeConfig,
         clientMaintenanceFeePaidUntil,
-        ACTIVATION_FLAGS
+        ACTIVATION_FLAGS,
+        cloudBackupActualBills
     ] = await Promise.all([
         loadAllowedDevices(),
         loadDeviceLabels(),
@@ -9582,7 +10077,8 @@ async function bootstrapStores() {
         loadNeonConfiguredPlans(),
         loadClientMaintenanceFeeConfig(),
         loadClientMaintenanceFeePaidUntil(),
-        loadActivationFlags()
+        loadActivationFlags(),
+        loadCloudBackupActualBills()
     ]);
     recomputeFeatureCatalog();
     if (Object.keys(featureCatalogOverrides).length > 0) {
@@ -9609,6 +10105,18 @@ async function bootstrapStores() {
     }
     pruneCloudSyncActivity();
     if (!neonConfiguredPlans || typeof neonConfiguredPlans !== 'object') neonConfiguredPlans = { cloudBackup: 'free', devices: 'free', build: 'free' };
+    // AYOS/BAGO: paalala sa bawat pag-restart kung "free" pa rin ang
+    // configured plan habang may naka-configure nang totoong Neon API key
+    // — hindi ito palaging mali (baka totoo ngang Free pa kayo), pero
+    // sulit na paalala ito kung sakaling default lang ito dahil na-reset
+    // ang Redis (tingnan ang saveNeonConfiguredPlans() sa itaas).
+    if (NEON_API_CONFIGURED) {
+        const stillFreeKeys = Object.entries(neonConfiguredPlans).filter(([, v]) => v === 'free').map(([k]) => k);
+        if (stillFreeKeys.length > 0) {
+            console.log(`ℹ️  Paalala: "free" pa rin ang configured Neon plan para sa: ${stillFreeKeys.join(', ')}. Kung may bayad ka na talaga dito, i-set ito nang tama sa Database Health admin panel (ligtas naman ang aktwal na sinisingil sa customer dahil may fallback-to-launch protection, pero para tumpak ang "REAL na usage" report).`);
+        }
+    }
+    if (!cloudBackupActualBills || typeof cloudBackupActualBills !== 'object') cloudBackupActualBills = {};
     if (!clientMaintenanceFeeConfig || typeof clientMaintenanceFeeConfig !== 'object') clientMaintenanceFeeConfig = JSON.parse(JSON.stringify(CLIENT_MAINTENANCE_FEE_DEFAULT));
     if (!clientMaintenanceFeeConfig.perClientOverridePHP || typeof clientMaintenanceFeeConfig.perClientOverridePHP !== 'object') clientMaintenanceFeeConfig.perClientOverridePHP = {};
     console.log(

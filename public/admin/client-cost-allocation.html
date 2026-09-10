@@ -338,6 +338,60 @@
       <button class="icon-btn" onclick="window.location.href='pricing.html'">💳 Edit tier pricing</button>
     </div>
 
+    <!-- GAWA/BAGO: RECONCILIATION — totoong charged-to-customers (mula sa
+         cloud_token_ledger) vs totoong Neon invoice (mano-manong ilalagay,
+         dahil walang public API si Neon para dito). Ito ang pinaka-diretsong
+         sagot sa "lugi ba ako?" — totoong pera, hindi estimate/projection. -->
+    <div class="stat-card" style="margin-bottom:16px;">
+      <div class="stat-label">💰 Reconciliation — Totoong Kita/Lugi (buwanang)</div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:8px;">
+        <input type="month" id="reconMonthInput" style="padding:6px 10px; border-radius:6px; border:1px solid var(--border-soft); background:var(--bg); color:var(--text);">
+        <button class="icon-btn" onclick="loadReconciliation()">⟳ Tingnan</button>
+      </div>
+      <div id="reconSummary" style="margin-top:12px; font-size:13px; line-height:1.8;"></div>
+      <div style="margin-top:14px; padding-top:12px; border-top:1px solid var(--border,#2a2a2a);">
+        <div class="stat-sub" style="margin-bottom:6px;">I-lagay ang TOTOONG Neon invoice (USD) para sa buwang ito:</div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+          <input type="number" id="reconActualBillInput" placeholder="hal. 12.50" step="0.01" min="0" style="padding:6px 10px; border-radius:6px; border:1px solid var(--border-soft); background:var(--bg); color:var(--text); width:120px;">
+          <input type="text" id="reconNoteInput" placeholder="Note (opsyonal)" style="padding:6px 10px; border-radius:6px; border:1px solid var(--border-soft); background:var(--bg); color:var(--text); flex:1; min-width:150px;">
+          <button class="icon-btn" onclick="saveReconciliationBill()">💾 I-save</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- GAWA/BAGO: RETENTION REVIEW — mga installation na may naka-store pa
+         ring backup data sa Neon (patuloy na gumagastos ng storage) pero
+         HINDI na active/bayad ang subscription nang matagal na. Manual
+         confirm pa rin bago mabura — hindi awtomatiko/hindi na-uundo. -->
+    <div class="stat-card" style="margin-bottom:16px;">
+      <div class="stat-label">🗑️ Retention Review — Inactive na Cloud Backup Data</div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:8px;">
+        <label class="stat-sub">Expired for at least
+          <input type="number" id="retentionGraceDaysInput" value="90" min="1" style="width:60px; padding:4px 8px; border-radius:6px; border:1px solid var(--border-soft); background:var(--bg); color:var(--text);">
+          araw:
+        </label>
+        <button class="icon-btn" onclick="loadRetentionReview()">⟳ Tingnan</button>
+      </div>
+      <div id="retentionSummary" style="margin-top:10px; font-size:13px;"></div>
+      <div id="retentionList" style="margin-top:10px;"></div>
+    </div>
+
+    <!-- GAWA/BAGO: NEAR-QUOTA UPSELL — mga PAYING na subscriber na malapit
+         na o nasa quota na. Revenue opportunity — suggest upgrade bago pa
+         sila mag-storage-exceeded error. -->
+    <div class="stat-card" style="margin-bottom:16px;">
+      <div class="stat-label">📈 Near-Quota Upsell — Paying na Subscriber na Malapit sa Limit</div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:8px;">
+        <label class="stat-sub">Nasa
+          <input type="number" id="nearQuotaThresholdInput" value="80" min="1" max="100" style="width:55px; padding:4px 8px; border-radius:6px; border:1px solid var(--border-soft); background:var(--bg); color:var(--text);">
+          % o higit pa ng quota:
+        </label>
+        <button class="icon-btn" onclick="loadNearQuotaReview()">⟳ Tingnan</button>
+      </div>
+      <div id="nearQuotaSummary" style="margin-top:10px; font-size:13px;"></div>
+      <div id="nearQuotaList" style="margin-top:10px;"></div>
+    </div>
+
     <div id="clientsWrap">
       <div class="client-toolbar hidden" id="clientToolbar">
         <div class="search-field">
@@ -729,11 +783,145 @@ async function loadAllocation() {
 async function boot() {
   if (!adminKey) return;
   try {
-    await loadAllocation();
+    document.getElementById('reconMonthInput').value = new Date().toISOString().slice(0, 7);
+    await Promise.all([loadAllocation(), loadReconciliation(), loadRetentionReview(), loadNearQuotaReview()]);
+    // BUGFIX: each loader above swallows its own errors internally (so a
+    // wrong admin key's 'forbidden' rejection never reaches this Promise.all),
+    // but a 403 inside any of them still calls logout(), which clears
+    // adminKey and hides #app/shows #loginWrap. Without this check, the
+    // lines below would unconditionally undo that and reveal a broken,
+    // empty app dashboard even though the admin key was rejected.
+    if (!adminKey) return;
     document.getElementById('loginWrap').classList.add('hidden');
     document.getElementById('app').classList.remove('hidden');
   } catch (err) {
     if (err.message !== 'forbidden') toast(err.message, 'error');
+  }
+}
+
+// ===================================================================
+// GAWA/BAGO: RECONCILIATION — tingnan ang comment sa PHP side
+// (/relay/admin/api/cloud-backup/reconciliation) para sa buong
+// paliwanag. Dito, ipinapakita lang / hinihingi ang input.
+// ===================================================================
+async function loadReconciliation() {
+  const monthInput = document.getElementById('reconMonthInput');
+  const month = monthInput.value || new Date().toISOString().slice(0, 7);
+  const summaryEl = document.getElementById('reconSummary');
+  summaryEl.innerHTML = 'Loading…';
+  try {
+    const data = await api(`/relay/admin/api/cloud-backup/reconciliation?month=${encodeURIComponent(month)}`);
+    const rows = [
+      `<div>Na-charge sa customers (net, bawas refund): <strong>${formatPHP(data.netChargedPHP)}</strong></div>`,
+      `<div style="font-size:12px; color:var(--muted);">— ${data.syncChargeCount} sync charge, ${data.restoreChargeCount} restore charge, ${data.activationCount} activation</div>`
+    ];
+    if (data.actualBill) {
+      const plColor = data.status === 'lugi' ? 'var(--red,#ff5c72)' : 'var(--green,#4ade80)';
+      const plLabel = data.status === 'lugi' ? '⚠️ LUGI' : '✅ Kumikita';
+      rows.push(`<div style="margin-top:6px;">Totoong Neon bill: <strong>$${data.actualBill.actualBillUSD.toFixed(2)} · ${formatPHP(data.actualBill.actualBillPHP)}</strong> <span style="font-size:11px; color:var(--muted);">(rate ${data.actualBill.exchangeRateUsed.toFixed(2)} nang i-save)</span></div>`);
+      rows.push(`<div style="margin-top:4px; font-weight:700; color:${plColor};">${plLabel}: ${formatPHP(Math.abs(data.profitLossPHP))} ${data.status === 'lugi' ? 'kulang' : 'sobra'} sa buwang ito</div>`);
+      if (data.actualBill.note) rows.push(`<div style="font-size:11px; color:var(--muted);">Note: ${data.actualBill.note}</div>`);
+    } else {
+      rows.push('<div style="margin-top:6px; color:var(--amber,#f5a623);">⚠️ Wala pang na-i-save na totoong Neon bill para sa buwang ito — ilagay sa ibaba para makita ang profit/loss.</div>');
+    }
+    summaryEl.innerHTML = rows.join('');
+  } catch (err) {
+    summaryEl.innerHTML = `<span style="color:var(--red);">${err.message}</span>`;
+  }
+}
+async function saveReconciliationBill() {
+  const month = document.getElementById('reconMonthInput').value || new Date().toISOString().slice(0, 7);
+  const actualBillUSD = Number(document.getElementById('reconActualBillInput').value);
+  if (!isFinite(actualBillUSD) || actualBillUSD < 0) { toast('Invalid na halaga.', 'error'); return; }
+  const note = document.getElementById('reconNoteInput').value.trim();
+  try {
+    await api('/relay/admin/api/cloud-backup/actual-bill', { method: 'POST', body: JSON.stringify({ month, actualBillUSD, note }) });
+    toast('Na-save ang totoong Neon bill.');
+    document.getElementById('reconActualBillInput').value = '';
+    document.getElementById('reconNoteInput').value = '';
+    await loadReconciliation();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+// ===================================================================
+// GAWA/BAGO: RETENTION REVIEW — tingnan ang comment sa PHP side
+// (/relay/admin/api/cloud-backup/retention-review) para sa buong
+// paliwanag. Kailangan pa ring i-confirm bago aktwal na mabura.
+// ===================================================================
+async function loadRetentionReview() {
+  const graceDays = Number(document.getElementById('retentionGraceDaysInput').value) || 90;
+  const summaryEl = document.getElementById('retentionSummary');
+  const listEl = document.getElementById('retentionList');
+  summaryEl.innerHTML = 'Loading…';
+  listEl.innerHTML = '';
+  try {
+    const data = await api(`/relay/admin/api/cloud-backup/retention-review?graceDays=${graceDays}`);
+    if (data.candidateCount === 0) {
+      summaryEl.innerHTML = '✅ Walang nakitang inactive na Cloud Backup data lampas sa grace period.';
+      return;
+    }
+    summaryEl.innerHTML = `⚠️ <strong>${data.candidateCount}</strong> installation ang inactive nang lampas ${graceDays} araw, tinatayang <strong>${formatPHP(data.totalEstMonthlyWastePHP)}/buwan</strong> na patuloy na storage cost (${data.totalEstMonthlyWasteMB.toFixed(1)} MB kabuuan).`;
+    listEl.innerHTML = data.candidates.map(c => `
+      <div class="backup-row" style="padding:10px 0; border-bottom:1px solid var(--border,#2a2a2a); align-items:flex-start; display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+        <div style="flex:1; min-width:200px;">
+          <div><strong>${c.label || c.storeName || c.installationId}</strong> <span style="font-size:11px; color:var(--muted);">${c.installationId}</span></div>
+          <div style="font-size:11px; color:var(--muted);">
+            ${c.sizeMB} MB · nag-expire ${c.expiryKnown ? '' : '(estimate mula sa last sync) '}${c.daysSinceExpiry} araw na ang nakalipas
+            · tinatayang ~${formatPHP(c.estMonthlyStorageCostPHP)}/buwan pa rin na ginagastos
+          </div>
+        </div>
+        <button class="icon-btn" style="background:var(--red-bg,#3a1418); color:var(--red,#ff5c72); border:1px solid var(--red-line,#5c1c26);" onclick="purgeRetentionCandidate('${c.installationId}')">🗑️ Burahin</button>
+      </div>`).join('');
+  } catch (err) {
+    summaryEl.innerHTML = `<span style="color:var(--red);">${err.message}</span>`;
+  }
+}
+async function purgeRetentionCandidate(installationId) {
+  if (!confirm(`Sigurado ka bang buburahin ang lahat ng Cloud Backup data ng "${installationId}"? HINDI NA ITO MAUUNDO.`)) return;
+  try {
+    await api('/relay/admin/api/cloud-backup/retention-purge', { method: 'POST', body: JSON.stringify({ installationId, confirm: true }) });
+    toast('Nabura na ang backup data.');
+    await loadRetentionReview();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+// ===================================================================
+// GAWA/BAGO: NEAR-QUOTA UPSELL — tingnan ang comment sa PHP side
+// (/relay/admin/api/cloud-backup/near-quota-review).
+// ===================================================================
+async function loadNearQuotaReview() {
+  const thresholdPercent = Number(document.getElementById('nearQuotaThresholdInput').value) || 80;
+  const summaryEl = document.getElementById('nearQuotaSummary');
+  const listEl = document.getElementById('nearQuotaList');
+  summaryEl.innerHTML = 'Loading…';
+  listEl.innerHTML = '';
+  try {
+    const data = await api(`/relay/admin/api/cloud-backup/near-quota-review?thresholdPercent=${thresholdPercent}`);
+    if (data.candidateCount === 0) {
+      summaryEl.innerHTML = '✅ Walang paying subscriber na malapit sa quota nila ngayon.';
+      return;
+    }
+    summaryEl.innerHTML = `📈 <strong>${data.candidateCount}</strong> paying subscriber ang nasa ${thresholdPercent}%+ ng quota nila — magandang oras para i-suggest ang upgrade.`;
+    listEl.innerHTML = data.candidates.map(c => `
+      <div class="backup-row" style="padding:10px 0; border-bottom:1px solid var(--border,#2a2a2a); align-items:flex-start; display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+        <div style="flex:1; min-width:200px;">
+          <div><strong>${c.label || c.storeName || c.installationId}</strong> <span style="font-size:11px; color:var(--muted);">${c.installationId}</span></div>
+          <div style="font-size:11px; color:var(--muted);">
+            ${c.currentTierName}: ${c.sizeMB} / ${c.quotaMB} MB (<strong>${c.percentUsed}%</strong>)
+          </div>
+        </div>
+        <div style="font-size:12px; text-align:right;">
+          ${c.atMaxTier
+            ? '<span style="color:var(--amber,#f5a623);">Nasa pinakamataas nang tier</span>'
+            : `<span style="color:var(--green,#4ade80);">Suggest: ${c.suggestedTierName} (₱${c.suggestedTierMonthlyPHP}/buwan)</span>`}
+        </div>
+      </div>`).join('');
+  } catch (err) {
+    summaryEl.innerHTML = `<span style="color:var(--red);">${err.message}</span>`;
   }
 }
 
