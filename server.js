@@ -7624,6 +7624,14 @@ async function runCostAlertSweep() {
         const labels = { cloudBackup: 'Cloud Backup DB', devices: 'Devices/License DB', build: 'Build/Push DB' };
         for (const key of Object.keys(projectIds)) {
             if (!projectIds[key]) continue; // hindi naka-configure ang project na ito, laktawan
+            // AYOS/BUGFIX: kapag DOWN na mismo ang buong Neon API key (#1 sa itaas),
+            // laktawan ang per-database check na ito — dahil parehong root cause lang
+            // ito (ang key mismo), hindi dapat mag-alert nang hiwalay ang bawat isa
+            // sa 3 databases (Cloud Backup/Devices/Build) na magiging usageMissing=true
+            // lahat. Dati, apat na magkakahiwalay na alert (1 key-down + 3 per-db) ang
+            // pumapasok kahit iisa lang talaga ang dahilan. Ipagpapatuloy ang per-db
+            // check na ito sa susunod na sweep kapag bumalik na REACHABLE ang key.
+            if (keyIsDown) continue;
             // AYOS/BAGO: dati, "usedFallback" lang (galing sa computeNeonRealCost)
             // ang sinusuri — pero kung mali/hindi tugma ang SPECIFIC na project
             // ID ng database na ito habang tama pa rin ang NEON_API_KEY mismo
@@ -9369,6 +9377,11 @@ const RELEASE_CLIENT_TARGETS = new Set([
     path.join('public', 'faq-knowledge.js'),
     path.join('public', 'faq-knowledge.en.js'),
     path.join('public', 'faq-lang.js'),
+    // BUG FIX: nakaligtaan — proprietary code rin ito (cache-shell list,
+    // PWA logic), hindi third-party lib, pero wala sa dating list kaya
+    // plain/readable pa rin ito sa loob ng omnipos-client.zip kahit
+    // obfuscated na ang lahat ng kapatid nitong public/*.js files.
+    path.join('public', 'service-worker.js'),
 ]);
 const RELEASE_ENV_LOADER_FILENAME = 'env-loader.js';
 const RELEASE_ENV_KEY_FILENAME = '.env.key';
