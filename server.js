@@ -8464,6 +8464,51 @@ async function checkPgPoolReachable(pool, timeoutMs = 5000) {
         return { configured: true, reachable: false, error: err.message, latencyMs: Date.now() - startedAt, pool: poolStats() };
     }
 }
+// ===================================================================
+// AYOS/BAGO: hiwalay na health check para sa NEON ACCOUNT API mismo
+// (NEON_API_KEY) — hindi ito katulad ng 3 check sa itaas, na Postgres
+// CONNECTION lang (DATABASE_URL, atbp.) ang sinusuri. Ang NEON_API_KEY
+// ay ibang credential — ginagamit lang para kunin ang REAL na plan/
+// usage mismo mula sa Neon account (tingnan ang getNeonProjectUsage() /
+// computeNeonRealCost() sa itaas).
+//
+// Bago ito: kung invalid/expired/na-revoke ang key na ito, TAHIMIK
+// itong babagsak sa "fallback" na dropdown plan sa loob ng bawat
+// database card ng Storage Usage & Neon Pricing (may maliit na warning
+// text doon, pero madaling ma-miss). Ngayon, may MALINAW at HIWALAY
+// nang REACHABLE/UNREACHABLE/NOT CONFIGURED na badge dito sa Database
+// Health mismo — kaya isang tingin lang sa itaas, alam na kaagad kung
+// may problema sa key bago pa man tignan isa-isa ang bawat card sa
+// baba.
+//
+// Tumatawag sa GET /api/v2/projects?limit=1 (pinaka-magaan na endpoint,
+// hindi umaasa sa isang partikular na project ID) — walang epekto sa
+// datos, read-only lang, kaparehong pattern ng SELECT 1 checks sa itaas.
+// ===================================================================
+async function checkNeonApiKeyReachable(timeoutMs = 8000) {
+    if (!NEON_API_KEY) return { configured: false, reachable: false, error: null, latencyMs: null };
+    const startedAt = Date.now();
+    try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), timeoutMs);
+        const resp = await fetch('https://console.neon.tech/api/v2/projects?limit=1', {
+            headers: { 'Authorization': `Bearer ${NEON_API_KEY}`, 'Accept': 'application/json' },
+            signal: controller.signal
+        });
+        clearTimeout(timeout);
+        const latencyMs = Date.now() - startedAt;
+        if (!resp.ok) {
+            let detail = `HTTP ${resp.status}`;
+            if (resp.status === 401 || resp.status === 403) detail += ' — mali/expired/walang access ang NEON_API_KEY (i-check sa Neon console kung buhay pa ito)';
+            else if (resp.status === 429) detail += ' — na-rate-limit ng Neon API (subukan ulit mamaya)';
+            return { configured: true, reachable: false, error: detail, latencyMs };
+        }
+        return { configured: true, reachable: true, error: null, latencyMs };
+    } catch (err) {
+        const isTimeout = err.name === 'AbortError';
+        return { configured: true, reachable: false, error: isTimeout ? 'Timed out while checking the Neon Account API.' : err.message, latencyMs: Date.now() - startedAt };
+    }
+}
 // Maikling in-memory cache lang (hindi persisted, hindi shared sa ibang
 // process) para kung ipapa-poll ito ng dashboard kada ilang segundo,
 // hindi paulit-ulit na tinatamaan ng live SELECT 1 ang parehong dalawang
@@ -8475,10 +8520,11 @@ app.get('/relay/admin/api/db-status', requireAdminKey, async (req, res) => {
         if (dbStatusCache.payload && (Date.now() - dbStatusCache.at) < DB_STATUS_CACHE_MS) {
             return res.json({ ...dbStatusCache.payload, cached: true });
         }
-        const [cloudBackupCheck, devicesCheck, buildCheck] = await Promise.all([
+        const [cloudBackupCheck, devicesCheck, buildCheck, neonApiKeyCheck] = await Promise.all([
             checkPgPoolReachable(pgPool),
             checkPgPoolReachable(pgPoolDevices),
-            checkPgPoolReachable(pgPoolBuild)
+            checkPgPoolReachable(pgPoolBuild),
+            checkNeonApiKeyReachable()
         ]);
         const payload = {
             success: true,
@@ -8498,6 +8544,18 @@ app.get('/relay/admin/api/db-status', requireAdminKey, async (req, res) => {
                 ...buildCheck,
                 envVar: 'RELAY_BUILD_DATABASE_URL',
                 connection: maskDatabaseUrlForDisplay(BUILD_DATABASE_URL)
+            },
+            // AYOS/BAGO: hiwalay na check para sa NEON_API_KEY mismo (tingnan
+            // ang checkNeonApiKeyReachable() sa itaas para sa buong paliwanag)
+            // — ibang credential ito kumpara sa 3 DATABASE_URL check sa itaas.
+            neonApiKey: {
+                ...neonApiKeyCheck,
+                envVar: 'NEON_API_KEY',
+                projectIdsConfigured: {
+                    cloudBackup: !!NEON_CLOUD_BACKUP_PROJECT_ID,
+                    devices: !!NEON_DEVICES_PROJECT_ID,
+                    build: !!NEON_BUILD_PROJECT_ID
+                }
             }
         };
         dbStatusCache = { at: Date.now(), payload };

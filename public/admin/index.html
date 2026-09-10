@@ -2232,6 +2232,39 @@ function renderDbCheckCard(label, envVar, check) {
       </div>
     </div>`;
 }
+// AYOS/BAGO: hiwalay na card para sa NEON ACCOUNT API mismo (NEON_API_KEY)
+// — ibang credential ito kumpara sa 3 Postgres (DATABASE_URL) check sa
+// itaas ng function na ito. Kung UNREACHABLE/NOT CONFIGURED ito, malaking
+// paalala: TAHIMIK babagsak sa fallback dropdown plan ang "REAL na usage"
+// breakdown sa ibaba (Storage Usage & Neon Pricing card) — posibleng
+// maling ₱0 ang makikita doon kung hindi ito ma-verify agad.
+function renderNeonApiKeyCard(check) {
+  const green = 'background:var(--green-bg,#0f2e1c); color:var(--green,#4ade80); border:1px solid var(--green-line,#1c5c34);';
+  const red = 'background:var(--red-bg,#3a1418); color:var(--red,#ff5c72); border:1px solid var(--red-line,#5c1c26);';
+  const gray = 'background:var(--gray-bg,#2a2a2a); color:var(--gray,#888);';
+  if (!check || check.configured === false) {
+    return `
+      <div class="backup-row" style="padding:10px 0; border-bottom:1px solid var(--border, #2a2a2a); align-items:flex-start;">
+        <div style="flex:1; min-width:0;">
+          <div><strong>Neon Account API</strong> <span class="badge" style="${gray}">⚪ NOT CONFIGURED</span></div>
+          <div style="font-size:11px; color:var(--muted);">NEON_API_KEY — walang naka-set na key. Illustrative example na lang (hindi totoong usage) ang ipapakita sa "Storage Usage & Neon Pricing" card sa ibaba.</div>
+        </div>
+      </div>`;
+  }
+  const statusBadge = check.reachable
+    ? `<span class="badge" style="${green}">🟢 REACHABLE</span>`
+    : `<span class="badge" style="${red}">🔴 UNREACHABLE</span>`;
+  const projIds = check.projectIdsConfigured || {};
+  const projLine = `Cloud Backup project: ${projIds.cloudBackup ? '✅' : '❌ wala'} · Devices project: ${projIds.devices ? '✅' : '❌ wala'} · Build project: ${projIds.build ? '✅' : '❌ wala'}`;
+  return `
+    <div class="backup-row" style="padding:10px 0; border-bottom:1px solid var(--border, #2a2a2a); align-items:flex-start;">
+      <div style="flex:1; min-width:0;">
+        <div><strong>Neon Account API</strong> ${statusBadge} <span style="font-size:11px; color:var(--muted);">${check.latencyMs != null ? `${check.latencyMs} ms` : ''}</span></div>
+        <div style="font-size:11px; color:var(--muted);">NEON_API_KEY · console.neon.tech · ${projLine}</div>
+        ${!check.reachable && check.error ? `<div style="font-size:11px; color:var(--red);">⚠️ ${check.error}<br>Habang ganito: TAHIMIK gagamitin ang dropdown plan (hindi ang totoong plan) sa "REAL na usage" breakdown ng bawat database sa ibaba — posibleng maling ₱0 o maling rate ang lalabas doon.</div>` : ''}
+      </div>
+    </div>`;
+}
 let dbStatusInFlight = false;
 async function loadDbStatus() {
   const container = document.getElementById('dbStatusList');
@@ -2250,7 +2283,8 @@ async function loadDbStatus() {
     container.innerHTML =
       renderDbCheckCard('Cloud Backup DB', data.cloudBackup.envVar, data.cloudBackup) +
       renderDbCheckCard('Devices/License DB' + (data.isSeparateDatabase ? '' : ' (same as Cloud Backup)'), data.devices.envVar, data.devices) +
-      renderDbCheckCard('Build/Push DB', data.build.envVar, data.build);
+      renderDbCheckCard('Build/Push DB', data.build.envVar, data.build) +
+      renderNeonApiKeyCard(data.neonApiKey);
     const checkedAtEl = document.getElementById('dbStatusCheckedAt');
     if (checkedAtEl && data.checkedAt) {
       checkedAtEl.innerText = `Last checked: ${new Date(data.checkedAt).toLocaleTimeString()}${data.cached ? ' (cached)' : ''}`;
