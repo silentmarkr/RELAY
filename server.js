@@ -1124,6 +1124,7 @@ const FEATURE_CATALOG_BASE = {
     promo_codes: { name: 'Promo Codes Module', price: 499, category: 'module' },
     advanced_reports: { name: 'Sales Analytics & Advanced Reports', price: 799, category: 'module' },
     shift_management: { name: 'Multi-Cashier Shift Oversight & Z-Reading Reports', price: 699, category: 'module' },
+    receipt_customization_credit: { name: 'Receipt Customization Credit', price: 59, category: 'service', pricingOnly: true },
     rbac_management: { name: 'Roles & Permissions (RBAC) Management', price: null, category: 'module', isSubscription: true },
     multi_branch: { name: 'Multi-Branch Dashboard', price: null, category: 'module', isSubscription: true },
     ai_assistant: { name: 'OmniPOS AI Assistant', price: null, category: 'module', isSubscription: true },
@@ -2285,6 +2286,15 @@ function isModuleSubscriptionFeature(featureId) {
 function isSubscriptionOnlyFeature(featureId) {
     return featureId === 'cloud_backup' || isModuleSubscriptionFeature(featureId);
 }
+function isPricingOnlyFeature(featureId) {
+    const entry = FEATURE_CATALOG[featureId] || FEATURE_CATALOG_BASE[featureId];
+    return !!(entry && entry.pricingOnly);
+}
+function getReceiptCreditPriceTokens() {
+    const entry = FEATURE_CATALOG.receipt_customization_credit;
+    const price = Number(entry && entry.price);
+    return Number.isFinite(price) && price >= 1 ? Math.round(price) : 59;
+}
 const MODULE_SUBSCRIPTION_PLANS_BASE = {
     rbac_management: {
         id: 'rbac_management',
@@ -3204,16 +3214,16 @@ const UPGRADE_TIER_FEATURE_IDS_BASE = {
 let UPGRADE_TIERS = [
     { id: 'basic', name: 'Basic Upgrade', featureIds: [...UPGRADE_TIER_FEATURE_IDS_BASE.basic], bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.basic },
     { id: 'standard', name: 'Standard Upgrade', featureIds: [...UPGRADE_TIER_FEATURE_IDS_BASE.standard], bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.standard },
-    { id: 'pro', name: 'Pro Upgrade (Complete)', featureIds: Object.keys(FEATURE_CATALOG).filter(id => !isSubscriptionOnlyFeature(id)), bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.pro }
+    { id: 'pro', name: 'Pro Upgrade (Complete)', featureIds: Object.keys(FEATURE_CATALOG).filter(id => !isSubscriptionOnlyFeature(id) && !isPricingOnlyFeature(id)), bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.pro }
 ];
 function recomputeProTierFeatureIds() {
     const proTier = UPGRADE_TIERS.find(t => t.id === 'pro');
     if (!proTier) return;
     const override = upgradeTierPricingOverrides && upgradeTierPricingOverrides.pro;
     if (override && Array.isArray(override.featureIds) && override.featureIds.length) {
-        proTier.featureIds = override.featureIds.filter(id => FEATURE_CATALOG[id] && !isSubscriptionOnlyFeature(id));
+        proTier.featureIds = override.featureIds.filter(id => FEATURE_CATALOG[id] && !isSubscriptionOnlyFeature(id) && !isPricingOnlyFeature(id));
     } else {
-        proTier.featureIds = Object.keys(FEATURE_CATALOG).filter(id => !isSubscriptionOnlyFeature(id));
+        proTier.featureIds = Object.keys(FEATURE_CATALOG).filter(id => !isSubscriptionOnlyFeature(id) && !isPricingOnlyFeature(id));
     }
 }
 function recomputeUpgradeTierPricing() {
@@ -4288,6 +4298,9 @@ app.post('/relay/admin/api/pricing/features', requireAdminKey, (req, res) => {
     if (price !== undefined && (typeof price !== 'number' || !isFinite(price) || price < 0)) {
         return res.status(400).json({ success: false, message: 'Invalid price.' });
     }
+    if (featureId === 'receipt_customization_credit' && price !== undefined && price < 1) {
+        return res.status(400).json({ success: false, message: 'Receipt Customization Credit price must be at least ₱1.' });
+    }
     if (name !== undefined && (typeof name !== 'string' || !name.trim())) {
         return res.status(400).json({ success: false, message: 'Invalid name.' });
     }
@@ -4373,7 +4386,7 @@ app.get('/relay/admin/api/pricing/tiers', requireAdminKey, (req, res) => {
             featureIds: UPGRADE_TIER_FEATURE_IDS_BASE[tierId] || undefined
         };
     }
-    const selectableFeatureIds = Object.keys(FEATURE_CATALOG).filter(id => !isSubscriptionOnlyFeature(id));
+    const selectableFeatureIds = Object.keys(FEATURE_CATALOG).filter(id => !isSubscriptionOnlyFeature(id) && !isPricingOnlyFeature(id));
     res.json({
         success: true,
         upgradeTiers: effective,
@@ -5512,6 +5525,10 @@ app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 100
         ...perClientFee,
         billingDays: CLOUD_BACKUP_BILLING_DAYS,
         featureCatalog,
+        receiptCustomization: {
+            creditPricePHP: getReceiptCreditPriceTokens(),
+            featureId: 'receipt_customization_credit'
+        },
         upgradeTiers,
         moduleSubscriptions: MODULE_SUBSCRIPTION_PLANS,
         moduleSubscriptionBillingDays: MODULE_SUBSCRIPTION_BILLING_DAYS,
@@ -8901,10 +8918,11 @@ app.post('/relay/request-receipt-credit-purchase',
         if (!ACTIVATION_FLAGS.otpRequestsEnabled) {
             return res.status(503).json({ success: false, message: 'Manual unlock requests ("Send Request") are temporarily disabled by the developer. Please try "Activate via Omni Tokens" instead, or try again later.' });
         }
-        const { installationId, storeName, requestedBy, pricePHP } = req.body;
+        const { installationId, storeName, requestedBy } = req.body;
         if (!installationId) {
             return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
         }
+        const pricePHP = getReceiptCreditPriceTokens();
         const otpCode = generateReceiptCreditOtp();
         pendingReceiptCreditPurchases.set(installationId, {
             code: otpCode,
@@ -8914,7 +8932,7 @@ app.post('/relay/request-receipt-credit-purchase',
             failedAttempts: 0,
             storeName: storeName || null,
             requestedBy: requestedBy || null,
-            pricePHP: Number(pricePHP) || null,
+            pricePHP,
             credits: RECEIPT_CREDIT_UNITS_PER_PURCHASE,
             requestedAt: Date.now()
         });
@@ -8925,12 +8943,12 @@ app.post('/relay/request-receipt-credit-purchase',
                       `Store: ${storeName || 'Hindi tiyak'}\n` +
                       `Installation ID: ${installationId}\n` +
                       `Hiniling ni: ${requestedBy || 'Hindi tiyak'}\n` +
-                      `Presyo: ₱${Number(pricePHP) || '?'}\n` +
+                      `Presyo: ₱${pricePHP}\n` +
                       `OTP Code: ${otpCode}\n` +
                       `Mag-e-expire ito sa loob ng 10 minuto.\n\n` +
                       `I-VERIFY MUNA na natanggap ang bayad (GCash/Maya/Cash/etc.) bago mag-Approve at ibigay ang OTP na ito sa kliyente.`
             });
-            logActivity(installationId, 'receipt_credit_purchase_requested', { storeName: storeName || null, pricePHP: Number(pricePHP) || null });
+            logActivity(installationId, 'receipt_credit_purchase_requested', { storeName: storeName || null, pricePHP });
             res.json({ success: true, message: 'Naipadala ang purchase request. Kontakin ang developer para sa confirmation code, matapos ang bayad.' });
         } catch (err) {
             console.error('Relay mail send failure (receipt-credit-purchase):', err);
@@ -9030,10 +9048,11 @@ app.post('/relay/confirm-receipt-credit-purchase',
 // the manual "developer approves, then hands over a code" process
 // used by /relay/request-receipt-credit-purchase + /relay/confirm-receipt-credit-purchase.
 // Same atomic-deduct-then-issue guarantee and clientRequestId dedupe.
-// Keep RECEIPT_CREDIT_PRICE_TOKENS in sync with CUSTOMIZE_CREDIT_PRICE_PHP
-// in OMNIPOS/server.js (1 token = ₱1, same as the rest of the à la carte catalog).
+// The Receipt Customization credit price is controlled by FEATURE_CATALOG and
+// can be changed from the RELAY admin pricing page. OmniPOS receives the same
+// value through /relay/pricing, while RELAY remains authoritative for charging.
 // ===================================================================
-const RECEIPT_CREDIT_PRICE_TOKENS = 59;
+
 const receiptCreditActivationDedupe = new Map(); // `${installationId}:${clientRequestId}` -> { status, body, expiresAt }
 const RECEIPT_CREDIT_ACTIVATION_DEDUPE_TTL_MS = 15 * 60 * 1000;
 setInterval(() => {
@@ -9053,7 +9072,7 @@ app.post('/relay/cloud-tokens/activate-receipt-credit', requireApiKey, requireAl
     if (!pgPool) {
         return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured — the Omni Token wallet needs it.' });
     }
-    const requiredTokens = RECEIPT_CREDIT_PRICE_TOKENS;
+    const requiredTokens = getReceiptCreditPriceTokens();
     const dedupeKey = clientRequestId ? `${installationId}:${clientRequestId}` : null;
     if (dedupeKey && receiptCreditActivationDedupe.has(dedupeKey)) {
         const cached = receiptCreditActivationDedupe.get(dedupeKey);

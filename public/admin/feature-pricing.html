@@ -181,6 +181,7 @@
       <button class="tab-btn active" data-tab="all" onclick="setTab('all')">All</button>
       <button class="tab-btn" data-tab="themes" onclick="setTab('themes')">🎨 Pro Themes</button>
       <button class="tab-btn" data-tab="modules" onclick="setTab('modules')">🧩 Modules</button>
+      <button class="tab-btn" data-tab="services" onclick="setTab('services')">🧾 Receipt Credits</button>
       <button class="tab-btn" data-tab="tiers" onclick="setTab('tiers')">📦 Bundle Price</button>
     </div>
     <div class="tab-section" id="section-themes">
@@ -190,6 +191,11 @@
     <div class="tab-section" id="section-modules">
       <div class="section-label">🧩 Modules</div>
       <div id="modulesGrid" class="plans-grid"></div>
+    </div>
+    <div class="tab-section" id="section-services">
+      <div class="section-label">🧾 Receipt Customization Credits</div>
+      <div style="font-size:.8rem;color:var(--muted);margin-bottom:10px;">Set the price of 1 additional Receipt Customization save after the 2 free saves. This price is the RELAY source of truth used by OmniPOS for both manual purchase requests and Omni Token activation.</div>
+      <div id="servicesGrid" class="plans-grid"></div>
     </div>
     <div class="tab-section" id="section-tiers">
       <div class="section-label">📦 Upgrade Bundles</div>
@@ -219,7 +225,7 @@ function setTab(tab) {
   document.querySelectorAll('#filterTabs .tab-btn').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.tab === tab);
   });
-  const sections = { themes: 'section-themes', modules: 'section-modules', tiers: 'section-tiers' };
+  const sections = { themes: 'section-themes', modules: 'section-modules', services: 'section-services', tiers: 'section-tiers' };
   Object.entries(sections).forEach(([key, id]) => {
     document.getElementById(id).classList.toggle('hidden', !(tab === 'all' || tab === key));
   });
@@ -354,19 +360,23 @@ function tierCardHtml(tierId, entry) {
 function renderCatalog() {
   const themesGrid = document.getElementById('themesGrid');
   const modulesGrid = document.getElementById('modulesGrid');
+  const servicesGrid = document.getElementById('servicesGrid');
   const tiersGrid = document.getElementById('tiersGrid');
   themesGrid.innerHTML = '';
   modulesGrid.innerHTML = '';
+  servicesGrid.innerHTML = '';
   tiersGrid.innerHTML = '';
   Object.entries(catalogEffective)
     .sort(([, a], [, b]) => a.name.localeCompare(b.name))
     .forEach(([featureId, entry]) => {
       const html = cardHtml(featureId, entry);
       if (entry.category === 'theme') themesGrid.insertAdjacentHTML('beforeend', html);
-      else modulesGrid.insertAdjacentHTML('beforeend', html);
+      else if (entry.category === 'service') servicesGrid.insertAdjacentHTML('beforeend', html);
+      else if (entry.category === 'module') modulesGrid.insertAdjacentHTML('beforeend', html);
     });
   if (!themesGrid.innerHTML) themesGrid.innerHTML = '<div style="color:var(--muted);">No themes in the catalog.</div>';
   if (!modulesGrid.innerHTML) modulesGrid.innerHTML = '<div style="color:var(--muted);">No modules in the catalog.</div>';
+  if (!servicesGrid.innerHTML) servicesGrid.innerHTML = '<div style="color:var(--muted);">No pricing services in the catalog.</div>';
   ['basic', 'standard', 'pro']
     .filter(tierId => tiersEffective[tierId])
     .forEach(tierId => {
