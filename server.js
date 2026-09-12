@@ -8878,6 +8878,242 @@ app.post('/relay/confirm-receipt-reset',
         });
     }
 );
+const RECEIPT_CREDIT_OTP_TTL_MS = 10 * 60 * 1000;
+const RECEIPT_CREDIT_TICKET_TTL_MS = 5 * 60 * 1000;
+const RECEIPT_CREDIT_UNITS_PER_PURCHASE = 1;
+const pendingReceiptCreditPurchases = new Map();
+function generateReceiptCreditOtp() {
+    return String(Math.floor(100000 + Math.random() * 900000));
+}
+setInterval(() => {
+    const now = Date.now();
+    for (const [installationId, pending] of pendingReceiptCreditPurchases.entries()) {
+        if (now > pending.expiresAt) {
+            pendingReceiptCreditPurchases.delete(installationId);
+        }
+    }
+}, 30 * 1000).unref();
+app.post('/relay/request-receipt-credit-purchase',
+    requireApiKey,
+    requireAllowedDevice,
+    rateLimit('request-receipt-credit-purchase', 5, 15 * 60 * 1000, (req) => req.body?.installationId),
+    async (req, res) => {
+        if (!ACTIVATION_FLAGS.otpRequestsEnabled) {
+            return res.status(503).json({ success: false, message: 'Manual unlock requests ("Send Request") are temporarily disabled by the developer. Please try "Activate via Omni Tokens" instead, or try again later.' });
+        }
+        const { installationId, storeName, requestedBy, pricePHP } = req.body;
+        if (!installationId) {
+            return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+        }
+        const otpCode = generateReceiptCreditOtp();
+        pendingReceiptCreditPurchases.set(installationId, {
+            code: otpCode,
+            expiresAt: Date.now() + RECEIPT_CREDIT_OTP_TTL_MS,
+            approved: false,
+            otpVerified: false,
+            failedAttempts: 0,
+            storeName: storeName || null,
+            requestedBy: requestedBy || null,
+            pricePHP: Number(pricePHP) || null,
+            credits: RECEIPT_CREDIT_UNITS_PER_PURCHASE,
+            requestedAt: Date.now()
+        });
+        try {
+            await notifyUnlockRequest({
+                subject: `💰 Receipt Customization Credit Purchase Request — ${storeName || installationId}`,
+                text: `May humiling bumili ng Receipt Customization credit (para sa customization beyond sa 2 free attempts).\n\n` +
+                      `Store: ${storeName || 'Hindi tiyak'}\n` +
+                      `Installation ID: ${installationId}\n` +
+                      `Hiniling ni: ${requestedBy || 'Hindi tiyak'}\n` +
+                      `Presyo: ₱${Number(pricePHP) || '?'}\n` +
+                      `OTP Code: ${otpCode}\n` +
+                      `Mag-e-expire ito sa loob ng 10 minuto.\n\n` +
+                      `I-VERIFY MUNA na natanggap ang bayad (GCash/Maya/Cash/etc.) bago mag-Approve at ibigay ang OTP na ito sa kliyente.`
+            });
+            logActivity(installationId, 'receipt_credit_purchase_requested', { storeName: storeName || null, pricePHP: Number(pricePHP) || null });
+            res.json({ success: true, message: 'Naipadala ang purchase request. Kontakin ang developer para sa confirmation code, matapos ang bayad.' });
+        } catch (err) {
+            console.error('Relay mail send failure (receipt-credit-purchase):', err);
+            pendingReceiptCreditPurchases.delete(installationId);
+            res.status(500).json({ success: false, message: `Nabigo ang pagpapadala ng code: ${err.message}` });
+        }
+    }
+);
+app.get('/relay/admin/api/pending-receipt-credit-purchases', requireAdminKey, (req, res) => {
+    const list = [];
+    for (const [installationId, pending] of pendingReceiptCreditPurchases) {
+        if (Date.now() > pending.expiresAt) continue;
+        list.push({
+            installationId,
+            storeName: pending.storeName,
+            requestedBy: pending.requestedBy,
+            pricePHP: pending.pricePHP,
+            credits: pending.credits,
+            approved: pending.approved,
+            otpVerified: pending.otpVerified,
+            requestedAt: pending.requestedAt,
+            expiresAt: pending.expiresAt,
+            code: pending.code
+        });
+    }
+    res.json({ success: true, pending: list });
+});
+app.post('/relay/admin/api/pending-receipt-credit-purchases/approve', requireAdminKey, (req, res) => {
+    const { installationId } = req.body;
+    const pending = pendingReceiptCreditPurchases.get(installationId);
+    if (!pending) {
+        return res.status(404).json({ success: false, message: 'Walang pending credit-purchase request para dito.' });
+    }
+    pending.approved = true;
+    logActivity(installationId, 'receipt_credit_purchase_approved', { pricePHP: pending.pricePHP });
+    res.json({ success: true, message: 'Naaprubahan. Puwede nang gamitin ng client ang code.' });
+});
+app.post('/relay/confirm-receipt-credit-purchase',
+    requireApiKey,
+    requireAllowedDevice,
+    rateLimit('confirm-receipt-credit-purchase', 120, 10 * 60 * 1000, (req) => req.body?.installationId),
+    (req, res) => {
+        const { installationId, otp } = req.body;
+        if (!installationId || !otp) {
+            return res.status(400).json({ success: false, message: 'Kulang ang installationId o otp.' });
+        }
+        const pending = pendingReceiptCreditPurchases.get(installationId);
+        if (!pending) {
+            return res.status(400).json({ success: false, message: 'Walang aktibong purchase request. Humingi muna ng code.' });
+        }
+        if (Date.now() > pending.expiresAt) {
+            pendingReceiptCreditPurchases.delete(installationId);
+            return res.status(400).json({ success: false, message: 'Expired na ang code. Humingi ng bago.' });
+        }
+        if (!safeCompare(String(otp).trim(), pending.code)) {
+            pending.failedAttempts = (pending.failedAttempts || 0) + 1;
+            if (pending.failedAttempts >= MAX_FAILED_OTP_ATTEMPTS) {
+                pendingReceiptCreditPurchases.delete(installationId);
+                logActivity(installationId, 'receipt_credit_purchase_locked_out', { failedAttempts: pending.failedAttempts });
+                return res.status(400).json({
+                    success: false,
+                    message: 'Sobra na sa pinapayagang maling tangka. Nakansela ang request na ito — humiling ng bagong purchase request at code.'
+                });
+            }
+            return res.status(400).json({ success: false, message: 'Maling code.' });
+        }
+        if (!checkApprovalGate(pending)) {
+            return res.json({
+                success: false,
+                pending: true,
+                message: 'Tama ang code! Naghihintay pa lang ng approval mula sa developer (i.e. kumpirmasyon ng bayad). Subukan ulit paglipas ng ilang segundo.'
+            });
+        }
+        const now = Date.now();
+        const payload = {
+            installationId,
+            purpose: 'receipt-customization-credit-purchase',
+            credits: pending.credits || RECEIPT_CREDIT_UNITS_PER_PURCHASE,
+            issuedAt: now,
+            expiresAt: now + RECEIPT_CREDIT_TICKET_TTL_MS
+        };
+        const payloadString = JSON.stringify(payload);
+        const signature = crypto.sign(null, Buffer.from(payloadString), privateKey).toString('base64');
+        logActivity(installationId, 'receipt_credit_purchase_ticket_issued', { credits: payload.credits, pricePHP: pending.pricePHP });
+        pendingReceiptCreditPurchases.delete(installationId);
+        res.json({
+            success: true,
+            message: 'Na-verify ang bayad. Naidagdag na ang credit.',
+            ticket: { payload, signature }
+        });
+    }
+);
+// ===================================================================
+// RECEIPT CUSTOMIZATION CREDIT — TOKEN-FUNDED SELF-SERVE ACTIVATION
+// Mirrors /relay/cloud-tokens/activate-cloud-backup: pays for a credit
+// directly out of the installation's own Omni Token wallet instead of
+// the manual "developer approves, then hands over a code" process
+// used by /relay/request-receipt-credit-purchase + /relay/confirm-receipt-credit-purchase.
+// Same atomic-deduct-then-issue guarantee and clientRequestId dedupe.
+// Keep RECEIPT_CREDIT_PRICE_TOKENS in sync with CUSTOMIZE_CREDIT_PRICE_PHP
+// in OMNIPOS/server.js (1 token = ₱1, same as the rest of the à la carte catalog).
+// ===================================================================
+const RECEIPT_CREDIT_PRICE_TOKENS = 59;
+const receiptCreditActivationDedupe = new Map(); // `${installationId}:${clientRequestId}` -> { status, body, expiresAt }
+const RECEIPT_CREDIT_ACTIVATION_DEDUPE_TTL_MS = 15 * 60 * 1000;
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of receiptCreditActivationDedupe) {
+        if (now > entry.expiresAt) receiptCreditActivationDedupe.delete(key);
+    }
+}, 5 * 60 * 1000).unref();
+app.post('/relay/cloud-tokens/activate-receipt-credit', requireApiKey, requireAllowedDevice, rateLimit('cloud-tokens-activate-receipt-credit', 30, 10 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    if (!ACTIVATION_FLAGS.omniTokenActivationEnabled) {
+        return res.status(503).json({ success: false, message: '"Activate via Omni Tokens" is temporarily disabled (maintenance/upgrade). Please try "Send Request" instead, or try again later.' });
+    }
+    const { installationId, clientRequestId } = req.body;
+    if (!installationId) {
+        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+    }
+    if (!pgPool) {
+        return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured — the Omni Token wallet needs it.' });
+    }
+    const requiredTokens = RECEIPT_CREDIT_PRICE_TOKENS;
+    const dedupeKey = clientRequestId ? `${installationId}:${clientRequestId}` : null;
+    if (dedupeKey && receiptCreditActivationDedupe.has(dedupeKey)) {
+        const cached = receiptCreditActivationDedupe.get(dedupeKey);
+        return res.status(cached.status).json(cached.body);
+    }
+    try {
+        await getOrCreateCloudTokenWallet(installationId);
+        const deductResult = await queryWithRetry(
+            pgPool,
+            `UPDATE cloud_token_wallets SET balance_tokens = balance_tokens - $2, updated_at = now()
+             WHERE installation_id = $1 AND balance_tokens >= $2 RETURNING balance_tokens`,
+            [installationId, requiredTokens]
+        );
+        if (!deductResult.rows[0]) {
+            const currentResult = await queryWithRetry(pgPool, 'SELECT balance_tokens FROM cloud_token_wallets WHERE installation_id = $1', [installationId]);
+            const insufficientBody = {
+                success: false,
+                insufficient: true,
+                balanceTokens: currentResult.rows[0] ? Number(currentResult.rows[0].balance_tokens) : 0,
+                requiredTokens,
+                message: `Insufficient Omni Tokens. ${requiredTokens} token(s) are needed for a Receipt Customization credit. Please buy more Omni Tokens first, then try again.`
+            };
+            // Not cached as an idempotent result, same reasoning as activate-purchase:
+            // a retry after topping up should make a fresh attempt, not replay "insufficient".
+            return res.status(402).json(insufficientBody);
+        }
+        const balanceAfter = Number(deductResult.rows[0].balance_tokens);
+        invalidateWalletCache(installationId);
+        await queryWithRetry(
+            pgPool,
+            `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note, category) VALUES ($1, 'consume', $2, $3, $4, 'ADDON_PURCHASE')`,
+            [installationId, -requiredTokens, balanceAfter, `Receipt Customization credit purchase (${RECEIPT_CREDIT_UNITS_PER_PURCHASE} credit, self-serve via Omni Tokens)`]
+        );
+        const now = Date.now();
+        const payload = {
+            installationId,
+            purpose: 'receipt-customization-credit-purchase',
+            credits: RECEIPT_CREDIT_UNITS_PER_PURCHASE,
+            issuedAt: now,
+            expiresAt: now + RECEIPT_CREDIT_TICKET_TTL_MS
+        };
+        const payloadString = JSON.stringify(payload);
+        const signature = crypto.sign(null, Buffer.from(payloadString), privateKey).toString('base64');
+        logActivity(installationId, 'receipt_credit_purchase_ticket_issued', { credits: payload.credits, source: 'cloud_token_selfserve', tokensSpent: requiredTokens });
+        const successBody = {
+            success: true,
+            message: 'Payment confirmed via Omni Tokens — 1 customization credit added.',
+            ticket: { payload, signature },
+            balanceTokens: balanceAfter,
+            tokensSpent: requiredTokens
+        };
+        if (dedupeKey) {
+            receiptCreditActivationDedupe.set(dedupeKey, { status: 200, body: successBody, expiresAt: Date.now() + RECEIPT_CREDIT_ACTIVATION_DEDUPE_TTL_MS });
+        }
+        res.json(successBody);
+    } catch (err) {
+        console.error('cloud-tokens/activate-receipt-credit error:', err);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 app.get('/relay/latest-version', requireApiKey, rateLimit('latest-version', 60, 10 * 60 * 1000), (req, res) => {
     const installationId = String(req.query.installationId || '').trim();
     const targeted = installationId ? targetedReleases.get(installationId) : null;

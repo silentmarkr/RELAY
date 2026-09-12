@@ -1159,6 +1159,10 @@ a:focus-visible,
         <div id="receiptResetList" class="empty">Loading...</div>
       </div>
       <div class="card">
+        <h2>💰 Pending Receipt Customization Credit Purchases <span class="count-pill" id="receiptCreditCountPill">0</span></h2>
+        <div id="receiptCreditList" class="empty">Loading...</div>
+      </div>
+      <div class="card">
         <h2>Manually add a device</h2>
         <input type="text" id="manualIdInput" placeholder="Paste installation ID here">
         <button class="btn-primary" onclick="manualAllow()">+ Allow</button>
@@ -2903,12 +2907,13 @@ function renderBackupSyncBanner(data) {
 async function loadDevices() {
   document.getElementById('loginScreen').style.display = 'none';
   document.getElementById('mainScreen').style.display = 'block';
-  let data, otpData, adminResetData, receiptResetData;
+  let data, otpData, adminResetData, receiptResetData, receiptCreditData;
   try {
     data = await api('/relay/admin/api/devices');
     otpData = await api('/relay/admin/api/pending-otps');
     adminResetData = await api('/relay/admin/api/pending-admin-resets');
     receiptResetData = await api('/relay/admin/api/pending-receipt-resets');
+    receiptCreditData = await api('/relay/admin/api/pending-receipt-credit-purchases');
   } catch (err) {
     return; // BUGFIX: bail out — without this, a failed call above (wrong admin key, network blip, rate limit) left data/otpData undefined and every line below crashed trying to read .pendingOtps/.allowedDevices off them.
   }
@@ -2919,6 +2924,8 @@ async function loadDevices() {
   document.getElementById('adminResetCountPill').innerText = adminResetData ? adminResetData.pending.length : 0;
   renderReceiptResets(receiptResetData ? receiptResetData.pending : []);
   document.getElementById('receiptResetCountPill').innerText = receiptResetData ? receiptResetData.pending.length : 0;
+  renderReceiptCreditPurchases(receiptCreditData ? receiptCreditData.pending : []);
+  document.getElementById('receiptCreditCountPill').innerText = receiptCreditData ? receiptCreditData.pending.length : 0;
   document.getElementById('statAllowed').innerText = data.allowedDevices.length;
   document.getElementById('statSeen').innerText = data.seenDevices.length;
   document.getElementById('statCloneFlagged').innerText = data.cloneFlaggedCount || 0;
@@ -3313,6 +3320,53 @@ async function approveReceiptReset(installationId, storeName) {
   try {
     const res = await api('/relay/admin/api/pending-receipt-resets/approve', { method: 'POST', body: JSON.stringify({ installationId }) });
     if (res.success) toast('Approved. Waiting for the client to finish the reset.', 'success');
+    else toast(res.message || 'Could not approve.', 'error');
+  } catch (err) {   }
+  loadDevices();
+}
+function renderReceiptCreditPurchases(list) {
+  const el = document.getElementById('receiptCreditList');
+  if (!list || list.length === 0) {
+    el.innerHTML = '<div class="empty">No pending Receipt Customization credit purchase requests right now.</div>';
+    return;
+  }
+  el.innerHTML = list.map(r => {
+    let statusHtml;
+    if (r.approved) {
+      statusHtml = '<span class="badge badge-allowed">APPROVED — waiting for client to finish the purchase</span>';
+    } else if (r.otpVerified) {
+      statusHtml = '<span class="badge badge-blocked">CODE CORRECT — waiting on your Run/Allow</span>';
+    } else {
+      statusHtml = '<span class="badge" style="background:#30363d;color:#8b949e;">Waiting for code entry</span>';
+    }
+    return `<div class="row" style="align-items:flex-start;">
+      <div class="row-info">
+        <div><strong>${r.storeName || 'No store name'}</strong></div>
+        <div class="meta">Installation: ${r.installationId} · requested by: ${r.requestedBy || 'Unknown'}</div>
+        <div class="meta">Price: ₱${r.pricePHP != null ? r.pricePHP : '?'} · Credits: ${r.credits || 1}</div>
+        <div style="margin:6px 0;">${statusHtml}</div>
+        <div class="countdown">Mag-e-expire sa ${minsLeft(r.expiresAt)}</div>
+      </div>
+      <div style="text-align:right;">
+        <div class="otp-code">${r.code}</div>
+        <button class="btn-copy" style="margin-top:6px; display:block; width:100%;" onclick="copyCode('${r.code}', this)">Copy</button>
+        ${!r.approved
+          ? `<button class="btn-allow" style="margin-top:6px; width:100%;" onclick="approveReceiptCreditPurchase('${r.installationId}', '${(r.storeName || '').replace(/'/g, "\\'")}', ${r.pricePHP != null ? r.pricePHP : 'null'})">✓ Payment Received — Allow</button>`
+          : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
+async function approveReceiptCreditPurchase(installationId, storeName, pricePHP) {
+  const ok = await confirmAction({
+    title: 'Approve the credit purchase?',
+    message: `Only approve this once you have CONFIRMED that "${storeName || 'unnamed'}" actually paid ₱${pricePHP != null ? pricePHP : '?'} for this Receipt Customization credit (check GCash/Maya/bank/cash before pressing this).`,
+    confirmLabel: '✓ Payment Received — Allow'
+  });
+  if (!ok) return;
+  try {
+    const res = await api('/relay/admin/api/pending-receipt-credit-purchases/approve', { method: 'POST', body: JSON.stringify({ installationId }) });
+    if (res.success) toast('Approved. Waiting for the client to finish the purchase.', 'success');
     else toast(res.message || 'Could not approve.', 'error');
   } catch (err) {   }
   loadDevices();
