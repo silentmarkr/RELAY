@@ -2703,6 +2703,16 @@ async function loadAiCreditSettings() {
   if (!data?.success) { toast(data?.message || 'Could not load AI credit settings.', 'error'); return; }
   relayAiCreditSettingsCache = data;
   fillAiSettingInputs('Default', data.defaults);
+  // AYOS: dating blangko ang Override number fields (Monthly/Text/File/Image)
+  // hangga't hindi pa pinipili ang isang existing override sa list. Kapag
+  // nag-type ang admin ng BAGONG target installation ID at direktang pinindot
+  // ang "Save Customer Override", Number(undefined) -> NaN ang mga blangkong
+  // field, kaya laging bumabagsak ang client-side validation (validateAiSettingInputs)
+  // bago pa man makarating ang request sa server — kaya parang "hindi
+  // gumagana" ang buong feature. I-prefill ang Override fields ng Default
+  // values bilang sensible starting point (mao-overwrite pa rin ito ng
+  // selectAiOverride() kapag umiiral na ang override na pinili).
+  fillAiSettingInputs('Override', data.defaults);
   const meta = document.getElementById('aiDefaultMeta');
   if (meta) meta.innerText = `Current month: ${data.month} · Default ${data.defaults.source || 'Relay'}`;
   const list = document.getElementById('aiOverrideList');
