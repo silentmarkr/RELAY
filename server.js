@@ -8789,13 +8789,16 @@ app.post('/relay/request-receipt-reset',
                       `Mag-e-expire ito sa loob ng 10 minuto.\n\n` +
                       `I-verify muna kung kinakailangan bago mag-Approve at ibigay ang OTP na ito sa kliyente.`
             });
-            logActivity(installationId, 'receipt_reset_requested', { storeName: storeName || null });
-            res.json({ success: true, message: 'Naipadala ang reset request. Kontakin ang developer para sa OTP.' });
         } catch (err) {
-            console.error('Relay mail send failure (receipt-reset):', err);
-            pendingReceiptResets.delete(installationId);
-            res.status(500).json({ success: false, message: `Nabigo ang pagpapadala ng OTP: ${err.message}` });
+            // NOTE: email/Slack/Telegram are best-effort notification channels only.
+            // The request itself was already saved to pendingReceiptResets above, so it
+            // still shows up (with its OTP code) under "Pending Receipt Customization
+            // Resets" in the RELAY admin panel even if every notification channel is
+            // down/misconfigured — the admin dashboard is the source of truth, not email.
+            console.error('Relay notification failure (receipt-reset) — request was still saved and is visible in the admin panel:', err);
         }
+        logActivity(installationId, 'receipt_reset_requested', { storeName: storeName || null });
+        res.json({ success: true, message: 'Naipadala ang reset request. Tignan ng developer ang RELAY admin panel (Pending Receipt Customization Resets) para sa OTP.' });
     }
 );
 app.get('/relay/admin/api/pending-receipt-resets', requireAdminKey, (req, res) => {
@@ -8965,13 +8968,16 @@ app.post('/relay/request-receipt-credit-purchase',
                       `Mag-e-expire ito sa loob ng 10 minuto.\n\n` +
                       `I-VERIFY MUNA na natanggap ang bayad (GCash/Maya/Cash/etc.) bago mag-Approve at ibigay ang OTP na ito sa kliyente.`
             });
-            logActivity(installationId, 'receipt_credit_purchase_requested', { storeName: storeName || null, pricePHP: quote.totalPHP, quantity: quote.quantity });
-            res.json({ success: true, message: 'Naipadala ang purchase request. Kontakin ang developer para sa confirmation code, matapos ang bayad.', quote });
         } catch (err) {
-            console.error('Relay mail send failure (receipt-credit-purchase):', err);
-            pendingReceiptCreditPurchases.delete(installationId);
-            res.status(500).json({ success: false, message: `Nabigo ang pagpapadala ng code: ${err.message}` });
+            // NOTE: email/Slack/Telegram are best-effort notification channels only.
+            // The request itself was already saved to pendingReceiptCreditPurchases above,
+            // so it still shows up (with its OTP code) under "Pending Receipt Customization
+            // Credit Purchases" in the RELAY admin panel even if every notification channel
+            // is down/misconfigured — the admin dashboard is the source of truth, not email.
+            console.error('Relay notification failure (receipt-credit-purchase) — request was still saved and is visible in the admin panel:', err);
         }
+        logActivity(installationId, 'receipt_credit_purchase_requested', { storeName: storeName || null, pricePHP: quote.totalPHP, quantity: quote.quantity });
+        res.json({ success: true, message: 'Naipadala ang purchase request. Tignan ng developer ang RELAY admin panel (Pending Receipt Customization Credit Purchases) para sa confirmation code, matapos ang bayad.', quote });
     }
 );
 app.get('/relay/receipt-credit-pricing', requireApiKey, requireAllowedDevice, (req, res) => {
