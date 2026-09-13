@@ -7052,8 +7052,7 @@ app.post('/relay/cloud-tokens/activate-cloud-backup', requireApiKey, requireAllo
             tier,
             billingCycle,
             balanceTokens: balanceAfter,
-            tokensSpent: requiredTokens,
-            quote
+            tokensSpent: requiredTokens
         };
         if (dedupeKey) {
             cloudBackupActivationDedupe.set(dedupeKey, { status: 200, body: successBody, expiresAt: Date.now() + CLOUD_BACKUP_ACTIVATION_DEDUPE_TTL_MS });
