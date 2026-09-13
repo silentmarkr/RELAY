@@ -207,16 +207,32 @@
   
     <div class="tab-section" id="section-receipt-credits">
       <div class="section-label">🧾 Receipt Customization Credits</div>
-      <div class="pricing-card" style="max-width:720px;">
-        <div class="field-row"><label for="receiptCreditPriceInput">Price per credit (₱)</label><input type="number" id="receiptCreditPriceInput" min="0" step="0.01"></div>
-        <div class="field-row"><label for="receiptCreditDiscountMinInput">Bulk discount starts at (credits)</label><input type="number" id="receiptCreditDiscountMinInput" min="2" step="1"></div>
-        <div class="field-row"><label for="receiptCreditDiscountPercentInput">Bulk discount (%)</label><input type="number" id="receiptCreditDiscountPercentInput" min="0" max="90" step="0.01"></div>
-        <div class="field-row"><label for="receiptCreditMaxInput">Maximum credits per purchase</label><input type="number" id="receiptCreditMaxInput" min="1" max="1000" step="1"></div>
-        <div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-          <button type="button" class="btn btn-primary" onclick="saveReceiptCreditPricing()">Save Receipt Credit Pricing</button>
-          <span id="receiptCreditSavedNote" style="color:var(--success,#69db7c);display:none;">Saved ✓</span>
+      <div class="plans-grid">
+        <div class="plan-card" style="max-width:360px;">
+          <div class="tier-id">pricing</div>
+          <h3>Receipt Customization Credits</h3>
+          <div class="field">
+            <label>Price per credit (₱)</label>
+            <input type="number" id="receiptCreditPriceInput" min="0" step="0.01">
+          </div>
+          <div class="field">
+            <label>Bulk discount starts at (credits)</label>
+            <input type="number" id="receiptCreditDiscountMinInput" min="2" step="1">
+          </div>
+          <div class="field">
+            <label>Bulk discount (%)</label>
+            <input type="number" id="receiptCreditDiscountPercentInput" min="0" max="90" step="0.01">
+          </div>
+          <div class="field">
+            <label>Maximum credits per purchase</label>
+            <input type="number" id="receiptCreditMaxInput" min="1" max="1000" step="1">
+          </div>
+          <div class="actions">
+            <button class="btn btn-save" onclick="saveReceiptCreditPricing()">Save Receipt Credit Pricing</button>
+          </div>
+          <span id="receiptCreditSavedNote" style="color:var(--success, #69db7c);display:none;font-size:.8rem;">Saved ✓</span>
+          <div id="receiptCreditPricingPreview" style="font-size:.78rem;color:var(--muted);"></div>
         </div>
-        <div id="receiptCreditPricingPreview" style="margin-top:12px;font-size:.82rem;color:var(--muted);"></div>
       </div>
     </div>
 </main>
