@@ -194,7 +194,7 @@
     </div>
     <div class="tab-section" id="section-services">
       <div class="section-label">🧾 Receipt Customization Credits</div>
-      <div style="font-size:.8rem;color:var(--muted);margin-bottom:10px;">Set the price of 1 additional Receipt Customization save after the 2 free saves. This price is the RELAY source of truth used by OmniPOS for both manual purchase requests and Omni Token activation.</div>
+      <div style="font-size:.8rem;color:var(--muted);margin-bottom:10px;">Set the price of 1 additional Receipt Customization save and the bulk discount. RELAY is the source of truth used by OmniPOS for both manual purchase requests and Omni Token activation. Example: 2+ credits at 5% off.</div>
       <div id="servicesGrid" class="plans-grid"></div>
     </div>
     <div class="tab-section" id="section-tiers">
@@ -289,8 +289,18 @@ function cardHtml(featureId, entry) {
       </div>
       <div class="field">
         <label>Price (₱) ${fieldIsCustom(featureId, 'price') ? '<span class="badge">customized</span>' : '<span class="badge default">default</span>'}</label>
-        <input type="number" min="0" step="1" id="price-${featureId}" value="${entry.price}">
+        <input type="number" min="1" step="1" id="price-${featureId}" value="${entry.price}">
       </div>
+      ${featureId === 'receipt_customization_credit' ? `
+      <div class="field">
+        <label>Bulk Discount Starts At (credits) ${fieldIsCustom(featureId, 'discountMinQuantity') ? '<span class="badge">customized</span>' : '<span class="badge default">default</span>'}</label>
+        <input type="number" min="2" max="100" step="1" id="discount-min-${featureId}" value="${Number.isInteger(entry.discountMinQuantity) ? entry.discountMinQuantity : 2}">
+      </div>
+      <div class="field">
+        <label>Bulk Discount (%) ${fieldIsCustom(featureId, 'discountPercent') ? '<span class="badge">customized</span>' : '<span class="badge default">default</span>'}</label>
+        <input type="number" min="0" max="90" step="0.01" id="discount-pct-${featureId}" value="${Number.isFinite(Number(entry.discountPercent)) ? entry.discountPercent : 5}">
+        <div style="font-size:.74rem;color:var(--muted);margin-top:5px;">Example: 2 credits = 5% off. The discount applies to that quantity and above.</div>
+      </div>` : ''}
       <div class="actions">
         <button class="btn btn-save" onclick="saveFeature('${featureId}')">Save</button>
         <button class="btn btn-reset" onclick="resetFeature('${featureId}')">Reset to default</button>
@@ -439,10 +449,15 @@ async function resetTier(tierId) {
 async function saveFeature(featureId) {
   const name = document.getElementById(`name-${featureId}`).value.trim();
   const price = Number(document.getElementById(`price-${featureId}`).value);
+  const body = { featureId, name, price };
+  if (featureId === 'receipt_customization_credit') {
+    body.discountMinQuantity = Number(document.getElementById(`discount-min-${featureId}`).value);
+    body.discountPercent = Number(document.getElementById(`discount-pct-${featureId}`).value);
+  }
   try {
     const data = await api('/relay/admin/api/pricing/features', {
       method: 'POST',
-      body: JSON.stringify({ featureId, name, price })
+      body: JSON.stringify(body)
     });
     toast(`Saved "${data.feature.name}" pricing.`);
     await loadCatalog();
