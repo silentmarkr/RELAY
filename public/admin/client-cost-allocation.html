@@ -392,6 +392,21 @@
       <div id="nearQuotaList" style="margin-top:10px;"></div>
     </div>
 
+    <!-- GAWA/BAGO: STORAGE FEE DEBTORS — mga installation na NEGATIVE na
+         ang Omni Token balance dahil sa Storage Holding Fee (patuloy itong
+         naniningil kahit naka-OFF ang auto-sync o lapsed na ang subscription
+         — tingnan ang paliwanag sa PHP side). Dito makikita agad kung sino
+         ang "umuutang" at kung dahil talaga sa storage fee (hindi sa
+         sync/restore charge). -->
+    <div class="stat-card" style="margin-bottom:16px;">
+      <div class="stat-label">🪫 Storage Fee Debtors — Negative Balance dahil sa Storage Holding Fee</div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:8px;">
+        <button class="icon-btn" onclick="loadStorageFeeDebtors()">⟳ Tingnan</button>
+      </div>
+      <div id="storageFeeDebtorsSummary" style="margin-top:10px; font-size:13px;"></div>
+      <div id="storageFeeDebtorsList" style="margin-top:10px;"></div>
+    </div>
+
     <div id="clientsWrap">
       <div class="client-toolbar hidden" id="clientToolbar">
         <div class="search-field">
@@ -784,7 +799,7 @@ async function boot() {
   if (!adminKey) return;
   try {
     document.getElementById('reconMonthInput').value = new Date().toISOString().slice(0, 7);
-    await Promise.all([loadAllocation(), loadReconciliation(), loadRetentionReview(), loadNearQuotaReview()]);
+    await Promise.all([loadAllocation(), loadReconciliation(), loadRetentionReview(), loadNearQuotaReview(), loadStorageFeeDebtors()]);
     // BUGFIX: each loader above swallows its own errors internally (so a
     // wrong admin key's 'forbidden' rejection never reaches this Promise.all),
     // but a 403 inside any of them still calls logout(), which clears
@@ -918,6 +933,48 @@ async function loadNearQuotaReview() {
           ${c.atMaxTier
             ? '<span style="color:var(--amber,#f5a623);">Nasa pinakamataas nang tier</span>'
             : `<span style="color:var(--green,#4ade80);">Suggest: ${c.suggestedTierName} (₱${c.suggestedTierMonthlyPHP}/buwan)</span>`}
+        </div>
+      </div>`).join('');
+  } catch (err) {
+    summaryEl.innerHTML = `<span style="color:var(--red);">${err.message}</span>`;
+  }
+}
+
+// ===================================================================
+// GAWA/BAGO: STORAGE FEE DEBTORS — tingnan ang comment sa PHP side
+// (/relay/admin/api/cloud-backup/storage-fee-debtors).
+// ===================================================================
+async function loadStorageFeeDebtors() {
+  const summaryEl = document.getElementById('storageFeeDebtorsSummary');
+  const listEl = document.getElementById('storageFeeDebtorsList');
+  summaryEl.innerHTML = 'Loading…';
+  listEl.innerHTML = '';
+  try {
+    const data = await api('/relay/admin/api/cloud-backup/storage-fee-debtors');
+    if (data.debtorCount === 0) {
+      summaryEl.innerHTML = '✅ Walang installation na may negative na Omni Token balance ngayon.';
+      return;
+    }
+    summaryEl.innerHTML = `⚠️ <strong>${data.debtorCount}</strong> installation ang negative ang balance, kabuuang <strong>${data.totalDebtTokens.toFixed(2)} token</strong> na utang.`;
+    listEl.innerHTML = data.debtors.map(d => `
+      <div class="backup-row" style="padding:10px 0; border-bottom:1px solid var(--border,#2a2a2a); align-items:flex-start; display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+        <div style="flex:1; min-width:220px;">
+          <div><strong>${d.label || d.storeName || d.installationId}</strong> <span style="font-size:11px; color:var(--muted);">${d.installationId}</span></div>
+          <div style="font-size:11px; color:var(--muted); margin-top:2px;">
+            Balance: <strong style="color:var(--red,#ff5c72);">${d.balanceTokens.toFixed(3)} token</strong>
+            · Auto-sync: <strong style="color:${d.autoSyncEnabled ? 'var(--green,#3ddc84)' : 'var(--amber,#ffb545)'};">${d.autoSyncEnabled ? 'ON' : 'OFF'}</strong>
+            · Subscription: ${d.cloudBackupActive ? 'active' : 'lapsed/wala'}
+            ${d.sizeMB !== null ? `· ${d.sizeMB} MB` : ''}
+          </div>
+          <div style="font-size:11px; color:var(--muted); margin-top:2px;">
+            Storage fee charges: <strong>${d.storageFeeChargeCount}</strong> (kabuuang ${d.totalStorageFeeTokens.toFixed(3)} token)
+            ${d.lastStorageFeeAt ? `· huling singil: ${new Date(d.lastStorageFeeAt).toLocaleString()}` : ''}
+          </div>
+        </div>
+        <div style="font-size:12px; text-align:right;">
+          ${d.primarilyStorageFeeDriven
+            ? '<span style="color:var(--red,#ff5c72);">Storage fee ang pangunahing dahilan ng utang</span>'
+            : '<span style="color:var(--muted);">Kasama rin ang ibang charge (sync/restore)</span>'}
         </div>
       </div>`).join('');
   } catch (err) {

@@ -257,6 +257,27 @@ async function ensureCloudBackupSchema() {
     // ang sobrang dalas mag-restore (posibleng abuser).
     await pgPool.query(`ALTER TABLE cloud_backup_meta ADD COLUMN IF NOT EXISTS restore_count INTEGER NOT NULL DEFAULT 0;`);
     await pgPool.query(`ALTER TABLE cloud_backup_meta ADD COLUMN IF NOT EXISTS last_restore_at TIMESTAMPTZ;`);
+    // ===================================================================
+    // AYOS/BAGO: mga column para sa paparating na "storage holding fee"
+    // scheduled job (#2 sa safety-margin discussion) — hiwalay na bayad
+    // para sa datos na TULOY-TULOY na nakaupo sa Neon storage, HINDI na
+    // naka-depende sa bilang ng syncs (kung 0 syncs ang customer sa isang
+    // buwan, 0 din dapat ang revenue base sa syncs, pero patuloy pa ring
+    // binabayaran ang Neon storage — kaya kailangan ng SARILING billing
+    // cycle ang storage fee, hiwalay sa per-sync charge). Ang mga column na
+    // ito ay TRACKING/ACCRUAL LANG dito sa migration na ito — ang aktwal na
+    // cron/scheduled job na gagamit sa mga ito ay hiwalay pang gagawin:
+    //   - storage_fee_last_billed_at: huling sandali kung kailan na-charge
+    //     (o unang na-set, para sa bagong installation) ang storage holding
+    //     fee — ito ang pinagbabatayan ng "elapsed time" sa susunod na run
+    //     ng scheduled job (elapsed = now() - storage_fee_last_billed_at).
+    //   - storage_fee_fraction_accrued: fractional (hindi pa buong token)
+    //     na naipon na storage fee — parehong pattern ng
+    //     sync_fraction_accrued sa cloud_token_wallets sa ibaba, para hindi
+    //     kailanman ma-undercharge dahil sa paulit-ulit na rounding.
+    // ===================================================================
+    await pgPool.query(`ALTER TABLE cloud_backup_meta ADD COLUMN IF NOT EXISTS storage_fee_last_billed_at TIMESTAMPTZ;`);
+    await pgPool.query(`ALTER TABLE cloud_backup_meta ADD COLUMN IF NOT EXISTS storage_fee_fraction_accrued NUMERIC NOT NULL DEFAULT 0;`);
     console.log('✅ Cloud backup Postgres schema ready (cloud_backup_modules, cloud_backup_meta).');
 }
 async function ensureDeviceLicenseSchema() {
@@ -1289,24 +1310,45 @@ function getCloudTokenPackages() {
 // ISANG sync. Ang tier ay ginagamit LANG dito para sa dalas ng pag-sync
 // (hindi na para sa presyo) — kaya ang pagbabago ng maintenance fee sa
 // pricing admin ay hindi na makakaapekto rito kailanman.
+// ===================================================================
+// AYOS/BAGO (Universal Safety Margin): idinagdag ang isang flat markup
+// multiplier sa likod mismo ng bawat "real cost" formula (sync + restore),
+// bago pa man ma-convert papuntang PHP/tokens. Layunin: kahit magkamali
+// ang isa sa mga assumption sa itaas (maling naka-configure na tier
+// dropdown, medyo mababa ang seed compute assumption, biglang bumagsak
+// ang piso bago ma-refresh ang FX rate, ...), may 30% na cushion na
+// bago pa man pumasok sa loss ang developer/negosyo — hindi na
+// kailangang i-predict nang eksakto ang bawat variable, ang buffer na
+// mismo ang proteksyon. Baguhin lang ang multiplier na ito kung
+// kailangang i-adjust ang laki ng cushion (hal. 1.30 = +30%).
+// ===================================================================
+const CLOUD_BACKUP_COST_SAFETY_MARGIN_MULTIPLIER = 1.30;
 function computeRealCloudBackupSyncCostPHP(sizeBytes, tier, usdToPhpRate) {
     const plan = CLOUD_BACKUP_PLANS[tier] || CLOUD_BACKUP_PLANS.basic;
     const sizeBytesSafe = Math.max(0, Number(sizeBytes) || 0);
-    const sizeGB = sizeBytesSafe / (1024 * 1024 * 1024);
     const sizeMB = sizeBytesSafe / (1024 * 1024);
     const neonPlanId = neonConfiguredPlans.cloudBackup || 'free';
     let neonTier = NEON_PRICING[neonPlanId];
     // Ang Free tier ay walang bayad na storage/compute rate ($0) — hindi
     // ito makatotohanang batayan kung TALAGANG may bayad na Neon account
     // (mali lang ang naka-configure na dropdown dito sa admin panel).
-    // Gamitin muna ang Launch rate (pinaka-conservative na paid-tier
-    // estimate) kapag ganito — kaparehong pattern ng ginagawa ng
-    // computeNeonRealCost() sa itaas.
-    if (!neonTier || !neonTier.storageRatePerGBMonthUSD) neonTier = NEON_PRICING.launch;
-    // STORAGE component
-    const monthlyStorageCostUSD = sizeGB * neonTier.storageRatePerGBMonthUSD;
-    const expectedSyncsPerMonth = Math.max(1, Math.round((30 * 24 * 60 * 60 * 1000) / plan.autoBackupIntervalMs));
-    const perSyncStorageCostUSD = monthlyStorageCostUSD / expectedSyncsPerMonth;
+    // AYOS/BAGO: dating "Launch" ang fallback dito — pinalitan papuntang
+    // "Scale" (ang PINAKAMATAAS/pinaka-conservative na paid-tier rate),
+    // dahil kung hindi tama o hindi malinaw ang dropdown, mas ligtas na
+    // MALING paraan ang bahagyang mag-overcharge kaysa sa dating
+    // undercharge (safe-by-default fallback).
+    if (!neonTier || !neonTier.storageRatePerGBMonthUSD) neonTier = NEON_PRICING.scale;
+    // BUGFIX: TINANGGAL ang STORAGE component dito. Dating may
+    // perSyncStorageCostUSD (monthlyStorageCostUSD / expectedSyncsPerMonth)
+    // na idinaragdag sa per-sync charge — pero ngayong may HIWALAY nang
+    // Storage Holding Fee (tingnan ang runStorageHoldingFeeSweep() sa
+    // ibaba) na naniningil din base sa AKTWAL na size_bytes x storage
+    // rate x elapsed time, ang dalawa ay NAGDO-DOUBLE-BILL ng EKSAKTONG
+    // parehong Neon storage cost: minsan sa bawat sync (dito) AT
+    // paulit-ulit bawat araw (doon). Ang orihinal na spec ay malinaw:
+    // "Per-sync fee (compute lang)" — compute ONLY ang dapat isama sa
+    // per-sync charge; ang storage ay dapat sa Storage Holding Fee na
+    // lang ipasa, hindi na rito.
     // AYOS/BAGO: COMPUTE component — bukod sa storage, may bayad din ang
     // Neon sa COMPUTE (CU-hours). Gamit ang admin-configurable na
     // "cloudBackupSyncCompute" assumption (tingnan ang NEON_PRICING_BASE
@@ -1315,17 +1357,21 @@ function computeRealCloudBackupSyncCostPHP(sizeBytes, tier, usdToPhpRate) {
     // overhead (segundo) + karagdagang oras batay sa laki ng na-upload na
     // datos (mas malaki ang datos = mas matagal ang assumed na compute
     // time). Ang computeRatePerCUHourUSD ng Free tier ay $0 rin — parehong
-    // fallback sa Launch rate ang ginagamit dito.
+    // fallback sa Scale rate (pinaka-mataas/pinaka-conservative) ang
+    // ginagamit dito, kaayon ng safe-by-default fallback sa itaas.
     const computeRateUSD = (typeof neonTier.computeRatePerCUHourUSD === 'number' && neonTier.computeRatePerCUHourUSD > 0)
         ? neonTier.computeRatePerCUHourUSD
-        : NEON_PRICING.launch.computeRatePerCUHourUSD;
+        : NEON_PRICING.scale.computeRatePerCUHourUSD;
     const computeAssumption = NEON_PRICING.cloudBackupSyncCompute || NEON_PRICING_BASE.cloudBackupSyncCompute;
     const assumedComputeSeconds = computeAssumption.assumedBaseSeconds + (sizeMB * computeAssumption.assumedSecondsPerMB);
     const assumedComputeCUHours = computeAssumption.assumedCU * (assumedComputeSeconds / 3600);
     const perSyncComputeCostUSD = assumedComputeCUHours * computeRateUSD;
-    const perSyncCostUSD = perSyncStorageCostUSD + perSyncComputeCostUSD;
+    // BUGFIX: compute-only na ngayon ang perSyncCostUSD (dating +
+    // perSyncStorageCostUSD, tanggal na — tingnan ang paliwanag sa itaas).
+    const perSyncCostUSD = perSyncComputeCostUSD;
     const rate = usdToPhpRate || EXCHANGE_RATE_FALLBACK_USD_TO_PHP;
-    return perSyncCostUSD * rate;
+    // Universal Safety Margin — tingnan ang paliwanag sa itaas.
+    return perSyncCostUSD * rate * CLOUD_BACKUP_COST_SAFETY_MARGIN_MULTIPLIER;
 }
 // "Ilustratibong" sample size lang (hal. sa packages catalog, kung saan
 // wala pang partikular na installation/aktwal na laki ng datos na
@@ -1386,18 +1432,39 @@ function computeRealCloudBackupRestoreCostPHP(sizeBytes, tier, usdToPhpRate) {
     let neonTier = NEON_PRICING[neonPlanId];
     // Same Free-tier fallback reasoning as computeRealCloudBackupSyncCostPHP()
     // above — $0 Free-tier rates aren't a realistic basis if there's
-    // actually a paid Neon account behind this.
-    if (!neonTier || !neonTier.storageRatePerGBMonthUSD) neonTier = NEON_PRICING.launch;
+    // actually a paid Neon account behind this. AYOS/BAGO: safe-by-default
+    // fallback papuntang "Scale" (pinakamataas na rate) sa halip na
+    // "Launch" — pareho sa ginawang fix sa sync cost function sa itaas.
+    if (!neonTier || !neonTier.storageRatePerGBMonthUSD) neonTier = NEON_PRICING.scale;
     const computeRateUSD = (typeof neonTier.computeRatePerCUHourUSD === 'number' && neonTier.computeRatePerCUHourUSD > 0)
         ? neonTier.computeRatePerCUHourUSD
-        : NEON_PRICING.launch.computeRatePerCUHourUSD;
+        : NEON_PRICING.scale.computeRatePerCUHourUSD;
     const computeAssumption = NEON_PRICING.cloudBackupSyncCompute || NEON_PRICING_BASE.cloudBackupSyncCompute;
     const assumedComputeSeconds = computeAssumption.assumedBaseSeconds + (sizeMB * computeAssumption.assumedSecondsPerMB);
     const assumedComputeCUHours = computeAssumption.assumedCU * (assumedComputeSeconds / 3600);
     const restoreComputeCostUSD = assumedComputeCUHours * computeRateUSD;
-    const perRestoreCostUSD = restoreStorageCostUSD + restoreComputeCostUSD;
+    // BUGFIX/GAP: dati, sinasabi ng comment sa itaas ng function na
+    // "the actual Neon egress/compute cost of a restore is covered" —
+    // pero WALANG egress component na kailanman naisama sa kwenta, kahit
+    // pa idineklara ang egressOverageRatePerGBUSD sa NEON_PRICING para
+    // dito. Ang restore ang EKSAKTONG operasyon na nagpapalabas (egress)
+    // ng buong laki ng backup mula sa Neon papunta sa RELAY — hindi tulad
+    // ng sync (na "ingress" papasok sa Neon, hindi karaniwang sinisingil
+    // ng cloud providers). Kung walang egress charge dito, ang totoong
+    // Neon egress cost ng bawat restore ay 100% sa developer na lang
+    // babagsak kahit "covered" na ang akala. Idinagdag: isang buong
+    // pagbasa (1x sizeGB) laban sa egressOverageRatePerGBUSD ng
+    // naka-configure/naka-fallback na Neon tier — parehong safe-by-
+    // default fallback pattern (Scale rate) tulad ng storage/compute sa
+    // itaas kapag walang valid na egress rate sa neonTier.
+    const egressRateUSD = (typeof neonTier.egressOverageRatePerGBUSD === 'number' && neonTier.egressOverageRatePerGBUSD > 0)
+        ? neonTier.egressOverageRatePerGBUSD
+        : NEON_PRICING.scale.egressOverageRatePerGBUSD;
+    const restoreEgressCostUSD = sizeGB * egressRateUSD;
+    const perRestoreCostUSD = restoreStorageCostUSD + restoreComputeCostUSD + restoreEgressCostUSD;
     const rate = usdToPhpRate || EXCHANGE_RATE_FALLBACK_USD_TO_PHP;
-    return perRestoreCostUSD * rate;
+    // Universal Safety Margin — tingnan ang paliwanag sa computeRealCloudBackupSyncCostPHP() sa itaas.
+    return perRestoreCostUSD * rate * CLOUD_BACKUP_COST_SAFETY_MARGIN_MULTIPLIER;
 }
 // Exact (fractional, no rounding) price for one restore — this is the true
 // basis used for charging. `sizeBytes` should be the installation's actual
@@ -2194,6 +2261,7 @@ const CLOUD_TOKEN_LEDGER_CATEGORIES = {
     SYNC_CHARGE: 'Cloud Sync Charge',       // WHOLE token na na-deduct mula sa isang sync (manual o auto)
     SYNC_FRACTION: 'Auto-Sync Activity',    // fractional cost lang, WALANG na-deduct na buong token pa
     RESTORE_CHARGE: 'Cloud Restore Charge', // WHOLE token na na-deduct mula sa isang cloud restore (auto-charge or manual admin charge)
+    STORAGE_HOLDING_FEE: 'Storage Holding Fee', // AYOS/BAGO: scheduled (hindi naka-depende sa bilang ng syncs) na bayad para sa datos na TULOY-TULOY na nakaupo sa Neon storage — naniningil kahit walang sync na naganap, dahil tuloy-tuloy din ang bayad ng developer kay Neon para sa storage na iyon
     REFUND: 'Refund'                        // ibinalik na tokens dahil sa failed/incomplete sync
 };
 // AYOS (cost-optimization): i-cache sa memory ang buong /relay/cloud-tokens/wallet
@@ -2434,10 +2502,18 @@ const NEON_PRICING_BASE = {
     // AGAD itong nagagamit sa SUSUNOD na sync (hindi lang naka-log,
     // direktang ginagamit na sa pag-charge sa customer). Ang mga seed value
     // sa ibaba ay ginagamit lang bago pa umabot sa minimum sample count.
+    // AYOS/BAGO: itinaas ang seed values papuntang mas malapit sa "worst
+    // case" (hindi na "best case") habang wala pang sapat na totoong
+    // measured data — 3s -> 5s na assumedBaseSeconds, 0.5 -> 0.7 s/MB na
+    // assumedSecondsPerMB. Kasabay ito ng Universal Safety Margin sa itaas
+    // bilang karagdagang proteksyon, pero mas mabuting hindi rin masyadong
+    // optimistiko ang panimulang tantiya mismo — awtomatiko naman itong
+    // mapapalitan ng TOTOONG measured value (recordCloudBackupSyncTiming())
+    // pagkatapos ng ilang totoong sync.
     cloudBackupSyncCompute: {
         assumedCU: 0.25,          // Neon's smallest/minimum compute size (official, hindi assumption)
-        assumedBaseSeconds: 3,    // SEED LANG — papalitan ng measured value pagkatapos ng ilang totoong sync
-        assumedSecondsPerMB: 0.5  // SEED LANG — papalitan ng measured value pagkatapos ng ilang totoong sync
+        assumedBaseSeconds: 5,    // SEED LANG (mas konserbatibo) — papalitan ng measured value pagkatapos ng ilang totoong sync
+        assumedSecondsPerMB: 0.7  // SEED LANG (mas konserbatibo) — papalitan ng measured value pagkatapos ng ilang totoong sync
     }
 };
 const NEON_PRICING_OVERRIDES_PATH = path.join(__dirname, 'neon-pricing-overrides.json');
@@ -2766,6 +2842,142 @@ async function getUsdToPhpRate() {
         fetchedAt: null
     };
 }
+// ===================================================================
+// AYOS/BAGO: STORAGE HOLDING FEE — scheduled job (#2 sa safety-margin
+// discussion). Bakit kailangan ito bukod sa per-sync charge sa itaas:
+// ang per-sync cost ay naka-attach lang sa BILANG ng syncs — kung 0 ang
+// syncs ng isang customer sa isang buwan, 0 din ang revenue mula sa
+// customer na iyon, PERO tuloy-tuloy pa ring binabayaran ang Neon
+// storage rate para sa datos niyang nakaupo doon (ang Neon ay
+// naniningil base sa GB-buwan na naka-store, HINDI base sa bilang ng
+// beses na na-access/na-sync ang datos). Ang storage holding fee na ito
+// ay HIWALAY sa per-sync compute charge — ito ay isang bayad na
+// naka-schedule (hindi naka-depende sa auto-sync interval ng tier),
+// batay lang sa (a) ELAPSED TIME mula sa huling pagsingil at (b) ang
+// AKTWAL na laki (size_bytes) ng backup — kaya kahit hindi kailanman
+// mag-sync ang customer sa buong buwan, patuloy pa rin siyang naba-bill
+// para sa storage na hawak niya, kagaya mismo ng paraan ng pagbabayad
+// ng developer kay Neon.
+//
+// Tulad ng ibang "real cost" formula sa itaas, gumagamit din ito ng
+// safe-by-default fallback (Scale tier kapag mali/malabo ang naka-
+// configure na Neon plan dropdown) AT ng Universal Safety Margin
+// (CLOUD_BACKUP_COST_SAFETY_MARGIN_MULTIPLIER) bago ma-convert sa
+// PHP/tokens.
+//
+// TALA: sinasadyang pinapayagan nitong maging NEGATIVE ang balance_tokens
+// (walang "insufficient" gate dito, di tulad ng consumeCloudTokensForSyncExact
+// sa itaas) — dahil ito ay isang HINDI maiiwasang gastos na ginagastos
+// pa rin ng developer kay Neon anuman ang balance ng customer; ang
+// pag-block ng auto-sync/restore kapag naubos na ang balance ay
+// nananatili sa mga existing gate sa ibang function — dito lang, sa
+// "rent" mismo, walang paglaktaw.
+// ===================================================================
+const STORAGE_HOLDING_FEE_MIN_INTERVAL_MS = 20 * 60 * 60 * 1000; // ~20 oras — takip para hindi ma-double-charge kung mas madalas tumakbo ang sweep kaysa sa layunin nitong 24-oras na cadence
+const STORAGE_HOLDING_FEE_MONTH_MS = 30 * 24 * 60 * 60 * 1000; // batayan ng "isang buwan" para sa prorating (kaayon ng ginamit na sa computeRealCloudBackupSyncCostPHP)
+function computeStorageHoldingFeeCostPHP(sizeBytes, elapsedMs, usdToPhpRate) {
+    const sizeBytesSafe = Math.max(0, Number(sizeBytes) || 0);
+    const sizeGB = sizeBytesSafe / (1024 * 1024 * 1024);
+    const elapsedMsSafe = Math.max(0, Number(elapsedMs) || 0);
+    const neonPlanId = neonConfiguredPlans.cloudBackup || 'free';
+    let neonTier = NEON_PRICING[neonPlanId];
+    // Safe-by-default fallback — pareho ng ginawang fix sa sync/restore cost
+    // functions sa itaas: Scale (pinakamataas na rate) sa halip na Launch.
+    if (!neonTier || !neonTier.storageRatePerGBMonthUSD) neonTier = NEON_PRICING.scale;
+    const monthlyStorageCostUSD = sizeGB * neonTier.storageRatePerGBMonthUSD;
+    const fractionOfMonth = elapsedMsSafe / STORAGE_HOLDING_FEE_MONTH_MS;
+    const proRatedCostUSD = monthlyStorageCostUSD * fractionOfMonth;
+    const rate = usdToPhpRate || EXCHANGE_RATE_FALLBACK_USD_TO_PHP;
+    // Universal Safety Margin — tingnan ang paliwanag sa computeRealCloudBackupSyncCostPHP() sa itaas.
+    return proRatedCostUSD * rate * CLOUD_BACKUP_COST_SAFETY_MARGIN_MULTIPLIER;
+}
+// Isang buong pass sa lahat ng installation na may cloud backup data
+// (size_bytes > 0) — kinukwenta at ide-deduct (₱1 = 1 token, kaayon ng
+// existing pattern) ang storage holding fee na naipon mula noong huling
+// pagkakataong na-bill ang bawat isa. Tumatakbo bilang naka-schedule na
+// background job (tingnan ang setInterval sa ibaba) — hindi kailanman
+// dapat i-trigger mula sa isang customer-facing request.
+async function runStorageHoldingFeeSweep() {
+    if (!pgPool) return;
+    try {
+        const { rate } = await getUsdToPhpRate();
+        const metaRows = await pgPool.query(
+            `SELECT installation_id FROM cloud_backup_meta WHERE size_bytes > 0`
+        );
+        for (const { installation_id: installationId } of metaRows.rows) {
+            try {
+                await runPgWriteTx(pgPool, async (client) => {
+                    await client.query(
+                        `INSERT INTO cloud_token_wallets (installation_id, balance_tokens, auto_sync_enabled) VALUES ($1, 0, true)
+                         ON CONFLICT (installation_id) DO NOTHING`,
+                        [installationId]
+                    );
+                    const metaRes = await client.query(
+                        `SELECT size_bytes, storage_fee_last_billed_at, storage_fee_fraction_accrued FROM cloud_backup_meta WHERE installation_id = $1 FOR UPDATE`,
+                        [installationId]
+                    );
+                    const metaRow = metaRes.rows[0];
+                    if (!metaRow) return;
+                    // Unang beses lang: itakda ang baseline, huwag maniningil
+                    // para sa "hindi kilalang" nakaraang panahon (mas ligtas
+                    // kaysa basta bigla na lang maniningil ng malaking halaga
+                    // batay sa isang haka-hakang "simula").
+                    if (!metaRow.storage_fee_last_billed_at) {
+                        await client.query(
+                            `UPDATE cloud_backup_meta SET storage_fee_last_billed_at = now() WHERE installation_id = $1`,
+                            [installationId]
+                        );
+                        return;
+                    }
+                    const elapsedMs = Date.now() - new Date(metaRow.storage_fee_last_billed_at).getTime();
+                    if (elapsedMs < STORAGE_HOLDING_FEE_MIN_INTERVAL_MS) return;
+                    const walletRes = await client.query(
+                        `SELECT balance_tokens FROM cloud_token_wallets WHERE installation_id = $1 FOR UPDATE`,
+                        [installationId]
+                    );
+                    const currentBalance = Number(walletRes.rows[0].balance_tokens);
+                    const costFraction = computeStorageHoldingFeeCostPHP(metaRow.size_bytes, elapsedMs, rate);
+                    const baseFraction = Number(metaRow.storage_fee_fraction_accrued) || 0;
+                    const newFraction = baseFraction + costFraction;
+                    const wholeTokens = Math.floor(newFraction);
+                    const remainder = newFraction - wholeTokens;
+                    // Sinasadyang WALANG "insufficient" gate dito — tingnan
+                    // ang paliwanag sa itaas kung bakit dapat itong tuloy-
+                    // tuloy magsingil, kahit umabot pa sa negatibong balance.
+                    const newBalance = currentBalance - wholeTokens;
+                    await client.query(
+                        `UPDATE cloud_backup_meta SET storage_fee_last_billed_at = now(), storage_fee_fraction_accrued = $2 WHERE installation_id = $1`,
+                        [installationId, remainder]
+                    );
+                    if (wholeTokens > 0) {
+                        await client.query(
+                            `UPDATE cloud_token_wallets SET balance_tokens = $2, updated_at = now() WHERE installation_id = $1`,
+                            [installationId, newBalance]
+                        );
+                        // AYOS/BUGFIX: 'automatic' ang ginamit dito (hindi 'scheduled')
+                        // dahil ang OMNIPOS Transaction History UI (CT_CATEGORY_META /
+                        // triggerLabel sa app.js) ay ang eksaktong string na 'automatic'
+                        // lang ang kinikilala bilang "(Auto)" — kahit anong ibang value
+                        // dito ay maling lalabas na "(Manual)", kahit na WALANG
+                        // taong nag-trigger ng bayad na ito (fully automatic/system-
+                        // scheduled job ito, walang manual path).
+                        await client.query(
+                            `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note, category, trigger_type) VALUES ($1, 'consume', $2, $3, $4, 'STORAGE_HOLDING_FEE', 'automatic')`,
+                            [installationId, -wholeTokens, newBalance, `Storage holding fee — ${formatDuration(elapsedMs)}`]
+                        );
+                    }
+                });
+                invalidateWalletCache(installationId);
+            } catch (err) {
+                console.error(`⚠️ STORAGE_HOLDING_FEE: hindi na-process ang installation ${installationId}:`, err.message);
+            }
+        }
+    } catch (err) {
+        console.error('⚠️ runStorageHoldingFeeSweep error:', err.message);
+    }
+}
+setInterval(runStorageHoldingFeeSweep, 24 * 60 * 60 * 1000);
+setTimeout(runStorageHoldingFeeSweep, 90 * 1000); // unang check, 90 segundo pagkatapos mag-boot
 // ===================================================================
 // NEON ACCOUNT API — kunin ang TUNAY na compute/storage usage ng
 // kasalukuyang billing period direkta mula sa Neon account (GET
@@ -7276,7 +7488,8 @@ app.get('/relay/admin/api/client-cost-allocation', requireAdminKey, async (req, 
 // gamit ang TOTOONG pera, hindi estimate/projection. Kumukuha ng
 // KABUUANG na-charge sa mga customer para sa Cloud Backup (mula sa
 // cloud_token_ledger mismo — SYNC_CHARGE + RESTORE_CHARGE +
-// FEATURE_UNLOCK, bawas ang anumang REFUND) sa loob ng isang buwan, at
+// FEATURE_UNLOCK + STORAGE_HOLDING_FEE, bawas ang anumang REFUND) sa
+// loob ng isang buwan, at
 // pinagkukumpara ito sa TOTOONG binayaran mo kay Neon (na mano-manong
 // ilalagay mo dito bawat buwan mula sa aktwal na Neon invoice — walang
 // public API si Neon para sa historical invoice amount, kaya hindi ito
@@ -7355,11 +7568,12 @@ app.get('/relay/admin/api/cloud-backup/reconciliation', requireAdminKey, async (
         const { rows } = await queryWithRetry(
             pgPool,
             `SELECT
-                COALESCE(SUM(CASE WHEN type = 'consume' AND category IN ('SYNC_CHARGE','RESTORE_CHARGE','FEATURE_UNLOCK') THEN -tokens ELSE 0 END), 0) AS gross_charged_php,
+                COALESCE(SUM(CASE WHEN type = 'consume' AND category IN ('SYNC_CHARGE','RESTORE_CHARGE','FEATURE_UNLOCK','STORAGE_HOLDING_FEE') THEN -tokens ELSE 0 END), 0) AS gross_charged_php,
                 COALESCE(SUM(CASE WHEN type = 'purchase' AND category = 'REFUND' THEN tokens ELSE 0 END), 0) AS refunded_php,
                 COUNT(*) FILTER (WHERE category = 'SYNC_CHARGE') AS sync_charge_count,
                 COUNT(*) FILTER (WHERE category = 'RESTORE_CHARGE') AS restore_charge_count,
-                COUNT(*) FILTER (WHERE category = 'FEATURE_UNLOCK') AS activation_count
+                COUNT(*) FILTER (WHERE category = 'FEATURE_UNLOCK') AS activation_count,
+                COUNT(*) FILTER (WHERE category = 'STORAGE_HOLDING_FEE') AS storage_fee_charge_count
              FROM cloud_token_ledger
              WHERE created_at >= to_timestamp($1 / 1000.0) AND created_at < to_timestamp($2 / 1000.0)`,
             [range.start, range.end]
@@ -7380,6 +7594,7 @@ app.get('/relay/admin/api/cloud-backup/reconciliation', requireAdminKey, async (
             syncChargeCount: Number(r.sync_charge_count || 0),
             restoreChargeCount: Number(r.restore_charge_count || 0),
             activationCount: Number(r.activation_count || 0),
+            storageFeeChargeCount: Number(r.storage_fee_charge_count || 0),
             actualBill: actualBillEntry,
             profitLossPHP,
             status: profitLossPHP === null ? 'unknown' : (profitLossPHP >= 0 ? 'kumikita' : 'lugi'),
@@ -7747,6 +7962,91 @@ app.get('/relay/admin/api/cloud-backup/near-quota-review', requireAdminKey, asyn
     } catch (err) {
         console.error('⚠️  /relay/admin/api/cloud-backup/near-quota-review error:', err.message);
         res.status(500).json({ success: false, message: 'Could not compute near-quota review.' });
+    }
+});
+// ===================================================================
+// GAWA/BAGO: STORAGE FEE DEBTORS — buod ng mga installation na NEGATIVE
+// na ang Omni Token balance dahil (bahagya man o buo) sa STORAGE_HOLDING_FEE
+// (tingnan ang runStorageHoldingFeeSweep() sa itaas). Sinasadyang WALANG
+// "insufficient" gate ang storage holding fee (patuloy itong naniningil
+// kahit naka-OFF ang auto-sync o lapsed na ang subscription — ang totoong
+// Neon storage cost ay patuloy ring binabayaran ng developer kay Neon
+// anuman ang ginagawa ng customer), kaya kailangan ng sarili nitong
+// visibility para makita agad kung sino ang "umuutang" — hindi ito
+// awtomatikong nabubura/nade-detect ng ibang existing report.
+// ===================================================================
+app.get('/relay/admin/api/cloud-backup/storage-fee-debtors', requireAdminKey, async (req, res) => {
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured.' });
+    try {
+        const { rows } = await queryWithRetry(
+            pgPool,
+            `SELECT
+                w.installation_id,
+                w.balance_tokens,
+                w.auto_sync_enabled,
+                m.store_name,
+                m.size_bytes,
+                m.last_sync_at,
+                COALESCE(sf.total_storage_fee_tokens, 0) AS total_storage_fee_tokens,
+                COALESCE(sf.storage_fee_charge_count, 0) AS storage_fee_charge_count,
+                sf.last_storage_fee_at,
+                COALESCE(other.total_other_charge_tokens, 0) AS total_other_charge_tokens
+             FROM cloud_token_wallets w
+             LEFT JOIN cloud_backup_meta m ON m.installation_id = w.installation_id
+             LEFT JOIN (
+                SELECT installation_id,
+                       SUM(-tokens) AS total_storage_fee_tokens,
+                       COUNT(*) AS storage_fee_charge_count,
+                       MAX(created_at) AS last_storage_fee_at
+                FROM cloud_token_ledger
+                WHERE category = 'STORAGE_HOLDING_FEE' AND type = 'consume'
+                GROUP BY installation_id
+             ) sf ON sf.installation_id = w.installation_id
+             LEFT JOIN (
+                SELECT installation_id, SUM(-tokens) AS total_other_charge_tokens
+                FROM cloud_token_ledger
+                WHERE category IN ('SYNC_CHARGE', 'RESTORE_CHARGE', 'FEATURE_UNLOCK') AND type = 'consume'
+                GROUP BY installation_id
+             ) other ON other.installation_id = w.installation_id
+             WHERE w.balance_tokens < 0
+             ORDER BY w.balance_tokens ASC`,
+            []
+        );
+        const debtors = rows.map(r => {
+            const sub = getCloudBackupSubscriptionForClient(r.installation_id);
+            return {
+                installationId: r.installation_id,
+                label: deviceLabels.get(r.installation_id) || null,
+                storeName: r.store_name || null,
+                balanceTokens: Number(r.balance_tokens),
+                // AYOS: ipinapakita rin ang auto_sync_enabled — direktang
+                // sinasagot nito ang tanong na "may bayad pa rin ba kahit
+                // naka-off ang auto-sync?" sa bawat naka-listang installation.
+                autoSyncEnabled: !!r.auto_sync_enabled,
+                cloudBackupActive: !!(sub.active || sub.isLifetime),
+                sizeMB: r.size_bytes !== null ? Math.round((Number(r.size_bytes) / (1024 * 1024)) * 100) / 100 : null,
+                lastSyncAt: r.last_sync_at || null,
+                totalStorageFeeTokens: Math.round(Number(r.total_storage_fee_tokens) * 1000) / 1000,
+                storageFeeChargeCount: Number(r.storage_fee_charge_count) || 0,
+                lastStorageFeeAt: r.last_storage_fee_at || null,
+                totalOtherChargeTokens: Math.round(Number(r.total_other_charge_tokens) * 1000) / 1000,
+                // Kung mas malaki ang storage-fee-driven na debt kaysa sa
+                // aktwal na negative balance mismo, ibig sabihin ang
+                // storage holding fee (hindi sync/restore) ang PANGUNAHING
+                // dahilan kung bakit negative ang balance nito.
+                primarilyStorageFeeDriven: Number(r.total_storage_fee_tokens) >= Math.abs(Number(r.balance_tokens))
+            };
+        });
+        res.json({
+            success: true,
+            checkedAt: Date.now(),
+            debtorCount: debtors.length,
+            totalDebtTokens: Math.round(debtors.reduce((s, d) => s + Math.abs(d.balanceTokens), 0) * 1000) / 1000,
+            debtors
+        });
+    } catch (err) {
+        console.error('⚠️  /relay/admin/api/cloud-backup/storage-fee-debtors error:', err.message);
+        res.status(500).json({ success: false, message: 'Could not compute storage fee debtors.' });
     }
 });
 
