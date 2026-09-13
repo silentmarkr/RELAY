@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Installation Data — RELAY Admin</title>
+<style>
+  :root {
+    --bg: #05070d;
+    --bg-raise: #101625;
+    --card: rgba(11, 15, 26, 0.72);
+    --card-hover: rgba(16, 22, 37, 0.85);
+    --border: #1f2a44;
+    --border-soft: rgba(34, 229, 255, 0.28);
+    --line: rgba(31, 42, 68, 0.7);
+    --text: #eafcff;
+    --muted: #8ea3c9;
+    --muted-dim: #7186ab;
+    --accent: #22e5ff;
+    --accent-hover: #ff2ee6;
+    --accent-soft: rgba(34, 229, 255, 0.16);
+    --accent-text: #031014;
+    --green: #3ddc84;
+    --green-bg: rgba(61, 220, 132, 0.12);
+    --green-line: rgba(61, 220, 132, 0.32);
+    --red: #ff5c72;
+    --red-bg: rgba(255, 92, 114, 0.12);
+    --red-line: rgba(255, 92, 114, 0.32);
+    --amber: #ffb545;
+    --amber-bg: rgba(255, 181, 69, 0.12);
+    --amber-line: rgba(255, 181, 69, 0.32);
+    --font-ui: 'Rajdhani', 'Inter', 'Segoe UI', system-ui, -apple-system, Roboto, sans-serif;
+    --font-heading: 'Orbitron', 'Space Grotesk', sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --radius: 6px;
+    --radius-lg: 8px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--font-ui); min-height: 100vh; }
+  .topbar { display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; border-bottom: 1.5px solid var(--border); background: var(--bg-raise); }
+  .topbar-brand { display: flex; align-items: center; gap: 10px; }
+  .topbar-title { font-family: var(--font-heading); font-size: 1.1rem; letter-spacing: .02em; }
+  .topbar-sub { color: var(--muted); font-size: .8rem; }
+  .icon-btn { background: transparent; border: 1.5px solid var(--border); color: var(--text); border-radius: var(--radius); padding: 8px 12px; cursor: pointer; font-family: var(--font-ui); font-size: .9rem; display: inline-flex; align-items: center; gap: 6px; }
+  .icon-btn:hover { border-color: var(--border-soft); background: var(--card-hover); }
+  #loginWrap { max-width: 360px; margin: 90px auto; text-align: center; }
+  #loginWrap input { width: 100%; padding: 10px 12px; border-radius: var(--radius); border: 1.5px solid var(--border); background: var(--bg-raise); color: var(--text); font-family: var(--font-mono); margin-bottom: 10px; }
+  #loginWrap button { width: 100%; padding: 10px; border-radius: var(--radius); border: none; background: var(--accent); color: var(--accent-text); font-weight: 700; cursor: pointer; }
+  #app { display: none; max-width: 1200px; margin: 0 auto; padding: 20px; }
+  .summary-row { display: flex; gap: 14px; margin-bottom: 16px; flex-wrap: wrap; }
+  .summary-card { flex: 1; min-width: 160px; background: var(--card); border: 1.5px solid var(--border); border-radius: var(--radius-lg); padding: 12px 16px; }
+  .summary-card .num { font-family: var(--font-heading); font-size: 1.4rem; }
+  .summary-card .lbl { color: var(--muted); font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
+  .bulk-bar { display: none; align-items: center; gap: 10px; background: var(--accent-soft); border: 1.5px solid var(--border-soft); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 14px; }
+  .bulk-bar.active { display: flex; }
+  .bulk-bar .count { font-weight: 700; }
+  table { width: 100%; border-collapse: collapse; background: var(--card); border-radius: var(--radius-lg); overflow: hidden; }
+  th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--line); font-size: .88rem; }
+  th { color: var(--muted); font-weight: 600; font-size: .76rem; text-transform: uppercase; letter-spacing: .03em; background: var(--bg-raise); }
+  tr:hover td { background: var(--card-hover); }
+  .id-cell { font-family: var(--font-mono); font-size: .78rem; color: var(--muted); }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: .72rem; font-weight: 700; }
+  .badge-green { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-line); }
+  .badge-red { background: var(--red-bg); color: var(--red); border: 1px solid var(--red-line); }
+  .badge-amber { background: var(--amber-bg); color: var(--amber); border: 1px solid var(--amber-line); }
+  .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .btn-sm { font-size: .74rem; padding: 5px 9px; border-radius: var(--radius); border: 1.5px solid var(--border); background: transparent; color: var(--text); cursor: pointer; }
+  .btn-sm:hover { border-color: var(--border-soft); }
+  .btn-danger { border-color: var(--red-line); color: var(--red); }
+  .btn-danger:hover { background: var(--red-bg); }
+  .btn-primary { border-color: var(--border-soft); color: var(--accent); }
+  .btn-primary:hover { background: var(--accent-soft); }
+  #toast { position: fixed; bottom: 20px; right: 20px; background: var(--bg-raise); border: 1.5px solid var(--border-soft); border-radius: var(--radius); padding: 10px 16px; font-size: .85rem; display: none; max-width: 340px; z-index: 50; }
+  .muted { color: var(--muted); }
+  #search { padding: 8px 12px; border-radius: var(--radius); border: 1.5px solid var(--border); background: var(--bg-raise); color: var(--text); font-family: var(--font-ui); width: 260px; margin-bottom: 14px; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-brand">
+    <div>
+      <div class="topbar-title">Installation Data</div>
+      <div class="topbar-sub">Per-store Cloud Backup footprint — view, backup, or delete</div>
+    </div>
+  </div>
+  <button class="icon-btn" onclick="logout()">Log out</button>
+</div>
+
+<div id="loginWrap">
+  <p class="muted">Enter admin key to continue</p>
+  <input type="password" id="adminKeyInput" placeholder="Admin key" autocomplete="off">
+  <button onclick="login()">Enter</button>
+</div>
+
+<div id="app">
+  <div class="summary-row" id="summaryRow"></div>
+  <div class="bulk-bar" id="bulkBar">
+    <span><span class="count" id="bulkCount">0</span> selected</span>
+    <button class="btn-sm btn-primary" onclick="bulkBackup()">Backup Selected</button>
+    <button class="btn-sm btn-danger" onclick="bulkDeleteOnly()">Delete Selected (only)</button>
+    <button class="btn-sm btn-danger" onclick="bulkBackupThenDelete()">Backup + Delete Selected</button>
+    <button class="btn-sm" onclick="clearSelection()">Clear selection</button>
+  </div>
+  <input type="text" id="search" placeholder="Search installation ID or store name..." oninput="renderTable()">
+  <table>
+    <thead>
+      <tr>
+        <th><input type="checkbox" id="selectAll" onchange="toggleSelectAll(this.checked)"></th>
+        <th>Store / Installation ID</th>
+        <th>Allowed</th>
+        <th>Records</th>
+        <th>Size</th>
+        <th>Last Sync</th>
+        <th>Sync Count</th>
+        <th>Fingerprint</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody id="tableBody"></tbody>
+  </table>
+</div>
+
+<div id="toast"></div>
+
+<script>
+let adminKey = sessionStorage.getItem('relayAdminKey') || '';
+let installations = [];
+let selected = new Set();
+
+function toast(msg, isError) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.borderColor = isError ? 'var(--red-line)' : 'var(--border-soft)';
+  t.style.display = 'block';
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => { t.style.display = 'none'; }, 5000);
+}
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    ...options,
+    headers: { ...(options.headers || {}), 'x-relay-admin-key': adminKey }
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.success === false) {
+    throw new Error(data.message || `Request failed (${res.status})`);
+  }
+  return data;
+}
+
+function login() {
+  const val = document.getElementById('adminKeyInput').value.trim();
+  if (!val) return;
+  adminKey = val;
+  sessionStorage.setItem('relayAdminKey', adminKey);
+  boot();
+}
+
+function logout() {
+  adminKey = '';
+  sessionStorage.removeItem('relayAdminKey');
+  document.getElementById('adminKeyInput').value = '';
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('loginWrap').style.display = 'block';
+}
+
+function formatBytes(n) {
+  if (!n) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+function formatDate(v) {
+  if (!v) return '—';
+  const d = new Date(v);
+  if (isNaN(d.getTime())) return '—';
+  return d.toLocaleString();
+}
+
+async function loadInstallations() {
+  const data = await api('/relay/admin/api/installations');
+  installations = data.installations || [];
+  if (!data.cloudBackupConfigured) {
+    toast('Note: Postgres (DATABASE_URL) is not configured on RELAY — Cloud Backup figures will show as empty.', true);
+  }
+  renderSummary();
+  renderTable();
+}
+
+function renderSummary() {
+  const totalSize = installations.reduce((sum, i) => sum + (i.sizeBytes || 0), 0);
+  const withData = installations.filter(i => i.hasCloudBackupData).length;
+  const flagged = installations.filter(i => i.fingerprintFlagged).length;
+  document.getElementById('summaryRow').innerHTML = `
+    <div class="summary-card"><div class="num">${installations.length}</div><div class="lbl">Total Installations</div></div>
+    <div class="summary-card"><div class="num">${withData}</div><div class="lbl">With Cloud Backup Data</div></div>
+    <div class="summary-card"><div class="num">${formatBytes(totalSize)}</div><div class="lbl">Total Stored Size</div></div>
+    <div class="summary-card"><div class="num">${flagged}</div><div class="lbl">Clone-Flagged</div></div>
+  `;
+}
+
+function toggleRow(id, checked) {
+  if (checked) selected.add(id); else selected.delete(id);
+  updateBulkBar();
+}
+
+function toggleSelectAll(checked) {
+  const q = document.getElementById('search').value.trim().toLowerCase();
+  const visible = installations.filter(i => !q || i.installationId.toLowerCase().includes(q) || (i.storeName || '').toLowerCase().includes(q));
+  if (checked) visible.forEach(i => selected.add(i.installationId));
+  else visible.forEach(i => selected.delete(i.installationId));
+  renderTable();
+}
+
+function clearSelection() {
+  selected.clear();
+  renderTable();
+}
+
+function updateBulkBar() {
+  const bar = document.getElementById('bulkBar');
+  document.getElementById('bulkCount').textContent = selected.size;
+  bar.classList.toggle('active', selected.size > 0);
+}
+
+function renderTable() {
+  const q = document.getElementById('search').value.trim().toLowerCase();
+  const filtered = installations.filter(i =>
+    !q || i.installationId.toLowerCase().includes(q) || (i.storeName || '').toLowerCase().includes(q)
+  );
+  const rows = filtered.map(i => `
+    <tr>
+      <td><input type="checkbox" ${selected.has(i.installationId) ? 'checked' : ''} onchange="toggleRow('${i.installationId}', this.checked)"></td>
+      <td>
+        <div>${i.storeName || i.label || '<span class="muted">(no store name)</span>'}</div>
+        <div class="id-cell">${i.installationId}</div>
+      </td>
+      <td>${i.allowed ? '<span class="badge badge-green">Allowed</span>' : '<span class="badge badge-red">Not allowed</span>'}</td>
+      <td>${i.totalRecords || 0} <span class="muted">(${i.moduleCount || 0} modules)</span></td>
+      <td>${formatBytes(i.sizeBytes)}</td>
+      <td>${formatDate(i.lastSyncAt)}</td>
+      <td>${i.syncCount || 0}</td>
+      <td>${i.fingerprintFlagged ? '<span class="badge badge-amber">Flagged</span>' : (i.fingerprintVerified ? '<span class="badge badge-green">Verified</span>' : '<span class="muted">—</span>')}</td>
+      <td>
+        <div class="row-actions">
+          <button class="btn-sm btn-primary" onclick="downloadBackup('${i.installationId}')">Backup</button>
+          <button class="btn-sm btn-danger" onclick="deleteOnly('${i.installationId}')">Delete only</button>
+          <button class="btn-sm btn-danger" onclick="backupThenDelete('${i.installationId}')">Backup + Delete</button>
+        </div>
+      </td>
+    </tr>
+  `).join('');
+  document.getElementById('tableBody').innerHTML = rows || `<tr><td colspan="9" class="muted">No installations found.</td></tr>`;
+  document.getElementById('selectAll').checked = filtered.length > 0 && filtered.every(i => selected.has(i.installationId));
+  updateBulkBar();
+}
+
+// Triggers a real file download of the export JSON (uses an <a> click
+// against the authenticated endpoint via a signed fetch + blob, since
+// a plain link can't carry the x-relay-admin-key header).
+async function downloadBackup(installationId) {
+  try {
+    const res = await fetch(`/relay/admin/api/installations/${encodeURIComponent(installationId)}/export`, {
+      headers: { 'x-relay-admin-key': adminKey }
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.message || `Export failed (${res.status})`);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `relay-backup-${installationId}-${Date.now()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast(`Backup downloaded for ${installationId}.`);
+    return true;
+  } catch (err) {
+    toast(err.message, true);
+    return false;
+  }
+}
+
+async function deleteOnly(installationId) {
+  const typed = prompt(`This permanently deletes ALL data for:\n${installationId}\n\nThis cannot be undone. Type DELETE to confirm.`);
+  if (typed !== 'DELETE') { toast('Cancelled.'); return; }
+  try {
+    await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/purge?confirm=DELETE`, { method: 'POST' });
+    toast(`${installationId} has been permanently deleted.`);
+    await loadInstallations();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+async function backupThenDelete(installationId) {
+  const ok = await downloadBackup(installationId);
+  if (!ok) {
+    toast('Backup failed — deletion was NOT performed, to avoid losing data with no copy.', true);
+    return;
+  }
+  const typed = prompt(`Backup downloaded. Now permanently delete ALL data for:\n${installationId}\n\nType DELETE to confirm.`);
+  if (typed !== 'DELETE') { toast('Backup saved. Deletion cancelled.'); return; }
+  try {
+    await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/purge?confirm=DELETE`, { method: 'POST' });
+    toast(`Backup saved and ${installationId} has been permanently deleted.`);
+    await loadInstallations();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+async function bulkBackup() {
+  const ids = [...selected];
+  if (!ids.length) return;
+  try {
+    const res = await fetch('/relay/admin/api/installations/bulk-export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-relay-admin-key': adminKey },
+      body: JSON.stringify({ installationIds: ids })
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.message || `Bulk export failed (${res.status})`);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `relay-bulk-backup-${Date.now()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast(`Backup downloaded for ${ids.length} installation(s) in one file.`);
+    return true;
+  } catch (err) {
+    toast(err.message, true);
+    return false;
+  }
+}
+
+async function bulkDeleteOnly() {
+  const ids = [...selected];
+  if (!ids.length) return;
+  const typed = prompt(`This permanently deletes ALL data for ${ids.length} installation(s):\n${ids.join(', ')}\n\nThis cannot be undone. Type DELETE to confirm.`);
+  if (typed !== 'DELETE') { toast('Cancelled.'); return; }
+  await runBulkDelete(ids);
+}
+
+async function bulkBackupThenDelete() {
+  const ids = [...selected];
+  if (!ids.length) return;
+  const ok = await bulkBackup();
+  if (!ok) {
+    toast('Bulk backup failed — deletion was NOT performed, to avoid losing data with no copy.', true);
+    return;
+  }
+  const typed = prompt(`Backup downloaded. Now permanently delete ALL data for ${ids.length} installation(s):\n${ids.join(', ')}\n\nType DELETE to confirm.`);
+  if (typed !== 'DELETE') { toast('Backup saved. Deletion cancelled.'); return; }
+  await runBulkDelete(ids);
+}
+
+async function runBulkDelete(ids) {
+  let okCount = 0;
+  const failed = [];
+  for (const id of ids) {
+    try {
+      await api(`/relay/admin/api/devices/${encodeURIComponent(id)}/purge?confirm=DELETE`, { method: 'POST' });
+      okCount++;
+    } catch (err) {
+      failed.push(`${id}: ${err.message}`);
+    }
+  }
+  selected.clear();
+  await loadInstallations();
+  if (failed.length) {
+    toast(`Deleted ${okCount}/${ids.length}. Failed: ${failed.join('; ')}`, true);
+  } else {
+    toast(`Deleted ${okCount} installation(s) successfully.`);
+  }
+}
+
+async function boot() {
+  document.getElementById('loginWrap').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  try {
+    await loadInstallations();
+  } catch (err) {
+    toast(err.message, true);
+    if (String(err.message).toLowerCase().includes('admin key')) logout();
+  }
+}
+
+if (adminKey) boot();
+document.getElementById('adminKeyInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') login();
+});
+</script>
+</body>
+</html>

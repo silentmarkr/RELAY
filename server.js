@@ -1326,6 +1326,7 @@ const CLOUD_BACKUP_COST_SAFETY_MARGIN_MULTIPLIER = 1.30;
 function computeRealCloudBackupSyncCostPHP(sizeBytes, tier, usdToPhpRate) {
     const plan = CLOUD_BACKUP_PLANS[tier] || CLOUD_BACKUP_PLANS.basic;
     const sizeBytesSafe = Math.max(0, Number(sizeBytes) || 0);
+    const sizeGB = sizeBytesSafe / (1024 * 1024 * 1024);
     const sizeMB = sizeBytesSafe / (1024 * 1024);
     const neonPlanId = neonConfiguredPlans.cloudBackup || 'free';
     let neonTier = NEON_PRICING[neonPlanId];
@@ -1338,17 +1339,10 @@ function computeRealCloudBackupSyncCostPHP(sizeBytes, tier, usdToPhpRate) {
     // MALING paraan ang bahagyang mag-overcharge kaysa sa dating
     // undercharge (safe-by-default fallback).
     if (!neonTier || !neonTier.storageRatePerGBMonthUSD) neonTier = NEON_PRICING.scale;
-    // BUGFIX: TINANGGAL ang STORAGE component dito. Dating may
-    // perSyncStorageCostUSD (monthlyStorageCostUSD / expectedSyncsPerMonth)
-    // na idinaragdag sa per-sync charge — pero ngayong may HIWALAY nang
-    // Storage Holding Fee (tingnan ang runStorageHoldingFeeSweep() sa
-    // ibaba) na naniningil din base sa AKTWAL na size_bytes x storage
-    // rate x elapsed time, ang dalawa ay NAGDO-DOUBLE-BILL ng EKSAKTONG
-    // parehong Neon storage cost: minsan sa bawat sync (dito) AT
-    // paulit-ulit bawat araw (doon). Ang orihinal na spec ay malinaw:
-    // "Per-sync fee (compute lang)" — compute ONLY ang dapat isama sa
-    // per-sync charge; ang storage ay dapat sa Storage Holding Fee na
-    // lang ipasa, hindi na rito.
+    // STORAGE component
+    const monthlyStorageCostUSD = sizeGB * neonTier.storageRatePerGBMonthUSD;
+    const expectedSyncsPerMonth = Math.max(1, Math.round((30 * 24 * 60 * 60 * 1000) / plan.autoBackupIntervalMs));
+    const perSyncStorageCostUSD = monthlyStorageCostUSD / expectedSyncsPerMonth;
     // AYOS/BAGO: COMPUTE component — bukod sa storage, may bayad din ang
     // Neon sa COMPUTE (CU-hours). Gamit ang admin-configurable na
     // "cloudBackupSyncCompute" assumption (tingnan ang NEON_PRICING_BASE
@@ -1366,9 +1360,7 @@ function computeRealCloudBackupSyncCostPHP(sizeBytes, tier, usdToPhpRate) {
     const assumedComputeSeconds = computeAssumption.assumedBaseSeconds + (sizeMB * computeAssumption.assumedSecondsPerMB);
     const assumedComputeCUHours = computeAssumption.assumedCU * (assumedComputeSeconds / 3600);
     const perSyncComputeCostUSD = assumedComputeCUHours * computeRateUSD;
-    // BUGFIX: compute-only na ngayon ang perSyncCostUSD (dating +
-    // perSyncStorageCostUSD, tanggal na — tingnan ang paliwanag sa itaas).
-    const perSyncCostUSD = perSyncComputeCostUSD;
+    const perSyncCostUSD = perSyncStorageCostUSD + perSyncComputeCostUSD;
     const rate = usdToPhpRate || EXCHANGE_RATE_FALLBACK_USD_TO_PHP;
     // Universal Safety Margin — tingnan ang paliwanag sa itaas.
     return perSyncCostUSD * rate * CLOUD_BACKUP_COST_SAFETY_MARGIN_MULTIPLIER;
@@ -1443,25 +1435,7 @@ function computeRealCloudBackupRestoreCostPHP(sizeBytes, tier, usdToPhpRate) {
     const assumedComputeSeconds = computeAssumption.assumedBaseSeconds + (sizeMB * computeAssumption.assumedSecondsPerMB);
     const assumedComputeCUHours = computeAssumption.assumedCU * (assumedComputeSeconds / 3600);
     const restoreComputeCostUSD = assumedComputeCUHours * computeRateUSD;
-    // BUGFIX/GAP: dati, sinasabi ng comment sa itaas ng function na
-    // "the actual Neon egress/compute cost of a restore is covered" —
-    // pero WALANG egress component na kailanman naisama sa kwenta, kahit
-    // pa idineklara ang egressOverageRatePerGBUSD sa NEON_PRICING para
-    // dito. Ang restore ang EKSAKTONG operasyon na nagpapalabas (egress)
-    // ng buong laki ng backup mula sa Neon papunta sa RELAY — hindi tulad
-    // ng sync (na "ingress" papasok sa Neon, hindi karaniwang sinisingil
-    // ng cloud providers). Kung walang egress charge dito, ang totoong
-    // Neon egress cost ng bawat restore ay 100% sa developer na lang
-    // babagsak kahit "covered" na ang akala. Idinagdag: isang buong
-    // pagbasa (1x sizeGB) laban sa egressOverageRatePerGBUSD ng
-    // naka-configure/naka-fallback na Neon tier — parehong safe-by-
-    // default fallback pattern (Scale rate) tulad ng storage/compute sa
-    // itaas kapag walang valid na egress rate sa neonTier.
-    const egressRateUSD = (typeof neonTier.egressOverageRatePerGBUSD === 'number' && neonTier.egressOverageRatePerGBUSD > 0)
-        ? neonTier.egressOverageRatePerGBUSD
-        : NEON_PRICING.scale.egressOverageRatePerGBUSD;
-    const restoreEgressCostUSD = sizeGB * egressRateUSD;
-    const perRestoreCostUSD = restoreStorageCostUSD + restoreComputeCostUSD + restoreEgressCostUSD;
+    const perRestoreCostUSD = restoreStorageCostUSD + restoreComputeCostUSD;
     const rate = usdToPhpRate || EXCHANGE_RATE_FALLBACK_USD_TO_PHP;
     // Universal Safety Margin — tingnan ang paliwanag sa computeRealCloudBackupSyncCostPHP() sa itaas.
     return perRestoreCostUSD * rate * CLOUD_BACKUP_COST_SAFETY_MARGIN_MULTIPLIER;
@@ -4859,6 +4833,181 @@ app.get('/relay/admin/api/devices/:installationId/detail', requireAdminKey, (req
         history
     });
 });
+// ===================================================================
+// BAGO: "Installation Data" admin page — isang listahan ng LAHAT ng
+// installation (per store) na may buod ng lahat ng nakasave nilang
+// datos: ilang records/modules, gaano kalaki (bytes), kailan huling
+// nag-sync, existing pa ba sa allowed device list, at fingerprint/
+// clone-flag status. Ginagamit ang parehong in-memory state
+// (allowedDevices/deviceLabels/deviceFingerprints/seenDevices) na
+// ginagamit na rin ng /relay/admin/api/devices, dagdag na lang ang
+// SQL query sa cloud_backup_meta (Neon-only, walang in-memory cache
+// nito) para sa mga column na size_bytes/last_sync_at/atbp.
+app.get('/relay/admin/api/installations', requireAdminKey, async (req, res) => {
+    try {
+        let metaByInstallation = new Map();
+        if (pgPool) {
+            const { rows } = await queryWithRetry(
+                pgPool,
+                `SELECT installation_id, store_name, total_records, module_count, size_bytes,
+                        last_sync_at, sync_count, restore_count, last_restore_at
+                 FROM cloud_backup_meta`,
+                []
+            );
+            metaByInstallation = new Map(rows.map(r => [r.installation_id, r]));
+        }
+        // Kunin ang UNION ng lahat ng kilalang installation ID mula sa bawat
+        // pinagmumulan — hindi lahat ng device ay may Cloud Backup data pa
+        // (hal. hindi pa naka-subscribe), at hindi lahat ng may Cloud Backup
+        // row ay kasalukuyang naka-seen/naka-allow (hal. na-uninstall na
+        // ang app pero naiwan pa ang datos sa Neon) — dapat pareho itong
+        // makita dito, kasi parehong may "data na pwedeng ikalugi" kapag
+        // hindi na-manage.
+        const allIds = new Set([
+            ...metaByInstallation.keys(),
+            ...seenDevices.keys(),
+            ...allowedDevices
+        ]);
+        const ids = [...allIds];
+        const onlineMap = await getOnlineStatusMap(ids);
+        const installations = ids.map((installationId) => {
+            const meta = metaByInstallation.get(installationId) || null;
+            const seen = seenDevices.get(installationId) || null;
+            const fingerprintRecord = deviceFingerprints.get(installationId) || null;
+            return {
+                installationId,
+                storeName: (meta && meta.store_name) || (seen && seen.storeName) || null,
+                label: deviceLabels.get(installationId) || null,
+                allowed: allowedDevices.has(installationId),
+                online: !!onlineMap[installationId],
+                lastSeenAt: seen ? seen.lastSeenAt : null,
+                // === Cloud Backup data footprint (Neon) ===
+                hasCloudBackupData: !!meta,
+                totalRecords: meta ? Number(meta.total_records) || 0 : 0,
+                moduleCount: meta ? Number(meta.module_count) || 0 : 0,
+                sizeBytes: meta ? Number(meta.size_bytes) || 0 : 0,
+                lastSyncAt: meta ? meta.last_sync_at : null,
+                syncCount: meta ? Number(meta.sync_count) || 0 : 0,
+                restoreCount: meta ? Number(meta.restore_count) || 0 : 0,
+                lastRestoreAt: meta ? meta.last_restore_at : null,
+                // === Device/clone integrity ===
+                fingerprintVerified: !!(fingerprintRecord && fingerprintRecord.fingerprint),
+                fingerprintFlagged: !!(fingerprintRecord && fingerprintRecord.flagged),
+                fingerprintVerifyCount: fingerprintRecord ? fingerprintRecord.verifyCount : 0,
+                lastVerifiedAt: fingerprintRecord ? fingerprintRecord.lastVerifiedAt : null
+            };
+        }).sort((a, b) => (b.sizeBytes || 0) - (a.sizeBytes || 0));
+        res.json({
+            success: true,
+            checkedAt: Date.now(),
+            cloudBackupConfigured: !!pgPool,
+            count: installations.length,
+            installations
+        });
+    } catch (err) {
+        console.error('⚠️  /relay/admin/api/installations error:', err.message);
+        res.status(500).json({ success: false, message: 'Could not load the installations list.' });
+    }
+});
+// BAGO: i-export ang buong Cloud Backup data (lahat ng module, hilaw
+// na JSONB) ng IISANG installation bilang isang downloadable JSON file
+// — GAMIT ANG PAREHONG SHAPE ({ meta, modules, redactedFieldsByModule })
+// na ibinabalik ng /relay/cloud-backup/restore sa OMNIPOS client mismo,
+// para kung sakaling kailanganin pa ito, direktang magagamit/mai-restore
+// ito pabalik sa parehong format na kilala na ng sistema. Walang token
+// charge dito (admin-initiated na export/manual backup, hindi client
+// restore), at hindi ito naka-rate-limit tulad ng client-facing restore
+// dahil ang tumatawag dito ay ang developer/admin lang (requireAdminKey).
+app.get('/relay/admin/api/installations/:installationId/export', requireAdminKey, async (req, res) => {
+    const { installationId } = req.params;
+    if (!installationId) {
+        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+    }
+    if (!pgPool) {
+        return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured — walang Cloud Backup data na makukuha.' });
+    }
+    try {
+        const metaResult = await queryWithRetry(pgPool, 'SELECT * FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
+        if (!metaResult.rows[0]) {
+            return res.status(404).json({ success: false, message: 'Walang Cloud Backup data na nakita para sa installation na ito sa Neon.' });
+        }
+        const modulesResult = await queryWithRetry(pgPool, 'SELECT module, data, record_count, size_bytes, updated_at FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
+        const modules = {};
+        modulesResult.rows.forEach((r) => { modules[r.module] = r.data; });
+        const exportBody = {
+            exportedAt: new Date().toISOString(),
+            exportedBy: 'relay-admin-installations-page',
+            installationId,
+            meta: {
+                storeName: metaResult.rows[0].store_name,
+                totalRecords: metaResult.rows[0].total_records,
+                moduleCount: metaResult.rows[0].module_count,
+                sizeBytes: Number(metaResult.rows[0].size_bytes) || 0,
+                lastSyncAt: metaResult.rows[0].last_sync_at,
+                syncCount: metaResult.rows[0].sync_count,
+                restoreCount: metaResult.rows[0].restore_count,
+                lastRestoreAt: metaResult.rows[0].last_restore_at
+            },
+            modules,
+            redactedFieldsByModule: CLOUD_BACKUP_REDACTED_FIELDS_BY_MODULE
+        };
+        logActivity(installationId, 'admin_data_exported', {
+            moduleCount: modulesResult.rows.length,
+            sizeBytes: Number(metaResult.rows[0].size_bytes) || 0
+        });
+        const fileSafeId = String(installationId).replace(/[^a-zA-Z0-9_-]/g, '_');
+        res.set('Content-Type', 'application/json; charset=utf-8');
+        res.set('Content-Disposition', `attachment; filename="relay-backup-${fileSafeId}-${Date.now()}.json"`);
+        res.send(JSON.stringify(exportBody, null, 2));
+    } catch (err) {
+        console.error('⚠️  /relay/admin/api/installations/:installationId/export error:', err.message);
+        res.status(500).json({ success: false, message: 'May error habang ine-export ang data: ' + err.message });
+    }
+});
+// BAGO: i-export ang Cloud Backup data ng MARAMING installation nang
+// sabay-sabay bilang ISANG JSON file (array ng bawat installation's
+// export object) — para sa "select multiple, backup all" flow sa
+// installations.html, iisa lang ang na-do-download na file (hindi
+// paulit-ulit na browser download prompt kada row).
+app.post('/relay/admin/api/installations/bulk-export', requireAdminKey, async (req, res) => {
+    const { installationIds } = req.body || {};
+    if (!Array.isArray(installationIds) || installationIds.length === 0) {
+        return res.status(400).json({ success: false, message: 'Kulang o walang laman ang installationIds array.' });
+    }
+    if (!pgPool) {
+        return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured.' });
+    }
+    try {
+        const exports = [];
+        const skipped = [];
+        for (const installationId of installationIds) {
+            const metaResult = await queryWithRetry(pgPool, 'SELECT * FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
+            if (!metaResult.rows[0]) { skipped.push(installationId); continue; }
+            const modulesResult = await queryWithRetry(pgPool, 'SELECT module, data FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
+            const modules = {};
+            modulesResult.rows.forEach((r) => { modules[r.module] = r.data; });
+            exports.push({
+                installationId,
+                meta: {
+                    storeName: metaResult.rows[0].store_name,
+                    totalRecords: metaResult.rows[0].total_records,
+                    moduleCount: metaResult.rows[0].module_count,
+                    sizeBytes: Number(metaResult.rows[0].size_bytes) || 0,
+                    lastSyncAt: metaResult.rows[0].last_sync_at
+                },
+                modules,
+                redactedFieldsByModule: CLOUD_BACKUP_REDACTED_FIELDS_BY_MODULE
+            });
+            logActivity(installationId, 'admin_data_exported', { via: 'bulk', moduleCount: modulesResult.rows.length });
+        }
+        res.set('Content-Type', 'application/json; charset=utf-8');
+        res.set('Content-Disposition', `attachment; filename="relay-bulk-backup-${Date.now()}.json"`);
+        res.send(JSON.stringify({ exportedAt: new Date().toISOString(), count: exports.length, skipped, exports }, null, 2));
+    } catch (err) {
+        console.error('⚠️  /relay/admin/api/installations/bulk-export error:', err.message);
+        res.status(500).json({ success: false, message: 'May error habang ine-export ang bulk backup: ' + err.message });
+    }
+});
 app.post('/relay/admin/api/devices/:installationId/clear-history', requireAdminKey, (req, res) => {
     const { installationId } = req.params;
     if (!installationId) {
@@ -4868,6 +5017,7 @@ app.post('/relay/admin/api/devices/:installationId/clear-history', requireAdminK
     activityLog = activityLog.filter(entry => entry.installationId !== installationId);
     const clearedCount = before - activityLog.length;
     saveActivityLog(activityLog);
+
     logActivity(installationId, 'device_history_cleared', { clearedCount });
     res.json({ success: true, clearedCount });
 });
@@ -7962,91 +8112,6 @@ app.get('/relay/admin/api/cloud-backup/near-quota-review', requireAdminKey, asyn
     } catch (err) {
         console.error('⚠️  /relay/admin/api/cloud-backup/near-quota-review error:', err.message);
         res.status(500).json({ success: false, message: 'Could not compute near-quota review.' });
-    }
-});
-// ===================================================================
-// GAWA/BAGO: STORAGE FEE DEBTORS — buod ng mga installation na NEGATIVE
-// na ang Omni Token balance dahil (bahagya man o buo) sa STORAGE_HOLDING_FEE
-// (tingnan ang runStorageHoldingFeeSweep() sa itaas). Sinasadyang WALANG
-// "insufficient" gate ang storage holding fee (patuloy itong naniningil
-// kahit naka-OFF ang auto-sync o lapsed na ang subscription — ang totoong
-// Neon storage cost ay patuloy ring binabayaran ng developer kay Neon
-// anuman ang ginagawa ng customer), kaya kailangan ng sarili nitong
-// visibility para makita agad kung sino ang "umuutang" — hindi ito
-// awtomatikong nabubura/nade-detect ng ibang existing report.
-// ===================================================================
-app.get('/relay/admin/api/cloud-backup/storage-fee-debtors', requireAdminKey, async (req, res) => {
-    if (!pgPool) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured.' });
-    try {
-        const { rows } = await queryWithRetry(
-            pgPool,
-            `SELECT
-                w.installation_id,
-                w.balance_tokens,
-                w.auto_sync_enabled,
-                m.store_name,
-                m.size_bytes,
-                m.last_sync_at,
-                COALESCE(sf.total_storage_fee_tokens, 0) AS total_storage_fee_tokens,
-                COALESCE(sf.storage_fee_charge_count, 0) AS storage_fee_charge_count,
-                sf.last_storage_fee_at,
-                COALESCE(other.total_other_charge_tokens, 0) AS total_other_charge_tokens
-             FROM cloud_token_wallets w
-             LEFT JOIN cloud_backup_meta m ON m.installation_id = w.installation_id
-             LEFT JOIN (
-                SELECT installation_id,
-                       SUM(-tokens) AS total_storage_fee_tokens,
-                       COUNT(*) AS storage_fee_charge_count,
-                       MAX(created_at) AS last_storage_fee_at
-                FROM cloud_token_ledger
-                WHERE category = 'STORAGE_HOLDING_FEE' AND type = 'consume'
-                GROUP BY installation_id
-             ) sf ON sf.installation_id = w.installation_id
-             LEFT JOIN (
-                SELECT installation_id, SUM(-tokens) AS total_other_charge_tokens
-                FROM cloud_token_ledger
-                WHERE category IN ('SYNC_CHARGE', 'RESTORE_CHARGE', 'FEATURE_UNLOCK') AND type = 'consume'
-                GROUP BY installation_id
-             ) other ON other.installation_id = w.installation_id
-             WHERE w.balance_tokens < 0
-             ORDER BY w.balance_tokens ASC`,
-            []
-        );
-        const debtors = rows.map(r => {
-            const sub = getCloudBackupSubscriptionForClient(r.installation_id);
-            return {
-                installationId: r.installation_id,
-                label: deviceLabels.get(r.installation_id) || null,
-                storeName: r.store_name || null,
-                balanceTokens: Number(r.balance_tokens),
-                // AYOS: ipinapakita rin ang auto_sync_enabled — direktang
-                // sinasagot nito ang tanong na "may bayad pa rin ba kahit
-                // naka-off ang auto-sync?" sa bawat naka-listang installation.
-                autoSyncEnabled: !!r.auto_sync_enabled,
-                cloudBackupActive: !!(sub.active || sub.isLifetime),
-                sizeMB: r.size_bytes !== null ? Math.round((Number(r.size_bytes) / (1024 * 1024)) * 100) / 100 : null,
-                lastSyncAt: r.last_sync_at || null,
-                totalStorageFeeTokens: Math.round(Number(r.total_storage_fee_tokens) * 1000) / 1000,
-                storageFeeChargeCount: Number(r.storage_fee_charge_count) || 0,
-                lastStorageFeeAt: r.last_storage_fee_at || null,
-                totalOtherChargeTokens: Math.round(Number(r.total_other_charge_tokens) * 1000) / 1000,
-                // Kung mas malaki ang storage-fee-driven na debt kaysa sa
-                // aktwal na negative balance mismo, ibig sabihin ang
-                // storage holding fee (hindi sync/restore) ang PANGUNAHING
-                // dahilan kung bakit negative ang balance nito.
-                primarilyStorageFeeDriven: Number(r.total_storage_fee_tokens) >= Math.abs(Number(r.balance_tokens))
-            };
-        });
-        res.json({
-            success: true,
-            checkedAt: Date.now(),
-            debtorCount: debtors.length,
-            totalDebtTokens: Math.round(debtors.reduce((s, d) => s + Math.abs(d.balanceTokens), 0) * 1000) / 1000,
-            debtors
-        });
-    } catch (err) {
-        console.error('⚠️  /relay/admin/api/cloud-backup/storage-fee-debtors error:', err.message);
-        res.status(500).json({ success: false, message: 'Could not compute storage fee debtors.' });
     }
 });
 
