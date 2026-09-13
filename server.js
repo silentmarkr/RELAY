@@ -8960,7 +8960,7 @@ app.post('/relay/request-receipt-credit-purchase',
                       `Store: ${storeName || 'Hindi tiyak'}\n` +
                       `Installation ID: ${installationId}\n` +
                       `Hiniling ni: ${requestedBy || 'Hindi tiyak'}\n` +
-                      `Presyo: ₱${Number(pricePHP) || '?'}\n` +
+                      `Presyo: ₱${Number(quote.totalPHP) || '?'}${quote.quantity > 1 ? ` (${quote.quantity} credits × ₱${quote.unitPrice})` : ''}\n` +
                       `OTP Code: ${otpCode}\n` +
                       `Mag-e-expire ito sa loob ng 10 minuto.\n\n` +
                       `I-VERIFY MUNA na natanggap ang bayad (GCash/Maya/Cash/etc.) bago mag-Approve at ibigay ang OTP na ito sa kliyente.`
@@ -9069,6 +9069,7 @@ app.post('/relay/confirm-receipt-credit-purchase',
             installationId,
             purpose: 'receipt-customization-credit-purchase',
             credits: pending.credits || RECEIPT_CREDIT_UNITS_PER_PURCHASE,
+            pricePHP: pending.pricePHP || 0,
             issuedAt: now,
             expiresAt: now + RECEIPT_CREDIT_TICKET_TTL_MS
         };
@@ -9154,6 +9155,7 @@ app.post('/relay/cloud-tokens/activate-receipt-credit', requireApiKey, requireAl
             installationId,
             purpose: 'receipt-customization-credit-purchase',
             credits: quote.quantity,
+            pricePHP: quote.totalPHP || 0,
             issuedAt: now,
             expiresAt: now + RECEIPT_CREDIT_TICKET_TTL_MS
         };
