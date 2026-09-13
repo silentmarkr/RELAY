@@ -181,8 +181,8 @@
       <button class="tab-btn active" data-tab="all" onclick="setTab('all')">All</button>
       <button class="tab-btn" data-tab="themes" onclick="setTab('themes')">🎨 Pro Themes</button>
       <button class="tab-btn" data-tab="modules" onclick="setTab('modules')">🧩 Modules</button>
-      <button class="tab-btn" data-tab="services" onclick="setTab('services')">🧾 Receipt Credits</button>
       <button class="tab-btn" data-tab="tiers" onclick="setTab('tiers')">📦 Bundle Price</button>
+      <button class="tab-btn" data-tab="receiptCredits" onclick="setTab('receiptCredits')">🧾 Receipt Credits</button>
     </div>
     <div class="tab-section" id="section-themes">
       <div class="section-label">🎨 Pro Themes</div>
@@ -191,11 +191,6 @@
     <div class="tab-section" id="section-modules">
       <div class="section-label">🧩 Modules</div>
       <div id="modulesGrid" class="plans-grid"></div>
-    </div>
-    <div class="tab-section" id="section-services">
-      <div class="section-label">🧾 Receipt Customization Credits</div>
-      <div style="font-size:.8rem;color:var(--muted);margin-bottom:10px;">Set the price of 1 additional Receipt Customization save and the bulk discount. RELAY is the source of truth used by OmniPOS for both manual purchase requests and Omni Token activation. Example: 2+ credits at 5% off.</div>
-      <div id="servicesGrid" class="plans-grid"></div>
     </div>
     <div class="tab-section" id="section-tiers">
       <div class="section-label">📦 Upgrade Bundles</div>
@@ -209,7 +204,22 @@
       <div id="tierWarnings"></div>
       <div id="tiersGrid" class="plans-grid"></div>
     </div>
-  </main>
+  
+    <div class="tab-section" id="section-receipt-credits">
+      <div class="section-label">🧾 Receipt Customization Credits</div>
+      <div class="pricing-card" style="max-width:720px;">
+        <div class="field-row"><label for="receiptCreditPriceInput">Price per credit (₱)</label><input type="number" id="receiptCreditPriceInput" min="0" step="0.01"></div>
+        <div class="field-row"><label for="receiptCreditDiscountMinInput">Bulk discount starts at (credits)</label><input type="number" id="receiptCreditDiscountMinInput" min="2" step="1"></div>
+        <div class="field-row"><label for="receiptCreditDiscountPercentInput">Bulk discount (%)</label><input type="number" id="receiptCreditDiscountPercentInput" min="0" max="90" step="0.01"></div>
+        <div class="field-row"><label for="receiptCreditMaxInput">Maximum credits per purchase</label><input type="number" id="receiptCreditMaxInput" min="1" max="1000" step="1"></div>
+        <div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <button type="button" class="btn btn-primary" onclick="saveReceiptCreditPricing()">Save Receipt Credit Pricing</button>
+          <span id="receiptCreditSavedNote" style="color:var(--success,#69db7c);display:none;">Saved ✓</span>
+        </div>
+        <div id="receiptCreditPricingPreview" style="margin-top:12px;font-size:.82rem;color:var(--muted);"></div>
+      </div>
+    </div>
+</main>
 </div>
 <div id="toast"></div>
 <script>
@@ -221,11 +231,41 @@ let tiersEffective = {};
 let tierWarnings = [];
 let tierOverrides = {};
 let selectableFeatureIds = [];
+let receiptCreditPricing = null;
+function renderReceiptCreditPricing() {
+  if (!receiptCreditPricing) return;
+  const p = receiptCreditPricing;
+  document.getElementById('receiptCreditPriceInput').value = p.pricePHP;
+  document.getElementById('receiptCreditDiscountMinInput').value = p.discountMinQuantity;
+  document.getElementById('receiptCreditDiscountPercentInput').value = p.discountPercent;
+  document.getElementById('receiptCreditMaxInput').value = p.maxQuantity;
+  const preview = document.getElementById('receiptCreditPricingPreview');
+  if (preview) preview.textContent = `Example: ${p.discountMinQuantity} credits or more gets ${p.discountPercent}% off. Current price: ₱${Number(p.pricePHP).toFixed(2)} per credit.`;
+}
+async function loadReceiptCreditPricing() {
+  const data = await api('/relay/admin/api/pricing/receipt-credits');
+  if (data && data.success) { receiptCreditPricing = data.pricing; renderReceiptCreditPricing(); }
+}
+async function saveReceiptCreditPricing() {
+  const body = {
+    pricePHP: Number(document.getElementById('receiptCreditPriceInput').value),
+    discountMinQuantity: Number(document.getElementById('receiptCreditDiscountMinInput').value),
+    discountPercent: Number(document.getElementById('receiptCreditDiscountPercentInput').value),
+    maxQuantity: Number(document.getElementById('receiptCreditMaxInput').value)
+  };
+  try {
+    const data = await api('/relay/admin/api/pricing/receipt-credits', { method:'POST', body: JSON.stringify(body) });
+    if (!data.success) throw new Error(data.message || 'Save failed');
+    receiptCreditPricing = data.pricing; renderReceiptCreditPricing();
+    const note=document.getElementById('receiptCreditSavedNote'); note.style.display='inline'; setTimeout(()=>note.style.display='none',1800);
+    toast('Receipt Credit pricing saved.', 'success');
+  } catch(e) { toast(e.message || 'Failed to save Receipt Credit pricing.', 'error'); }
+}
 function setTab(tab) {
   document.querySelectorAll('#filterTabs .tab-btn').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.tab === tab);
   });
-  const sections = { themes: 'section-themes', modules: 'section-modules', services: 'section-services', tiers: 'section-tiers' };
+  const sections = { themes: 'section-themes', modules: 'section-modules', tiers: 'section-tiers', receiptCredits: 'section-receipt-credits' };
   Object.entries(sections).forEach(([key, id]) => {
     document.getElementById(id).classList.toggle('hidden', !(tab === 'all' || tab === key));
   });
@@ -289,18 +329,8 @@ function cardHtml(featureId, entry) {
       </div>
       <div class="field">
         <label>Price (₱) ${fieldIsCustom(featureId, 'price') ? '<span class="badge">customized</span>' : '<span class="badge default">default</span>'}</label>
-        <input type="number" min="1" step="1" id="price-${featureId}" value="${entry.price}">
+        <input type="number" min="0" step="1" id="price-${featureId}" value="${entry.price}">
       </div>
-      ${featureId === 'receipt_customization_credit' ? `
-      <div class="field">
-        <label>Bulk Discount Starts At (credits) ${fieldIsCustom(featureId, 'discountMinQuantity') ? '<span class="badge">customized</span>' : '<span class="badge default">default</span>'}</label>
-        <input type="number" min="2" max="100" step="1" id="discount-min-${featureId}" value="${Number.isInteger(entry.discountMinQuantity) ? entry.discountMinQuantity : 2}">
-      </div>
-      <div class="field">
-        <label>Bulk Discount (%) ${fieldIsCustom(featureId, 'discountPercent') ? '<span class="badge">customized</span>' : '<span class="badge default">default</span>'}</label>
-        <input type="number" min="0" max="90" step="0.01" id="discount-pct-${featureId}" value="${Number.isFinite(Number(entry.discountPercent)) ? entry.discountPercent : 5}">
-        <div style="font-size:.74rem;color:var(--muted);margin-top:5px;">Example: 2 credits = 5% off. The discount applies to that quantity and above.</div>
-      </div>` : ''}
       <div class="actions">
         <button class="btn btn-save" onclick="saveFeature('${featureId}')">Save</button>
         <button class="btn btn-reset" onclick="resetFeature('${featureId}')">Reset to default</button>
@@ -370,23 +400,19 @@ function tierCardHtml(tierId, entry) {
 function renderCatalog() {
   const themesGrid = document.getElementById('themesGrid');
   const modulesGrid = document.getElementById('modulesGrid');
-  const servicesGrid = document.getElementById('servicesGrid');
   const tiersGrid = document.getElementById('tiersGrid');
   themesGrid.innerHTML = '';
   modulesGrid.innerHTML = '';
-  servicesGrid.innerHTML = '';
   tiersGrid.innerHTML = '';
   Object.entries(catalogEffective)
     .sort(([, a], [, b]) => a.name.localeCompare(b.name))
     .forEach(([featureId, entry]) => {
       const html = cardHtml(featureId, entry);
       if (entry.category === 'theme') themesGrid.insertAdjacentHTML('beforeend', html);
-      else if (entry.category === 'service') servicesGrid.insertAdjacentHTML('beforeend', html);
-      else if (entry.category === 'module') modulesGrid.insertAdjacentHTML('beforeend', html);
+      else modulesGrid.insertAdjacentHTML('beforeend', html);
     });
   if (!themesGrid.innerHTML) themesGrid.innerHTML = '<div style="color:var(--muted);">No themes in the catalog.</div>';
   if (!modulesGrid.innerHTML) modulesGrid.innerHTML = '<div style="color:var(--muted);">No modules in the catalog.</div>';
-  if (!servicesGrid.innerHTML) servicesGrid.innerHTML = '<div style="color:var(--muted);">No pricing services in the catalog.</div>';
   ['basic', 'standard', 'pro']
     .filter(tierId => tiersEffective[tierId])
     .forEach(tierId => {
@@ -449,15 +475,10 @@ async function resetTier(tierId) {
 async function saveFeature(featureId) {
   const name = document.getElementById(`name-${featureId}`).value.trim();
   const price = Number(document.getElementById(`price-${featureId}`).value);
-  const body = { featureId, name, price };
-  if (featureId === 'receipt_customization_credit') {
-    body.discountMinQuantity = Number(document.getElementById(`discount-min-${featureId}`).value);
-    body.discountPercent = Number(document.getElementById(`discount-pct-${featureId}`).value);
-  }
   try {
     const data = await api('/relay/admin/api/pricing/features', {
       method: 'POST',
-      body: JSON.stringify(body)
+      body: JSON.stringify({ featureId, name, price })
     });
     toast(`Saved "${data.feature.name}" pricing.`);
     await loadCatalog();
@@ -520,6 +541,7 @@ async function boot() {
   if (!adminKey) return;
   try {
     await loadCatalog();
+    await loadReceiptCreditPricing();
     document.getElementById('loginWrap').classList.add('hidden');
     document.getElementById('app').classList.remove('hidden');
   } catch (err) {

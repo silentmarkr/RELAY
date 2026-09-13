@@ -1124,7 +1124,6 @@ const FEATURE_CATALOG_BASE = {
     promo_codes: { name: 'Promo Codes Module', price: 499, category: 'module' },
     advanced_reports: { name: 'Sales Analytics & Advanced Reports', price: 799, category: 'module' },
     shift_management: { name: 'Multi-Cashier Shift Oversight & Z-Reading Reports', price: 699, category: 'module' },
-    receipt_customization_credit: { name: 'Receipt Customization Credit', price: 59, discountMinQuantity: 2, discountPercent: 5, category: 'service', pricingOnly: true },
     rbac_management: { name: 'Roles & Permissions (RBAC) Management', price: null, category: 'module', isSubscription: true },
     multi_branch: { name: 'Multi-Branch Dashboard', price: null, category: 'module', isSubscription: true },
     ai_assistant: { name: 'OmniPOS AI Assistant', price: null, category: 'module', isSubscription: true },
@@ -2286,50 +2285,6 @@ function isModuleSubscriptionFeature(featureId) {
 function isSubscriptionOnlyFeature(featureId) {
     return featureId === 'cloud_backup' || isModuleSubscriptionFeature(featureId);
 }
-function isPricingOnlyFeature(featureId) {
-    const entry = FEATURE_CATALOG[featureId] || FEATURE_CATALOG_BASE[featureId];
-    return !!(entry && entry.pricingOnly);
-}
-const RECEIPT_CREDIT_DEFAULT_PRICE = 59;
-const RECEIPT_CREDIT_DEFAULT_DISCOUNT_MIN_QTY = 2;
-const RECEIPT_CREDIT_DEFAULT_DISCOUNT_PERCENT = 5;
-const RECEIPT_CREDIT_MAX_QUANTITY = 100;
-function getReceiptCreditPricing() {
-    const entry = FEATURE_CATALOG.receipt_customization_credit || FEATURE_CATALOG_BASE.receipt_customization_credit;
-    const priceRaw = Number(entry && entry.price);
-    const discountMinRaw = Number(entry && entry.discountMinQuantity);
-    const discountPctRaw = Number(entry && entry.discountPercent);
-    const unitPrice = Number.isFinite(priceRaw) && priceRaw >= 1 ? Math.round(priceRaw) : RECEIPT_CREDIT_DEFAULT_PRICE;
-    const discountMinQuantity = Number.isInteger(discountMinRaw) && discountMinRaw >= 2 && discountMinRaw <= RECEIPT_CREDIT_MAX_QUANTITY
-        ? discountMinRaw : RECEIPT_CREDIT_DEFAULT_DISCOUNT_MIN_QTY;
-    const discountPercent = Number.isFinite(discountPctRaw) && discountPctRaw >= 0 && discountPctRaw <= 90
-        ? Math.round(discountPctRaw * 100) / 100 : RECEIPT_CREDIT_DEFAULT_DISCOUNT_PERCENT;
-    return { unitPrice, discountMinQuantity, discountPercent };
-}
-function getReceiptCreditPriceTokens() {
-    return getReceiptCreditPricing().unitPrice;
-}
-function calculateReceiptCreditQuote(quantity) {
-    const pricing = getReceiptCreditPricing();
-    const qty = Number.isInteger(quantity) ? quantity : Math.floor(Number(quantity));
-    if (!Number.isInteger(qty) || qty < 1 || qty > RECEIPT_CREDIT_MAX_QUANTITY) return null;
-    const subtotalPHP = pricing.unitPrice * qty;
-    const discountPercent = qty >= pricing.discountMinQuantity ? pricing.discountPercent : 0;
-    const discountPHP = Math.round(subtotalPHP * discountPercent) / 100;
-    const totalPHP = Math.max(0, Math.round((subtotalPHP - discountPHP) * 100) / 100);
-    // Omni Tokens are integer units. Round UP so RELAY never undercharges.
-    const totalTokens = Math.max(1, Math.ceil(totalPHP));
-    return {
-        quantity: qty,
-        unitPricePHP: pricing.unitPrice,
-        subtotalPHP,
-        discountMinQuantity: pricing.discountMinQuantity,
-        discountPercent,
-        discountPHP,
-        totalPHP,
-        totalTokens
-    };
-}
 const MODULE_SUBSCRIPTION_PLANS_BASE = {
     rbac_management: {
         id: 'rbac_management',
@@ -3249,16 +3204,16 @@ const UPGRADE_TIER_FEATURE_IDS_BASE = {
 let UPGRADE_TIERS = [
     { id: 'basic', name: 'Basic Upgrade', featureIds: [...UPGRADE_TIER_FEATURE_IDS_BASE.basic], bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.basic },
     { id: 'standard', name: 'Standard Upgrade', featureIds: [...UPGRADE_TIER_FEATURE_IDS_BASE.standard], bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.standard },
-    { id: 'pro', name: 'Pro Upgrade (Complete)', featureIds: Object.keys(FEATURE_CATALOG).filter(id => !isSubscriptionOnlyFeature(id) && !isPricingOnlyFeature(id)), bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.pro }
+    { id: 'pro', name: 'Pro Upgrade (Complete)', featureIds: Object.keys(FEATURE_CATALOG).filter(id => !isSubscriptionOnlyFeature(id)), bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.pro }
 ];
 function recomputeProTierFeatureIds() {
     const proTier = UPGRADE_TIERS.find(t => t.id === 'pro');
     if (!proTier) return;
     const override = upgradeTierPricingOverrides && upgradeTierPricingOverrides.pro;
     if (override && Array.isArray(override.featureIds) && override.featureIds.length) {
-        proTier.featureIds = override.featureIds.filter(id => FEATURE_CATALOG[id] && !isSubscriptionOnlyFeature(id) && !isPricingOnlyFeature(id));
+        proTier.featureIds = override.featureIds.filter(id => FEATURE_CATALOG[id] && !isSubscriptionOnlyFeature(id));
     } else {
-        proTier.featureIds = Object.keys(FEATURE_CATALOG).filter(id => !isSubscriptionOnlyFeature(id) && !isPricingOnlyFeature(id));
+        proTier.featureIds = Object.keys(FEATURE_CATALOG).filter(id => !isSubscriptionOnlyFeature(id));
     }
 }
 function recomputeUpgradeTierPricing() {
@@ -4326,23 +4281,12 @@ app.get('/relay/admin/api/pricing/features', requireAdminKey, (req, res) => {
     });
 });
 app.post('/relay/admin/api/pricing/features', requireAdminKey, (req, res) => {
-    const { featureId, name, price, discountMinQuantity, discountPercent } = req.body || {};
+    const { featureId, name, price } = req.body || {};
     if (!featureId || isSubscriptionOnlyFeature(featureId) || !FEATURE_CATALOG[featureId]) {
         return res.status(400).json({ success: false, message: 'Invalid or unknown featureId (or it is a subscription feature — cloud_backup/rbac_management/multi_branch/ai_assistant — which has its own dedicated pricing editor).' });
     }
     if (price !== undefined && (typeof price !== 'number' || !isFinite(price) || price < 0)) {
         return res.status(400).json({ success: false, message: 'Invalid price.' });
-    }
-    if (featureId === 'receipt_customization_credit' && price !== undefined && price < 1) {
-        return res.status(400).json({ success: false, message: 'Receipt Customization Credit price must be at least ₱1.' });
-    }
-    if (featureId === 'receipt_customization_credit') {
-        if (discountMinQuantity !== undefined && (!Number.isInteger(discountMinQuantity) || discountMinQuantity < 2 || discountMinQuantity > RECEIPT_CREDIT_MAX_QUANTITY)) {
-            return res.status(400).json({ success: false, message: `Bulk discount minimum quantity must be an integer from 2 to ${RECEIPT_CREDIT_MAX_QUANTITY}.` });
-        }
-        if (discountPercent !== undefined && (typeof discountPercent !== 'number' || !isFinite(discountPercent) || discountPercent < 0 || discountPercent > 90)) {
-            return res.status(400).json({ success: false, message: 'Bulk discount must be between 0% and 90%.' });
-        }
     }
     if (name !== undefined && (typeof name !== 'string' || !name.trim())) {
         return res.status(400).json({ success: false, message: 'Invalid name.' });
@@ -4351,10 +4295,6 @@ app.post('/relay/admin/api/pricing/features', requireAdminKey, (req, res) => {
     const updated = { ...existing };
     if (typeof name === 'string' && name.trim()) updated.name = name.trim();
     if (typeof price === 'number') updated.price = price;
-    if (featureId === 'receipt_customization_credit') {
-        if (Number.isInteger(discountMinQuantity)) updated.discountMinQuantity = discountMinQuantity;
-        if (typeof discountPercent === 'number') updated.discountPercent = Math.round(discountPercent * 100) / 100;
-    }
     featurePricingOverrides[featureId] = updated;
     saveFeaturePricingOverrides(featurePricingOverrides);
     recomputeFeatureCatalog();
@@ -4433,7 +4373,7 @@ app.get('/relay/admin/api/pricing/tiers', requireAdminKey, (req, res) => {
             featureIds: UPGRADE_TIER_FEATURE_IDS_BASE[tierId] || undefined
         };
     }
-    const selectableFeatureIds = Object.keys(FEATURE_CATALOG).filter(id => !isSubscriptionOnlyFeature(id) && !isPricingOnlyFeature(id));
+    const selectableFeatureIds = Object.keys(FEATURE_CATALOG).filter(id => !isSubscriptionOnlyFeature(id));
     res.json({
         success: true,
         upgradeTiers: effective,
@@ -5572,12 +5512,6 @@ app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 100
         ...perClientFee,
         billingDays: CLOUD_BACKUP_BILLING_DAYS,
         featureCatalog,
-        receiptCustomization: {
-            ...getReceiptCreditPricing(),
-            creditPricePHP: getReceiptCreditPriceTokens(),
-            featureId: 'receipt_customization_credit',
-            maxQuantity: RECEIPT_CREDIT_MAX_QUANTITY
-        },
         upgradeTiers,
         moduleSubscriptions: MODULE_SUBSCRIPTION_PLANS,
         moduleSubscriptionBillingDays: MODULE_SUBSCRIPTION_BILLING_DAYS,
@@ -7118,7 +7052,8 @@ app.post('/relay/cloud-tokens/activate-cloud-backup', requireApiKey, requireAllo
             tier,
             billingCycle,
             balanceTokens: balanceAfter,
-            tokensSpent: requiredTokens
+            tokensSpent: requiredTokens,
+            quote
         };
         if (dedupeKey) {
             cloudBackupActivationDedupe.set(dedupeKey, { status: 200, body: successBody, expiresAt: Date.now() + CLOUD_BACKUP_ACTIVATION_DEDUPE_TTL_MS });
@@ -8947,6 +8882,37 @@ app.post('/relay/confirm-receipt-reset',
 const RECEIPT_CREDIT_OTP_TTL_MS = 10 * 60 * 1000;
 const RECEIPT_CREDIT_TICKET_TTL_MS = 5 * 60 * 1000;
 const RECEIPT_CREDIT_UNITS_PER_PURCHASE = 1;
+const RECEIPT_CREDIT_PRICING_KEY = 'receipt-credit-pricing';
+const RECEIPT_CREDIT_PRICING_DEFAULT = {
+    pricePHP: 59,
+    discountMinQuantity: 2,
+    discountPercent: 5,
+    maxQuantity: 100
+};
+let receiptCreditPricing = { ...RECEIPT_CREDIT_PRICING_DEFAULT };
+async function loadReceiptCreditPricing() {
+    const stored = await getPersistentJSON(RECEIPT_CREDIT_PRICING_KEY, null);
+    if (stored && typeof stored === 'object') receiptCreditPricing = { ...RECEIPT_CREDIT_PRICING_DEFAULT, ...stored };
+    return receiptCreditPricing;
+}
+function saveReceiptCreditPricing() {
+    if (pgPoolDevices || pgPool || redisClient) return setPersistentJSON(RECEIPT_CREDIT_PRICING_KEY, receiptCreditPricing);
+    return null;
+}
+function calculateReceiptCreditQuote(quantity) {
+    const maxQuantity = Math.max(1, Math.min(1000, Math.floor(Number(receiptCreditPricing.maxQuantity) || 100)));
+    const qty = Math.max(1, Math.min(maxQuantity, Math.floor(Number(quantity) || 1)));
+    const unitPrice = Math.max(0, Number(receiptCreditPricing.pricePHP) || 0);
+    const minQty = Math.max(2, Math.floor(Number(receiptCreditPricing.discountMinQuantity) || 2));
+    const discountPercent = Math.max(0, Math.min(90, Number(receiptCreditPricing.discountPercent) || 0));
+    const subtotal = unitPrice * qty;
+    const appliedDiscountPercent = qty >= minQty ? discountPercent : 0;
+    const discount = Math.round(subtotal * appliedDiscountPercent) / 100;
+    const totalPHP = Math.max(0, Math.round((subtotal - discount) * 100) / 100);
+    const totalTokens = Math.ceil(totalPHP);
+    return { quantity: qty, unitPrice, subtotal, discountMinQuantity: minQty, discountPercent: appliedDiscountPercent, discount, totalPHP, totalTokens, maxQuantity };
+}
+
 const pendingReceiptCreditPurchases = new Map();
 function generateReceiptCreditOtp() {
     return String(Math.floor(100000 + Math.random() * 900000));
@@ -8967,13 +8933,10 @@ app.post('/relay/request-receipt-credit-purchase',
         if (!ACTIVATION_FLAGS.otpRequestsEnabled) {
             return res.status(503).json({ success: false, message: 'Manual unlock requests ("Send Request") are temporarily disabled by the developer. Please try "Activate via Omni Tokens" instead, or try again later.' });
         }
-        const { installationId, storeName, requestedBy } = req.body;
-        const quote = calculateReceiptCreditQuote(req.body?.quantity || 1);
+        const { installationId, storeName, requestedBy, quantity } = req.body;
+        const quote = calculateReceiptCreditQuote(quantity);
         if (!installationId) {
             return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
-        }
-        if (!quote) {
-            return res.status(400).json({ success: false, message: `Quantity must be between 1 and ${RECEIPT_CREDIT_MAX_QUANTITY}.` });
         }
         const otpCode = generateReceiptCreditOtp();
         pendingReceiptCreditPurchases.set(installationId, {
@@ -8985,10 +8948,8 @@ app.post('/relay/request-receipt-credit-purchase',
             storeName: storeName || null,
             requestedBy: requestedBy || null,
             pricePHP: quote.totalPHP,
-            unitPricePHP: quote.unitPricePHP,
-            subtotalPHP: quote.subtotalPHP,
-            discountPHP: quote.discountPHP,
-            discountPercent: quote.discountPercent,
+            unitPricePHP: quote.unitPrice,
+            quote,
             credits: quote.quantity,
             requestedAt: Date.now()
         });
@@ -8999,17 +8960,13 @@ app.post('/relay/request-receipt-credit-purchase',
                       `Store: ${storeName || 'Hindi tiyak'}\n` +
                       `Installation ID: ${installationId}\n` +
                       `Hiniling ni: ${requestedBy || 'Hindi tiyak'}\n` +
-                      `Quantity: ${quote.quantity} credit(s)\n` +
-                      `Unit price: ₱${quote.unitPricePHP}\n` +
-                      `Subtotal: ₱${quote.subtotalPHP.toFixed(2)}\n` +
-                      `${quote.discountPercent > 0 ? `Bulk discount (${quote.discountPercent}%): -₱${quote.discountPHP.toFixed(2)}\n` : ''}` +
-                      `Total payment: ₱${quote.totalPHP.toFixed(2)}\n` +
+                      `Presyo: ₱${Number(pricePHP) || '?'}\n` +
                       `OTP Code: ${otpCode}\n` +
                       `Mag-e-expire ito sa loob ng 10 minuto.\n\n` +
                       `I-VERIFY MUNA na natanggap ang bayad (GCash/Maya/Cash/etc.) bago mag-Approve at ibigay ang OTP na ito sa kliyente.`
             });
-            logActivity(installationId, 'receipt_credit_purchase_requested', { storeName: storeName || null, credits: quote.quantity, totalPHP: quote.totalPHP, discountPercent: quote.discountPercent });
-            res.json({ success: true, quote, message: `Naipadala ang purchase request para sa ${quote.quantity} credit(s). Total: ₱${quote.totalPHP.toFixed(2)}.` });
+            logActivity(installationId, 'receipt_credit_purchase_requested', { storeName: storeName || null, pricePHP: quote.totalPHP, quantity: quote.quantity });
+            res.json({ success: true, message: 'Naipadala ang purchase request. Kontakin ang developer para sa confirmation code, matapos ang bayad.', quote });
         } catch (err) {
             console.error('Relay mail send failure (receipt-credit-purchase):', err);
             pendingReceiptCreditPurchases.delete(installationId);
@@ -9017,6 +8974,29 @@ app.post('/relay/request-receipt-credit-purchase',
         }
     }
 );
+app.get('/relay/receipt-credit-pricing', requireApiKey, requireAllowedDevice, (req, res) => {
+    const pricing = { ...receiptCreditPricing };
+    const quote = calculateReceiptCreditQuote(req.query.quantity || 1);
+    res.json({ success: true, pricing, quote });
+});
+app.get('/relay/admin/api/pricing/receipt-credits', requireAdminKey, (req, res) => {
+    res.json({ success: true, pricing: { ...receiptCreditPricing } });
+});
+app.post('/relay/admin/api/pricing/receipt-credits', requireAdminKey, async (req, res) => {
+    const body = req.body || {};
+    const pricePHP = Number(body.pricePHP);
+    const discountMinQuantity = Number(body.discountMinQuantity);
+    const discountPercent = Number(body.discountPercent);
+    const maxQuantity = Number(body.maxQuantity);
+    if (!Number.isFinite(pricePHP) || pricePHP < 0) return res.status(400).json({ success: false, message: 'Invalid Receipt Credit price.' });
+    if (!Number.isInteger(discountMinQuantity) || discountMinQuantity < 2 || discountMinQuantity > 1000) return res.status(400).json({ success: false, message: 'Discount start quantity must be a whole number from 2 to 1000.' });
+    if (!Number.isFinite(discountPercent) || discountPercent < 0 || discountPercent > 90) return res.status(400).json({ success: false, message: 'Discount must be between 0% and 90%.' });
+    if (!Number.isInteger(maxQuantity) || maxQuantity < 1 || maxQuantity > 1000) return res.status(400).json({ success: false, message: 'Maximum quantity must be a whole number from 1 to 1000.' });
+    receiptCreditPricing = { pricePHP: Math.round(pricePHP * 100) / 100, discountMinQuantity, discountPercent: Math.round(discountPercent * 100) / 100, maxQuantity };
+    await saveReceiptCreditPricing();
+    logActivity('SYSTEM', 'receipt_credit_pricing_updated', receiptCreditPricing);
+    res.json({ success: true, pricing: { ...receiptCreditPricing } });
+});
 app.get('/relay/admin/api/pending-receipt-credit-purchases', requireAdminKey, (req, res) => {
     const list = [];
     for (const [installationId, pending] of pendingReceiptCreditPurchases) {
@@ -9027,9 +9007,7 @@ app.get('/relay/admin/api/pending-receipt-credit-purchases', requireAdminKey, (r
             requestedBy: pending.requestedBy,
             pricePHP: pending.pricePHP,
             unitPricePHP: pending.unitPricePHP,
-            subtotalPHP: pending.subtotalPHP,
-            discountPHP: pending.discountPHP,
-            discountPercent: pending.discountPercent,
+            quote: pending.quote,
             credits: pending.credits,
             approved: pending.approved,
             otpVerified: pending.otpVerified,
@@ -9047,7 +9025,7 @@ app.post('/relay/admin/api/pending-receipt-credit-purchases/approve', requireAdm
         return res.status(404).json({ success: false, message: 'Walang pending credit-purchase request para dito.' });
     }
     pending.approved = true;
-    logActivity(installationId, 'receipt_credit_purchase_approved', { pricePHP: pending.pricePHP, credits: pending.credits, discountPercent: pending.discountPercent });
+    logActivity(installationId, 'receipt_credit_purchase_approved', { pricePHP: pending.pricePHP });
     res.json({ success: true, message: 'Naaprubahan. Puwede nang gamitin ng client ang code.' });
 });
 app.post('/relay/confirm-receipt-credit-purchase',
@@ -9112,11 +9090,10 @@ app.post('/relay/confirm-receipt-credit-purchase',
 // the manual "developer approves, then hands over a code" process
 // used by /relay/request-receipt-credit-purchase + /relay/confirm-receipt-credit-purchase.
 // Same atomic-deduct-then-issue guarantee and clientRequestId dedupe.
-// The Receipt Customization credit price is controlled by FEATURE_CATALOG and
-// can be changed from the RELAY admin pricing page. OmniPOS receives the same
-// value through /relay/pricing, while RELAY remains authoritative for charging.
+// Keep RECEIPT_CREDIT_PRICE_TOKENS in sync with CUSTOMIZE_CREDIT_PRICE_PHP
+// in OMNIPOS/server.js (1 token = ₱1, same as the rest of the à la carte catalog).
 // ===================================================================
-
+const RECEIPT_CREDIT_PRICE_TOKENS = 59; // Legacy fallback; calculateReceiptCreditQuote() is authoritative.
 const receiptCreditActivationDedupe = new Map(); // `${installationId}:${clientRequestId}` -> { status, body, expiresAt }
 const RECEIPT_CREDIT_ACTIVATION_DEDUPE_TTL_MS = 15 * 60 * 1000;
 setInterval(() => {
@@ -9130,16 +9107,14 @@ app.post('/relay/cloud-tokens/activate-receipt-credit', requireApiKey, requireAl
         return res.status(503).json({ success: false, message: '"Activate via Omni Tokens" is temporarily disabled (maintenance/upgrade). Please try "Send Request" instead, or try again later.' });
     }
     const { installationId, clientRequestId } = req.body;
-    const quote = calculateReceiptCreditQuote(req.body?.quantity || 1);
     if (!installationId) {
         return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
-    }
-    if (!quote) {
-        return res.status(400).json({ success: false, message: `Quantity must be between 1 and ${RECEIPT_CREDIT_MAX_QUANTITY}.` });
     }
     if (!pgPool) {
         return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured — the Omni Token wallet needs it.' });
     }
+    const requestedQuantity = req.body?.quantity || 1;
+    const quote = calculateReceiptCreditQuote(requestedQuantity);
     const requiredTokens = quote.totalTokens;
     const dedupeKey = clientRequestId ? `${installationId}:${clientRequestId}` : null;
     if (dedupeKey && receiptCreditActivationDedupe.has(dedupeKey)) {
@@ -9172,7 +9147,7 @@ app.post('/relay/cloud-tokens/activate-receipt-credit', requireApiKey, requireAl
         await queryWithRetry(
             pgPool,
             `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note, category) VALUES ($1, 'consume', $2, $3, $4, 'ADDON_PURCHASE')`,
-            [installationId, -requiredTokens, balanceAfter, `Receipt Customization credit purchase (${quote.quantity} credit(s), ${quote.discountPercent}% bulk discount, self-serve via Omni Tokens)`]
+            [installationId, -requiredTokens, balanceAfter, `Receipt Customization credit purchase (${quote.quantity} credit(s), self-serve via Omni Tokens; ₱${quote.totalPHP.toFixed(2)})`]
         );
         const now = Date.now();
         const payload = {
@@ -9184,14 +9159,13 @@ app.post('/relay/cloud-tokens/activate-receipt-credit', requireApiKey, requireAl
         };
         const payloadString = JSON.stringify(payload);
         const signature = crypto.sign(null, Buffer.from(payloadString), privateKey).toString('base64');
-        logActivity(installationId, 'receipt_credit_purchase_ticket_issued', { credits: payload.credits, source: 'cloud_token_selfserve', tokensSpent: requiredTokens, totalPHP: quote.totalPHP, discountPercent: quote.discountPercent });
+        logActivity(installationId, 'receipt_credit_purchase_ticket_issued', { credits: payload.credits, source: 'cloud_token_selfserve', tokensSpent: requiredTokens });
         const successBody = {
             success: true,
             message: `Payment confirmed via Omni Tokens — ${quote.quantity} customization credit(s) added.`,
             ticket: { payload, signature },
             balanceTokens: balanceAfter,
-            tokensSpent: requiredTokens,
-            quote
+            tokensSpent: requiredTokens
         };
         if (dedupeKey) {
             receiptCreditActivationDedupe.set(dedupeKey, { status: 200, body: successBody, expiresAt: Date.now() + RECEIPT_CREDIT_ACTIVATION_DEDUPE_TTL_MS });
@@ -10466,7 +10440,8 @@ async function bootstrapStores() {
     );
 }
 bootstrapStores()
-    .then(() => {
+    .then(async () => {
+        await loadReceiptCreditPricing();
         const server = app.listen(PORT, () => {
             console.log(`OmniPOS Unlock Relay running sa port ${PORT}`);
         });
