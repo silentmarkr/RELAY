@@ -79,6 +79,7 @@
 
 <div class="topbar">
   <div class="topbar-brand">
+    <button class="icon-btn" onclick="window.location.href='index.html'" title="Back to Devices">← Devices</button>
     <div>
       <div class="topbar-title">Installation Data</div>
       <div class="topbar-sub">Per-store Cloud Backup footprint — view, backup, or delete</div>
@@ -180,6 +181,30 @@ function formatDate(v) {
   return d.toLocaleString();
 }
 
+// BUG FIX: storeName/label/installationId come straight from client
+// devices (req.body.storeName, etc. on the RELAY server) — never trust
+// them raw inside innerHTML. Mirrors the escapeHtml() already used in
+// client-cost-allocation.html for the same reason.
+function escapeHtml(str) {
+  return String(str == null ? '' : str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+// Safe for embedding inside a single-quoted inline onclick="...('...')"
+// attribute: escape for the JS string literal first (backslash, quote),
+// THEN HTML-escape the result for the surrounding double-quoted
+// attribute — the browser HTML-decodes the attribute before parsing it
+// as JS, so this order round-trips correctly.
+function escapeJsAttr(str) {
+  const jsEscaped = String(str == null ? '' : str)
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'");
+  return escapeHtml(jsEscaped);
+}
+
 async function loadInstallations() {
   const data = await api('/relay/admin/api/installations');
   installations = data.installations || [];
@@ -231,12 +256,14 @@ function renderTable() {
   const filtered = installations.filter(i =>
     !q || i.installationId.toLowerCase().includes(q) || (i.storeName || '').toLowerCase().includes(q)
   );
-  const rows = filtered.map(i => `
+  const rows = filtered.map(i => {
+    const safeId = escapeJsAttr(i.installationId);
+    return `
     <tr>
-      <td><input type="checkbox" ${selected.has(i.installationId) ? 'checked' : ''} onchange="toggleRow('${i.installationId}', this.checked)"></td>
+      <td><input type="checkbox" ${selected.has(i.installationId) ? 'checked' : ''} onchange="toggleRow('${safeId}', this.checked)"></td>
       <td>
-        <div>${i.storeName || i.label || '<span class="muted">(no store name)</span>'}</div>
-        <div class="id-cell">${i.installationId}</div>
+        <div>${escapeHtml(i.storeName || i.label) || '<span class="muted">(no store name)</span>'}</div>
+        <div class="id-cell">${escapeHtml(i.installationId)}</div>
       </td>
       <td>${i.allowed ? '<span class="badge badge-green">Allowed</span>' : '<span class="badge badge-red">Not allowed</span>'}</td>
       <td>${i.totalRecords || 0} <span class="muted">(${i.moduleCount || 0} modules)</span></td>
@@ -246,13 +273,14 @@ function renderTable() {
       <td>${i.fingerprintFlagged ? '<span class="badge badge-amber">Flagged</span>' : (i.fingerprintVerified ? '<span class="badge badge-green">Verified</span>' : '<span class="muted">—</span>')}</td>
       <td>
         <div class="row-actions">
-          <button class="btn-sm btn-primary" onclick="downloadBackup('${i.installationId}')">Backup</button>
-          <button class="btn-sm btn-danger" onclick="deleteOnly('${i.installationId}')">Delete only</button>
-          <button class="btn-sm btn-danger" onclick="backupThenDelete('${i.installationId}')">Backup + Delete</button>
+          <button class="btn-sm btn-primary" onclick="downloadBackup('${safeId}')">Backup</button>
+          <button class="btn-sm btn-danger" onclick="deleteOnly('${safeId}')">Delete only</button>
+          <button class="btn-sm btn-danger" onclick="backupThenDelete('${safeId}')">Backup + Delete</button>
         </div>
       </td>
     </tr>
-  `).join('');
+  `;
+  }).join('');
   document.getElementById('tableBody').innerHTML = rows || `<tr><td colspan="9" class="muted">No installations found.</td></tr>`;
   document.getElementById('selectAll').checked = filtered.length > 0 && filtered.every(i => selected.has(i.installationId));
   updateBulkBar();
