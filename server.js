@@ -5435,8 +5435,20 @@ function issueDevicePermit(installationId, fingerprint) {
     return { payload, signature };
 }
 const pendingOtps = new Map(); 
+// AYOS/SECURITY FIX: dati, kapag WALANG naka-configure na RELAY_API_KEY
+// (halimbawa, di-sinasadyang nakalimutang i-set ito sa production .env),
+// basta `return next()` agad ang ginagawa nito — ibig sabihin, LAHAT ng
+// endpoint na pinoprotektahan ng requireApiKey (halos lahat maliban sa
+// /relay/admin/*) ay NAGIGING BUKAS SA LAHAT, walang kailangang key.
+// Ito ay "fail-open" sa isang money-handling backend — mapanganib kung
+// magkamali ang deployment config. Ang requireAdminKey ay tama namang
+// fail-CLOSED (tinatanggihan kung walang ADMIN_KEY) — ginawa na rin
+// itong ganoon dito, tulad ng dapat.
 function requireApiKey(req, res, next) {
-    if (!RELAY_API_KEY) return next(); 
+    if (!RELAY_API_KEY) {
+        console.error('⚠️  RELAY_API_KEY ay hindi naka-configure sa server na ito — tinatanggihan (fail-closed) ang request sa halip na tanggapin ito nang walang verification.');
+        return res.status(503).json({ success: false, message: 'RELAY_API_KEY is not configured on this server yet. Please set it before using the relay.' });
+    }
     const provided = req.headers['x-relay-key'];
     if (!safeCompare(String(provided || ''), RELAY_API_KEY)) {
         return res.status(403).json({ success: false, message: 'Invalid o walang API key.' });
@@ -7449,6 +7461,60 @@ setInterval(() => {
         if (now > entry.expiresAt) featurePurchaseActivationDedupe.delete(key);
     }
 }, 5 * 60 * 1000).unref();
+// ===================================================================
+// AYOS/SECURITY FIX (totalPrice trust bug): dati, ang à la carte na
+// sanga ng /relay/cloud-tokens/activate-purchase sa ibaba ay tinatanggap
+// LANG ang `totalPrice` mula sa CLIENT (kinukwenta sa browser JS ng
+// OMNIPOS) basta `>= 0` — walang server-side na pag-verify laban sa
+// FEATURE_CATALOG o sa totoong bundle-discount rules. Dahil ATOMIC at
+// AUTOMATIC (walang developer/admin approval) ang endpoint na ito,
+// kahit sinong nag-modify ng request (devtools, proxy, patched client)
+// ay pwedeng magpadala ng totalPrice: 0 o 1 para sa isang mamahaling
+// Pro theme/feature, at agad-agad na mabigyan ng valid, properly-
+// signed unlock token — halos libre. Ang mga function dito ay
+// kumukwenta ng PINAKAMABABANG lehitimong presyo sa RELAY mismo
+// (ang sole source of truth para sa pera), gamit ang eksaktong
+// parehong bundle-discount formula ng OMNIPOS getTierPricing() at ang
+// totoong multi-terminal discount ng installation na ito — hindi na
+// basta tinitiwalaan ang bilang mula sa client kung mas mababa ito.
+function getTierBundleEffectivePrice(tier, alreadyPurchased, multiTerminalDiscountPercent = 0) {
+    const fullAlaCarteValue = tier.featureIds.reduce((sum, id) => sum + ((FEATURE_CATALOG[id] && FEATURE_CATALOG[id].price) || 0), 0);
+    const remainingFeatureIds = tier.featureIds.filter(id => !alreadyPurchased.includes(id));
+    const remainingAlaCarteValue = remainingFeatureIds.reduce((sum, id) => sum + ((FEATURE_CATALOG[id] && FEATURE_CATALOG[id].price) || 0), 0);
+    if (fullAlaCarteValue <= 0 || remainingAlaCarteValue <= 0) return 0;
+    const bundleRate = tier.bundlePrice / fullAlaCarteValue;
+    let effectivePrice = Math.min(
+        tier.bundlePrice,
+        Math.max(1, Math.ceil(remainingAlaCarteValue * bundleRate))
+    );
+    if (multiTerminalDiscountPercent > 0) {
+        effectivePrice = Math.max(1, Math.round(effectivePrice * (1 - multiTerminalDiscountPercent / 100)));
+    }
+    return effectivePrice;
+}
+// Kinukwenta ang pinakamababang presyo na maaaring lehitimong asahan ng
+// client para sa hiniling na `featureIds`. Ang alaCarteTotal (walang
+// discount) ang default floor; kung LAHAT ng hiniling na featureIds ay
+// bahagi ng isang kilalang UPGRADE_TIER (at ang natitirang bahagi ng
+// tier na iyon ay totoong-totoo nang naka-unlock na sa installation na
+// ito), pinapayagan ang marginal/bundle-rate na presyo ng tier na iyon
+// bilang mas mababang floor — kopya ito ng eksaktong parehong senaryo
+// na ginagamit ng OMNIPOS getTierPricing() (request-unlock-bulk), hindi
+// basta-basta arbitrary discount.
+function computeMinimumLegitimatePrice(installationId, featureIds) {
+    const alaCarteTotal = featureIds.reduce((sum, id) => sum + ((FEATURE_CATALOG[id] && FEATURE_CATALOG[id].price) || 0), 0);
+    const deviceCount = getGroupDeviceCount(installationId);
+    const multiTerminalDiscountPercent = getMultiTerminalDiscountPercent(deviceCount);
+    let bestPrice = alaCarteTotal;
+    for (const tier of UPGRADE_TIERS) {
+        const requestedInTier = featureIds.filter(id => tier.featureIds.includes(id));
+        if (requestedInTier.length !== featureIds.length) continue; // hindi lahat ng hiniling ay bahagi ng tier na ito
+        const alreadyPurchased = tier.featureIds.filter(id => !featureIds.includes(id) && isFeatureCurrentlyUnlocked(installationId, id));
+        const tierPrice = getTierBundleEffectivePrice(tier, alreadyPurchased, multiTerminalDiscountPercent);
+        if (tierPrice < bestPrice) bestPrice = tierPrice;
+    }
+    return bestPrice;
+}
 app.post('/relay/cloud-tokens/activate-purchase', requireApiKey, requireAllowedDevice, rateLimit('cloud-tokens-activate-purchase', 30, 10 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
     if (!ACTIVATION_FLAGS.omniTokenActivationEnabled) {
         return res.status(503).json({ success: false, message: '"Activate via Omni Tokens" is temporarily disabled (maintenance/upgrade). Please try "Send Request" instead, or try again later.' });
@@ -7480,8 +7546,22 @@ app.post('/relay/cloud-tokens/activate-purchase', requireApiKey, requireAllowedD
         }
         durationMs = MODULE_SUBSCRIPTION_BILLING_DAYS[billingCycle] * 24 * 60 * 60 * 1000;
     } else {
-        const alaCarteTotal = featureIds.reduce((sum, id) => sum + ((FEATURE_CATALOG[id] && FEATURE_CATALOG[id].price) || 0), 0);
-        requiredTokens = (typeof totalPrice === 'number' && totalPrice >= 0) ? Math.round(totalPrice) : alaCarteTotal;
+        // AYOS/SECURITY FIX: hindi na basta tinitiwalaan ang client-supplied
+        // `totalPrice`. Kinukwenta muna dito sa RELAY (server-side, authoritative)
+        // ang pinakamababang lehitimong presyo — kung mas mababa dito ang
+        // ipinasa ng client (o wala/invalid), gagamitin ang floor na ito
+        // sa halip, at ilalagay sa activity log para malaman ng developer
+        // kung may nag-attempt ng price tampering.
+        const minimumLegitimatePrice = computeMinimumLegitimatePrice(installationId, featureIds);
+        if (typeof totalPrice === 'number' && isFinite(totalPrice) && totalPrice >= minimumLegitimatePrice) {
+            requiredTokens = Math.round(totalPrice);
+        } else {
+            if (typeof totalPrice === 'number' && isFinite(totalPrice) && totalPrice < minimumLegitimatePrice) {
+                console.warn(`⚠️ PRICE TAMPERING SUSPECTED: installation ${installationId} sent totalPrice=${totalPrice} for [${featureIds.join(', ')}] pero ang pinakamababang lehitimong presyo ay ${minimumLegitimatePrice}. Ginamit ang floor sa halip.`);
+                logActivity(installationId, 'price_tampering_suspected', { featureIds, clientTotalPrice: totalPrice, enforcedPrice: minimumLegitimatePrice });
+            }
+            requiredTokens = minimumLegitimatePrice;
+        }
     }
     if (typeof requiredTokens !== 'number' || requiredTokens < 0 || !isFinite(requiredTokens)) {
         return res.status(400).json({ success: false, message: 'Could not determine a valid price for this purchase.' });
