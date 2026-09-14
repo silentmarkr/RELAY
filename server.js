@@ -3588,14 +3588,14 @@ function saveBranchSummaries(obj) {
     try {
         fs.writeFileSync(BRANCH_SUMMARIES_PATH, JSON.stringify(obj, null, 2));
     } catch (err) {
-        console.error('Hindi ma-save ang branch-summaries.json:', err);
+        console.error('Could not save branch-summaries.json:', err);
     }
 }
 let branchSummaries = {}; 
-// AYOS (cost-optimization): huwag i-persist sa Neon ang branch-summaries kada
-// checkin kung walang aktwal na nagbago sa summary ng installationId na 'yon.
-// Periodic safety flush pa rin kada BRANCH_PERSIST_MIN_INTERVAL_MS.
-const BRANCH_PERSIST_MIN_INTERVAL_MS = 15 * 60 * 1000; // 15 minuto
+// FIX (cost-optimization): don't persist branch-summaries to Neon on every
+// checkin if nothing actually changed in that installationId's summary.
+// Still does a periodic safety flush every BRANCH_PERSIST_MIN_INTERVAL_MS.
+const BRANCH_PERSIST_MIN_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const branchLastPersisted = new Map(); // `${groupHash}|${installationId}` -> { signature, at }
 function branchEntrySignature(branchName, summary) {
     return `${branchName}|${JSON.stringify(summary)}`;
@@ -3615,6 +3615,65 @@ function sanitizeBranchSummaryPayload(raw) {
     }
     return out;
 }
+// === Multi-Branch: hourly trend history (PRO) ===
+const BRANCH_HISTORY_PATH = path.join(__dirname, 'branch-history.json');
+async function loadBranchHistory() {
+    const fromStore = await getPersistentJSON('branch-history', null);
+    if (fromStore !== null) return fromStore;
+    try {
+        return JSON.parse(fs.readFileSync(BRANCH_HISTORY_PATH, 'utf8'));
+    } catch (err) {
+        return {};
+    }
+}
+function saveBranchHistory(obj) {
+    if (pgPoolDevices || pgPool || redisClient) {
+        setPersistentJSON('branch-history', obj);
+        return;
+    }
+    try {
+        fs.writeFileSync(BRANCH_HISTORY_PATH, JSON.stringify(obj, null, 2));
+    } catch (err) {
+        console.error('Could not save branch-history.json:', err);
+    }
+}
+let branchHistory = {};
+const BRANCH_HISTORY_MAX_POINTS = 48; // ~2 days at 1x/hour resolution
+const BRANCH_HISTORY_MIN_GAP_MS = 50 * 60 * 1000; // skip appending if a point was just recorded
+function appendBranchHistoryPoint(groupKeyHash, installationId, summary) {
+    const key = `${groupKeyHash}|${installationId}`;
+    if (!Array.isArray(branchHistory[key])) branchHistory[key] = [];
+    const arr = branchHistory[key];
+    const last = arr[arr.length - 1];
+    if (last && (Date.now() - last.ts) < BRANCH_HISTORY_MIN_GAP_MS) return;
+    arr.push({ ts: Date.now(), ...summary });
+    if (arr.length > BRANCH_HISTORY_MAX_POINTS) arr.splice(0, arr.length - BRANCH_HISTORY_MAX_POINTS);
+    saveBranchHistory(branchHistory);
+}
+// === Multi-Branch: stock transfer requests (PRO) ===
+const BRANCH_TRANSFERS_PATH = path.join(__dirname, 'branch-transfers.json');
+async function loadBranchTransfers() {
+    const fromStore = await getPersistentJSON('branch-transfers', null);
+    if (fromStore !== null) return fromStore;
+    try {
+        return JSON.parse(fs.readFileSync(BRANCH_TRANSFERS_PATH, 'utf8'));
+    } catch (err) {
+        return {};
+    }
+}
+function saveBranchTransfers(obj) {
+    if (pgPoolDevices || pgPool || redisClient) {
+        setPersistentJSON('branch-transfers', obj);
+        return;
+    }
+    try {
+        fs.writeFileSync(BRANCH_TRANSFERS_PATH, JSON.stringify(obj, null, 2));
+    } catch (err) {
+        console.error('Could not save branch-transfers.json:', err);
+    }
+}
+let branchTransfers = {}; // groupKeyHash -> array of transfer objects
+const BRANCH_TRANSFERS_MAX_PER_GROUP = 300;
 const AUTOALLOW_ON_BACKUP = String(process.env.RELAY_AUTOALLOW_ON_BACKUP || 'true').trim().toLowerCase() !== 'false';
 function mostRecentBackupCheckinAt() {
     const values = Object.values(backupCheckins).map((c) => c.lastBackupAt).filter(Boolean);
@@ -4051,7 +4110,7 @@ app.get('/relay/admin/api/subscriptions', requireAdminKey, (req, res) => {
 app.post('/relay/admin/api/devices/allow', requireAdminKey, (req, res) => {
     const { installationId } = req.body;
     if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+        return res.status(400).json({ success: false, message: 'Missing installationId.' });
     }
     allowedDevices.add(installationId);
     saveAllowedDevices(allowedDevices);
@@ -4073,7 +4132,7 @@ app.post('/relay/admin/api/devices/:installationId/label', requireAdminKey, (req
 app.post('/relay/admin/api/devices/revoke', requireAdminKey, (req, res) => {
     const { installationId } = req.body;
     if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+        return res.status(400).json({ success: false, message: 'Missing installationId.' });
     }
     allowedDevices.delete(installationId);
     saveAllowedDevices(allowedDevices);
@@ -4087,7 +4146,7 @@ app.post('/relay/admin/api/devices/revoke', requireAdminKey, (req, res) => {
 app.post('/relay/admin/api/devices/clone-reset', requireAdminKey, (req, res) => {
     const { installationId } = req.body;
     if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+        return res.status(400).json({ success: false, message: 'Missing installationId.' });
     }
     deviceFingerprints.delete(installationId);
     saveDeviceFingerprints(deviceFingerprints);
@@ -4203,7 +4262,7 @@ app.post('/relay/admin/api/devices/:installationId/purge', requireAdminKey, asyn
     const { installationId } = req.params;
     const confirm = req.query.confirm || req.body?.confirm;
     if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+        return res.status(400).json({ success: false, message: 'Missing installationId.' });
     }
     if (confirm !== 'DELETE') {
         return res.status(400).json({
@@ -4921,7 +4980,7 @@ app.get('/relay/admin/api/installations', requireAdminKey, async (req, res) => {
 app.get('/relay/admin/api/installations/:installationId/export', requireAdminKey, async (req, res) => {
     const { installationId } = req.params;
     if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+        return res.status(400).json({ success: false, message: 'Missing installationId.' });
     }
     if (!pgPool) {
         return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured — walang Cloud Backup data na makukuha.' });
@@ -5011,7 +5070,7 @@ app.post('/relay/admin/api/installations/bulk-export', requireAdminKey, async (r
 app.post('/relay/admin/api/devices/:installationId/clear-history', requireAdminKey, (req, res) => {
     const { installationId } = req.params;
     if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+        return res.status(400).json({ success: false, message: 'Missing installationId.' });
     }
     const before = activityLog.length;
     activityLog = activityLog.filter(entry => entry.installationId !== installationId);
@@ -5323,7 +5382,7 @@ app.post('/relay/admin/api/restore', requireAdminKey, (req, res) => {
 app.post('/relay/restore-tokens', requireApiKey, requireAllowedDevice, rateLimit('restore-tokens', 30, 10 * 60 * 1000), (req, res) => {
     const { installationId } = req.body;
     if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+        return res.status(400).json({ success: false, message: 'Missing installationId.' });
     }
     const record = issuedUnlocks[installationId] || {};
     const now = Date.now();
@@ -5394,7 +5453,7 @@ app.post('/relay/check-feature-status', requireApiKey, requireAllowedDevice, rat
 app.post('/relay/pending-integrity-check', requireApiKey, requireAllowedDevice, rateLimit('pending-integrity-check', 150, 5 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
     const { installationId } = req.body;
     if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+        return res.status(400).json({ success: false, message: 'Missing installationId.' });
     }
     let pending = false;
     if (pendingIntegrityChecks.has(installationId)) {
@@ -5897,7 +5956,7 @@ app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 100
 app.post('/relay/backup-checkin', requireApiKey, rateLimit('backup-checkin', 20, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
     const { installationId, storeName, username, fileSizeBytes, backupAt } = req.body;
     if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+        return res.status(400).json({ success: false, message: 'Missing installationId.' });
     }
     recordDeviceSeen(installationId, { storeName, username });
     const existing = backupCheckins[installationId] || { checkinCount: 0 };
@@ -5932,7 +5991,7 @@ app.post('/relay/integrity-checkin', requireApiKey, requireAllowedDevice, rateLi
     const { installationId, version, files, watcherActive } = req.body || {};
     const watcherActiveFlag = typeof watcherActive === 'boolean' ? watcherActive : null;
     if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+        return res.status(400).json({ success: false, message: 'Missing installationId.' });
     }
     if (!files || typeof files !== 'object' || Array.isArray(files)) {
         return res.status(400).json({ success: false, message: 'Kulang o mali ang format ng "files" (dapat object na { relPath: sha256 }).' });
@@ -6014,10 +6073,10 @@ app.post('/relay/integrity-checkin', requireApiKey, requireAllowedDevice, rateLi
 app.post('/relay/branch-checkin', requireApiKey, requireAllowedDevice, rateLimit('branch-checkin', 40, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
     const { installationId, branchGroupKeyHash, branchName, summary } = req.body || {};
     if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+        return res.status(400).json({ success: false, message: 'Missing installationId.' });
     }
     if (!branchGroupKeyHash || !BRANCH_GROUP_HASH_RE.test(String(branchGroupKeyHash))) {
-        return res.status(400).json({ success: false, message: 'Kulang o mali ang format ng branchGroupKeyHash (dapat SHA-256 hex).' });
+        return res.status(400).json({ success: false, message: 'Missing or invalid branchGroupKeyHash format (must be SHA-256 hex).' });
     }
     const cleanName = String(branchName || '').trim().slice(0, BRANCH_NAME_MAX_LEN) || 'Unnamed Branch';
     const cleanSummary = sanitizeBranchSummaryPayload(summary);
@@ -6036,6 +6095,7 @@ app.post('/relay/branch-checkin', requireApiKey, requireAllowedDevice, rateLimit
         summary: cleanSummary,
         updatedAt: Date.now()
     };
+    appendBranchHistoryPoint(branchGroupKeyHash, installationId, cleanSummary);
     const branchPersistKey = `${branchGroupKeyHash}|${installationId}`;
     const branchSig = branchEntrySignature(cleanName, cleanSummary);
     const branchPrev = branchLastPersisted.get(branchPersistKey);
@@ -6050,7 +6110,7 @@ app.post('/relay/branch-checkin', requireApiKey, requireAllowedDevice, rateLimit
 app.get('/relay/branch-summary', requireApiKey, requireAllowedDevice, rateLimit('branch-summary', 120, 60 * 60 * 1000, (req) => req.query?.installationId), (req, res) => {
     const groupKeyHash = String(req.query.groupKeyHash || '');
     if (!BRANCH_GROUP_HASH_RE.test(groupKeyHash)) {
-        return res.status(400).json({ success: false, message: 'Kulang o mali ang format ng groupKeyHash query param.' });
+        return res.status(400).json({ success: false, message: 'Missing or invalid groupKeyHash query param format.' });
     }
     const group = branchSummaries[groupKeyHash] || {};
     const branches = Object.entries(group).map(([installationId, entry]) => ({
@@ -6066,6 +6126,117 @@ app.get('/relay/branch-summary', requireApiKey, requireAllowedDevice, rateLimit(
         return acc;
     }, {});
     res.json({ success: true, branchCount: branches.length, branches, combined });
+});
+app.get('/relay/branch-trend', requireApiKey, requireAllowedDevice, rateLimit('branch-trend', 120, 60 * 60 * 1000, (req) => req.query?.installationId), (req, res) => {
+    const groupKeyHash = String(req.query.groupKeyHash || '');
+    if (!BRANCH_GROUP_HASH_RE.test(groupKeyHash)) {
+        return res.status(400).json({ success: false, message: 'Missing or invalid groupKeyHash query param format.' });
+    }
+    const group = branchSummaries[groupKeyHash] || {};
+    const branches = Object.entries(group).map(([installationId, entry]) => ({
+        installationId,
+        branchName: entry.branchName,
+        history: branchHistory[`${groupKeyHash}|${installationId}`] || []
+    }));
+    // Combined trend: bucket all points from all branches into the nearest hour
+    // (rounded to the hour) and sum each branch's most recent point's grossSalesToday
+    // before that bucket — a way to derive the "total sales curve" across the day.
+    const bucketMap = new Map();
+    for (const b of branches) {
+        for (const point of b.history) {
+            const bucketTs = Math.floor(point.ts / (60 * 60 * 1000)) * (60 * 60 * 1000);
+            if (!bucketMap.has(bucketTs)) bucketMap.set(bucketTs, {});
+            bucketMap.get(bucketTs)[b.installationId] = point;
+        }
+    }
+    const sortedBuckets = Array.from(bucketMap.keys()).sort((a, b) => a - b);
+    const lastKnown = {};
+    const combinedHistory = sortedBuckets.map((ts) => {
+        const atBucket = bucketMap.get(ts);
+        for (const [id, point] of Object.entries(atBucket)) lastKnown[id] = point;
+        const acc = { ts };
+        for (const field of BRANCH_SUMMARY_NUMERIC_FIELDS) {
+            acc[field] = Object.values(lastKnown).reduce((sum, p) => sum + (Number(p[field]) || 0), 0);
+        }
+        return acc;
+    });
+    res.json({ success: true, branches, combinedHistory });
+});
+app.post('/relay/branch-transfer-request', requireApiKey, requireAllowedDevice, rateLimit('branch-transfer-request', 60, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
+    const { installationId, branchGroupKeyHash, fromBranchName, toInstallationId, toBranchName, itemName, sku, qty, note } = req.body || {};
+    if (!installationId || !toInstallationId) {
+        return res.status(400).json({ success: false, message: 'Missing installationId or toInstallationId.' });
+    }
+    if (!branchGroupKeyHash || !BRANCH_GROUP_HASH_RE.test(String(branchGroupKeyHash))) {
+        return res.status(400).json({ success: false, message: 'Missing or invalid branchGroupKeyHash format.' });
+    }
+    if (installationId === toInstallationId) {
+        return res.status(400).json({ success: false, message: 'The transfer destination cannot be the same branch as the source.' });
+    }
+    const cleanItemName = String(itemName || '').trim().slice(0, 120);
+    if (!cleanItemName) {
+        return res.status(400).json({ success: false, message: 'Missing item name.' });
+    }
+    const cleanQty = Math.max(1, Math.floor(Number(qty) || 0));
+    if (!Number.isFinite(cleanQty) || cleanQty < 1) {
+        return res.status(400).json({ success: false, message: 'Invalid quantity.' });
+    }
+    const transfer = {
+        id: crypto.randomBytes(8).toString('hex'),
+        fromInstallationId: installationId,
+        fromBranchName: String(fromBranchName || '').trim().slice(0, BRANCH_NAME_MAX_LEN) || 'Unnamed Branch',
+        toInstallationId,
+        toBranchName: String(toBranchName || '').trim().slice(0, BRANCH_NAME_MAX_LEN) || 'Unnamed Branch',
+        itemName: cleanItemName,
+        sku: String(sku || '').trim().slice(0, 60),
+        qty: cleanQty,
+        note: String(note || '').trim().slice(0, 300),
+        status: 'pending',
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+    };
+    if (!Array.isArray(branchTransfers[branchGroupKeyHash])) branchTransfers[branchGroupKeyHash] = [];
+    branchTransfers[branchGroupKeyHash].unshift(transfer);
+    if (branchTransfers[branchGroupKeyHash].length > BRANCH_TRANSFERS_MAX_PER_GROUP) {
+        branchTransfers[branchGroupKeyHash].length = BRANCH_TRANSFERS_MAX_PER_GROUP;
+    }
+    saveBranchTransfers(branchTransfers);
+    res.json({ success: true, transfer });
+});
+app.get('/relay/branch-transfers', requireApiKey, requireAllowedDevice, rateLimit('branch-transfers', 120, 60 * 60 * 1000, (req) => req.query?.installationId), (req, res) => {
+    const groupKeyHash = String(req.query.groupKeyHash || '');
+    if (!BRANCH_GROUP_HASH_RE.test(groupKeyHash)) {
+        return res.status(400).json({ success: false, message: 'Missing or invalid groupKeyHash query param format.' });
+    }
+    const list = branchTransfers[groupKeyHash] || [];
+    res.json({ success: true, transfers: list });
+});
+app.post('/relay/branch-transfer-respond', requireApiKey, requireAllowedDevice, rateLimit('branch-transfer-respond', 60, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
+    const { installationId, branchGroupKeyHash, transferId, action } = req.body || {};
+    if (!installationId || !transferId || !['accept', 'reject', 'cancel'].includes(action)) {
+        return res.status(400).json({ success: false, message: 'Missing or invalid request.' });
+    }
+    if (!branchGroupKeyHash || !BRANCH_GROUP_HASH_RE.test(String(branchGroupKeyHash))) {
+        return res.status(400).json({ success: false, message: 'Missing or invalid branchGroupKeyHash format.' });
+    }
+    const list = branchTransfers[branchGroupKeyHash] || [];
+    const transfer = list.find((t) => t.id === transferId);
+    if (!transfer) {
+        return res.status(404).json({ success: false, message: 'Transfer request not found.' });
+    }
+    if (transfer.status !== 'pending') {
+        return res.status(409).json({ success: false, message: `This transfer is no longer "pending" (status: ${transfer.status}).` });
+    }
+    if ((action === 'accept' || action === 'reject') && installationId !== transfer.toInstallationId) {
+        return res.status(403).json({ success: false, message: 'Only the destination branch can accept or reject this transfer.' });
+    }
+    if (action === 'cancel' && installationId !== transfer.fromInstallationId) {
+        return res.status(403).json({ success: false, message: 'Only the requesting branch can cancel this transfer.' });
+    }
+    transfer.status = action === 'accept' ? 'accepted' : (action === 'reject' ? 'rejected' : 'cancelled');
+    transfer.updatedAt = Date.now();
+    saveBranchTransfers(branchTransfers);
+    res.json({ success: true, transfer });
 });
 const MULTI_TERMINAL_DISCOUNT_TIERS_BASE = [
     { minDevices: 7, percent: 15 },
@@ -6536,7 +6707,7 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
 app.get('/relay/cloud-backup/usage', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-usage', 60, 60 * 60 * 1000, (req) => req.query?.installationId), async (req, res) => {
     const installationId = String(req.query.installationId || '').trim();
     if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+        return res.status(400).json({ success: false, message: 'Missing installationId.' });
     }
     if (!pgPool) {
         return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
@@ -7262,7 +7433,7 @@ app.post(DRAGONPAY_WEBHOOK_PATH, express.urlencoded({ extended: false, limit: '2
 // OMNIPOS at RELAY (iisang pinagmumulan ng presyo na lang).
 app.post('/relay/cloud-tokens/check-and-consume', requireApiKey, requireAllowedDevice, rateLimit('cloud-tokens-consume', 300, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
     const { installationId, tier, note } = req.body;
-    if (!installationId) return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+    if (!installationId) return res.status(400).json({ success: false, message: 'Missing installationId.' });
     if (!tier || !CLOUD_BACKUP_PLANS[tier]) return res.status(400).json({ success: false, message: 'Invalid o missing na Cloud Backup tier.' });
     if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
     try {
@@ -7673,7 +7844,7 @@ app.post('/relay/cloud-tokens/activate-purchase', requireApiKey, requireAllowedD
 app.get('/relay/cloud-backup/cost-allocation', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-cost-allocation', 30, 60 * 60 * 1000, (req) => req.query?.installationId), async (req, res) => {
     const installationId = String(req.query.installationId || '').trim();
     if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+        return res.status(400).json({ success: false, message: 'Missing installationId.' });
     }
     try {
         const allocation = await computeClientCostAllocation();
@@ -8768,7 +8939,7 @@ function formatDemoDurationLabel(durationMs) {
 app.post('/relay/request-demo', requireApiKey, requireAllowedDevice, rateLimit('request-demo', 5, 10 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
     const { installationId, username, storeName, photo } = req.body;
     if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+        return res.status(400).json({ success: false, message: 'Missing installationId.' });
     }
     const otpCode = String(Math.floor(100000 + Math.random() * 900000));
     const key = `${installationId}:${DEMO_FEATURE_ID}`;
@@ -8856,7 +9027,7 @@ app.post('/relay/confirm-demo', requireApiKey, requireAllowedDevice, rateLimit('
 app.post('/relay/end-demo', requireApiKey, requireAllowedDevice, rateLimit('end-demo', 20, 10 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
     const { installationId } = req.body;
     if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+        return res.status(400).json({ success: false, message: 'Missing installationId.' });
     }
     const record = issuedUnlocks[installationId];
     if (!record || !record[DEMO_FEATURE_ID]) {
@@ -8874,7 +9045,7 @@ app.post('/relay/end-demo', requireApiKey, requireAllowedDevice, rateLimit('end-
 app.post('/relay/cancel-otp', requireApiKey, requireAllowedDevice, rateLimit('cancel-otp', 30, 10 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
     const { installationId, featureId, featureIds, demo } = req.body;
     if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+        return res.status(400).json({ success: false, message: 'Missing installationId.' });
     }
     let key;
     if (demo) {
@@ -9072,7 +9243,7 @@ app.post('/relay/request-admin-reset',
     async (req, res) => {
         const { installationId, storeName, hintUsername } = req.body;
         if (!installationId) {
-            return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+            return res.status(400).json({ success: false, message: 'Missing installationId.' });
         }
         const otpCode = generateAdminResetOtp();
         pendingAdminResets.set(installationId, {
@@ -9209,7 +9380,7 @@ app.post('/relay/request-receipt-reset',
     async (req, res) => {
         const { installationId, storeName, requestedBy } = req.body;
         if (!installationId) {
-            return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+            return res.status(400).json({ success: false, message: 'Missing installationId.' });
         }
         const otpCode = generateReceiptResetOtp();
         pendingReceiptResets.set(installationId, {
@@ -9383,7 +9554,7 @@ app.post('/relay/request-receipt-credit-purchase',
         const { installationId, storeName, requestedBy, quantity } = req.body;
         const quote = calculateReceiptCreditQuote(quantity);
         if (!installationId) {
-            return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+            return res.status(400).json({ success: false, message: 'Missing installationId.' });
         }
         const otpCode = generateReceiptCreditOtp();
         pendingReceiptCreditPurchases.set(installationId, {
@@ -9559,7 +9730,7 @@ app.post('/relay/cloud-tokens/activate-receipt-credit', requireApiKey, requireAl
     }
     const { installationId, clientRequestId } = req.body;
     if (!installationId) {
-        return res.status(400).json({ success: false, message: 'Kulang ang installationId.' });
+        return res.status(400).json({ success: false, message: 'Missing installationId.' });
     }
     if (!pgPool) {
         return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured — the Omni Token wallet needs it.' });
@@ -10807,6 +10978,8 @@ async function bootstrapStores() {
         integrityStatus,
         featureCatalogOverrides,
         branchSummaries,
+        branchHistory,
+        branchTransfers,
         cloudBackupPlanOverrides,
         featurePricingOverrides,
         upgradeTierPricingOverrides,
@@ -10834,6 +11007,8 @@ async function bootstrapStores() {
         loadIntegrityStatus(),
         loadFeatureCatalogOverrides(),
         loadBranchSummaries(),
+        loadBranchHistory(),
+        loadBranchTransfers(),
         loadCloudBackupPlanOverrides(),
         loadFeaturePricingOverrides(),
         loadUpgradeTierPricingOverrides(),
