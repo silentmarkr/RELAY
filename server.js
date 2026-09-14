@@ -6211,9 +6211,40 @@ app.get('/relay/branch-transfers', requireApiKey, requireAllowedDevice, rateLimi
     const list = branchTransfers[groupKeyHash] || [];
     res.json({ success: true, transfers: list });
 });
+// AYOS/BUGFIX (two-sided stock movement): dati, ang tanging ginagawa dito ay
+// palitan ang `status` field (pending -> accepted/rejected/cancelled) — walang
+// kahit anong epekto sa totoong stock ng alinmang branch, kaya effectively
+// "request/coordination tracker" lang ito. Dinagdagan ngayon ng dalawang bagong
+// action/status para maging tunay na two-sided na paglipat ng stock:
+//   pending -> accepted -> in_transit ("Mark as Sent", source branch) -> completed ("Confirm Received", destination branch)
+// Mahalaga: ang RELAY na ito ay walang access sa totoong Products/Inventory ng
+// alinmang branch (magkahiwalay na database bawat branch — RELAY lang ang
+// tagapag-ugnay/coordinator). Kaya ang totoong pagbawas ng stock sa source at
+// pagdagdag ng stock sa destination ay ginagawa ng bawat OMNIPOS instance sa
+// sarili nitong server (tingnan ang /api/branches/transfer-respond sa OMNIPOS),
+// BAGO tumawag dito para i-update ang shared status. Dito lang pinipilit ang
+// tamang pagkakasunod-sunod (state machine) at kung sinong branch ang
+// pwedeng gumawa ng bawat hakbang.
+const BRANCH_TRANSFER_ACTIONS = ['accept', 'reject', 'cancel', 'send', 'receive'];
+const BRANCH_TRANSFER_NEXT_STATUS = {
+    accept: 'accepted',
+    reject: 'rejected',
+    cancel: 'cancelled',
+    send: 'in_transit',
+    receive: 'completed'
+};
+// Aling status kailangan bago payagan ang bawat action, at sinong panig
+// (source/destination installationId) lang ang pwedeng gumawa nito.
+const BRANCH_TRANSFER_RULES = {
+    accept: { requiredStatus: 'pending', actorField: 'toInstallationId', errorMessage: 'Only the destination branch can accept or reject this transfer.' },
+    reject: { requiredStatus: 'pending', actorField: 'toInstallationId', errorMessage: 'Only the destination branch can accept or reject this transfer.' },
+    cancel: { requiredStatus: 'pending', actorField: 'fromInstallationId', errorMessage: 'Only the requesting branch can cancel this transfer.' },
+    send: { requiredStatus: 'accepted', actorField: 'fromInstallationId', errorMessage: 'Only the source branch can mark this transfer as sent.' },
+    receive: { requiredStatus: 'in_transit', actorField: 'toInstallationId', errorMessage: 'Only the destination branch can confirm receipt of this transfer.' }
+};
 app.post('/relay/branch-transfer-respond', requireApiKey, requireAllowedDevice, rateLimit('branch-transfer-respond', 60, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
     const { installationId, branchGroupKeyHash, transferId, action } = req.body || {};
-    if (!installationId || !transferId || !['accept', 'reject', 'cancel'].includes(action)) {
+    if (!installationId || !transferId || !BRANCH_TRANSFER_ACTIONS.includes(action)) {
         return res.status(400).json({ success: false, message: 'Missing or invalid request.' });
     }
     if (!branchGroupKeyHash || !BRANCH_GROUP_HASH_RE.test(String(branchGroupKeyHash))) {
@@ -6224,17 +6255,17 @@ app.post('/relay/branch-transfer-respond', requireApiKey, requireAllowedDevice, 
     if (!transfer) {
         return res.status(404).json({ success: false, message: 'Transfer request not found.' });
     }
-    if (transfer.status !== 'pending') {
-        return res.status(409).json({ success: false, message: `This transfer is no longer "pending" (status: ${transfer.status}).` });
+    const rule = BRANCH_TRANSFER_RULES[action];
+    if (transfer.status !== rule.requiredStatus) {
+        return res.status(409).json({ success: false, message: `This transfer must be "${rule.requiredStatus}" for that action (current status: ${transfer.status}).` });
     }
-    if ((action === 'accept' || action === 'reject') && installationId !== transfer.toInstallationId) {
-        return res.status(403).json({ success: false, message: 'Only the destination branch can accept or reject this transfer.' });
+    if (installationId !== transfer[rule.actorField]) {
+        return res.status(403).json({ success: false, message: rule.errorMessage });
     }
-    if (action === 'cancel' && installationId !== transfer.fromInstallationId) {
-        return res.status(403).json({ success: false, message: 'Only the requesting branch can cancel this transfer.' });
-    }
-    transfer.status = action === 'accept' ? 'accepted' : (action === 'reject' ? 'rejected' : 'cancelled');
+    transfer.status = BRANCH_TRANSFER_NEXT_STATUS[action];
     transfer.updatedAt = Date.now();
+    if (action === 'send') transfer.sentAt = Date.now();
+    if (action === 'receive') transfer.receivedAt = Date.now();
     saveBranchTransfers(branchTransfers);
     res.json({ success: true, transfer });
 });
