@@ -6089,6 +6089,43 @@ app.post('/relay/branch-checkin', requireApiKey, requireAllowedDevice, rateLimit
             changed = true;
         }
     }
+    // AYOS/BUGFIX (mga transfer request na "hindi nakikita" sa ibang
+    // branch, kahit tama na ngayon ang Business Group Code sa magkabilang
+    // panig): may parehong problema dito gaya ng sa branchSummaries sa
+    // itaas, pero WALANG kaparehong migration dati. Kung nagawa/natanggap
+    // ng installation na ito ang isang transfer request noong isang
+    // BANTULOT/hindi-tugmang groupKeyHash pa (hal. dahil sa
+    // case-sensitivity bago naayos ang hashBranchGroupKey, o dahil ibang
+    // bersyon pa ng server ang tumatakbo sa isang branch habang unti-unting
+    // ina-update ang isa pa), permanenteng naiipit ang transfer na iyon sa
+    // LUMANG hash bucket — invisible ito sa DALAWANG panig kahit tama na
+    // ang groupKeyHash mula ngayon, dahil walang paraan para malipat ang
+    // datos papunta sa bagong bucket. Dito, sa bawat check-in (tuwing ilang
+    // minuto, o pag-navigate sa Branches page), ililipat ang alinmang
+    // transfer na kinasasangkutan ng installation na ito (bilang galing
+    // man o papunta rito) mula sa ibang hash bucket papunta sa
+    // kasalukuyang tamang groupKeyHash — parehong self-heal na pattern
+    // gaya ng sa branchSummaries sa itaas.
+    let transfersChanged = false;
+    for (const hash of Object.keys(branchTransfers)) {
+        if (hash === branchGroupKeyHash) continue;
+        const list = branchTransfers[hash];
+        if (!Array.isArray(list) || list.length === 0) continue;
+        const mine = list.filter(t => t.fromInstallationId === installationId || t.toInstallationId === installationId);
+        if (mine.length === 0) continue;
+        branchTransfers[hash] = list.filter(t => !(t.fromInstallationId === installationId || t.toInstallationId === installationId));
+        if (branchTransfers[hash].length === 0) delete branchTransfers[hash];
+        if (!Array.isArray(branchTransfers[branchGroupKeyHash])) branchTransfers[branchGroupKeyHash] = [];
+        branchTransfers[branchGroupKeyHash].push(...mine);
+        transfersChanged = true;
+    }
+    if (transfersChanged) {
+        branchTransfers[branchGroupKeyHash].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        if (branchTransfers[branchGroupKeyHash].length > BRANCH_TRANSFERS_MAX_PER_GROUP) {
+            branchTransfers[branchGroupKeyHash].length = BRANCH_TRANSFERS_MAX_PER_GROUP;
+        }
+        saveBranchTransfers(branchTransfers);
+    }
     if (!branchSummaries[branchGroupKeyHash]) branchSummaries[branchGroupKeyHash] = {};
     branchSummaries[branchGroupKeyHash][installationId] = {
         branchName: cleanName,
