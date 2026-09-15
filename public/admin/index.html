@@ -1967,11 +1967,28 @@ function createProgressController(ids) {
         : 'linear-gradient(90deg, var(--accent-dim), var(--accent))';
     }
     if (typeof target.etaMs === 'number') {
-      etaTargetMs = target.etaMs;
+      const newTargetMs = target.etaMs;
       if (etaMsLocal == null) {
-        etaMsLocal = etaTargetMs;
-        etaLastTickAt = Date.now();
+        // Unang value — walang dating countdown na aagawin, gamitin agad.
+        etaMsLocal = newTargetMs;
+      } else if (newTargetMs !== etaTargetMs) {
+        // AYOS/BUGFIX: dati, dito walang ginagawa — ang "pagsabay" sa bagong
+        // server value ay nangyayari sa tick() sa halip, paulit-ulit tuwing
+        // 120ms sa pamamagitan ng "gap * 0.1" na pull. Problema: kapag
+        // paulit-ulit na PAREHONG value lang ang ipinapadala ng server
+        // (hal. habang nakatigil sa iisang malaking file), ang paulit-ulit
+        // na "bawas ng 120ms tapos idagdag pabalik ang 10% ng gap" ay
+        // mathematically nagko-converge sa isang halos-static na numero
+        // (~1 segundo lang sa ilalim ng target, tapos tumitigil na — hindi
+        // na bumababa) sa halip na tuloy-tuloy na bumababa. Dito na ngayon
+        // ginagawa ang pagsabay — ISANG BESES lang, at ONLY kapag talagang
+        // may BAGONG value na dumating mula sa server (ibig sabihin, may
+        // totoong pagbabago sa progress o na-recompute ng server ang
+        // estimate) — 50/50 blend para hindi biglaan/jarring ang lundag.
+        etaMsLocal = (etaMsLocal * 0.5) + (newTargetMs * 0.5);
       }
+      etaTargetMs = newTargetMs;
+      etaLastTickAt = Date.now();
     }
     if (target.done && etaEl) etaEl.innerText = '';
   }
@@ -1990,11 +2007,12 @@ function createProgressController(ids) {
         const now = Date.now();
         const elapsedTick = now - etaLastTickAt;
         etaLastTickAt = now;
+        // AYOS/BUGFIX: tuloy-tuloy na lang na bumababa dito base sa totoong
+        // nakalipas na oras — walang na dating "pull pabalik" papunta sa
+        // etaTargetMs dito (inilipat na sa applyTarget() sa itaas, isang
+        // beses lang bawat GENUINELY bagong value — tingnan ang paliwanag
+        // doon). Ito ang nag-aayos sa "hindi na gumagalaw" na countdown.
         etaMsLocal = Math.max(0, etaMsLocal - elapsedTick);
-        if (etaTargetMs != null) {
-          const gap = etaTargetMs - etaMsLocal;
-          etaMsLocal = Math.max(0, etaMsLocal + gap * 0.1);
-        }
         etaEl.innerText = formatEta(etaMsLocal);
       } else {
         etaEl.innerText = '';

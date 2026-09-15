@@ -10601,6 +10601,32 @@ app.get('/relay/admin/api/build-progress', requireAdminKey, (req, res) => {
 // parehong RELEASE_PACKAGE_TMP_PATH/tmpDir at magresulta sa sirang zip o
 // nagkakasalungat na build-progress state.
 let buildInProgress = false;
+// AYOS/BUGFIX (natitigil/hindi gumagalaw ang "~Ns natitira" sa panahon ng
+// obfuscation): dati, iisang beses lang ina-update/nire-recompute ang
+// buildProgressState.etaMs — sa bawat pagtapos ng isang FILE (onProgress
+// callback ng obfuscateReleaseTree, tingnan sa ibaba). Kung malaki ang
+// isang SOLONG file (hal. server.js, public/app.js — daan-daang KB),
+// puwedeng ilang segundo itong tumagal sa loob ng worker thread nang
+// walang kahit anong progress event sa buong panahong iyon — kaya
+// "nakafreeze" ang etaMs (at ang ipinapakitang countdown sa admin panel)
+// hanggang matapos ang buong file, kahit patuloy namang tumatakbo ang
+// totoong oras. Itong heartbeat na ito ay tumatakbo bawat segundo habang
+// may aktibong build, tumatawag ng setBuildProgress({}) (walang binabago
+// sa percent/stage/message) — sapat na ito para patuloy na ma-recompute
+// ang etaMs batay sa totoong elapsed time (Date.now() - startedAt), kaya
+// palaging "buhay"/tumatakbo ang ipinapakitang numero anuman kalaki ang
+// kasalukuyang file.
+let buildProgressHeartbeatTimer = null;
+function startBuildProgressHeartbeat() {
+    stopBuildProgressHeartbeat();
+    buildProgressHeartbeatTimer = setInterval(() => {
+        if (buildProgressState.done) { stopBuildProgressHeartbeat(); return; }
+        setBuildProgress({});
+    }, 1000);
+}
+function stopBuildProgressHeartbeat() {
+    if (buildProgressHeartbeatTimer) { clearInterval(buildProgressHeartbeatTimer); buildProgressHeartbeatTimer = null; }
+}
 async function performBuildRelease(reqBody, req, publishOverride) {
     if (buildInProgress) {
         const err = new Error('May kasalukuyang build pa rin na tumatakbo — hintayin munang matapos ito bago mag-request ng bago.');
@@ -10608,10 +10634,12 @@ async function performBuildRelease(reqBody, req, publishOverride) {
         throw err;
     }
     buildInProgress = true;
+    startBuildProgressHeartbeat();
     try {
         return await performBuildReleaseInner(reqBody, req, publishOverride);
     } finally {
         buildInProgress = false;
+        stopBuildProgressHeartbeat();
     }
 }
 async function performBuildReleaseInner(reqBody, req, publishOverride) {
