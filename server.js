@@ -6089,23 +6089,22 @@ app.post('/relay/branch-checkin', requireApiKey, requireAllowedDevice, rateLimit
             changed = true;
         }
     }
-    // AYOS/BUGFIX (mga transfer request na "hindi nakikita" sa ibang
-    // branch, kahit tama na ngayon ang Business Group Code sa magkabilang
-    // panig): may parehong problema dito gaya ng sa branchSummaries sa
-    // itaas, pero WALANG kaparehong migration dati. Kung nagawa/natanggap
-    // ng installation na ito ang isang transfer request noong isang
-    // BANTULOT/hindi-tugmang groupKeyHash pa (hal. dahil sa
-    // case-sensitivity bago naayos ang hashBranchGroupKey, o dahil ibang
-    // bersyon pa ng server ang tumatakbo sa isang branch habang unti-unting
-    // ina-update ang isa pa), permanenteng naiipit ang transfer na iyon sa
-    // LUMANG hash bucket — invisible ito sa DALAWANG panig kahit tama na
-    // ang groupKeyHash mula ngayon, dahil walang paraan para malipat ang
-    // datos papunta sa bagong bucket. Dito, sa bawat check-in (tuwing ilang
-    // minuto, o pag-navigate sa Branches page), ililipat ang alinmang
-    // transfer na kinasasangkutan ng installation na ito (bilang galing
-    // man o papunta rito) mula sa ibang hash bucket papunta sa
-    // kasalukuyang tamang groupKeyHash — parehong self-heal na pattern
-    // gaya ng sa branchSummaries sa itaas.
+    // FIX (transfer requests "not visible" on the other branch, even
+    // though the Business Group Code is now correct on both sides): the
+    // same problem existed here as with branchSummaries above, but there
+    // was NO equivalent migration before. If this installation made/
+    // received a transfer request while under an OLD/mismatched
+    // groupKeyHash (e.g. due to case-sensitivity before
+    // hashBranchGroupKey was fixed, or because a different server
+    // version was running on one branch while the other was gradually
+    // updated), that transfer would be permanently stuck in the OLD hash
+    // bucket — invisible to BOTH sides even though the groupKeyHash is
+    // now correct, since there was no way to move the data to the new
+    // bucket. Here, on every check-in (every few minutes, or when
+    // navigating to the Branches page), any transfer involving this
+    // installation (as either source or destination) is moved from the
+    // other hash bucket to the current correct groupKeyHash — the same
+    // self-heal pattern as with branchSummaries above.
     let transfersChanged = false;
     for (const hash of Object.keys(branchTransfers)) {
         if (hash === branchGroupKeyHash) continue;
@@ -6141,7 +6140,6 @@ app.post('/relay/branch-checkin', requireApiKey, requireAllowedDevice, rateLimit
         saveBranchSummaries(branchSummaries);
         branchLastPersisted.set(branchPersistKey, { signature: branchSig, at: Date.now() });
     }
-    if (changed) {   }
     res.json({ success: true, message: 'Branch check-in recorded.' });
 });
 app.get('/relay/branch-summary', requireApiKey, requireAllowedDevice, rateLimit('branch-summary', 120, 60 * 60 * 1000, (req) => req.query?.installationId), (req, res) => {
@@ -6248,20 +6246,20 @@ app.get('/relay/branch-transfers', requireApiKey, requireAllowedDevice, rateLimi
     const list = branchTransfers[groupKeyHash] || [];
     res.json({ success: true, transfers: list });
 });
-// AYOS/BUGFIX (two-sided stock movement): dati, ang tanging ginagawa dito ay
-// palitan ang `status` field (pending -> accepted/rejected/cancelled) — walang
-// kahit anong epekto sa totoong stock ng alinmang branch, kaya effectively
-// "request/coordination tracker" lang ito. Dinagdagan ngayon ng dalawang bagong
-// action/status para maging tunay na two-sided na paglipat ng stock:
+// FIX (two-sided stock movement): previously, all this did was swap the
+// `status` field (pending -> accepted/rejected/cancelled) — with no
+// effect on either branch's real stock, so it was effectively just a
+// "request/coordination tracker". Two new actions/statuses have now been
+// added to make this a genuine two-sided stock transfer:
 //   pending -> accepted -> in_transit ("Mark as Sent", source branch) -> completed ("Confirm Received", destination branch)
-// Mahalaga: ang RELAY na ito ay walang access sa totoong Products/Inventory ng
-// alinmang branch (magkahiwalay na database bawat branch — RELAY lang ang
-// tagapag-ugnay/coordinator). Kaya ang totoong pagbawas ng stock sa source at
-// pagdagdag ng stock sa destination ay ginagawa ng bawat OMNIPOS instance sa
-// sarili nitong server (tingnan ang /api/branches/transfer-respond sa OMNIPOS),
-// BAGO tumawag dito para i-update ang shared status. Dito lang pinipilit ang
-// tamang pagkakasunod-sunod (state machine) at kung sinong branch ang
-// pwedeng gumawa ng bawat hakbang.
+// Important: this RELAY has no access to either branch's real
+// Products/Inventory (each branch has its own separate database — RELAY
+// is only the coordinator). So the actual stock deduction at the source
+// and stock addition at the destination is done by each OMNIPOS instance
+// on its own server (see /api/branches/transfer-respond on OMNIPOS),
+// BEFORE it calls here to update the shared status. This only enforces
+// the correct sequence (state machine) and which branch is allowed to
+// perform each step.
 const BRANCH_TRANSFER_ACTIONS = ['accept', 'reject', 'cancel', 'send', 'receive'];
 const BRANCH_TRANSFER_NEXT_STATUS = {
     accept: 'accepted',
@@ -6270,8 +6268,8 @@ const BRANCH_TRANSFER_NEXT_STATUS = {
     send: 'in_transit',
     receive: 'completed'
 };
-// Aling status kailangan bago payagan ang bawat action, at sinong panig
-// (source/destination installationId) lang ang pwedeng gumawa nito.
+// Which status is required before allowing each action, and which side
+// (source/destination installationId) is allowed to perform it.
 const BRANCH_TRANSFER_RULES = {
     accept: { requiredStatus: 'pending', actorField: 'toInstallationId', errorMessage: 'Only the destination branch can accept or reject this transfer.' },
     reject: { requiredStatus: 'pending', actorField: 'toInstallationId', errorMessage: 'Only the destination branch can accept or reject this transfer.' },
