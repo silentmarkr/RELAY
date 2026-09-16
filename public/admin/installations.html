@@ -103,7 +103,7 @@
     <button class="btn-sm btn-danger" onclick="bulkBackupThenDelete()">Backup + Delete Selected</button>
     <button class="btn-sm" onclick="clearSelection()">Clear selection</button>
   </div>
-  <input type="text" id="search" placeholder="Search installation ID or store name..." oninput="renderTable()">
+  <input type="text" id="search" placeholder="Search installation ID, store name, or label..." oninput="renderTable()">
   <table>
     <thead>
       <tr>
@@ -234,7 +234,7 @@ function toggleRow(id, checked) {
 
 function toggleSelectAll(checked) {
   const q = document.getElementById('search').value.trim().toLowerCase();
-  const visible = installations.filter(i => !q || i.installationId.toLowerCase().includes(q) || (i.storeName || '').toLowerCase().includes(q));
+  const visible = installations.filter(i => !q || i.installationId.toLowerCase().includes(q) || (i.storeName || '').toLowerCase().includes(q) || (i.label || '').toLowerCase().includes(q));
   if (checked) visible.forEach(i => selected.add(i.installationId));
   else visible.forEach(i => selected.delete(i.installationId));
   renderTable();
@@ -254,7 +254,7 @@ function updateBulkBar() {
 function renderTable() {
   const q = document.getElementById('search').value.trim().toLowerCase();
   const filtered = installations.filter(i =>
-    !q || i.installationId.toLowerCase().includes(q) || (i.storeName || '').toLowerCase().includes(q)
+    !q || i.installationId.toLowerCase().includes(q) || (i.storeName || '').toLowerCase().includes(q) || (i.label || '').toLowerCase().includes(q)
   );
   const rows = filtered.map(i => {
     const safeId = escapeJsAttr(i.installationId);
@@ -262,7 +262,8 @@ function renderTable() {
     <tr>
       <td><input type="checkbox" ${selected.has(i.installationId) ? 'checked' : ''} onchange="toggleRow('${safeId}', this.checked)"></td>
       <td>
-        <div>${escapeHtml(i.storeName || i.label) || '<span class="muted">(no store name)</span>'}</div>
+        <div>${escapeHtml(i.storeName) || '<span class="muted">(no store name)</span>'}</div>
+        ${i.label ? `<div class="muted" style="font-size:.78rem;">🏷️ ${escapeHtml(i.label)}</div>` : ''}
         <div class="id-cell">${escapeHtml(i.installationId)}</div>
       </td>
       <td>${i.allowed ? '<span class="badge badge-green">Allowed</span>' : '<span class="badge badge-red">Not allowed</span>'}</td>
