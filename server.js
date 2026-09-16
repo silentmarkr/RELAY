@@ -10359,6 +10359,11 @@ const RELEASE_SERVER_TARGETS = new Set([
 ]);
 const RELEASE_CLIENT_TARGETS = new Set([
     path.join('public', 'app.js'),
+    // SYNC FIX: idinagdag ang public/app1.js (Branch Intelligence & Safety
+    // Extension) — itinugma sa CLIENT_TARGETS ng OMNIPOS (build-release.js).
+    // Nakaligtaan din dito kahit proprietary code rin ito na kasabay ng
+    // app.js, kaya na-e-excempt sa obfuscation sa remote build path.
+    path.join('public', 'app1.js'),
     path.join('public', 'bt-printer.js'),
     // Printer Device Settings (Bluetooth brand presets + WiFi/LAN network
     // printing) — proprietary code, must ship/obfuscate alongside bt-printer.js.
