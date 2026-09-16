@@ -6304,6 +6304,34 @@ app.post('/relay/branch-transfer-respond', requireApiKey, requireAllowedDevice, 
     saveBranchTransfers(branchTransfers);
     res.json({ success: true, transfer });
 });
+// Lets a branch clear the FINISHED (completed/rejected/cancelled) transfer
+// requests out of the shared history for its group. This is deliberately
+// scoped to terminal statuses only — a transfer that is still
+// pending/accepted/in_transit is never removed here, even if requested,
+// because that history is shared between both branches involved and
+// deleting an in-progress request out from under the other side would
+// desync their view of a transfer that hasn't actually finished yet.
+// Since branchTransfers[groupKeyHash] is one shared list for the whole
+// group (not per-installation), clearing here clears it for every branch
+// in the group, not just the caller's own device.
+app.post('/relay/branch-transfers/clear-finished', requireApiKey, requireAllowedDevice, rateLimit('branch-transfers-clear', 10, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
+    const { installationId, branchGroupKeyHash } = req.body || {};
+    if (!installationId) {
+        return res.status(400).json({ success: false, message: 'Missing installationId.' });
+    }
+    if (!branchGroupKeyHash || !BRANCH_GROUP_HASH_RE.test(String(branchGroupKeyHash))) {
+        return res.status(400).json({ success: false, message: 'Missing or invalid branchGroupKeyHash format.' });
+    }
+    const FINISHED_STATUSES = ['completed', 'rejected', 'cancelled'];
+    const list = branchTransfers[branchGroupKeyHash] || [];
+    const remaining = list.filter((t) => !FINISHED_STATUSES.includes(t.status));
+    const clearedCount = list.length - remaining.length;
+    if (clearedCount > 0) {
+        branchTransfers[branchGroupKeyHash] = remaining;
+        saveBranchTransfers(branchTransfers);
+    }
+    res.json({ success: true, clearedCount, remainingCount: remaining.length });
+});
 const MULTI_TERMINAL_DISCOUNT_TIERS_BASE = [
     { minDevices: 7, percent: 15 },
     { minDevices: 4, percent: 10 },
