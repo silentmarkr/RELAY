@@ -72,6 +72,7 @@
   .btn-primary:hover { background: var(--accent-soft); }
   #toast { position: fixed; bottom: 20px; right: 20px; background: var(--bg-raise); border: 1.5px solid var(--border-soft); border-radius: var(--radius); padding: 10px 16px; font-size: .85rem; display: none; max-width: 340px; z-index: 50; }
   .muted { color: var(--muted); }
+  .chip { display: inline-block; padding: 1px 7px; margin: 2px 4px 2px 0; border-radius: 20px; font-size: .68rem; border: 1px solid var(--line); color: var(--muted); }
   #search { padding: 8px 12px; border-radius: var(--radius); border: 1.5px solid var(--border); background: var(--bg-raise); color: var(--text); font-family: var(--font-ui); width: 260px; margin-bottom: 14px; }
 </style>
 </head>
@@ -82,7 +83,7 @@
     <button class="icon-btn" onclick="window.location.href='index.html'" title="Back to Devices">← Devices</button>
     <div>
       <div class="topbar-title">Installation Data</div>
-      <div class="topbar-sub">Per-store Cloud Backup footprint — view, backup, or delete</div>
+      <div class="topbar-sub">Every installation ID found in Neon and Relay — view, backup, or delete</div>
     </div>
   </div>
   <button class="icon-btn" onclick="logout()">Log out</button>
@@ -103,13 +104,14 @@
     <button class="btn-sm btn-danger" onclick="bulkBackupThenDelete()">Backup + Delete Selected</button>
     <button class="btn-sm" onclick="clearSelection()">Clear selection</button>
   </div>
-  <input type="text" id="search" placeholder="Search installation ID, store name, or label..." oninput="renderTable()">
+  <input type="text" id="search" placeholder="Search installation ID, store name, label, or where found..." oninput="renderTable()">
   <table>
     <thead>
       <tr>
         <th><input type="checkbox" id="selectAll" onchange="toggleSelectAll(this.checked)"></th>
         <th>Store / Installation ID</th>
         <th>Allowed</th>
+        <th>Found in</th>
         <th>Records</th>
         <th>Size</th>
         <th>Last Sync</th>
@@ -213,6 +215,33 @@ async function loadInstallations() {
   }
   renderSummary();
   renderTable();
+  if (data.scanWarnings && data.scanWarnings.length) {
+    toast('Some tables could not be scanned: ' + data.scanWarnings.join('; '), true);
+  }
+}
+
+const SOURCE_LABELS = {
+  cloud_backup: 'Cloud Backup', token_wallet: 'Token wallet', token_purchases: 'Token purchases',
+  token_ledger: 'Token ledger', sync_activity: 'Sync log', device_record: 'Device record',
+  fingerprint: 'Fingerprint', clone_split: 'Clone split', ai_credits: 'AI credits',
+  seen: 'Seen since restart', allowed: 'Allow-list', label: 'Label', unlocks: 'Feature unlocks',
+  backup_checkin: 'Backup check-in', integrity: 'Integrity', fee_override: 'Fee override'
+};
+
+function findInstallation(id) {
+  return installations.find(i => i.installationId === id) || null;
+}
+
+// Plain-language summary of what a delete will remove, shown in the confirm prompt.
+function describeDeletion(id) {
+  const inst = findInstallation(id);
+  if (!inst) return '';
+  const where = (inst.foundIn || []).map(k => SOURCE_LABELS[k] || k).join(', ') || 'unknown';
+  let text = `Found in: ${where}.`;
+  if (inst.walletBalanceTokens !== null && inst.walletBalanceTokens !== undefined) {
+    text += `\nToken wallet balance that will be deleted: ${inst.walletBalanceTokens} tokens.`;
+  }
+  return text;
 }
 
 function renderSummary() {
@@ -224,6 +253,7 @@ function renderSummary() {
     <div class="summary-card"><div class="num">${withData}</div><div class="lbl">With Cloud Backup Data</div></div>
     <div class="summary-card"><div class="num">${formatBytes(totalSize)}</div><div class="lbl">Total Stored Size</div></div>
     <div class="summary-card"><div class="num">${flagged}</div><div class="lbl">Clone-Flagged</div></div>
+    <div class="summary-card"><div class="num">${installations.filter(i => !i.allowed).length}</div><div class="lbl">Not in Allow-List</div></div>
   `;
 }
 
@@ -254,7 +284,8 @@ function updateBulkBar() {
 function renderTable() {
   const q = document.getElementById('search').value.trim().toLowerCase();
   const filtered = installations.filter(i =>
-    !q || i.installationId.toLowerCase().includes(q) || (i.storeName || '').toLowerCase().includes(q) || (i.label || '').toLowerCase().includes(q)
+    !q || i.installationId.toLowerCase().includes(q) || (i.storeName || '').toLowerCase().includes(q) || (i.label || '').toLowerCase().includes(q) ||
+    (i.foundIn || []).some(k => (SOURCE_LABELS[k] || k).toLowerCase().includes(q))
   );
   const rows = filtered.map(i => {
     const safeId = escapeJsAttr(i.installationId);
@@ -267,6 +298,10 @@ function renderTable() {
         <div class="id-cell">${escapeHtml(i.installationId)}</div>
       </td>
       <td>${i.allowed ? '<span class="badge badge-green">Allowed</span>' : '<span class="badge badge-red">Not allowed</span>'}</td>
+      <td>
+        ${(i.foundIn || []).map(k => `<span class="chip">${escapeHtml(SOURCE_LABELS[k] || k)}</span>`).join('')}
+        ${(i.walletBalanceTokens !== null && i.walletBalanceTokens !== undefined) ? `<div><span class="badge badge-amber">Wallet: ${escapeHtml(i.walletBalanceTokens)} tokens</span></div>` : ''}
+      </td>
       <td>${i.totalRecords || 0} <span class="muted">(${i.moduleCount || 0} modules)</span></td>
       <td>${formatBytes(i.sizeBytes)}</td>
       <td>${formatDate(i.lastSyncAt)}</td>
@@ -274,15 +309,15 @@ function renderTable() {
       <td>${i.fingerprintFlagged ? '<span class="badge badge-amber">Flagged</span>' : (i.fingerprintVerified ? '<span class="badge badge-green">Verified</span>' : '<span class="muted">—</span>')}</td>
       <td>
         <div class="row-actions">
-          <button class="btn-sm btn-primary" onclick="downloadBackup('${safeId}')">Backup</button>
-          <button class="btn-sm btn-danger" onclick="deleteOnly('${safeId}')">Delete only</button>
-          <button class="btn-sm btn-danger" onclick="backupThenDelete('${safeId}')">Backup + Delete</button>
+          ${i.hasCloudBackupData ? `<button class="btn-sm btn-primary" onclick="downloadBackup('${safeId}')">Backup</button>` : ''}
+          <button class="btn-sm btn-danger" onclick="deleteOnly('${safeId}')">${i.hasCloudBackupData ? 'Delete only' : 'Delete'}</button>
+          ${i.hasCloudBackupData ? `<button class="btn-sm btn-danger" onclick="backupThenDelete('${safeId}')">Backup + Delete</button>` : ''}
         </div>
       </td>
     </tr>
   `;
   }).join('');
-  document.getElementById('tableBody').innerHTML = rows || `<tr><td colspan="9" class="muted">No installations found.</td></tr>`;
+  document.getElementById('tableBody').innerHTML = rows || `<tr><td colspan="10" class="muted">No installations found.</td></tr>`;
   document.getElementById('selectAll').checked = filtered.length > 0 && filtered.every(i => selected.has(i.installationId));
   updateBulkBar();
 }
@@ -317,7 +352,7 @@ async function downloadBackup(installationId) {
 }
 
 async function deleteOnly(installationId) {
-  const typed = prompt(`This permanently deletes ALL data for:\n${installationId}\n\nThis cannot be undone. Type DELETE to confirm.`);
+  const typed = prompt(`This permanently deletes ALL data for:\n${installationId}\n${describeDeletion(installationId)}\n\nThis cannot be undone. Type DELETE to confirm.`);
   if (typed !== 'DELETE') { toast('Cancelled.'); return; }
   try {
     await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/purge?confirm=DELETE`, { method: 'POST' });
@@ -334,7 +369,7 @@ async function backupThenDelete(installationId) {
     toast('Backup failed — deletion was NOT performed, to avoid losing data with no copy.', true);
     return;
   }
-  const typed = prompt(`Backup downloaded. Now permanently delete ALL data for:\n${installationId}\n\nType DELETE to confirm.`);
+  const typed = prompt(`Backup downloaded. Now permanently delete ALL data for:\n${installationId}\n${describeDeletion(installationId)}\n\nType DELETE to confirm.`);
   if (typed !== 'DELETE') { toast('Backup saved. Deletion cancelled.'); return; }
   try {
     await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/purge?confirm=DELETE`, { method: 'POST' });
@@ -378,7 +413,8 @@ async function bulkBackup() {
 async function bulkDeleteOnly() {
   const ids = [...selected];
   if (!ids.length) return;
-  const typed = prompt(`This permanently deletes ALL data for ${ids.length} installation(s):\n${ids.join(', ')}\n\nThis cannot be undone. Type DELETE to confirm.`);
+  const walletTotal = ids.reduce((sum, id) => sum + ((findInstallation(id) || {}).walletBalanceTokens || 0), 0);
+  const typed = prompt(`This permanently deletes ALL data for ${ids.length} installation(s):\n${ids.join(', ')}\n${walletTotal ? `\nToken wallet balances that will be deleted: ${walletTotal} tokens.\n` : ''}\nThis cannot be undone. Type DELETE to confirm.`);
   if (typed !== 'DELETE') { toast('Cancelled.'); return; }
   await runBulkDelete(ids);
 }
@@ -386,12 +422,13 @@ async function bulkDeleteOnly() {
 async function bulkBackupThenDelete() {
   const ids = [...selected];
   if (!ids.length) return;
-  const ok = await bulkBackup();
+  const anyCloudData = ids.some(id => (findInstallation(id) || {}).hasCloudBackupData);
+  const ok = anyCloudData ? await bulkBackup() : true;
   if (!ok) {
     toast('Bulk backup failed — deletion was NOT performed, to avoid losing data with no copy.', true);
     return;
   }
-  const typed = prompt(`Backup downloaded. Now permanently delete ALL data for ${ids.length} installation(s):\n${ids.join(', ')}\n\nType DELETE to confirm.`);
+  const typed = prompt(`${anyCloudData ? 'Backup downloaded. ' : 'None of the selected have Cloud Backup data, so nothing was backed up. '}Now permanently delete ALL data for ${ids.length} installation(s):\n${ids.join(', ')}\n\nType DELETE to confirm.`);
   if (typed !== 'DELETE') { toast('Backup saved. Deletion cancelled.'); return; }
   await runBulkDelete(ids);
 }

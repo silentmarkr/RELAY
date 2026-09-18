@@ -4423,6 +4423,42 @@ app.post('/relay/admin/api/devices/:installationId/purge', requireAdminKey, asyn
             }
         }
 
+        // BAGO: burahin din ang natitirang record ng installation na ito sa
+        // ibang Neon table (token wallet/purchases/ledger, sync activity, AI
+        // credit usage/requests/settings). Dati hindi ito ginagalaw kaya
+        // bumabalik/nananatili ang ID sa Installations list kahit na-purge
+        // na. Kada table ay may sariling try/catch para hindi mahinto ang
+        // iba kung may isang mabigo.
+        summary.deletedRows = {};
+        summary.deleteErrors = {};
+        if (pgPool) {
+            try {
+                const walletRow = await queryWithRetry(pgPool, 'SELECT balance_tokens FROM cloud_token_wallets WHERE installation_id = $1', [installationId]);
+                summary.deletedTokenWalletBalance = walletRow.rows[0] ? Number(walletRow.rows[0].balance_tokens) : null;
+            } catch (err) {
+                summary.deleteErrors.cloud_token_wallets_read = err.message;
+            }
+        }
+        const purgeRows = async (pool, table) => {
+            if (!pool) return;
+            try {
+                const r = await queryWithRetry(pool, `DELETE FROM ${table} WHERE installation_id = $1`, [installationId]);
+                summary.deletedRows[table] = r.rowCount;
+            } catch (err) {
+                console.error(`⚠️  Hindi na-delete ang ${table} rows (purge):`, err.message);
+                summary.deleteErrors[table] = err.message;
+            }
+        };
+        await purgeRows(pgPool, 'cloud_token_wallets');
+        await purgeRows(pgPool, 'cloud_token_purchases');
+        await purgeRows(pgPool, 'cloud_token_ledger');
+        await purgeRows(pgPool, 'cloud_sync_activity');
+        await purgeRows(pgPoolDevices, 'relay_ai_credit_usage');
+        await purgeRows(pgPoolDevices, 'relay_ai_credit_requests');
+        await purgeRows(pgPoolDevices, 'relay_ai_credit_settings');
+        await purgeRows(pgPoolDevices, 'relay_device_fingerprints');
+        await purgeRows(pgPoolDevices, 'relay_clone_splits');
+
         logActivity(installationId, 'device_purged', summary);
         res.json({
             success: true,
@@ -5057,10 +5093,67 @@ app.get('/relay/admin/api/installations', requireAdminKey, async (req, res) => {
         // ang app pero naiwan pa ang datos sa Neon) — dapat pareho itong
         // makita dito, kasi parehong may "data na pwedeng ikalugi" kapag
         // hindi na-manage.
+        // AYOS: dating tatlong pinagmulan lang (cloud_backup_meta, seenDevices,
+        // allowedDevices) — kaya ang installation ID na nasa Neon lang
+        // (hal. may token wallet/purchases, hindi allowed, may fingerprint o
+        // AI credit record, o hindi pa nag-request mula noong huling restart)
+        // ay HINDI lumalabas dito at hindi mabura. Ngayon, sinusuri na ang
+        // LAHAT ng Neon table na may installation_id, kasama ang mga
+        // in-memory store na galing din sa Neon KV. Ang bawat ID ay may
+        // "foundIn" list para makita kung saan ito nakita.
+        const foundIn = new Map();
+        const scanWarnings = [];
+        const addSource = (rawId, src) => {
+            if (typeof rawId !== 'string') return;
+            const id = rawId.trim();
+            if (!id || id === '__default__') return;
+            if (!foundIn.has(id)) foundIn.set(id, new Set());
+            foundIn.get(id).add(src);
+        };
+        const scanTable = async (pool, table, src) => {
+            if (!pool) return;
+            try {
+                const { rows } = await queryWithRetry(pool, `SELECT DISTINCT installation_id AS id FROM ${table}`, []);
+                rows.forEach((r) => addSource(r.id, src));
+            } catch (err) {
+                scanWarnings.push(`${table}: ${err.message}`);
+                console.error(`⚠️  Installations scan: hindi nabasa ang ${table}:`, err.message);
+            }
+        };
+        const walletBalances = new Map();
+        await scanTable(pgPool, 'cloud_backup_meta', 'cloud_backup');
+        if (pgPool) {
+            try {
+                const { rows } = await queryWithRetry(pgPool, 'SELECT installation_id, balance_tokens FROM cloud_token_wallets', []);
+                rows.forEach((r) => {
+                    addSource(r.installation_id, 'token_wallet');
+                    walletBalances.set(r.installation_id, Number(r.balance_tokens) || 0);
+                });
+            } catch (err) {
+                scanWarnings.push(`cloud_token_wallets: ${err.message}`);
+                console.error('⚠️  Installations scan: hindi nabasa ang cloud_token_wallets:', err.message);
+            }
+        }
+        await scanTable(pgPool, 'cloud_token_purchases', 'token_purchases');
+        await scanTable(pgPool, 'cloud_token_ledger', 'token_ledger');
+        await scanTable(pgPool, 'cloud_sync_activity', 'sync_activity');
+        await scanTable(pgPoolDevices, 'relay_devices', 'device_record');
+        await scanTable(pgPoolDevices, 'relay_device_fingerprints', 'fingerprint');
+        await scanTable(pgPoolDevices, 'relay_clone_splits', 'clone_split');
+        await scanTable(pgPoolDevices, 'relay_ai_credit_usage', 'ai_credits');
+        await scanTable(pgPoolDevices, 'relay_ai_credit_requests', 'ai_credits');
+        await scanTable(pgPoolDevices, 'relay_ai_credit_settings', 'ai_credits');
+        seenDevices.forEach((_v, id) => addSource(id, 'seen'));
+        allowedDevices.forEach((id) => addSource(id, 'allowed'));
+        deviceLabels.forEach((_v, id) => addSource(id, 'label'));
+        deviceFingerprints.forEach((_v, id) => addSource(id, 'fingerprint'));
+        Object.keys(issuedUnlocks || {}).forEach((id) => addSource(id, 'unlocks'));
+        Object.keys(backupCheckins || {}).forEach((id) => addSource(id, 'backup_checkin'));
+        Object.keys(integrityStatus || {}).forEach((id) => addSource(id, 'integrity'));
+        Object.keys((clientMaintenanceFeeConfig && clientMaintenanceFeeConfig.perClientOverridePHP) || {}).forEach((id) => addSource(id, 'fee_override'));
         const allIds = new Set([
             ...metaByInstallation.keys(),
-            ...seenDevices.keys(),
-            ...allowedDevices
+            ...foundIn.keys()
         ]);
         const ids = [...allIds];
         const onlineMap = await getOnlineStatusMap(ids);
@@ -5076,6 +5169,8 @@ app.get('/relay/admin/api/installations', requireAdminKey, async (req, res) => {
                 online: !!onlineMap[installationId],
                 lastSeenAt: seen ? seen.lastSeenAt : null,
                 // === Cloud Backup data footprint (Neon) ===
+                foundIn: [...(foundIn.get(installationId) || [])].sort(),
+                walletBalanceTokens: walletBalances.has(installationId) ? walletBalances.get(installationId) : null,
                 hasCloudBackupData: !!meta,
                 totalRecords: meta ? Number(meta.total_records) || 0 : 0,
                 moduleCount: meta ? Number(meta.module_count) || 0 : 0,
@@ -5096,6 +5191,7 @@ app.get('/relay/admin/api/installations', requireAdminKey, async (req, res) => {
             checkedAt: Date.now(),
             cloudBackupConfigured: !!pgPool,
             count: installations.length,
+            scanWarnings,
             installations
         });
     } catch (err) {
