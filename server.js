@@ -2345,8 +2345,66 @@ const MODULE_SUBSCRIPTION_PLANS_BASE = {
     }
 };
 const MODULE_SUBSCRIPTION_BILLING_DAYS = { monthly: 30, yearly: 365 };
-const MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS = 7;
-const MODULE_SUBSCRIPTION_GRACE_PERIOD_MS = MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS * 24 * 60 * 60 * 1000;
+// ===================================================================
+// GAWA/BAGO: SUBSCRIPTION GRACE PERIOD SETTINGS — dating hardcoded
+// (MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS = 7, at CLOUD_BACKUP_RETENTION_
+// DEFAULT_GRACE_DAYS = 90 sa retention-review/retention-purge sa baba),
+// ngayon admin-configurable at PERSISTENT ito (parehong pattern ng
+// moduleSubscriptionOverrides/cloudBackupPlanOverrides) — tingnan ang
+// GET/POST /relay/admin/api/grace-periods sa baba. Dalawang hiwalay na
+// bilang ito dahil magkaibang klase ng consequence:
+//   - moduleSubscriptionGracePeriodDays: RBAC/Multi-Branch/AI Assistant
+//     — pansamantalang naka-Allow pa rin gamitin (walang data loss).
+//   - cloudBackupDataRetentionDays: Cloud Backup — pagkatapos nito,
+//     PERMANENTENG mabubura ang backup data sa Neon (runCloudBackup-
+//     RetentionAutoPurgeSweep, tingnan sa baba). Kaya mas mahaba ito
+//     bilang default (90 araw) kaysa sa module grace period (7 araw).
+// ===================================================================
+const SUBSCRIPTION_GRACE_PERIOD_DEFAULTS = {
+    moduleSubscriptionGracePeriodDays: 7,
+    cloudBackupDataRetentionDays: 90,
+    cloudBackupAutoPurgeEnabled: true
+};
+const SUBSCRIPTION_GRACE_PERIOD_SETTINGS_PATH = path.join(__dirname, 'subscription-grace-period-settings.json');
+async function loadSubscriptionGracePeriodSettings() {
+    const fromStore = await getPersistentJSON('subscription-grace-period-settings', null);
+    if (fromStore !== null) return fromStore;
+    try {
+        return JSON.parse(fs.readFileSync(SUBSCRIPTION_GRACE_PERIOD_SETTINGS_PATH, 'utf8'));
+    } catch (err) {
+        return {};
+    }
+}
+function saveSubscriptionGracePeriodSettings(obj) {
+    if (pgPoolDevices || pgPool || redisClient) {
+        setPersistentJSON('subscription-grace-period-settings', obj);
+        return;
+    }
+    try {
+        fs.writeFileSync(SUBSCRIPTION_GRACE_PERIOD_SETTINGS_PATH, JSON.stringify(obj, null, 2));
+    } catch (err) {
+        console.error('Could not save subscription-grace-period-settings.json:', err);
+    }
+}
+let subscriptionGracePeriodOverrides = {};
+let MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS = SUBSCRIPTION_GRACE_PERIOD_DEFAULTS.moduleSubscriptionGracePeriodDays;
+let MODULE_SUBSCRIPTION_GRACE_PERIOD_MS = MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS * 24 * 60 * 60 * 1000;
+let CLOUD_BACKUP_DATA_RETENTION_DAYS = SUBSCRIPTION_GRACE_PERIOD_DEFAULTS.cloudBackupDataRetentionDays;
+let CLOUD_BACKUP_AUTO_PURGE_ENABLED = SUBSCRIPTION_GRACE_PERIOD_DEFAULTS.cloudBackupAutoPurgeEnabled;
+function recomputeSubscriptionGracePeriodSettings() {
+    const merged = { ...SUBSCRIPTION_GRACE_PERIOD_DEFAULTS, ...subscriptionGracePeriodOverrides };
+    // BUGFIX: dating gamit ng "||" — nasisira nito ang 0 bilang valid na
+    // moduleSubscriptionGracePeriodDays (0 || 7 === 7 sa JavaScript, kaya
+    // kahit i-set ng admin ang "walang grace period" (0 days), bumabalik
+    // itong 7 nang tahimik). Number.isFinite() ang ginamit dito para
+    // tanging hindi-valid/missing na value lang ang bumalik sa default.
+    MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS = Number.isFinite(Number(merged.moduleSubscriptionGracePeriodDays))
+        ? Number(merged.moduleSubscriptionGracePeriodDays)
+        : SUBSCRIPTION_GRACE_PERIOD_DEFAULTS.moduleSubscriptionGracePeriodDays;
+    MODULE_SUBSCRIPTION_GRACE_PERIOD_MS = MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS * 24 * 60 * 60 * 1000;
+    CLOUD_BACKUP_DATA_RETENTION_DAYS = Number(merged.cloudBackupDataRetentionDays) || SUBSCRIPTION_GRACE_PERIOD_DEFAULTS.cloudBackupDataRetentionDays;
+    CLOUD_BACKUP_AUTO_PURGE_ENABLED = merged.cloudBackupAutoPurgeEnabled !== false;
+}
 const MODULE_SUBSCRIPTION_OVERRIDES_PATH = path.join(__dirname, 'module-subscription-overrides.json');
 async function loadModuleSubscriptionOverrides() {
     const fromStore = await getPersistentJSON('module-subscription-overrides', null);
@@ -4398,7 +4456,84 @@ app.get('/relay/admin/api/pricing', requireAdminKey, (req, res) => {
         moduleSubscriptionPlansBase: MODULE_SUBSCRIPTION_PLANS_BASE,
         moduleSubscriptionOverrides,
         moduleSubscriptionBillingDays: MODULE_SUBSCRIPTION_BILLING_DAYS,
-        moduleSubscriptionGracePeriodDays: MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS
+        moduleSubscriptionGracePeriodDays: MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS,
+        cloudBackupDataRetentionDays: CLOUD_BACKUP_DATA_RETENTION_DAYS,
+        cloudBackupAutoPurgeEnabled: CLOUD_BACKUP_AUTO_PURGE_ENABLED
+    });
+});
+// ===================================================================
+// GAWA/BAGO: GRACE PERIOD CONTROLS — dedikadong admin endpoint para
+// baguhin ang moduleSubscriptionGracePeriodDays (RBAC/Multi-Branch/AI
+// Assistant) at ang cloudBackupDataRetentionDays (kailan awtomatikong
+// mabubura ang Cloud Backup data ng isang expired na installation sa
+// Neon — tingnan ang runCloudBackupRetentionAutoPurgeSweep() sa baba).
+// Hiwalay ito sa /relay/admin/api/pricing/module-subscriptions (na
+// presyo lang ang binabago) para malinaw ang separation of concerns.
+// ===================================================================
+app.get('/relay/admin/api/grace-periods', requireAdminKey, (req, res) => {
+    res.json({
+        success: true,
+        settings: {
+            moduleSubscriptionGracePeriodDays: MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS,
+            cloudBackupDataRetentionDays: CLOUD_BACKUP_DATA_RETENTION_DAYS,
+            cloudBackupAutoPurgeEnabled: CLOUD_BACKUP_AUTO_PURGE_ENABLED
+        },
+        defaults: SUBSCRIPTION_GRACE_PERIOD_DEFAULTS,
+        overrides: subscriptionGracePeriodOverrides,
+        // Mga sanity bound na ipinapakita sa admin UI (hindi hard server-side
+        // cap, tingnan ang validation sa POST handler sa ibaba para sa aktwal
+        // na minimum/maximum na ipinapatupad).
+        bounds: {
+            moduleSubscriptionGracePeriodDays: { min: 0, max: 60 },
+            cloudBackupDataRetentionDays: { min: 7, max: 365 }
+        }
+    });
+});
+app.post('/relay/admin/api/grace-periods', requireAdminKey, (req, res) => {
+    const { moduleSubscriptionGracePeriodDays, cloudBackupDataRetentionDays, cloudBackupAutoPurgeEnabled } = req.body || {};
+    const updated = { ...subscriptionGracePeriodOverrides };
+    if (moduleSubscriptionGracePeriodDays !== undefined) {
+        const days = Number(moduleSubscriptionGracePeriodDays);
+        if (!isFinite(days) || days < 0 || days > 60) {
+            return res.status(400).json({ success: false, message: 'Invalid moduleSubscriptionGracePeriodDays — dapat 0-60 araw.' });
+        }
+        updated.moduleSubscriptionGracePeriodDays = Math.round(days);
+    }
+    if (cloudBackupDataRetentionDays !== undefined) {
+        const days = Number(cloudBackupDataRetentionDays);
+        if (!isFinite(days) || days < 7 || days > 365) {
+            return res.status(400).json({ success: false, message: 'Invalid cloudBackupDataRetentionDays — dapat 7-365 araw (mas mahaba dapat ito kaysa sa module grace period, dahil permanenteng pagbura ng data ang consequence).' });
+        }
+        updated.cloudBackupDataRetentionDays = Math.round(days);
+    }
+    if (cloudBackupAutoPurgeEnabled !== undefined) {
+        updated.cloudBackupAutoPurgeEnabled = cloudBackupAutoPurgeEnabled !== false;
+    }
+    subscriptionGracePeriodOverrides = updated;
+    saveSubscriptionGracePeriodSettings(subscriptionGracePeriodOverrides);
+    recomputeSubscriptionGracePeriodSettings();
+    console.log(`⚙️  Na-update ang subscription grace period settings via admin panel: moduleSubscriptionGracePeriodDays=${MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS}, cloudBackupDataRetentionDays=${CLOUD_BACKUP_DATA_RETENTION_DAYS}, cloudBackupAutoPurgeEnabled=${CLOUD_BACKUP_AUTO_PURGE_ENABLED}.`);
+    res.json({
+        success: true,
+        settings: {
+            moduleSubscriptionGracePeriodDays: MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS,
+            cloudBackupDataRetentionDays: CLOUD_BACKUP_DATA_RETENTION_DAYS,
+            cloudBackupAutoPurgeEnabled: CLOUD_BACKUP_AUTO_PURGE_ENABLED
+        }
+    });
+});
+app.post('/relay/admin/api/grace-periods/reset', requireAdminKey, (req, res) => {
+    subscriptionGracePeriodOverrides = {};
+    saveSubscriptionGracePeriodSettings(subscriptionGracePeriodOverrides);
+    recomputeSubscriptionGracePeriodSettings();
+    console.log('⚙️  Na-reset sa default ang subscription grace period settings via admin panel.');
+    res.json({
+        success: true,
+        settings: {
+            moduleSubscriptionGracePeriodDays: MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS,
+            cloudBackupDataRetentionDays: CLOUD_BACKUP_DATA_RETENTION_DAYS,
+            cloudBackupAutoPurgeEnabled: CLOUD_BACKUP_AUTO_PURGE_ENABLED
+        }
     });
 });
 app.post('/relay/admin/api/pricing/cloud-backup', requireAdminKey, (req, res) => {
@@ -5949,6 +6084,12 @@ app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 100
         moduleSubscriptions: MODULE_SUBSCRIPTION_PLANS,
         moduleSubscriptionBillingDays: MODULE_SUBSCRIPTION_BILLING_DAYS,
         moduleSubscriptionGracePeriodDays: MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS,
+        // BAGO: para malaman ng OMNIPOS client kung ilang araw pa bago
+        // PERMANENTENG mabura ang Cloud Backup data ng isang expired na
+        // installation sa Neon (runCloudBackupRetentionAutoPurgeSweep sa
+        // baba) — ginagamit ito ng bagong "Your backed-up data will be
+        // permanently deleted in Xd" countdown sa Settings > Cloud Backup.
+        cloudBackupDataRetentionDays: CLOUD_BACKUP_DATA_RETENTION_DAYS,
         activationFlags: ACTIVATION_FLAGS,
         fetchedAt: new Date().toISOString()
     });
@@ -8101,63 +8242,99 @@ app.get('/relay/admin/api/cloud-backup/reconciliation', requireAdminKey, async (
     }
 });
 // ===================================================================
-// GAWA/BAGO: RETENTION REVIEW — hinahanap ang mga installation na may
-// naka-store pa ring Cloud Backup data sa Neon (patuloy na gumagastos
-// ng storage) pero HINDI na active/bayad ang subscription nila nang
-// matagal na (>= graceDays, default 90 araw). Kailanman ay hindi
-// kasama ang Lifetime purchases (bayad na nang buo, dapat manatili
-// habang buhay). Read-only lang ang endpoint na ito — HINDI awtomatikong
-// nagde-delete; ang aktwal na pagbura ay hiwalay na endpoint
-// (retention-purge, sa ibaba) na kailangan pang i-confirm nang mano-mano
-// per-installation — sinasadya ito, dahil delikado/hindi na-uundo ang
-// pagbura ng customer data kung basta na lang awtomatiko.
+// RETENTION REVIEW / AUTO-PURGE — hinahanap ang mga installation na
+// may naka-store pa ring Cloud Backup data sa Neon (patuloy na
+// gumagastos ng storage) pero HINDI na active/bayad ang subscription
+// nila nang matagal na (>= CLOUD_BACKUP_DATA_RETENTION_DAYS, admin-
+// configurable, default 90 araw — tingnan ang GET/POST /relay/admin/api/
+// grace-periods sa itaas). Kailanman ay hindi kasama ang Lifetime
+// purchases (bayad na nang buo, dapat manatili habang buhay).
+//
+// findCloudBackupRetentionCandidates() at purgeCloudBackupDataForInstallation()
+// sa ibaba ay ang SHARED na logic na ginagamit ng TATLO:
+//   1) GET  /relay/admin/api/cloud-backup/retention-review — read-only,
+//      pwedeng i-override ang graceDays via query param para sa "ano
+//      pa ang paparating" na preview.
+//   2) POST /relay/admin/api/cloud-backup/retention-purge — mano-manong
+//      pagbura, isa-isa, kailangan pa rin ng confirm:true (para sa
+//      admin na gustong agad mag-cleanup ng isang partikular na device
+//      nang hindi na hinihintay ang susunod na scheduled sweep).
+//   3) runCloudBackupRetentionAutoPurgeSweep() — BAGO: awtomatiko na
+//      itong tumatakbo bawat 24 oras (kaparehong pattern ng
+//      runStorageHoldingFeeSweep), gamit ang CLOUD_BACKUP_DATA_RETENTION_
+//      DAYS mismo (hindi query param) — ito ang "safety valve" na
+//      humihinto sa walang-katapusang storage cost kapag talagang
+//      inabandona na ng customer ang account. Naka-toggle ito
+//      (CLOUD_BACKUP_AUTO_PURGE_ENABLED, admin-configurable) kung sakaling
+//      gusto ng admin na mano-mano na lang lagi itong kontrolin.
 // ===================================================================
-const CLOUD_BACKUP_RETENTION_DEFAULT_GRACE_DAYS = 90;
+async function findCloudBackupRetentionCandidates(graceDays) {
+    const { rows } = await queryWithRetry(
+        pgPool,
+        'SELECT installation_id, store_name, size_bytes, last_sync_at, module_count FROM cloud_backup_meta ORDER BY size_bytes DESC',
+        []
+    );
+    const { rate } = await getUsdToPhpRate();
+    const neonPlanId = neonConfiguredPlans.cloudBackup || 'free';
+    let neonTier = NEON_PRICING[neonPlanId];
+    if (!neonTier || !neonTier.storageRatePerGBMonthUSD) neonTier = NEON_PRICING.launch;
+    const now = Date.now();
+    const candidates = [];
+    for (const r of rows) {
+        const sub = getCloudBackupSubscriptionForClient(r.installation_id);
+        if (sub.isLifetime || sub.active) continue; // huwag kailanman i-touch ang Lifetime o currently-active
+        const expiryKnown = sub.expiresAt !== null;
+        const referenceMs = expiryKnown ? sub.expiresAt : new Date(r.last_sync_at).getTime();
+        if (!isFinite(referenceMs)) continue;
+        const daysSince = Math.floor((now - referenceMs) / (24 * 60 * 60 * 1000));
+        if (daysSince < graceDays) continue;
+        const sizeBytes = Number(r.size_bytes) || 0;
+        const sizeGB = sizeBytes / (1024 * 1024 * 1024);
+        const estMonthlyStorageCostUSD = sizeGB * neonTier.storageRatePerGBMonthUSD;
+        candidates.push({
+            installationId: r.installation_id,
+            label: deviceLabels.get(r.installation_id) || null,
+            storeName: r.store_name || null,
+            sizeMB: Math.round((sizeBytes / (1024 * 1024)) * 100) / 100,
+            moduleCount: r.module_count,
+            lastSyncAt: r.last_sync_at,
+            expiryKnown,
+            referenceDate: new Date(referenceMs).toISOString(),
+            daysSinceExpiry: daysSince,
+            estMonthlyStorageCostUSD: Math.round(estMonthlyStorageCostUSD * 1000) / 1000,
+            estMonthlyStorageCostPHP: Math.round(estMonthlyStorageCostUSD * rate * 100) / 100
+        });
+    }
+    candidates.sort((a, b) => b.daysSinceExpiry - a.daysSinceExpiry);
+    return candidates;
+}
+// Aktwal na pagbura — binubura ang cloud_backup_modules AT cloud_backup_meta
+// — hindi na-touch ang cloud_token_wallets/ledger (transaction history
+// mananatili). Muling che-check dito (hindi lang sa caller) na hindi
+// Lifetime/active ang subscription, bilang huling safety gate bago ang
+// hindi-na-uundo na DELETE — kahit anong caller (manual o automatic).
+async function purgeCloudBackupDataForInstallation(installationId) {
+    const sub = getCloudBackupSubscriptionForClient(installationId);
+    if (sub.isLifetime || sub.active) {
+        return { purged: false, reason: 'Ligtas na hinarang ang pagbura — Lifetime o kasalukuyang active pa ang subscription na ito.' };
+    }
+    await runPgWriteTx(pgPool, async (client) => {
+        await client.query('DELETE FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
+        await client.query('DELETE FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
+    });
+    return { purged: true };
+}
 app.get('/relay/admin/api/cloud-backup/retention-review', requireAdminKey, async (req, res) => {
     if (!pgPool) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured.' });
-    const graceDays = Number(req.query.graceDays) > 0 ? Number(req.query.graceDays) : CLOUD_BACKUP_RETENTION_DEFAULT_GRACE_DAYS;
+    const graceDays = Number(req.query.graceDays) > 0 ? Number(req.query.graceDays) : CLOUD_BACKUP_DATA_RETENTION_DAYS;
     try {
-        const { rows } = await queryWithRetry(
-            pgPool,
-            'SELECT installation_id, store_name, size_bytes, last_sync_at, module_count FROM cloud_backup_meta ORDER BY size_bytes DESC',
-            []
-        );
-        const { rate } = await getUsdToPhpRate();
-        const neonPlanId = neonConfiguredPlans.cloudBackup || 'free';
-        let neonTier = NEON_PRICING[neonPlanId];
-        if (!neonTier || !neonTier.storageRatePerGBMonthUSD) neonTier = NEON_PRICING.launch;
-        const now = Date.now();
-        const candidates = [];
-        for (const r of rows) {
-            const sub = getCloudBackupSubscriptionForClient(r.installation_id);
-            if (sub.isLifetime || sub.active) continue; // huwag kailanman i-touch ang Lifetime o currently-active
-            const expiryKnown = sub.expiresAt !== null;
-            const referenceMs = expiryKnown ? sub.expiresAt : new Date(r.last_sync_at).getTime();
-            if (!isFinite(referenceMs)) continue;
-            const daysSince = Math.floor((now - referenceMs) / (24 * 60 * 60 * 1000));
-            if (daysSince < graceDays) continue;
-            const sizeBytes = Number(r.size_bytes) || 0;
-            const sizeGB = sizeBytes / (1024 * 1024 * 1024);
-            const estMonthlyStorageCostUSD = sizeGB * neonTier.storageRatePerGBMonthUSD;
-            candidates.push({
-                installationId: r.installation_id,
-                label: deviceLabels.get(r.installation_id) || null,
-                storeName: r.store_name || null,
-                sizeMB: Math.round((sizeBytes / (1024 * 1024)) * 100) / 100,
-                moduleCount: r.module_count,
-                lastSyncAt: r.last_sync_at,
-                expiryKnown,
-                referenceDate: new Date(referenceMs).toISOString(),
-                daysSinceExpiry: daysSince,
-                estMonthlyStorageCostUSD: Math.round(estMonthlyStorageCostUSD * 1000) / 1000,
-                estMonthlyStorageCostPHP: Math.round(estMonthlyStorageCostUSD * rate * 100) / 100
-            });
-        }
-        candidates.sort((a, b) => b.daysSinceExpiry - a.daysSinceExpiry);
+        const candidates = await findCloudBackupRetentionCandidates(graceDays);
         res.json({
             success: true,
-            checkedAt: now,
+            checkedAt: Date.now(),
             graceDays,
+            configuredRetentionDays: CLOUD_BACKUP_DATA_RETENTION_DAYS,
+            autoPurgeEnabled: CLOUD_BACKUP_AUTO_PURGE_ENABLED,
             candidateCount: candidates.length,
             totalEstMonthlyWasteMB: Math.round(candidates.reduce((s, c) => s + c.sizeMB, 0) * 100) / 100,
             totalEstMonthlyWastePHP: Math.round(candidates.reduce((s, c) => s + c.estMonthlyStorageCostPHP, 0) * 100) / 100,
@@ -8168,31 +8345,71 @@ app.get('/relay/admin/api/cloud-backup/retention-review', requireAdminKey, async
         res.status(500).json({ success: false, message: 'Could not compute retention review.' });
     }
 });
-// Aktwal na pagbura — kailangan pa ring i-confirm nang mano-mano
-// per-installation (tingnan ang paalala sa itaas). Binubura ang
-// cloud_backup_modules AT cloud_backup_meta — hindi na-touch ang
-// cloud_token_wallets/ledger (transaction history mananatili).
+// Mano-manong pagbura, isa-isa — kailangan pa ring i-confirm nang
+// mano-mano per-installation (tingnan ang paalala sa itaas).
 app.post('/relay/admin/api/cloud-backup/retention-purge', requireAdminKey, async (req, res) => {
     if (!pgPool) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured.' });
     const { installationId, confirm } = req.body || {};
     if (!installationId) return res.status(400).json({ success: false, message: 'Missing installationId.' });
     if (confirm !== true) return res.status(400).json({ success: false, message: 'Kailangan ng confirm:true — hindi na-uundo ang pagbura.' });
-    const sub = getCloudBackupSubscriptionForClient(installationId);
-    if (sub.isLifetime || sub.active) {
-        return res.status(400).json({ success: false, message: 'Ligtas na hinarang ang pagbura — Lifetime o kasalukuyang active pa ang subscription na ito.' });
-    }
     try {
-        await runPgWriteTx(pgPool, async (client) => {
-            await client.query('DELETE FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
-            await client.query('DELETE FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
-        });
-        logActivity(installationId, 'cloud_backup_retention_purge', { purgedBy: 'admin', graceReason: 'expired subscription retention sweep' });
+        const result = await purgeCloudBackupDataForInstallation(installationId);
+        if (!result.purged) return res.status(400).json({ success: false, message: result.reason });
+        logActivity(installationId, 'cloud_backup_retention_purge', { purgedBy: 'admin', graceReason: 'expired subscription retention sweep (manual)', retentionDays: CLOUD_BACKUP_DATA_RETENTION_DAYS });
         res.json({ success: true, message: `Nabura na ang Cloud Backup data ng installation ${installationId}.` });
     } catch (err) {
         console.error('⚠️  /relay/admin/api/cloud-backup/retention-purge error:', err.message);
         res.status(500).json({ success: false, message: 'Could not purge this installation\'s cloud backup data.' });
     }
 });
+// BAGO: ang aktwal na "safety valve" — automatic na background job,
+// kaparehong pattern/cadence ng runStorageHoldingFeeSweep (tuwing 24
+// oras), na humahanap ng mga candidate gamit ang CLOUD_BACKUP_DATA_
+// RETENTION_DAYS mismo (hindi override-able via request) at direktang
+// nagpu-purge — WALANG kailangang mano-manong confirm dahil ito mismo
+// ang buong punto (itigil ang tuloy-tuloy na storage cost ng talagang
+// inabandonang account). Naka-guard sa likod ng CLOUD_BACKUP_AUTO_PURGE_
+// ENABLED (admin-configurable, default ON) kung gustong i-disable ng
+// admin at gawing purely-manual (retention-review + retention-purge)
+// na lang ang flow.
+async function runCloudBackupRetentionAutoPurgeSweep() {
+    if (!pgPool) return;
+    if (!CLOUD_BACKUP_AUTO_PURGE_ENABLED) return;
+    try {
+        const candidates = await findCloudBackupRetentionCandidates(CLOUD_BACKUP_DATA_RETENTION_DAYS);
+        if (candidates.length === 0) return;
+        let purgedCount = 0;
+        let purgedMB = 0;
+        for (const candidate of candidates) {
+            try {
+                const result = await purgeCloudBackupDataForInstallation(candidate.installationId);
+                if (result.purged) {
+                    purgedCount++;
+                    purgedMB += candidate.sizeMB;
+                    logActivity(candidate.installationId, 'cloud_backup_retention_purge', {
+                        purgedBy: 'automatic',
+                        graceReason: 'expired subscription retention sweep (auto)',
+                        retentionDays: CLOUD_BACKUP_DATA_RETENTION_DAYS,
+                        daysSinceExpiry: candidate.daysSinceExpiry,
+                        sizeMB: candidate.sizeMB
+                    });
+                }
+            } catch (err) {
+                console.error(`⚠️ CLOUD_BACKUP_RETENTION_AUTO_PURGE: hindi na-purge ang installation ${candidate.installationId}:`, err.message);
+            }
+        }
+        if (purgedCount > 0) {
+            console.log(`🗑️  CLOUD_BACKUP_RETENTION_AUTO_PURGE: awtomatikong nabura ang Cloud Backup data ng ${purgedCount} installation(s) (${Math.round(purgedMB * 100) / 100} MB) na lagpas na sa ${CLOUD_BACKUP_DATA_RETENTION_DAYS}-araw na retention period.`);
+        }
+    } catch (err) {
+        console.error('⚠️ runCloudBackupRetentionAutoPurgeSweep error:', err.message);
+    }
+}
+// Bahagyang naka-stagger (150s) mula sa runStorageHoldingFeeSweep (90s)
+// para hindi magsabay sa unang pass pagkatapos mag-boot; parehong 24h
+// cadence pagkatapos.
+setInterval(runCloudBackupRetentionAutoPurgeSweep, 24 * 60 * 60 * 1000);
+setTimeout(runCloudBackupRetentionAutoPurgeSweep, 150 * 1000);
 // ===================================================================
 // GAWA/BAGO: PROACTIVE ALERTS — dati, kailangan mo pang buksan mismo
 // ang admin panel para malaman kung UNREACHABLE ang NEON_API_KEY o
@@ -11111,6 +11328,7 @@ async function bootstrapStores() {
         featurePricingOverrides,
         upgradeTierPricingOverrides,
         moduleSubscriptionOverrides,
+        subscriptionGracePeriodOverrides,
         SUGGESTED_DISCOUNT_PERCENT,
         neonPricingOverrides,
         neonConfiguredPlans,
@@ -11140,6 +11358,7 @@ async function bootstrapStores() {
         loadFeaturePricingOverrides(),
         loadUpgradeTierPricingOverrides(),
         loadModuleSubscriptionOverrides(),
+        loadSubscriptionGracePeriodSettings(),
         loadSuggestedDiscountPercent(),
         loadNeonPricingOverrides(),
         loadNeonConfiguredPlans(),
@@ -11162,6 +11381,11 @@ async function bootstrapStores() {
     recomputeModuleSubscriptionPlans();
     if (Object.keys(moduleSubscriptionOverrides).length > 0) {
         console.log(`💳 Loaded custom Module Subscription pricing override for: ${Object.keys(moduleSubscriptionOverrides).join(', ')}.`);
+    }
+    if (!subscriptionGracePeriodOverrides || typeof subscriptionGracePeriodOverrides !== 'object') subscriptionGracePeriodOverrides = {};
+    recomputeSubscriptionGracePeriodSettings();
+    if (Object.keys(subscriptionGracePeriodOverrides).length > 0) {
+        console.log(`⚙️  Na-load ang custom na subscription grace period settings: moduleSubscriptionGracePeriodDays=${MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS}, cloudBackupDataRetentionDays=${CLOUD_BACKUP_DATA_RETENTION_DAYS}, cloudBackupAutoPurgeEnabled=${CLOUD_BACKUP_AUTO_PURGE_ENABLED}.`);
     }
     recomputeUpgradeTierPricing();
     if (Object.keys(upgradeTierPricingOverrides).length > 0) {

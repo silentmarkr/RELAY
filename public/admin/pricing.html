@@ -171,10 +171,52 @@
     <p class="intro" style="margin-bottom:16px;">
       RBAC Management and Multi-Branch Dashboard are subscriptions too (converted from a one-time
       purchase) — flat monthly/yearly pricing, no tiers. A subscription that lapses stays working
-      for a <strong>7-day grace period</strong> before it locks (this buffer is not editable here —
-      it's intentionally the same for both, hardcoded server-side).
+      for a grace period before it locks — <strong>editable below in "Grace Periods &amp; Data Retention".</strong>
     </p>
     <div id="moduleSubGrid" class="plans-grid"></div>
+
+    <h2 style="font-family:var(--font-heading);font-size:1rem;color:var(--accent);margin:34px 0 6px;">⏳ Grace Periods &amp; Data Retention</h2>
+    <p class="intro" style="margin-bottom:16px;">
+      Two independent timers, on purpose — the consequences are not the same. The <strong>module grace
+      period</strong> just delays a lock-out (no data loss). The <strong>Cloud Backup retention period</strong> ends in
+      <strong>permanent deletion</strong> of a customer's backed-up data from Neon — a background job checks this
+      every 24 hours and purges anything past the deadline automatically (toggle below). Both values are
+      shown to OMNIPOS installations live via <code>GET /relay/pricing</code>, so the countdown customers see
+      in-app always matches what's set here.
+    </p>
+    <div class="plans-grid" style="margin-bottom:16px;">
+      <div class="plan-card">
+        <div class="tier-id">module subscriptions</div>
+        <h3>Grace Period (RBAC / Multi-Branch / AI Assistant)</h3>
+        <div class="field">
+          <label>Days after expiry before access locks <span id="gpModuleBadge" class="badge default">default</span></label>
+          <input type="number" min="0" max="60" step="1" id="gpModuleDays">
+        </div>
+        <div style="font-size:11px; color:var(--muted-dim);">Allowed range: 0–60 days. No data loss risk — this only delays losing access to the module.</div>
+        <div class="actions">
+          <button class="btn btn-save" onclick="saveGracePeriods()">Save</button>
+          <button class="btn btn-reset" onclick="resetGracePeriods()">Reset both to default</button>
+        </div>
+      </div>
+      <div class="plan-card">
+        <div class="tier-id">cloud backup</div>
+        <h3 style="color:var(--red);">Data Retention Period</h3>
+        <div class="field">
+          <label>Days after expiry before permanent deletion <span id="gpCloudBadge" class="badge default">default</span></label>
+          <input type="number" min="7" max="365" step="1" id="gpCloudDays">
+        </div>
+        <div style="font-size:11px; color:var(--muted-dim); margin-bottom:6px;">Allowed range: 7–365 days. ⚠️ Irreversible once the sweep runs — Lifetime and currently-active subscriptions are always skipped.</div>
+        <label style="display:flex; align-items:center; gap:8px; font-size:.85rem; color:var(--text); cursor:pointer;">
+          <input type="checkbox" id="gpAutoPurgeEnabled" style="width:16px;height:16px;">
+          Automatic daily purge sweep enabled
+        </label>
+        <div id="gpCandidatesInfo" style="font-size:11px; color:var(--muted-dim);"></div>
+        <div class="actions">
+          <button class="btn btn-save" onclick="saveGracePeriods()">Save</button>
+          <button class="btn btn-reset" onclick="resetGracePeriods()">Reset both to default</button>
+        </div>
+      </div>
+    </div>
   </main>
 </div>
 
@@ -188,6 +230,8 @@ let overrides = {};
 let moduleSubPlansBase = {};
 let moduleSubPlansEffective = {};
 let moduleSubOverrides = {};
+let gracePeriodDefaults = {};
+let gracePeriodOverrides = {};
 
 function toast(msg, type) {
   const el = document.getElementById('toast');
@@ -333,6 +377,64 @@ async function loadPricing() {
   moduleSubPlansEffective = data.moduleSubscriptionPlans || {};
   moduleSubOverrides = data.moduleSubscriptionOverrides || {};
   renderModuleSubPlans();
+
+  await loadGracePeriods();
+}
+
+async function loadGracePeriods() {
+  const data = await api('/relay/admin/api/grace-periods');
+  gracePeriodDefaults = data.defaults || {};
+  gracePeriodOverrides = data.overrides || {};
+  document.getElementById('gpModuleDays').value = data.settings.moduleSubscriptionGracePeriodDays;
+  document.getElementById('gpCloudDays').value = data.settings.cloudBackupDataRetentionDays;
+  document.getElementById('gpAutoPurgeEnabled').checked = data.settings.cloudBackupAutoPurgeEnabled !== false;
+  document.getElementById('gpModuleBadge').outerHTML = gracePeriodOverrides.moduleSubscriptionGracePeriodDays !== undefined
+    ? '<span class="badge" id="gpModuleBadge">customized</span>'
+    : '<span class="badge default" id="gpModuleBadge">default</span>';
+  document.getElementById('gpCloudBadge').outerHTML = gracePeriodOverrides.cloudBackupDataRetentionDays !== undefined
+    ? '<span class="badge" id="gpCloudBadge">customized</span>'
+    : '<span class="badge default" id="gpCloudBadge">default</span>';
+  refreshRetentionCandidatesPreview(data.settings.cloudBackupDataRetentionDays);
+}
+
+async function refreshRetentionCandidatesPreview(days) {
+  const el = document.getElementById('gpCandidatesInfo');
+  el.textContent = 'Checking how many installations would be purged right now…';
+  try {
+    const data = await api(`/relay/admin/api/cloud-backup/retention-review?graceDays=${encodeURIComponent(days)}`);
+    el.textContent = data.candidateCount > 0
+      ? `⚠️ ${data.candidateCount} installation(s) already past ${days}d would be purged on the next sweep (~${data.totalEstMonthlyWasteMB} MB).`
+      : `No installations currently past ${days}d — nothing would be purged right now.`;
+  } catch (err) {
+    el.textContent = '';
+  }
+}
+
+async function saveGracePeriods() {
+  const moduleSubscriptionGracePeriodDays = Number(document.getElementById('gpModuleDays').value);
+  const cloudBackupDataRetentionDays = Number(document.getElementById('gpCloudDays').value);
+  const cloudBackupAutoPurgeEnabled = document.getElementById('gpAutoPurgeEnabled').checked;
+  try {
+    await api('/relay/admin/api/grace-periods', {
+      method: 'POST',
+      body: JSON.stringify({ moduleSubscriptionGracePeriodDays, cloudBackupDataRetentionDays, cloudBackupAutoPurgeEnabled })
+    });
+    toast('Saved grace period & retention settings.');
+    await loadGracePeriods();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function resetGracePeriods() {
+  if (!confirm('Reset the module grace period and Cloud Backup retention period back to defaults (7 days / 90 days)?')) return;
+  try {
+    await api('/relay/admin/api/grace-periods/reset', { method: 'POST' });
+    toast('Reset grace period & retention settings to default.');
+    await loadGracePeriods();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
 }
 
 function moduleSubFieldIsCustom(featureId, key) {
