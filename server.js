@@ -9344,6 +9344,11 @@ function formatDemoDurationLabel(durationMs) {
     return `${days} araw`;
 }
 app.post('/relay/request-demo', requireApiKey, requireAllowedDevice, rateLimit('request-demo', 5, 10 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    // Parehong gate ng /relay/request-unlock: kapag naka-OFF ang "Allow Send Request" sa admin
+    // panel, hindi na tatanggap ng bagong manual OTP request (kasama ang Demo Mode).
+    if (!ACTIVATION_FLAGS.otpRequestsEnabled) {
+        return res.status(503).json({ success: false, code: 'DEVELOPER_UNAVAILABLE', message: 'Developer is unavailable at this time.' });
+    }
     const { installationId, username, storeName, photo } = req.body;
     if (!installationId) {
         return res.status(400).json({ success: false, message: 'Missing installationId.' });
