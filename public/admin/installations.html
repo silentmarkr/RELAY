@@ -159,10 +159,10 @@
   /* ---------- Table ---------- */
   .table-wrap {
     background: var(--card); border: 1.5px solid var(--border); border-radius: var(--radius-lg);
-    overflow: hidden; box-shadow: var(--shadow-ambient);
+    overflow: clip; box-shadow: var(--shadow-ambient);
   }
   table { width: 100%; border-collapse: collapse; }
-  th, td { padding: 11px 12px; text-align: left; border-bottom: 1px solid var(--line); font-size: .87rem; vertical-align: top; }
+  th, td { padding: 11px 12px; text-align: left; border-bottom: 1px solid var(--line); font-size: .87rem; vertical-align: middle; }
   thead th {
     position: sticky; top: var(--topbar-h, 57px); color: var(--muted); font-weight: 600; font-size: .72rem;
     text-transform: uppercase; letter-spacing: .04em; background: var(--bg-raise); z-index: 5;
@@ -287,27 +287,99 @@
   .modal-confirm.enabled { opacity: 1; pointer-events: auto; }
   .modal-confirm.enabled:hover { filter: brightness(1.1); }
 
-  /* ---------- Responsive: stacked cards under 760px ---------- */
-  @media (max-width: 760px) {
+  /* ---------- List view: one compact table, details in a modal ---------- */
+  .inst-table { table-layout: fixed; }
+  .inst-table th, .inst-table td { padding: 9px 12px; }
+  .inst-table td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .inst-table td.cell-name { white-space: normal; }
+  .inst-table td.cell-select, .inst-table td.col-status, .inst-table td.col-fp, .inst-table td.col-open { overflow: visible; }
+  .inst-table th.col-select, .inst-table td.cell-select { width: 44px; padding-left: 14px; padding-right: 0; }
+  .inst-table th.col-status { width: 112px; }
+  .inst-table th.col-fp { width: 104px; }
+  .inst-table th.col-records { width: 128px; }
+  .inst-table th.col-size { width: 84px; }
+  .inst-table th.col-sync { width: 196px; }
+  .inst-table th.col-count { width: 112px; }
+  .inst-table th.col-open { width: 100px; cursor: default; }
+  .inst-table input[type="checkbox"] { width: 18px; height: 18px; display: block; }
+  .inst-row { cursor: pointer; }
+  .inst-row:hover td { background: var(--card-hover); }
+
+  .name-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+  .name-line .store-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .row-label-inline { color: var(--muted-dim); font-size: .76rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .flag-mark { color: var(--amber); flex-shrink: 0; font-size: .82rem; }
+  .id-line { display: flex; align-items: center; gap: 6px; margin-top: 2px; min-width: 0; font-family: var(--font-mono); font-size: .72rem; color: var(--muted-dim); }
+  .id-line .id-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .row-open { display: inline-flex; align-items: center; gap: 6px; }
+  .row-open .open-arrow { font-size: 1.05rem; line-height: 1; }
+
+  /* ---------- Details modal (bottom sheet on phones) ---------- */
+  body.modal-open { overflow: hidden; }
+  .detail-overlay {
+    position: fixed; inset: 0; background: rgba(2,4,10,.72); backdrop-filter: blur(3px);
+    display: none; align-items: center; justify-content: center; z-index: 80; padding: 20px;
+  }
+  .detail-overlay.active { display: flex; }
+  .detail-box {
+    background: var(--bg-raise); border: 1.5px solid var(--border-soft); border-radius: var(--radius-lg);
+    width: 100%; max-width: 540px; max-height: 88vh; max-height: min(88dvh, 720px);
+    display: flex; flex-direction: column; box-shadow: var(--shadow-ambient); animation: modalIn .16s var(--ease);
+  }
+  .detail-box:focus { outline: none; }
+  .detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 18px 20px 14px; }
+  .detail-title { margin: 0; font-family: var(--font-heading); font-size: 1.05rem; line-height: 1.3; overflow-wrap: anywhere; }
+  .detail-title.empty-name { font-family: var(--font-ui); font-weight: 400; font-style: italic; color: var(--muted); }
+  .detail-label { color: var(--muted); font-size: .82rem; margin-top: 3px; overflow-wrap: anywhere; }
+  .detail-close { padding: 6px 11px; flex-shrink: 0; }
+  .detail-body { padding: 0 20px 18px; overflow-y: auto; flex: 1 1 auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+  .detail-id {
+    display: flex; align-items: center; gap: 10px; background: var(--bg); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 9px 10px 9px 12px; font-family: var(--font-mono); font-size: .78rem; color: var(--muted);
+  }
+  .detail-id span { flex: 1; min-width: 0; word-break: break-all; }
+  .detail-id .copy-btn { font-family: var(--font-ui); font-size: .8rem; padding: 4px 8px; border: 1px solid var(--line); flex-shrink: 0; }
+  .detail-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+  .detail-section { margin-top: 18px; }
+  .detail-h { color: var(--muted-dim); font-size: .76rem; font-weight: 600; margin-bottom: 8px; }
+  .detail-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 16px; }
+  .detail-stats .stat-lbl { color: var(--muted-dim); font-size: .65rem; text-transform: uppercase; letter-spacing: .05em; }
+  .detail-stats .stat-val { margin-top: 2px; font-size: .92rem; }
+  .detail-foot {
+    display: flex; flex-wrap: wrap; gap: 8px; padding: 14px 20px 18px; border-top: 1px solid var(--line);
+  }
+  .detail-foot .btn-sm { flex: 1 1 auto; padding: 10px 14px; font-size: .82rem; }
+
+  /* ---------- Responsive: fewer columns as the screen narrows ---------- */
+  @media (max-width: 1099px) {
+    .col-fp, .col-count, .col-size { display: none; }
+  }
+  @media (max-width: 799px) {
+    .col-sync { display: none; }
+  }
+  @media (max-width: 639px) {
     #app { padding: 14px 12px 60px; }
-    .topbar { padding: 12px 14px; }
-    thead th { position: static; }
-    .table-wrap { background: transparent; border: none; box-shadow: none; }
-    table, thead, tbody, th, td, tr { display: block; width: 100%; }
-    thead { display: none; }
-    tbody tr {
-      background: var(--card); border: 1.5px solid var(--border); border-radius: var(--radius-lg);
-      padding: 12px 12px 10px; margin-bottom: 12px;
+    .topbar { position: static; padding: 12px 14px; }
+    .col-records { display: none; }
+    .inst-table th, .inst-table td { padding: 10px 8px; }
+    .inst-table th.col-select, .inst-table td.cell-select { width: 40px; padding-left: 12px; }
+    .inst-table th.col-status { width: 100px; }
+    .inst-table th.col-open { width: 44px; }
+    .inst-table td.col-open { padding-right: 10px; }
+    .inst-table .badge { font-size: .68rem; padding: 2px 7px; }
+    .row-open { padding: 6px 10px; }
+    .row-open .open-txt, .row-label-inline, .id-line .copy-btn { display: none; }
+    thead th { top: 0; }
+    .detail-overlay { padding: 0; align-items: flex-end; }
+    .detail-box {
+      max-width: none; max-height: 90vh; max-height: 90dvh; border-radius: 16px 16px 0 0; border-bottom: none;
+      animation: sheetIn .22s var(--ease);
     }
-    tbody tr:hover td { background: transparent; }
-    td { border-bottom: none; padding: 6px 0; }
-    td[data-label]::before {
-      content: attr(data-label); display: block; color: var(--muted-dim); font-size: .68rem;
-      text-transform: uppercase; letter-spacing: .05em; margin-bottom: 3px;
-    }
-    td.cell-select { display: flex; justify-content: flex-end; padding: 0 0 8px; order: -1; }
-    td.cell-select::before { display: none; }
-    .chips-cell { max-width: none; }
+    .detail-foot { padding-bottom: max(18px, env(safe-area-inset-bottom)); }
+  }
+  @keyframes sheetIn { from { transform: translateY(100%); } to { transform: translateY(0); } }
+  @media (prefers-reduced-motion: reduce) {
+    .detail-box { animation: none; }
   }
 
   @media (max-width: 420px) {
@@ -371,24 +443,22 @@
   </div>
 
   <div class="table-wrap">
-    <table>
+    <div class="empty-state" id="tableEmpty"><span class="spinner"></span>Loading installations…</div>
+    <table class="inst-table" id="instTable" style="display:none;">
       <thead>
         <tr>
-          <th style="width:34px;"><input type="checkbox" id="selectAll" onchange="toggleSelectAll(this.checked)"></th>
-          <th class="sortable" data-key="storeName" onclick="setSort('storeName')">Store / Installation ID</th>
-          <th class="sortable" data-key="allowed" onclick="setSort('allowed')">Allowed</th>
-          <th>Found in</th>
-          <th class="sortable" data-key="totalRecords" onclick="setSort('totalRecords')">Records</th>
-          <th class="sortable" data-key="sizeBytes" onclick="setSort('sizeBytes')">Size</th>
-          <th class="sortable" data-key="lastSyncAt" onclick="setSort('lastSyncAt')">Last Sync</th>
-          <th class="sortable" data-key="syncCount" onclick="setSort('syncCount')">Sync Count</th>
-          <th>Fingerprint</th>
-          <th>Actions</th>
+          <th class="col-select"><input type="checkbox" id="selectAll" onchange="toggleSelectAll(this.checked)" aria-label="Select all shown"></th>
+          <th class="sortable" data-key="storeName" onclick="setSort('storeName')">Store / ID</th>
+          <th class="sortable col-status" data-key="allowed" onclick="setSort('allowed')">Allowed</th>
+          <th class="col-fp">Fingerprint</th>
+          <th class="sortable col-records" data-key="totalRecords" onclick="setSort('totalRecords')">Records</th>
+          <th class="sortable col-size" data-key="sizeBytes" onclick="setSort('sizeBytes')">Size</th>
+          <th class="sortable col-sync" data-key="lastSyncAt" onclick="setSort('lastSyncAt')">Last Sync</th>
+          <th class="sortable col-count" data-key="syncCount" onclick="setSort('syncCount')">Sync Count</th>
+          <th class="col-open"><span class="sr-only" style="position:absolute;left:-9999px;">Details</span></th>
         </tr>
       </thead>
-      <tbody id="tableBody">
-        <tr class="loading-row"><td colspan="10"><span class="spinner"></span>Loading installations…</td></tr>
-      </tbody>
+      <tbody id="tableBody"></tbody>
     </table>
   </div>
 
@@ -403,6 +473,20 @@
 </div>
 
 <div id="toastStack"></div>
+
+<div class="detail-overlay" id="detailOverlay" role="dialog" aria-modal="true" aria-labelledby="detailTitle">
+  <div class="detail-box" tabindex="-1">
+    <div class="detail-head">
+      <div style="min-width:0;">
+        <h3 class="detail-title" id="detailTitle"></h3>
+        <div class="detail-label" id="detailLabel"></div>
+      </div>
+      <button class="icon-btn detail-close" id="detailClose" onclick="closeDetail()" aria-label="Close details">✕</button>
+    </div>
+    <div class="detail-body" id="detailBody"></div>
+    <div class="detail-foot" id="detailFoot"></div>
+  </div>
+</div>
 
 <div class="modal-overlay" id="modalOverlay">
   <div class="modal-box">
@@ -425,6 +509,8 @@ let sortKey = null;
 let sortDir = 'asc';
 let expandedChips = new Set();
 let viewMode = 'list';
+let detailId = null;
+let detailReturnFocus = null;
 try {
   const savedView = localStorage.getItem('relayInstallationsView');
   if (savedView === 'grid' || savedView === 'list') viewMode = savedView;
@@ -490,6 +576,7 @@ function logout() {
   sessionStorage.removeItem('relayAdminKey');
   installations = [];
   selected.clear();
+  closeDetail();
   document.getElementById('adminKeyInput').value = '';
   document.getElementById('app').style.display = 'none';
   document.getElementById('loginWrap').style.display = 'block';
@@ -580,15 +667,98 @@ document.getElementById('modalOverlay').addEventListener('click', (e) => {
   if (e.target.id === 'modalOverlay') closeModal(false);
 });
 
+/* ---------- Details modal ---------- */
+function openDetail(id) {
+  detailId = id;
+  detailReturnFocus = document.activeElement;
+  renderDetail();
+  if (detailId === null) return;
+  document.getElementById('detailOverlay').classList.add('active');
+  document.body.classList.add('modal-open');
+  document.getElementById('detailBody').scrollTop = 0;
+  setTimeout(() => document.querySelector('.detail-box').focus(), 30);
+}
+
+function closeDetail() {
+  detailId = null;
+  document.getElementById('detailOverlay').classList.remove('active');
+  document.body.classList.remove('modal-open');
+  if (detailReturnFocus && document.contains(detailReturnFocus)) {
+    try { detailReturnFocus.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
+  }
+  detailReturnFocus = null;
+}
+
+function renderDetail() {
+  const i = findInstallation(detailId);
+  if (!i) { closeDetail(); return; }
+  const p = buildRowPieces(i);
+  const title = document.getElementById('detailTitle');
+  title.textContent = i.storeName || '(no store name)';
+  title.classList.toggle('empty-name', !i.storeName);
+  document.getElementById('detailLabel').textContent = i.label ? '🏷️ ' + i.label : '';
+
+  const allChips = (i.foundIn || []).map(k => `<span class="chip">${escapeHtml(SOURCE_LABELS[k] || k)}</span>`).join('')
+    || '<span class="muted">—</span>';
+
+  document.getElementById('detailBody').innerHTML = `
+    <div class="detail-id"><span>${escapeHtml(i.installationId)}</span><button class="copy-btn" onclick="copyId('${p.safeId}')">⧉ Copy</button></div>
+    <div class="detail-badges">${p.allowedBadge}${p.fpBadge}${p.walletHtml}</div>
+    <div class="detail-section">
+      <div class="detail-h">Found in</div>
+      <div>${allChips}</div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-h">Stored data</div>
+      <div class="detail-stats">
+        <div><div class="stat-lbl">Records</div><div class="stat-val">${i.totalRecords || 0} <span class="muted">(${i.moduleCount || 0} modules)</span></div></div>
+        <div><div class="stat-lbl">Size</div><div class="stat-val">${formatBytes(i.sizeBytes)}</div></div>
+        <div><div class="stat-lbl">Last sync</div><div class="stat-val">${formatDate(i.lastSyncAt)}</div></div>
+        <div><div class="stat-lbl">Sync count</div><div class="stat-val">${i.syncCount || 0}</div></div>
+      </div>
+    </div>
+  `;
+  document.getElementById('detailFoot').innerHTML = p.actionsHtml;
+}
+
+document.getElementById('detailOverlay').addEventListener('click', (e) => {
+  if (e.target.id === 'detailOverlay') closeDetail();
+});
+// Capture phase so Escape closes only the top-most dialog: the delete
+// confirmation first (if open), then the details modal underneath it.
+document.addEventListener('keydown', (e) => {
+  const confirmOpen = document.getElementById('modalOverlay').classList.contains('active');
+  if (e.key === 'Escape') {
+    if (confirmOpen) {
+      e.stopPropagation();
+      closeModal(false);
+    } else if (detailId !== null) {
+      closeDetail();
+    }
+  } else if (e.key === 'Tab' && detailId !== null && !confirmOpen) {
+    const box = document.querySelector('.detail-box');
+    const f = [...box.querySelectorAll('button, input, [tabindex]:not([tabindex="-1"])')].filter(el => !el.disabled);
+    if (!f.length) return;
+    const first = f[0], last = f[f.length - 1], cur = document.activeElement;
+    if (!box.contains(cur) || (e.shiftKey && (cur === first || cur === box))) { e.preventDefault(); (e.shiftKey ? last : first).focus(); }
+    else if (!e.shiftKey && cur === last) { e.preventDefault(); first.focus(); }
+  }
+}, true);
+
 /* ---------- Load & render ---------- */
 async function loadInstallations() {
   const data = await api('/relay/admin/api/installations');
   installations = data.installations || [];
+  const knownIds = new Set(installations.map(i => i.installationId));
+  [...selected].forEach(id => { if (!knownIds.has(id)) selected.delete(id); });
   if (!data.cloudBackupConfigured) {
     toast('Note: Postgres (DATABASE_URL) is not configured on RELAY — Cloud Backup figures will show as empty.', true);
   }
   renderSummary();
   renderTable();
+  // If the open details modal's installation was deleted, this closes it;
+  // otherwise it refreshes with the latest numbers.
+  if (detailId !== null) renderDetail();
   if (data.scanWarnings && data.scanWarnings.length) {
     toast('Some tables could not be scanned: ' + data.scanWarnings.join('; '), true);
   }
@@ -766,21 +936,23 @@ function rowMarkup(i) {
   const p = buildRowPieces(i);
   const isSel = selected.has(i.installationId);
   return `
-    <tr class="${isSel ? 'row-selected' : ''}">
-      <td class="cell-select"><input type="checkbox" ${isSel ? 'checked' : ''} onchange="toggleRow('${p.safeId}', this.checked)"></td>
-      <td data-label="Store / Installation ID">
-        <div class="store-name${i.storeName ? '' : ' empty-name'}">${escapeHtml(i.storeName) || '(no store name)'}</div>
-        ${i.label ? `<div class="row-label">🏷️ ${escapeHtml(i.label)}</div>` : ''}
-        <div class="id-cell"><span>${escapeHtml(i.installationId)}</span><button class="copy-btn" title="Copy ID" onclick="copyId('${p.safeId}')">⧉</button></div>
+    <tr class="inst-row${isSel ? ' row-selected' : ''}" onclick="openDetail('${p.safeId}')">
+      <td class="cell-select" onclick="event.stopPropagation()"><input type="checkbox" aria-label="Select installation" ${isSel ? 'checked' : ''} onchange="toggleRow('${p.safeId}', this.checked)"></td>
+      <td class="cell-name">
+        <div class="name-line">
+          <span class="store-name${i.storeName ? '' : ' empty-name'}">${escapeHtml(i.storeName) || '(no store name)'}</span>
+          ${i.fingerprintFlagged ? '<span class="flag-mark" title="Clone-flagged">⚠</span>' : ''}
+          ${i.label ? `<span class="row-label-inline">🏷️ ${escapeHtml(i.label)}</span>` : ''}
+        </div>
+        <div class="id-line"><span class="id-text">${escapeHtml(i.installationId)}</span><button class="copy-btn" title="Copy ID" onclick="event.stopPropagation(); copyId('${p.safeId}')">⧉</button></div>
       </td>
-      <td data-label="Allowed">${p.allowedBadge}</td>
-      <td data-label="Found in" class="chips-cell">${p.chipsHtml}${p.walletHtml ? `<div class="wallet-badge">${p.walletHtml}</div>` : ''}</td>
-      <td data-label="Records">${i.totalRecords || 0} <span class="muted">(${i.moduleCount || 0} modules)</span></td>
-      <td data-label="Size">${formatBytes(i.sizeBytes)}</td>
-      <td data-label="Last Sync">${formatDate(i.lastSyncAt)}</td>
-      <td data-label="Sync Count">${i.syncCount || 0}</td>
-      <td data-label="Fingerprint">${p.fpBadge}</td>
-      <td data-label="Actions"><div class="row-actions">${p.actionsHtml}</div></td>
+      <td class="col-status">${p.allowedBadge}</td>
+      <td class="col-fp">${p.fpBadge}</td>
+      <td class="col-records">${i.totalRecords || 0} <span class="muted">(${i.moduleCount || 0} mod.)</span></td>
+      <td class="col-size">${formatBytes(i.sizeBytes)}</td>
+      <td class="col-sync">${formatDate(i.lastSyncAt)}</td>
+      <td class="col-count">${i.syncCount || 0}</td>
+      <td class="col-open"><button class="btn-sm btn-primary row-open" aria-label="View details"><span class="open-txt">Details</span><span class="open-arrow" aria-hidden="true">›</span></button></td>
     </tr>
   `;
 }
@@ -829,8 +1001,11 @@ function renderTable() {
     const msg = installations.length
       ? 'No installations match your search or filter.'
       : 'No installations found.';
-    document.getElementById('tableBody').innerHTML =
-      `<tr><td colspan="10"><div class="empty-state"><div class="big-ic">🗄️</div>${escapeHtml(msg)}</div></td></tr>`;
+    document.getElementById('tableBody').innerHTML = '';
+    document.getElementById('instTable').style.display = 'none';
+    const emptyEl = document.getElementById('tableEmpty');
+    emptyEl.style.display = 'block';
+    emptyEl.innerHTML = `<div class="big-ic">🗄️</div>${escapeHtml(msg)}`;
     document.getElementById('cardGrid').innerHTML =
       `<div class="empty-state"><div class="big-ic">🗄️</div>${escapeHtml(msg)}</div>`;
     syncSelectAllCheckboxes([]);
@@ -838,6 +1013,8 @@ function renderTable() {
     return;
   }
 
+  document.getElementById('tableEmpty').style.display = 'none';
+  document.getElementById('instTable').style.display = '';
   document.getElementById('tableBody').innerHTML = filtered.map(rowMarkup).join('');
   document.getElementById('cardGrid').innerHTML = filtered.map(cardMarkup).join('');
   syncSelectAllCheckboxes(filtered);
@@ -1005,6 +1182,11 @@ async function boot() {
       document.getElementById('loginErr').textContent = err.message;
     } else {
       toast(err.message, true);
+      if (!installations.length) {
+        const emptyEl = document.getElementById('tableEmpty');
+        emptyEl.style.display = 'block';
+        emptyEl.textContent = 'Could not load installations. Tap Refresh to try again.';
+      }
     }
   }
 }
