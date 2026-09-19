@@ -227,7 +227,7 @@
     position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
     background: var(--bg-raise); border: 1.5px solid var(--border-soft); color: var(--text);
     padding: 10px 18px; border-radius: var(--radius); font-size: .88rem; opacity: 0; pointer-events: none;
-    transition: opacity .2s ease; z-index: 50;
+    transition: opacity .2s ease; z-index: 100; max-width: calc(100vw - 24px);
   }
   #toast.show { opacity: 1; }
   #toast.error { border-color: var(--red-line); color: var(--red); }
@@ -237,6 +237,126 @@
     border: 1px solid var(--border-soft); background: var(--accent-soft); color: var(--accent);
   }
   .basis-badge.unstable { border-color: var(--amber-line); background: var(--amber-bg); color: var(--amber); }
+  /* ---------- View toggle (list / grid) ---------- */
+  .view-toggle { display: flex; border: 1.5px solid var(--border); border-radius: var(--radius); overflow: hidden; flex: 0 0 auto; }
+  .view-btn {
+    background: transparent; border: none; color: var(--muted); padding: 9px 13px; cursor: pointer;
+    font-family: var(--font-ui); font-size: .88rem; line-height: 1.2; display: flex; align-items: center; justify-content: center; gap: 4px;
+  }
+  .view-btn + .view-btn { border-left: 1.5px solid var(--border); }
+  .view-btn:hover { color: var(--text); }
+  .view-btn.active { background: var(--accent-soft); color: var(--accent); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  #clientsWrap[data-view="list"] .client-grid { display: none; }
+  #clientsWrap[data-view="grid"] .client-table-wrap { display: none; }
+
+  /* ---------- List view: one compact table, details in a modal ---------- */
+  .client-table-wrap {
+    background: var(--card); border: 1.5px solid var(--border); border-radius: var(--radius-lg); overflow: clip;
+  }
+  .client-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  .client-table th, .client-table td {
+    padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--line); font-size: .87rem; vertical-align: middle;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .client-table thead th {
+    position: sticky; top: 0; z-index: 5; background: var(--bg-raise); color: var(--muted);
+    font-weight: 600; font-size: .72rem; text-transform: uppercase; letter-spacing: .04em;
+  }
+  .client-table tbody tr:last-child td { border-bottom: none; }
+  .client-table th.ct-c-storage { width: 120px; }
+  .client-table th.ct-c-compute { width: 96px; }
+  .client-table th.ct-c-neon { width: 120px; }
+  .client-table th.ct-c-plan { width: 200px; }
+  .client-table th.ct-c-restores { width: 104px; }
+  .client-table th.ct-c-total { width: 124px; }
+  .client-table th.ct-c-open { width: 100px; }
+  .client-table td.ct-c-open { overflow: visible; }
+  .ct-row { cursor: pointer; transition: background .12s ease; }
+  .ct-row:hover td { background: var(--card-hover); }
+  .ct-name { display: block; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+  .ct-sub { display: block; margin-top: 2px; font-size: .72rem; color: var(--muted-dim); overflow: hidden; text-overflow: ellipsis; }
+  .ct-sub.mono { font-size: .72rem; color: var(--muted-dim); }
+  .ct-name.mono { font-weight: 400; font-size: .8rem; color: var(--text); }
+  .ct-flag { margin-left: 6px; font-size: .8rem; }
+  .ct-num { font-family: var(--font-mono); font-size: .82rem; }
+  .ct-total { font-family: var(--font-mono); font-size: .9rem; font-weight: 700; color: var(--accent); }
+  .ct-paid { color: var(--green); }
+  .ct-open {
+    display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: var(--radius);
+    border: 1.5px solid var(--border-soft); background: transparent; color: var(--accent); cursor: pointer;
+    font-family: var(--font-ui); font-size: .8rem;
+  }
+  .ct-open:hover { background: var(--accent-soft); }
+  .ct-open .open-arrow { font-size: 1.05rem; line-height: 1; }
+
+  /* ---------- Details modal (bottom sheet on phones) ---------- */
+  body.modal-open { overflow: hidden; }
+  .detail-overlay {
+    position: fixed; inset: 0; background: rgba(2,4,10,.72); backdrop-filter: blur(3px);
+    display: none; align-items: center; justify-content: center; z-index: 80; padding: 20px;
+  }
+  .detail-overlay.active { display: flex; }
+  .detail-box {
+    background: var(--bg-raise); border: 1.5px solid var(--border-soft); border-radius: var(--radius-lg);
+    width: 100%; max-width: 520px; max-height: 88vh; max-height: min(88dvh, 720px);
+    display: flex; flex-direction: column; box-shadow: 0 20px 44px -22px rgba(0,0,0,.7); animation: detailIn .16s ease;
+  }
+  .detail-box:focus { outline: none; }
+  @keyframes detailIn { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: none; } }
+  @keyframes sheetIn { from { transform: translateY(100%); } to { transform: none; } }
+  .detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 18px 20px 14px; }
+  .detail-title { margin: 0; font-size: 1.05rem; font-weight: 700; line-height: 1.3; overflow-wrap: anywhere; }
+  .detail-title.empty-name { font-weight: 400; font-style: italic; color: var(--muted); }
+  .detail-sub { color: var(--muted); font-size: .8rem; margin-top: 3px; }
+  .detail-close { padding: 6px 11px; flex-shrink: 0; }
+  .detail-body { padding: 0 20px 18px; overflow-y: auto; flex: 1 1 auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+  .detail-id {
+    display: flex; align-items: center; gap: 10px; background: var(--bg); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 9px 10px 9px 12px; margin-bottom: 14px;
+  }
+  .detail-id .mono { flex: 1; min-width: 0; word-break: break-all; }
+  .detail-copy {
+    flex-shrink: 0; background: transparent; border: 1px solid var(--line); color: var(--muted); cursor: pointer;
+    border-radius: var(--radius); padding: 4px 8px; font-family: var(--font-ui); font-size: .8rem;
+  }
+  .detail-copy:hover { color: var(--accent); border-color: var(--border-soft); }
+  .detail-stack { display: flex; flex-direction: column; gap: 12px; }
+  .detail-foot {
+    padding: 14px 20px 18px; border-top: 1px solid var(--line);
+  }
+  .detail-foot .client-card-total { padding-top: 0; border-top: none; }
+
+  @media (max-width: 1099px) {
+    .ct-c-plan, .ct-c-compute { display: none; }
+  }
+  @media (max-width: 799px) {
+    .ct-c-neon, .ct-c-restores { display: none; }
+  }
+  @media (max-width: 720px) {
+    .view-toggle { width: 100%; }
+    .view-btn { flex: 1; font-size: 16px; }
+  }
+  @media (max-width: 639px) {
+    .ct-c-storage { display: none; }
+    .client-table th, .client-table td { padding: 10px 8px; }
+    .client-table th:first-child, .client-table td:first-child { padding-left: 12px; }
+    .client-table th.ct-c-total { width: 104px; }
+    .client-table th.ct-c-open { width: 44px; }
+    .client-table td.ct-c-open { padding-right: 10px; }
+    .ct-open { padding: 6px 10px; }
+    .ct-open .open-txt { display: none; }
+    .detail-overlay { padding: 0; align-items: flex-end; }
+    .detail-box {
+      max-width: none; max-height: 90vh; max-height: 90dvh; border-radius: 16px 16px 0 0; border-bottom: none;
+      animation: sheetIn .22s ease;
+    }
+    .detail-foot { padding-bottom: max(18px, env(safe-area-inset-bottom)); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .detail-box { animation: none; }
+  }
 </style>
 </head>
 <body>
@@ -407,7 +527,7 @@
       <div id="storageFeeDebtorsList" style="margin-top:10px;"></div>
     </div>
 
-    <div id="clientsWrap">
+    <div id="clientsWrap" data-view="list">
       <div class="client-toolbar hidden" id="clientToolbar">
         <div class="search-field">
           <input type="search" id="clientSearchInput" placeholder="Search by label, store name, or installation ID…" oninput="onClientSearchChange(this.value)">
@@ -420,7 +540,28 @@
           <option value="syncsDesc">Syncs (high → low)</option>
           <option value="restoresDesc">Restores, last 30d (high → low)</option>
         </select>
+        <div class="view-toggle" role="group" aria-label="View mode">
+          <button type="button" class="view-btn active" data-view="list" onclick="setView('list')" title="List view" aria-pressed="true">☰ List</button>
+          <button type="button" class="view-btn" data-view="grid" onclick="setView('grid')" title="Grid view" aria-pressed="false">▦ Grid</button>
+        </div>
         <div class="client-count-note" id="clientCountNote"></div>
+      </div>
+      <div class="client-table-wrap hidden" id="clientTableWrap">
+        <table class="client-table">
+          <thead>
+            <tr>
+              <th>Client</th>
+              <th class="ct-c-storage">Storage</th>
+              <th class="ct-c-compute">Compute</th>
+              <th class="ct-c-neon" title="Neon cost share">Neon cost</th>
+              <th class="ct-c-plan">Plan</th>
+              <th class="ct-c-restores" title="Restores in the last 30 days">Restores</th>
+              <th class="ct-c-total">Total / mo</th>
+              <th class="ct-c-open"><span style="position:absolute;left:-9999px;">Details</span></th>
+            </tr>
+          </thead>
+          <tbody id="clientTableBody"></tbody>
+        </table>
       </div>
       <div class="client-grid" id="clientGrid"></div>
       <div class="empty-state hidden" id="emptyState">No Cloud Backup client activity recorded yet for the current billing period.</div>
@@ -432,6 +573,20 @@
   </main>
 </div>
 
+<div class="detail-overlay" id="detailOverlay" role="dialog" aria-modal="true" aria-labelledby="detailTitle">
+  <div class="detail-box" tabindex="-1">
+    <div class="detail-head">
+      <div style="min-width:0;">
+        <h3 class="detail-title" id="detailTitle"></h3>
+        <div class="detail-sub" id="detailSub"></div>
+      </div>
+      <button type="button" class="icon-btn detail-close" id="detailClose" onclick="closeClientDetail()" aria-label="Close details">✕</button>
+    </div>
+    <div class="detail-body" id="detailBody"></div>
+    <div class="detail-foot" id="detailFoot"></div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
@@ -441,6 +596,13 @@ let clientSearchQuery = '';
 let clientSortKey = 'totalDesc';
 const CLIENT_PAGE_SIZE = 20; // how many client cards to render at a time — avoids one giant scroll at scale
 let clientVisibleCount = CLIENT_PAGE_SIZE;
+let viewMode = 'list';
+let detailClientId = null;
+let detailReturnFocus = null;
+try {
+  const savedView = localStorage.getItem('relayCostAllocationView');
+  if (savedView === 'grid' || savedView === 'list') viewMode = savedView;
+} catch (e) { /* localStorage unavailable — default to list */ }
 
 function toast(msg, type) {
   const el = document.getElementById('toast');
@@ -487,6 +649,7 @@ function login() {
 }
 
 function logout() {
+  closeClientDetail();
   adminKey = '';
   sessionStorage.removeItem('relayAdminKey');
   document.getElementById('app').classList.add('hidden');
@@ -511,6 +674,25 @@ function escapeHtml(str) {
   ));
 }
 
+// Safe for embedding inside a single-quoted inline onclick="...('...')"
+// attribute: JS-escape first, THEN HTML-escape (the browser decodes the
+// attribute before parsing it as JS, so this order round-trips correctly).
+function escapeJsAttr(str) {
+  return escapeHtml(String(str == null ? '' : str).replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
+}
+
+function setView(mode) {
+  viewMode = mode;
+  try { localStorage.setItem('relayCostAllocationView', mode); } catch (e) { /* ignore */ }
+  const wrap = document.getElementById('clientsWrap');
+  if (wrap) wrap.dataset.view = mode;
+  document.querySelectorAll('.view-btn').forEach((btn) => {
+    const on = btn.dataset.view === mode;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+}
+
 function renderShareBar(pct) {
   const clamped = Math.max(0, Math.min(100, Number(pct) || 0));
   return `
@@ -522,6 +704,12 @@ function renderShareBar(pct) {
 }
 
 function renderAllocation(data) {
+  renderAllocationInner(data);
+  // If a details modal is open, refresh it (or close it if the client is gone).
+  if (detailClientId !== null) renderClientDetail();
+}
+
+function renderAllocationInner(data) {
   lastAllocation = data;
 
   const errorBanner = document.getElementById('errorBanner');
@@ -572,6 +760,8 @@ function renderAllocation(data) {
 
   if (clients.length === 0) {
     grid.innerHTML = '';
+    document.getElementById('clientTableBody').innerHTML = '';
+    document.getElementById('clientTableWrap').classList.add('hidden');
     toolbar.classList.add('hidden');
     document.getElementById('filterEmptyState').classList.add('hidden');
     document.getElementById('loadMoreWrap').classList.add('hidden');
@@ -626,62 +816,43 @@ function getFilteredSortedClients() {
   return filtered;
 }
 
-function renderClientCard(c) {
+// Everything the card, the table row and the details modal need, computed once
+// so the three views can never drift apart.
+function clientVM(c) {
   const safeId = escapeHtml(c.installationId);
-  // AYOS: hiniling na makita rin sa Client Cost Allocation kung ano ang
-  // naka-label sa device sa Allowed Devices page, hindi lang basta
-  // installation ID. Kung walang manual label, gamitin ang self-reported
-  // store name mula sa Cloud Backup check-in bilang fallback; kung wala ring
-  // alinman, ang installation ID lang mismo ang lalabas gaya ng dati.
+  const jsId = escapeJsAttr(c.installationId);
+  // Label shown in Allowed Devices; falls back to the self-reported store
+  // name from the Cloud Backup check-in; else only the installation ID.
   const displayLabel = c.label || c.storeName || null;
-  const idBlock = displayLabel
-    ? `<div class="client-card-label">${escapeHtml(displayLabel)}</div><div class="mono client-card-id has-label">${safeId}</div>`
-    : `<div class="mono client-card-id">${safeId}</div>`;
-  // AYOS: badge na nagpapakita kung "paid"/active pa ang Cloud Backup
-  // subscription ng client na ito ngayong buwan (kaka-subscribe/renew
-  // lang, o lifetime) — hindi pa ito kasama sa Total / month habang
-  // aktibo pa ito, babalik lang ito pagka-expire ng subscription period
-  // na iyon.
+  // Badge: this month's Cloud Backup fee is already paid (or lifetime), so it
+  // is excluded from Total / month until that subscription period expires.
   const paidBadge = c.maintenanceFeePaid
     ? `<span class="mono" style="color:#16a34a;font-size:11px;" title="${c.maintenanceFeePaidUntil ? 'Paid until ' + new Date(c.maintenanceFeePaidUntil).toLocaleDateString() : 'Paid'}">✓ ${c.cloudBackupIsLifetime ? 'Lifetime' : 'Paid'} (excluded from total)</span>`
     : '';
-  // BAGO: hindi na editable/flat na fee — ang "maintenance fee" ay ang
-  // Monthly/Yearly presyo mismo ng tier (Basic/Standard/Pro) na
-  // sinubscribe ng client, kaya read-only na lang ipinapakita dito.
+  // The "maintenance fee" is the Monthly/Yearly price of the subscribed tier (read-only).
   const tierLabel = c.cloudBackupTierName || (c.cloudBackupTier ? c.cloudBackupTier : null);
   const planLine = c.cloudBackupIsLifetime
     ? `<span class="mono">Lifetime (no recurring fee)</span>`
     : tierLabel
       ? `<span class="mono">${escapeHtml(tierLabel)} — ${formatPHP(c.maintenanceFeeMonthlyPHP)}/mo · ${formatPHP(c.maintenanceFeeYearlyPHP)}/yr</span>`
       : `<span class="mono">No active Cloud Backup plan</span>`;
-  // AYOS/BAGO: restore tracking (visibility-only, hindi kasama sa
-  // Neon cost share sa itaas) — para makita agad kung sinong client ang
-  // sobrang dalas mag-restore. Naka-flag/naka-highlight (amber) kapag
-  // ~malapit na o umabot na sa bagong 5/araw na cap, bilang mabilisang
-  // visual cue kung sino ang posibleng abuser.
-  // BUGFIX: restore_count sa itaas ay LIFETIME total — kung ito lang ang
-  // basehan ng ⚠️ flag, isang lehitimong client na 3 beses lang nag-restore
-  // sa loob ng ilang TAON (malayo-layo, disaster recovery lang) ay
-  // permanenteng mananatiling naka-flag magpakailanman. Ang restoreCountRecent30d
-  // (rolling 30-day window, mula sa cloud_token_ledger) na ang ginagamit
-  // ngayon para sa ⚠️ flag — mas makatwiran, dahil "abuse" ay tungkol sa
-  // dalas SA LOOB NG MAIKLING PANAHON, hindi sa lifetime total.
+  // Restore tracking uses the rolling 30-day count (restoreCountRecent30d) for
+  // the ⚠️ flag, not the lifetime total, so one old legitimate restore never
+  // stays flagged forever.
   const restoreCount = c.restoreCount || 0;
   const restoreCountRecent = c.restoreCountRecent30d || 0;
   const restoreFlagged = restoreCountRecent >= 3;
   const restoreCountDisplay = restoreFlagged
     ? `<span class="mono" style="color:var(--amber);">${restoreCountRecent} ⚠️</span> <span class="mono" style="color:var(--muted);font-size:.72rem;">(${restoreCount} all-time)</span>`
     : `<span class="mono">${restoreCountRecent}</span> <span class="mono" style="color:var(--muted);font-size:.72rem;">(${restoreCount} all-time)</span>`;
-  const lastRestoreDisplay = c.lastRestoreAt
-    ? new Date(c.lastRestoreAt).toLocaleString()
-    : 'Never';
-  return `
-    <div class="client-card" data-installation-id="${safeId}">
-      <div>
-        ${idBlock}
-        <div class="client-card-sub">${c.syncCount != null ? c.syncCount : 0} syncs · ${c.totalRecords != null ? c.totalRecords : 0} records</div>
-      </div>
+  const lastRestoreDisplay = c.lastRestoreAt ? new Date(c.lastRestoreAt).toLocaleString() : 'Never';
+  const syncsRecords = `${c.syncCount != null ? c.syncCount : 0} syncs · ${c.totalRecords != null ? c.totalRecords : 0} records`;
+  return { safeId, jsId, displayLabel, paidBadge, tierLabel, planLine, restoreCount, restoreCountRecent, restoreFlagged, restoreCountDisplay, lastRestoreDisplay, syncsRecords };
+}
 
+// Storage → Total blocks, shared by the grid card and the details modal.
+function clientMetricsHtml(c, v, withTotal) {
+  return `
       <div>
         <div class="client-metric-head">
           <span class="client-metric-label">Storage</span>
@@ -705,32 +876,157 @@ function renderClientCard(c) {
       </div>
 
       <div class="client-card-line">
-        <span class="client-card-line-label">Maintenance fee (plan) ${paidBadge}</span>
-        ${planLine}
+        <span class="client-card-line-label">Maintenance fee (plan) ${v.paidBadge}</span>
+        ${v.planLine}
       </div>
 
       <div class="client-card-divider"></div>
 
       <div class="client-card-line">
         <span class="client-card-line-label">Restores (last 30 days)</span>
-        <span>${restoreCountDisplay} · <span class="mono" style="color:var(--muted);font-size:.75rem;">last: ${escapeHtml(lastRestoreDisplay)}</span></span>
+        <span>${v.restoreCountDisplay} · <span class="mono" style="color:var(--muted);font-size:.75rem;">last: ${escapeHtml(v.lastRestoreDisplay)}</span></span>
       </div>
 
       <div class="client-card-line">
         <span class="client-card-line-label" style="font-size:.75rem;color:var(--muted-dim);">Manual charge for restore abuse</span>
-        <button type="button" class="row-save-btn" onclick="promptChargeRestore('${safeId.replace(/'/g, "\\'")}', '${escapeHtml(displayLabel || c.installationId).replace(/'/g, "\\'")}')">⚡ Charge</button>
+        <button type="button" class="row-save-btn" onclick="chargeClient('${v.jsId}')">⚡ Charge</button>
       </div>
-
+      ${withTotal ? `
       <div class="client-card-total">
         <span>Total / month</span>
         <span class="total-price">${formatPHP(c.finalPricePHP)}</span>
+      </div>` : ''}
+  `;
+}
+
+function renderClientCard(c) {
+  const v = clientVM(c);
+  const idBlock = v.displayLabel
+    ? `<div class="client-card-label">${escapeHtml(v.displayLabel)}</div><div class="mono client-card-id has-label">${v.safeId}</div>`
+    : `<div class="mono client-card-id">${v.safeId}</div>`;
+  return `
+    <div class="client-card" data-installation-id="${v.safeId}">
+      <div>
+        ${idBlock}
+        <div class="client-card-sub">${v.syncsRecords}</div>
       </div>
+      ${clientMetricsHtml(c, v, true)}
     </div>
   `;
 }
 
+function pctText(n) {
+  return `${Math.max(0, Math.min(100, Number(n) || 0)).toFixed(1)}%`;
+}
+
+function renderClientRow(c) {
+  const v = clientVM(c);
+  const flag = v.restoreFlagged ? `<span class="ct-flag" title="${v.restoreCountRecent} restores in the last 30 days">⚠️</span>` : '';
+  const clientCell = v.displayLabel
+    ? `<span class="ct-name">${escapeHtml(v.displayLabel)}${flag}</span><span class="ct-sub mono">${v.safeId}</span>`
+    : `<span class="ct-name mono">${v.safeId}${flag}</span><span class="ct-sub">${v.syncsRecords}</span>`;
+  const planMain = c.cloudBackupIsLifetime ? 'Lifetime'
+    : v.tierLabel ? escapeHtml(v.tierLabel)
+    : '<span class="muted" style="color:var(--muted);">No active plan</span>';
+  const planSub = c.maintenanceFeePaid ? '<span class="ct-sub ct-paid">✓ Paid (excluded)</span>'
+    : (!c.cloudBackupIsLifetime && v.tierLabel) ? `<span class="ct-sub">${formatPHP(c.maintenanceFeeMonthlyPHP)}/mo</span>` : '';
+  return `
+    <tr class="ct-row" onclick="openClientDetail('${v.jsId}')">
+      <td class="ct-c-client">${clientCell}</td>
+      <td class="ct-c-storage"><span class="ct-num">${formatBytes(c.sizeBytes)}</span><span class="ct-sub">${pctText(c.storageSharePercent)}</span></td>
+      <td class="ct-c-compute ct-num">${pctText(c.computeSharePercent)}</td>
+      <td class="ct-c-neon ct-num">${formatPHP(c.baseCostPHP)}</td>
+      <td class="ct-c-plan">${planMain}${planSub}</td>
+      <td class="ct-c-restores ct-num"${v.restoreFlagged ? ' style="color:var(--amber);"' : ''}>${v.restoreCountRecent}${v.restoreFlagged ? ' ⚠️' : ''}</td>
+      <td class="ct-c-total ct-total">${formatPHP(c.finalPricePHP)}</td>
+      <td class="ct-c-open"><button type="button" class="ct-open" aria-label="View details"><span class="open-txt">Details</span><span class="open-arrow" aria-hidden="true">›</span></button></td>
+    </tr>
+  `;
+}
+
+function findClient(id) {
+  const list = (lastAllocation && Array.isArray(lastAllocation.clients)) ? lastAllocation.clients : [];
+  return list.find((c) => c.installationId === id) || null;
+}
+
+/* ---------- Details modal ---------- */
+function openClientDetail(id) {
+  detailClientId = id;
+  detailReturnFocus = document.activeElement;
+  renderClientDetail();
+  if (detailClientId === null) return; // client not found — renderClientDetail closed it
+  document.getElementById('detailOverlay').classList.add('active');
+  document.body.classList.add('modal-open');
+  document.getElementById('detailBody').scrollTop = 0;
+  setTimeout(() => document.querySelector('.detail-box').focus(), 30);
+}
+
+function closeClientDetail() {
+  detailClientId = null;
+  document.getElementById('detailOverlay').classList.remove('active');
+  document.body.classList.remove('modal-open');
+  if (detailReturnFocus && document.contains(detailReturnFocus)) {
+    try { detailReturnFocus.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
+  }
+  detailReturnFocus = null;
+}
+
+function renderClientDetail() {
+  const c = findClient(detailClientId);
+  if (!c) { closeClientDetail(); return; }
+  const v = clientVM(c);
+  const title = document.getElementById('detailTitle');
+  title.textContent = v.displayLabel || 'Unlabeled client';
+  title.classList.toggle('empty-name', !v.displayLabel);
+  document.getElementById('detailSub').textContent = `${c.syncCount != null ? c.syncCount : 0} syncs · ${c.totalRecords != null ? c.totalRecords : 0} records`;
+  document.getElementById('detailBody').innerHTML = `
+    <div class="detail-id"><span class="mono">${v.safeId}</span><button type="button" class="detail-copy" onclick="copyClientId('${v.jsId}')">⧉ Copy</button></div>
+    <div class="detail-stack">${clientMetricsHtml(c, v, false)}</div>
+  `;
+  document.getElementById('detailFoot').innerHTML = `
+    <div class="client-card-total">
+      <span>Total / month</span>
+      <span class="total-price">${formatPHP(c.finalPricePHP)}</span>
+    </div>
+  `;
+}
+
+function copyClientId(id) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(id).then(() => toast('Copied ' + id)).catch(() => toast('Could not copy to clipboard', 'error'));
+  } else {
+    toast('Clipboard not available in this browser', 'error');
+  }
+}
+
+// Looks the client up by ID so no label/ID text is ever spliced into an inline handler.
+function chargeClient(id) {
+  const c = findClient(id);
+  const label = c ? (c.label || c.storeName || c.installationId) : id;
+  return promptChargeRestore(id, label);
+}
+
+document.getElementById('detailOverlay').addEventListener('click', (e) => {
+  if (e.target.id === 'detailOverlay') closeClientDetail();
+});
+document.addEventListener('keydown', (e) => {
+  if (detailClientId === null) return;
+  if (e.key === 'Escape') {
+    closeClientDetail();
+  } else if (e.key === 'Tab') {
+    const box = document.querySelector('.detail-box');
+    const f = [...box.querySelectorAll('button, input, [tabindex]:not([tabindex="-1"])')].filter((el) => !el.disabled);
+    if (!f.length) return;
+    const first = f[0], last = f[f.length - 1], cur = document.activeElement;
+    if (!box.contains(cur) || (e.shiftKey && (cur === first || cur === box))) { e.preventDefault(); (e.shiftKey ? last : first).focus(); }
+    else if (!e.shiftKey && cur === last) { e.preventDefault(); first.focus(); }
+  }
+}, true);
+
 function renderClientGrid() {
   const grid = document.getElementById('clientGrid');
+  const tableBody = document.getElementById('clientTableBody');
+  const tableWrap = document.getElementById('clientTableWrap');
   const filterEmptyState = document.getElementById('filterEmptyState');
   const loadMoreWrap = document.getElementById('loadMoreWrap');
   const loadMoreBtn = document.getElementById('loadMoreBtn');
@@ -741,6 +1037,8 @@ function renderClientGrid() {
 
   if (matched.length === 0) {
     grid.innerHTML = '';
+    tableBody.innerHTML = '';
+    tableWrap.classList.add('hidden');
     filterEmptyState.classList.remove('hidden');
     loadMoreWrap.classList.add('hidden');
     countNote.textContent = clientSearchQuery ? `0 of ${totalCount} clients match "${clientSearchQuery}"` : '';
@@ -750,6 +1048,8 @@ function renderClientGrid() {
 
   const visible = matched.slice(0, clientVisibleCount);
   grid.innerHTML = visible.map(renderClientCard).join('');
+  tableBody.innerHTML = visible.map(renderClientRow).join('');
+  tableWrap.classList.remove('hidden');
 
   if (matched.length > visible.length) {
     loadMoreWrap.classList.remove('hidden');
@@ -835,7 +1135,7 @@ async function loadReconciliation() {
       const plLabel = data.status === 'lugi' ? '⚠️ LUGI' : '✅ Kumikita';
       rows.push(`<div style="margin-top:6px;">Totoong Neon bill: <strong>$${data.actualBill.actualBillUSD.toFixed(2)} · ${formatPHP(data.actualBill.actualBillPHP)}</strong> <span style="font-size:11px; color:var(--muted);">(rate ${data.actualBill.exchangeRateUsed.toFixed(2)} nang i-save)</span></div>`);
       rows.push(`<div style="margin-top:4px; font-weight:700; color:${plColor};">${plLabel}: ${formatPHP(Math.abs(data.profitLossPHP))} ${data.status === 'lugi' ? 'kulang' : 'sobra'} sa buwang ito</div>`);
-      if (data.actualBill.note) rows.push(`<div style="font-size:11px; color:var(--muted);">Note: ${data.actualBill.note}</div>`);
+      if (data.actualBill.note) rows.push(`<div style="font-size:11px; color:var(--muted);">Note: ${escapeHtml(data.actualBill.note)}</div>`);
     } else {
       rows.push('<div style="margin-top:6px; color:var(--amber,#f5a623);">⚠️ Wala pang na-i-save na totoong Neon bill para sa buwang ito — ilagay sa ibaba para makita ang profit/loss.</div>');
     }
@@ -881,13 +1181,13 @@ async function loadRetentionReview() {
     listEl.innerHTML = data.candidates.map(c => `
       <div class="backup-row" style="padding:10px 0; border-bottom:1px solid var(--border,#2a2a2a); align-items:flex-start; display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;">
         <div style="flex:1; min-width:200px;">
-          <div><strong>${c.label || c.storeName || c.installationId}</strong> <span style="font-size:11px; color:var(--muted);">${c.installationId}</span></div>
+          <div><strong>${escapeHtml(c.label || c.storeName || c.installationId)}</strong> <span style="font-size:11px; color:var(--muted);">${escapeHtml(c.installationId)}</span></div>
           <div style="font-size:11px; color:var(--muted);">
             ${c.sizeMB} MB · nag-expire ${c.expiryKnown ? '' : '(estimate mula sa last sync) '}${c.daysSinceExpiry} araw na ang nakalipas
             · tinatayang ~${formatPHP(c.estMonthlyStorageCostPHP)}/buwan pa rin na ginagastos
           </div>
         </div>
-        <button class="icon-btn" style="background:var(--red-bg,#3a1418); color:var(--red,#ff5c72); border:1px solid var(--red-line,#5c1c26);" onclick="purgeRetentionCandidate('${c.installationId}')">🗑️ Burahin</button>
+        <button class="icon-btn" style="background:var(--red-bg,#3a1418); color:var(--red,#ff5c72); border:1px solid var(--red-line,#5c1c26);" onclick="purgeRetentionCandidate('${escapeJsAttr(c.installationId)}')">🗑️ Burahin</button>
       </div>`).join('');
   } catch (err) {
     summaryEl.innerHTML = `<span style="color:var(--red);">${err.message}</span>`;
@@ -924,15 +1224,15 @@ async function loadNearQuotaReview() {
     listEl.innerHTML = data.candidates.map(c => `
       <div class="backup-row" style="padding:10px 0; border-bottom:1px solid var(--border,#2a2a2a); align-items:flex-start; display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;">
         <div style="flex:1; min-width:200px;">
-          <div><strong>${c.label || c.storeName || c.installationId}</strong> <span style="font-size:11px; color:var(--muted);">${c.installationId}</span></div>
+          <div><strong>${escapeHtml(c.label || c.storeName || c.installationId)}</strong> <span style="font-size:11px; color:var(--muted);">${escapeHtml(c.installationId)}</span></div>
           <div style="font-size:11px; color:var(--muted);">
-            ${c.currentTierName}: ${c.sizeMB} / ${c.quotaMB} MB (<strong>${c.percentUsed}%</strong>)
+            ${escapeHtml(c.currentTierName)}: ${c.sizeMB} / ${c.quotaMB} MB (<strong>${c.percentUsed}%</strong>)
           </div>
         </div>
         <div style="font-size:12px; text-align:right;">
           ${c.atMaxTier
             ? '<span style="color:var(--amber,#f5a623);">Nasa pinakamataas nang tier</span>'
-            : `<span style="color:var(--green,#4ade80);">Suggest: ${c.suggestedTierName} (₱${c.suggestedTierMonthlyPHP}/buwan)</span>`}
+            : `<span style="color:var(--green,#4ade80);">Suggest: ${escapeHtml(c.suggestedTierName)} (₱${c.suggestedTierMonthlyPHP}/buwan)</span>`}
         </div>
       </div>`).join('');
   } catch (err) {
@@ -959,7 +1259,7 @@ async function loadStorageFeeDebtors() {
     listEl.innerHTML = data.debtors.map(d => `
       <div class="backup-row" style="padding:10px 0; border-bottom:1px solid var(--border,#2a2a2a); align-items:flex-start; display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;">
         <div style="flex:1; min-width:220px;">
-          <div><strong>${d.label || d.storeName || d.installationId}</strong> <span style="font-size:11px; color:var(--muted);">${d.installationId}</span></div>
+          <div><strong>${escapeHtml(d.label || d.storeName || d.installationId)}</strong> <span style="font-size:11px; color:var(--muted);">${escapeHtml(d.installationId)}</span></div>
           <div style="font-size:11px; color:var(--muted); margin-top:2px;">
             Balance: <strong style="color:var(--red,#ff5c72);">${d.balanceTokens.toFixed(3)} token</strong>
             · Auto-sync: <strong style="color:${d.autoSyncEnabled ? 'var(--green,#3ddc84)' : 'var(--amber,#ffb545)'};">${d.autoSyncEnabled ? 'ON' : 'OFF'}</strong>
@@ -986,6 +1286,7 @@ document.getElementById('adminKeyInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') login();
 });
 
+setView(viewMode);
 boot();
 </script>
 </body>
