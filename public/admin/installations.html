@@ -61,15 +61,19 @@
   /* ---------- Topbar ---------- */
   .topbar {
     position: sticky; top: 0; z-index: 40;
-    display: flex; align-items: center; justify-content: space-between; gap: 12px;
-    padding: 12px 20px; border-bottom: 1.5px solid var(--border);
-    background: rgba(16, 22, 37, 0.92); backdrop-filter: blur(14px) saturate(140%);
+    display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 10px 14px;
+    padding: 14px 20px; border-bottom: 1.5px solid var(--border);
+    background: rgba(16, 22, 37, 0.94); backdrop-filter: blur(14px) saturate(140%);
     -webkit-backdrop-filter: blur(14px) saturate(140%);
   }
-  .topbar-brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
-  .topbar-title { font-size: 1.08rem; }
-  .topbar-sub { color: var(--muted); font-size: .78rem; margin-top: 1px; }
-  .topbar-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+  .topbar-brand { display: flex; align-items: flex-start; gap: 10px; min-width: 0; flex: 1 1 240px; }
+  .topbar-brand .icon-btn { flex-shrink: 0; margin-top: 1px; }
+  .topbar-title { font-size: clamp(.96rem, 3.4vw, 1.1rem); line-height: 1.3; }
+  .topbar-sub { color: var(--muted); font-size: .76rem; margin-top: 2px; line-height: 1.45; }
+  .topbar-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; flex-wrap: wrap; }
+  @media (max-width: 560px) {
+    .topbar-actions { width: 100%; justify-content: flex-end; }
+  }
 
   .icon-btn {
     background: transparent; border: 1.5px solid var(--border); color: var(--text);
@@ -160,7 +164,7 @@
   table { width: 100%; border-collapse: collapse; }
   th, td { padding: 11px 12px; text-align: left; border-bottom: 1px solid var(--line); font-size: .87rem; vertical-align: top; }
   thead th {
-    position: sticky; top: 57px; color: var(--muted); font-weight: 600; font-size: .72rem;
+    position: sticky; top: var(--topbar-h, 57px); color: var(--muted); font-weight: 600; font-size: .72rem;
     text-transform: uppercase; letter-spacing: .04em; background: var(--bg-raise); z-index: 5;
     cursor: pointer; user-select: none; white-space: nowrap;
   }
@@ -211,6 +215,41 @@
   .spinner { width: 20px; height: 20px; border: 2.5px solid var(--border); border-top-color: var(--accent); border-radius: 50%; display: inline-block; animation: spin .7s linear infinite; margin-right: 8px; vertical-align: -5px; }
 
   input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+
+  /* ---------- View toggle (list / grid) ---------- */
+  .view-toggle { display: flex; border: 1.5px solid var(--border); border-radius: var(--radius); overflow: hidden; flex-shrink: 0; }
+  .view-btn {
+    background: transparent; border: none; color: var(--muted); padding: 8px 12px; cursor: pointer;
+    font-size: .95rem; line-height: 1; display: flex; align-items: center; transition: background .15s var(--ease), color .15s var(--ease);
+  }
+  .view-btn + .view-btn { border-left: 1.5px solid var(--border); }
+  .view-btn:hover { color: var(--text); }
+  .view-btn.active { background: var(--accent-soft); color: var(--accent-bright); }
+
+  /* ---------- Card grid view ---------- */
+  .grid-wrap { display: none; }
+  #app[data-view="grid"] .table-wrap { display: none; }
+  #app[data-view="grid"] .grid-wrap { display: block; }
+  .grid-select-bar {
+    display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: .82rem; margin-bottom: 12px;
+  }
+  .grid-select-bar label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 14px; }
+  .inst-card {
+    background: var(--card); border: 1.5px solid var(--border); border-radius: var(--radius-lg);
+    padding: 14px; display: flex; flex-direction: column; gap: 10px; box-shadow: var(--shadow-ambient);
+    transition: border-color .15s var(--ease), transform .15s var(--ease);
+  }
+  .inst-card:hover { border-color: var(--border-soft); transform: translateY(-1px); }
+  .inst-card.selected { border-color: var(--accent); background: rgba(34, 229, 255, 0.05); }
+  .inst-card-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+  .inst-card-top .id-block { min-width: 0; }
+  .inst-card-badges { display: flex; gap: 6px; flex-wrap: wrap; }
+  .card-chips { display: block; }
+  .inst-card-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; font-size: .82rem; }
+  .inst-card-stats .stat-lbl { color: var(--muted-dim); font-size: .65rem; text-transform: uppercase; letter-spacing: .05em; }
+  .inst-card-stats .stat-val { margin-top: 1px; }
+  .inst-card-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: auto; padding-top: 10px; border-top: 1px solid var(--line); }
 
   /* ---------- Toast ---------- */
   #toastStack { position: fixed; bottom: 20px; right: 20px; z-index: 100; display: flex; flex-direction: column; gap: 8px; max-width: 360px; }
@@ -325,6 +364,10 @@
       <button class="filter-chip" data-filter="backup" onclick="setFilter('backup')">Has backup</button>
     </div>
     <span class="result-count" id="resultCount"></span>
+    <div class="view-toggle" role="group" aria-label="View mode">
+      <button class="view-btn active" data-view="list" onclick="setView('list')" title="List view">☰ List</button>
+      <button class="view-btn" data-view="grid" onclick="setView('grid')" title="Grid view">▦ Grid</button>
+    </div>
   </div>
 
   <div class="table-wrap">
@@ -347,6 +390,15 @@
         <tr class="loading-row"><td colspan="10"><span class="spinner"></span>Loading installations…</td></tr>
       </tbody>
     </table>
+  </div>
+
+  <div class="grid-wrap">
+    <div class="grid-select-bar">
+      <label><input type="checkbox" id="selectAllGrid" onchange="toggleSelectAll(this.checked)"> Select all shown</label>
+    </div>
+    <div class="card-grid" id="cardGrid">
+      <div class="empty-state"><div class="big-ic">🗄️</div>Loading installations…</div>
+    </div>
   </div>
 </div>
 
@@ -372,6 +424,27 @@ let activeFilter = 'all';
 let sortKey = null;
 let sortDir = 'asc';
 let expandedChips = new Set();
+let viewMode = 'list';
+try {
+  const savedView = localStorage.getItem('relayInstallationsView');
+  if (savedView === 'grid' || savedView === 'list') viewMode = savedView;
+} catch (e) { /* localStorage unavailable — default to list */ }
+
+function setView(mode) {
+  viewMode = mode;
+  try { localStorage.setItem('relayInstallationsView', mode); } catch (e) { /* ignore */ }
+  const app = document.getElementById('app');
+  if (app) app.dataset.view = mode;
+  document.querySelectorAll('.view-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.view === mode));
+}
+
+// Keeps the sticky table sub-header aligned under the topbar, whose
+// height can vary (wraps on narrow screens, shifts slightly once web
+// fonts finish loading) instead of assuming a fixed pixel height.
+function syncTopbarHeight() {
+  const tb = document.querySelector('.topbar');
+  if (tb) document.documentElement.style.setProperty('--topbar-h', tb.offsetHeight + 'px');
+}
 
 /* ---------- Toast ---------- */
 function toast(msg, isError) {
@@ -666,6 +739,87 @@ function getFiltered() {
   return list;
 }
 
+// Shared per-row pieces used by both the table (list) and card (grid)
+// renderers, so the two views can never drift out of sync with each other.
+function buildRowPieces(i) {
+  const safeId = escapeJsAttr(i.installationId);
+  const chips = (i.foundIn || []).map(k => escapeHtml(SOURCE_LABELS[k] || k));
+  const expanded = expandedChips.has(i.installationId);
+  const visibleChips = expanded ? chips : chips.slice(0, 3);
+  const hiddenCount = chips.length - visibleChips.length;
+  const chipsHtml = visibleChips.map(c => `<span class="chip">${c}</span>`).join('') +
+    (hiddenCount > 0 ? `<span class="chip chip-more" onclick="toggleChips('${safeId}')">+${hiddenCount} more</span>` : '') +
+    (expanded && chips.length > 3 ? `<span class="chip chip-more" onclick="toggleChips('${safeId}')">show less</span>` : '');
+  const walletHtml = (i.walletBalanceTokens !== null && i.walletBalanceTokens !== undefined)
+    ? `<span class="badge badge-amber">💰 Wallet: ${escapeHtml(i.walletBalanceTokens)} tokens</span>` : '';
+  const allowedBadge = i.allowed ? '<span class="badge badge-green">Allowed</span>' : '<span class="badge badge-red">Not allowed</span>';
+  const fpBadge = i.fingerprintFlagged ? '<span class="badge badge-amber">Flagged</span>' : (i.fingerprintVerified ? '<span class="badge badge-green">Verified</span>' : '<span class="muted">—</span>');
+  const actionsHtml = `
+    ${i.hasCloudBackupData ? `<button class="btn-sm btn-primary" onclick="downloadBackup('${safeId}')">Backup</button>` : ''}
+    <button class="btn-sm btn-danger" onclick="deleteOnly('${safeId}')">${i.hasCloudBackupData ? 'Delete only' : 'Delete'}</button>
+    ${i.hasCloudBackupData ? `<button class="btn-sm btn-danger" onclick="backupThenDelete('${safeId}')">Backup + Delete</button>` : ''}
+  `;
+  return { safeId, chipsHtml, walletHtml, allowedBadge, fpBadge, actionsHtml };
+}
+
+function rowMarkup(i) {
+  const p = buildRowPieces(i);
+  const isSel = selected.has(i.installationId);
+  return `
+    <tr class="${isSel ? 'row-selected' : ''}">
+      <td class="cell-select"><input type="checkbox" ${isSel ? 'checked' : ''} onchange="toggleRow('${p.safeId}', this.checked)"></td>
+      <td data-label="Store / Installation ID">
+        <div class="store-name${i.storeName ? '' : ' empty-name'}">${escapeHtml(i.storeName) || '(no store name)'}</div>
+        ${i.label ? `<div class="row-label">🏷️ ${escapeHtml(i.label)}</div>` : ''}
+        <div class="id-cell"><span>${escapeHtml(i.installationId)}</span><button class="copy-btn" title="Copy ID" onclick="copyId('${p.safeId}')">⧉</button></div>
+      </td>
+      <td data-label="Allowed">${p.allowedBadge}</td>
+      <td data-label="Found in" class="chips-cell">${p.chipsHtml}${p.walletHtml ? `<div class="wallet-badge">${p.walletHtml}</div>` : ''}</td>
+      <td data-label="Records">${i.totalRecords || 0} <span class="muted">(${i.moduleCount || 0} modules)</span></td>
+      <td data-label="Size">${formatBytes(i.sizeBytes)}</td>
+      <td data-label="Last Sync">${formatDate(i.lastSyncAt)}</td>
+      <td data-label="Sync Count">${i.syncCount || 0}</td>
+      <td data-label="Fingerprint">${p.fpBadge}</td>
+      <td data-label="Actions"><div class="row-actions">${p.actionsHtml}</div></td>
+    </tr>
+  `;
+}
+
+function cardMarkup(i) {
+  const p = buildRowPieces(i);
+  const isSel = selected.has(i.installationId);
+  return `
+    <div class="inst-card${isSel ? ' selected' : ''}">
+      <div class="inst-card-top">
+        <div class="id-block">
+          <div class="store-name${i.storeName ? '' : ' empty-name'}">${escapeHtml(i.storeName) || '(no store name)'}</div>
+          ${i.label ? `<div class="row-label">🏷️ ${escapeHtml(i.label)}</div>` : ''}
+          <div class="id-cell"><span>${escapeHtml(i.installationId)}</span><button class="copy-btn" title="Copy ID" onclick="copyId('${p.safeId}')">⧉</button></div>
+        </div>
+        <input type="checkbox" ${isSel ? 'checked' : ''} onchange="toggleRow('${p.safeId}', this.checked)" title="Select">
+      </div>
+      <div class="inst-card-badges">${p.allowedBadge}${p.fpBadge}</div>
+      <div class="card-chips">${p.chipsHtml}</div>
+      ${p.walletHtml ? `<div>${p.walletHtml}</div>` : ''}
+      <div class="inst-card-stats">
+        <div><div class="stat-lbl">Records</div><div class="stat-val">${i.totalRecords || 0} <span class="muted">(${i.moduleCount || 0} mod.)</span></div></div>
+        <div><div class="stat-lbl">Size</div><div class="stat-val">${formatBytes(i.sizeBytes)}</div></div>
+        <div><div class="stat-lbl">Last Sync</div><div class="stat-val">${formatDate(i.lastSyncAt)}</div></div>
+        <div><div class="stat-lbl">Sync Count</div><div class="stat-val">${i.syncCount || 0}</div></div>
+      </div>
+      <div class="inst-card-actions">${p.actionsHtml}</div>
+    </div>
+  `;
+}
+
+function syncSelectAllCheckboxes(filtered) {
+  const allSelected = filtered.length > 0 && filtered.every(i => selected.has(i.installationId));
+  const a = document.getElementById('selectAll');
+  if (a) a.checked = allSelected;
+  const g = document.getElementById('selectAllGrid');
+  if (g) g.checked = allSelected;
+}
+
 function renderTable() {
   const filtered = getFiltered();
   document.getElementById('resultCount').textContent =
@@ -677,50 +831,16 @@ function renderTable() {
       : 'No installations found.';
     document.getElementById('tableBody').innerHTML =
       `<tr><td colspan="10"><div class="empty-state"><div class="big-ic">🗄️</div>${escapeHtml(msg)}</div></td></tr>`;
-    document.getElementById('selectAll').checked = false;
+    document.getElementById('cardGrid').innerHTML =
+      `<div class="empty-state"><div class="big-ic">🗄️</div>${escapeHtml(msg)}</div>`;
+    syncSelectAllCheckboxes([]);
     updateBulkBar();
     return;
   }
 
-  const rows = filtered.map(i => {
-    const safeId = escapeJsAttr(i.installationId);
-    const chips = (i.foundIn || []).map(k => escapeHtml(SOURCE_LABELS[k] || k));
-    const expanded = expandedChips.has(i.installationId);
-    const visibleChips = expanded ? chips : chips.slice(0, 3);
-    const hiddenCount = chips.length - visibleChips.length;
-    const chipsHtml = visibleChips.map(c => `<span class="chip">${c}</span>`).join('') +
-      (hiddenCount > 0 ? `<span class="chip chip-more" onclick="toggleChips('${safeId}')">+${hiddenCount} more</span>` : '') +
-      (expanded && chips.length > 3 ? `<span class="chip chip-more" onclick="toggleChips('${safeId}')">show less</span>` : '');
-    const walletHtml = (i.walletBalanceTokens !== null && i.walletBalanceTokens !== undefined)
-      ? `<div class="wallet-badge"><span class="badge badge-amber">💰 Wallet: ${escapeHtml(i.walletBalanceTokens)} tokens</span></div>` : '';
-
-    return `
-    <tr class="${selected.has(i.installationId) ? 'row-selected' : ''}">
-      <td class="cell-select"><input type="checkbox" ${selected.has(i.installationId) ? 'checked' : ''} onchange="toggleRow('${safeId}', this.checked)"></td>
-      <td data-label="Store / Installation ID">
-        <div class="store-name${i.storeName ? '' : ' empty-name'}">${escapeHtml(i.storeName) || '(no store name)'}</div>
-        ${i.label ? `<div class="row-label">🏷️ ${escapeHtml(i.label)}</div>` : ''}
-        <div class="id-cell"><span>${escapeHtml(i.installationId)}</span><button class="copy-btn" title="Copy ID" onclick="copyId('${safeId}')">⧉</button></div>
-      </td>
-      <td data-label="Allowed">${i.allowed ? '<span class="badge badge-green">Allowed</span>' : '<span class="badge badge-red">Not allowed</span>'}</td>
-      <td data-label="Found in" class="chips-cell">${chipsHtml}${walletHtml}</td>
-      <td data-label="Records">${i.totalRecords || 0} <span class="muted">(${i.moduleCount || 0} modules)</span></td>
-      <td data-label="Size">${formatBytes(i.sizeBytes)}</td>
-      <td data-label="Last Sync">${formatDate(i.lastSyncAt)}</td>
-      <td data-label="Sync Count">${i.syncCount || 0}</td>
-      <td data-label="Fingerprint">${i.fingerprintFlagged ? '<span class="badge badge-amber">Flagged</span>' : (i.fingerprintVerified ? '<span class="badge badge-green">Verified</span>' : '<span class="muted">—</span>')}</td>
-      <td data-label="Actions">
-        <div class="row-actions">
-          ${i.hasCloudBackupData ? `<button class="btn-sm btn-primary" onclick="downloadBackup('${safeId}')">Backup</button>` : ''}
-          <button class="btn-sm btn-danger" onclick="deleteOnly('${safeId}')">${i.hasCloudBackupData ? 'Delete only' : 'Delete'}</button>
-          ${i.hasCloudBackupData ? `<button class="btn-sm btn-danger" onclick="backupThenDelete('${safeId}')">Backup + Delete</button>` : ''}
-        </div>
-      </td>
-    </tr>
-  `;
-  }).join('');
-  document.getElementById('tableBody').innerHTML = rows;
-  document.getElementById('selectAll').checked = filtered.length > 0 && filtered.every(i => selected.has(i.installationId));
+  document.getElementById('tableBody').innerHTML = filtered.map(rowMarkup).join('');
+  document.getElementById('cardGrid').innerHTML = filtered.map(cardMarkup).join('');
+  syncSelectAllCheckboxes(filtered);
   updateBulkBar();
 }
 
@@ -887,6 +1007,14 @@ async function boot() {
       toast(err.message, true);
     }
   }
+}
+
+setView(viewMode);
+syncTopbarHeight();
+window.addEventListener('resize', syncTopbarHeight);
+window.addEventListener('load', syncTopbarHeight);
+if (document.fonts && document.fonts.ready) {
+  document.fonts.ready.then(syncTopbarHeight).catch(() => {});
 }
 
 if (adminKey) boot();
