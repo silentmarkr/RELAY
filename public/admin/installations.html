@@ -3,8 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#05070d">
 <title>Installation Data — RELAY Admin</title>
 <style>
+  @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700;800&family=Rajdhani:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
   :root {
     --bg: #05070d;
     --bg-raise: #101625;
@@ -17,6 +20,7 @@
     --muted: #8ea3c9;
     --muted-dim: #7186ab;
     --accent: #22e5ff;
+    --accent-bright: #7cf3ff;
     --accent-hover: #ff2ee6;
     --accent-soft: rgba(34, 229, 255, 0.16);
     --accent-text: #031014;
@@ -32,48 +36,244 @@
     --font-ui: 'Rajdhani', 'Inter', 'Segoe UI', system-ui, -apple-system, Roboto, sans-serif;
     --font-heading: 'Orbitron', 'Space Grotesk', sans-serif;
     --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    --radius: 6px;
-    --radius-lg: 8px;
+    --radius: 8px;
+    --radius-sm: 5px;
+    --radius-lg: 12px;
+    --ease: cubic-bezier(.16, 1, .3, 1);
+    --shadow-ambient: 0 20px 44px -22px rgba(0,0,0,.7);
   }
+
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--font-ui); min-height: 100vh; }
-  .topbar { display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; border-bottom: 1.5px solid var(--border); background: var(--bg-raise); }
-  .topbar-brand { display: flex; align-items: center; gap: 10px; }
-  .topbar-title { font-family: var(--font-heading); font-size: 1.1rem; letter-spacing: .02em; }
-  .topbar-sub { color: var(--muted); font-size: .8rem; }
-  .icon-btn { background: transparent; border: 1.5px solid var(--border); color: var(--text); border-radius: var(--radius); padding: 8px 12px; cursor: pointer; font-family: var(--font-ui); font-size: .9rem; display: inline-flex; align-items: center; gap: 6px; }
+  html { scrollbar-color: var(--border) var(--bg); }
+  ::selection { background: var(--accent-soft); color: var(--accent-bright); }
+  body {
+    margin: 0; background: var(--bg); color: var(--text); font-family: var(--font-ui);
+    min-height: 100vh; -webkit-font-smoothing: antialiased;
+    background-image:
+      radial-gradient(circle at 14% -10%, rgba(34,229,255,.08), transparent 40%),
+      radial-gradient(circle at 86% 0%, rgba(255,46,230,.06), transparent 38%);
+    background-attachment: fixed;
+  }
+  h1, .topbar-title, .num { font-family: var(--font-heading); letter-spacing: .01em; }
+  button, input { font-family: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-sm); }
+
+  /* ---------- Topbar ---------- */
+  .topbar {
+    position: sticky; top: 0; z-index: 40;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 12px 20px; border-bottom: 1.5px solid var(--border);
+    background: rgba(16, 22, 37, 0.92); backdrop-filter: blur(14px) saturate(140%);
+    -webkit-backdrop-filter: blur(14px) saturate(140%);
+  }
+  .topbar-brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .topbar-title { font-size: 1.08rem; }
+  .topbar-sub { color: var(--muted); font-size: .78rem; margin-top: 1px; }
+  .topbar-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+
+  .icon-btn {
+    background: transparent; border: 1.5px solid var(--border); color: var(--text);
+    border-radius: var(--radius); padding: 8px 13px; cursor: pointer; font-size: .88rem;
+    display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+    transition: border-color .15s var(--ease), background .15s var(--ease), transform .1s var(--ease);
+  }
   .icon-btn:hover { border-color: var(--border-soft); background: var(--card-hover); }
-  #loginWrap { max-width: 360px; margin: 90px auto; text-align: center; }
-  #loginWrap input { width: 100%; padding: 10px 12px; border-radius: var(--radius); border: 1.5px solid var(--border); background: var(--bg-raise); color: var(--text); font-family: var(--font-mono); margin-bottom: 10px; }
-  #loginWrap button { width: 100%; padding: 10px; border-radius: var(--radius); border: none; background: var(--accent); color: var(--accent-text); font-weight: 700; cursor: pointer; }
-  #app { display: none; max-width: 1200px; margin: 0 auto; padding: 20px; }
-  .summary-row { display: flex; gap: 14px; margin-bottom: 16px; flex-wrap: wrap; }
-  .summary-card { flex: 1; min-width: 160px; background: var(--card); border: 1.5px solid var(--border); border-radius: var(--radius-lg); padding: 12px 16px; }
-  .summary-card .num { font-family: var(--font-heading); font-size: 1.4rem; }
-  .summary-card .lbl { color: var(--muted); font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; }
-  .bulk-bar { display: none; align-items: center; gap: 10px; background: var(--accent-soft); border: 1.5px solid var(--border-soft); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 14px; }
+  .icon-btn:active { transform: scale(.97); }
+  .icon-btn.spinning .refresh-ic { animation: spin .7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ---------- Login ---------- */
+  #loginWrap {
+    max-width: 360px; margin: 14vh auto 0; text-align: center; padding: 28px 26px;
+    background: var(--card); border: 1.5px solid var(--border); border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-ambient);
+  }
+  #loginWrap .lock-ic { font-size: 1.6rem; margin-bottom: 6px; }
+  #loginWrap p { color: var(--muted); margin: 0 0 14px; }
+  #loginWrap input {
+    width: 100%; padding: 11px 12px; border-radius: var(--radius); border: 1.5px solid var(--border);
+    background: var(--bg-raise); color: var(--text); font-family: var(--font-mono); margin-bottom: 10px;
+    transition: border-color .15s var(--ease);
+  }
+  #loginWrap input:focus { border-color: var(--border-soft); }
+  #loginWrap button {
+    width: 100%; padding: 11px; border-radius: var(--radius); border: none;
+    background: var(--accent); color: var(--accent-text); font-weight: 700; font-size: .95rem; cursor: pointer;
+    transition: filter .15s var(--ease), transform .1s var(--ease);
+  }
+  #loginWrap button:hover { filter: brightness(1.08); }
+  #loginWrap button:active { transform: scale(.98); }
+  #loginErr { color: var(--red); font-size: .8rem; min-height: 1.2em; margin-top: 8px; }
+
+  #app { display: none; max-width: 1280px; margin: 0 auto; padding: 18px 20px 60px; }
+
+  /* ---------- Summary ---------- */
+  .summary-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .summary-card {
+    background: var(--card); border: 1.5px solid var(--border); border-radius: var(--radius-lg);
+    padding: 13px 16px; transition: border-color .15s var(--ease), transform .15s var(--ease);
+  }
+  .summary-card:hover { border-color: var(--border-soft); transform: translateY(-1px); }
+  .summary-card .num { font-size: 1.5rem; line-height: 1.15; }
+  .summary-card .lbl { color: var(--muted); font-size: .74rem; text-transform: uppercase; letter-spacing: .05em; margin-top: 2px; }
+  .summary-card.warn .num { color: var(--amber); }
+  .summary-card.danger .num { color: var(--red); }
+
+  /* ---------- Toolbar ---------- */
+  .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .search-wrap { position: relative; flex: 1 1 240px; min-width: 200px; }
+  .search-wrap .search-ic { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--muted-dim); pointer-events: none; font-size: .85rem; }
+  #search {
+    width: 100%; padding: 9px 34px 9px 32px; border-radius: var(--radius); border: 1.5px solid var(--border);
+    background: var(--bg-raise); color: var(--text); font-size: .9rem; transition: border-color .15s var(--ease);
+  }
+  #search:focus { border-color: var(--border-soft); }
+  .search-clear {
+    position: absolute; right: 6px; top: 50%; transform: translateY(-50%); background: transparent; border: none;
+    color: var(--muted-dim); cursor: pointer; padding: 4px 6px; display: none; font-size: .85rem; border-radius: var(--radius-sm);
+  }
+  .search-clear:hover { color: var(--text); }
+  .filter-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .filter-chip {
+    border: 1.5px solid var(--border); background: transparent; color: var(--muted); border-radius: 999px;
+    padding: 7px 13px; font-size: .8rem; cursor: pointer; white-space: nowrap; transition: all .15s var(--ease);
+  }
+  .filter-chip:hover { border-color: var(--border-soft); color: var(--text); }
+  .filter-chip.active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-bright); font-weight: 600; }
+  .result-count { color: var(--muted-dim); font-size: .78rem; margin-left: auto; white-space: nowrap; }
+
+  /* ---------- Bulk bar ---------- */
+  .bulk-bar {
+    display: none; align-items: center; gap: 10px; flex-wrap: wrap;
+    background: var(--accent-soft); border: 1.5px solid var(--border-soft); border-radius: var(--radius);
+    padding: 10px 14px; margin-bottom: 14px; animation: slideDown .18s var(--ease);
+  }
+  @keyframes slideDown { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
   .bulk-bar.active { display: flex; }
-  .bulk-bar .count { font-weight: 700; }
-  table { width: 100%; border-collapse: collapse; background: var(--card); border-radius: var(--radius-lg); overflow: hidden; }
-  th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--line); font-size: .88rem; }
-  th { color: var(--muted); font-weight: 600; font-size: .76rem; text-transform: uppercase; letter-spacing: .03em; background: var(--bg-raise); }
-  tr:hover td { background: var(--card-hover); }
-  .id-cell { font-family: var(--font-mono); font-size: .78rem; color: var(--muted); }
-  .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: .72rem; font-weight: 700; }
+  .bulk-bar .count { font-weight: 700; color: var(--accent-bright); }
+
+  /* ---------- Table ---------- */
+  .table-wrap {
+    background: var(--card); border: 1.5px solid var(--border); border-radius: var(--radius-lg);
+    overflow: hidden; box-shadow: var(--shadow-ambient);
+  }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 11px 12px; text-align: left; border-bottom: 1px solid var(--line); font-size: .87rem; vertical-align: top; }
+  thead th {
+    position: sticky; top: 57px; color: var(--muted); font-weight: 600; font-size: .72rem;
+    text-transform: uppercase; letter-spacing: .04em; background: var(--bg-raise); z-index: 5;
+    cursor: pointer; user-select: none; white-space: nowrap;
+  }
+  thead th:hover { color: var(--text); }
+  thead th.sortable::after { content: '↕'; color: var(--muted-dim); margin-left: 4px; font-size: .7rem; }
+  thead th.sort-asc::after { content: '↑'; color: var(--accent); }
+  thead th.sort-desc::after { content: '↓'; color: var(--accent); }
+  tbody tr { transition: background .12s var(--ease); }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover td { background: var(--card-hover); }
+  tbody tr.row-selected td { background: rgba(34, 229, 255, 0.05); }
+
+  .store-name { font-weight: 600; }
+  .store-name.empty-name { font-weight: 400; color: var(--muted); font-style: italic; }
+  .row-label { color: var(--muted); font-size: .76rem; margin-top: 2px; display: flex; align-items: center; gap: 4px; }
+  .id-cell { font-family: var(--font-mono); font-size: .74rem; color: var(--muted-dim); margin-top: 4px; display: flex; align-items: center; gap: 6px; word-break: break-all; }
+  .copy-btn { background: transparent; border: none; color: var(--muted-dim); cursor: pointer; padding: 1px 3px; font-size: .78rem; border-radius: var(--radius-sm); flex-shrink: 0; }
+  .copy-btn:hover { color: var(--accent); }
+
+  .badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: 20px; font-size: .72rem; font-weight: 700; white-space: nowrap; }
   .badge-green { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-line); }
   .badge-red { background: var(--red-bg); color: var(--red); border: 1px solid var(--red-line); }
   .badge-amber { background: var(--amber-bg); color: var(--amber); border: 1px solid var(--amber-line); }
+
+  .chips-cell { max-width: 260px; }
+  .chip { display: inline-block; padding: 2px 8px; margin: 2px 4px 2px 0; border-radius: 20px; font-size: .68rem; border: 1px solid var(--line); color: var(--muted); background: rgba(255,255,255,.02); }
+  .chip-more { border-style: dashed; cursor: pointer; color: var(--accent); border-color: var(--border-soft); background: var(--accent-soft); }
+  .chip-more:hover { filter: brightness(1.15); }
+  .wallet-badge { margin-top: 4px; }
+
   .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
-  .btn-sm { font-size: .74rem; padding: 5px 9px; border-radius: var(--radius); border: 1.5px solid var(--border); background: transparent; color: var(--text); cursor: pointer; }
+  .btn-sm {
+    font-size: .74rem; padding: 6px 10px; border-radius: var(--radius); border: 1.5px solid var(--border);
+    background: transparent; color: var(--text); cursor: pointer; white-space: nowrap;
+    transition: border-color .15s var(--ease), background .15s var(--ease), transform .1s var(--ease);
+  }
   .btn-sm:hover { border-color: var(--border-soft); }
+  .btn-sm:active { transform: scale(.96); }
   .btn-danger { border-color: var(--red-line); color: var(--red); }
   .btn-danger:hover { background: var(--red-bg); }
   .btn-primary { border-color: var(--border-soft); color: var(--accent); }
   .btn-primary:hover { background: var(--accent-soft); }
-  #toast { position: fixed; bottom: 20px; right: 20px; background: var(--bg-raise); border: 1.5px solid var(--border-soft); border-radius: var(--radius); padding: 10px 16px; font-size: .85rem; display: none; max-width: 340px; z-index: 50; }
+
   .muted { color: var(--muted); }
-  .chip { display: inline-block; padding: 1px 7px; margin: 2px 4px 2px 0; border-radius: 20px; font-size: .68rem; border: 1px solid var(--line); color: var(--muted); }
-  #search { padding: 8px 12px; border-radius: var(--radius); border: 1.5px solid var(--border); background: var(--bg-raise); color: var(--text); font-family: var(--font-ui); width: 260px; margin-bottom: 14px; }
+  .empty-state { text-align: center; padding: 48px 20px; color: var(--muted); }
+  .empty-state .big-ic { font-size: 1.8rem; margin-bottom: 8px; opacity: .6; }
+  .loading-row td { padding: 44px 20px; text-align: center; color: var(--muted); }
+  .spinner { width: 20px; height: 20px; border: 2.5px solid var(--border); border-top-color: var(--accent); border-radius: 50%; display: inline-block; animation: spin .7s linear infinite; margin-right: 8px; vertical-align: -5px; }
+
+  input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+
+  /* ---------- Toast ---------- */
+  #toastStack { position: fixed; bottom: 20px; right: 20px; z-index: 100; display: flex; flex-direction: column; gap: 8px; max-width: 360px; }
+  .toast {
+    background: var(--bg-raise); border: 1.5px solid var(--border-soft); border-radius: var(--radius);
+    padding: 11px 15px; font-size: .85rem; box-shadow: var(--shadow-ambient);
+    animation: toastIn .2s var(--ease); display: flex; align-items: flex-start; gap: 8px;
+  }
+  .toast.error { border-color: var(--red-line); }
+  @keyframes toastIn { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: translateX(0); } }
+
+  /* ---------- Confirm modal ---------- */
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(2,4,10,.72); backdrop-filter: blur(3px);
+    display: none; align-items: center; justify-content: center; z-index: 90; padding: 20px;
+  }
+  .modal-overlay.active { display: flex; }
+  .modal-box {
+    background: var(--bg-raise); border: 1.5px solid var(--border-soft); border-radius: var(--radius-lg);
+    max-width: 420px; width: 100%; padding: 22px; box-shadow: var(--shadow-ambient); animation: modalIn .16s var(--ease);
+  }
+  @keyframes modalIn { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+  .modal-box h3 { margin: 0 0 10px; font-size: 1.05rem; color: var(--red); display: flex; align-items: center; gap: 8px; }
+  .modal-box .modal-body { color: var(--muted); font-size: .86rem; line-height: 1.55; white-space: pre-line; margin-bottom: 14px; }
+  .modal-box input {
+    width: 100%; padding: 10px 12px; border-radius: var(--radius); border: 1.5px solid var(--border);
+    background: var(--bg); color: var(--text); font-family: var(--font-mono); margin-bottom: 14px;
+  }
+  .modal-box input:focus { border-color: var(--red-line); }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+  .modal-actions button { padding: 9px 16px; border-radius: var(--radius); font-size: .87rem; cursor: pointer; }
+  .modal-cancel { background: transparent; border: 1.5px solid var(--border); color: var(--text); }
+  .modal-cancel:hover { border-color: var(--border-soft); }
+  .modal-confirm { background: var(--red); border: none; color: #200; font-weight: 700; opacity: .45; pointer-events: none; }
+  .modal-confirm.enabled { opacity: 1; pointer-events: auto; }
+  .modal-confirm.enabled:hover { filter: brightness(1.1); }
+
+  /* ---------- Responsive: stacked cards under 760px ---------- */
+  @media (max-width: 760px) {
+    #app { padding: 14px 12px 60px; }
+    .topbar { padding: 12px 14px; }
+    thead th { position: static; }
+    .table-wrap { background: transparent; border: none; box-shadow: none; }
+    table, thead, tbody, th, td, tr { display: block; width: 100%; }
+    thead { display: none; }
+    tbody tr {
+      background: var(--card); border: 1.5px solid var(--border); border-radius: var(--radius-lg);
+      padding: 12px 12px 10px; margin-bottom: 12px;
+    }
+    tbody tr:hover td { background: transparent; }
+    td { border-bottom: none; padding: 6px 0; }
+    td[data-label]::before {
+      content: attr(data-label); display: block; color: var(--muted-dim); font-size: .68rem;
+      text-transform: uppercase; letter-spacing: .05em; margin-bottom: 3px;
+    }
+    td.cell-select { display: flex; justify-content: flex-end; padding: 0 0 8px; order: -1; }
+    td.cell-select::before { display: none; }
+    .chips-cell { max-width: none; }
+  }
+
+  @media (max-width: 420px) {
+    .summary-row { grid-template-columns: repeat(2, 1fr); }
+  }
 </style>
 </head>
 <body>
@@ -86,17 +286,23 @@
       <div class="topbar-sub">Every installation ID found in Neon and Relay — view, backup, or delete</div>
     </div>
   </div>
-  <button class="icon-btn" onclick="logout()">Log out</button>
+  <div class="topbar-actions">
+    <button class="icon-btn" id="refreshBtn" onclick="manualRefresh()" title="Refresh"><span class="refresh-ic">⟳</span> Refresh</button>
+    <button class="icon-btn" onclick="logout()">Log out</button>
+  </div>
 </div>
 
 <div id="loginWrap">
-  <p class="muted">Enter admin key to continue</p>
+  <div class="lock-ic">🔒</div>
+  <p>Enter admin key to continue</p>
   <input type="password" id="adminKeyInput" placeholder="Admin key" autocomplete="off">
   <button onclick="login()">Enter</button>
+  <div id="loginErr"></div>
 </div>
 
 <div id="app">
   <div class="summary-row" id="summaryRow"></div>
+
   <div class="bulk-bar" id="bulkBar">
     <span><span class="count" id="bulkCount">0</span> selected</span>
     <button class="btn-sm btn-primary" onclick="bulkBackup()">Backup Selected</button>
@@ -104,42 +310,85 @@
     <button class="btn-sm btn-danger" onclick="bulkBackupThenDelete()">Backup + Delete Selected</button>
     <button class="btn-sm" onclick="clearSelection()">Clear selection</button>
   </div>
-  <input type="text" id="search" placeholder="Search installation ID, store name, label, or where found..." oninput="renderTable()">
-  <table>
-    <thead>
-      <tr>
-        <th><input type="checkbox" id="selectAll" onchange="toggleSelectAll(this.checked)"></th>
-        <th>Store / Installation ID</th>
-        <th>Allowed</th>
-        <th>Found in</th>
-        <th>Records</th>
-        <th>Size</th>
-        <th>Last Sync</th>
-        <th>Sync Count</th>
-        <th>Fingerprint</th>
-        <th>Actions</th>
-      </tr>
-    </thead>
-    <tbody id="tableBody"></tbody>
-  </table>
+
+  <div class="toolbar">
+    <div class="search-wrap">
+      <span class="search-ic">🔎</span>
+      <input type="text" id="search" placeholder="Search installation ID, store name, label, or where found..." oninput="onSearchInput()">
+      <button class="search-clear" id="searchClear" onclick="clearSearch()" title="Clear">✕</button>
+    </div>
+    <div class="filter-chips" id="filterChips">
+      <button class="filter-chip active" data-filter="all" onclick="setFilter('all')">All</button>
+      <button class="filter-chip" data-filter="allowed" onclick="setFilter('allowed')">Allowed</button>
+      <button class="filter-chip" data-filter="not-allowed" onclick="setFilter('not-allowed')">Not allowed</button>
+      <button class="filter-chip" data-filter="flagged" onclick="setFilter('flagged')">Flagged</button>
+      <button class="filter-chip" data-filter="backup" onclick="setFilter('backup')">Has backup</button>
+    </div>
+    <span class="result-count" id="resultCount"></span>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th style="width:34px;"><input type="checkbox" id="selectAll" onchange="toggleSelectAll(this.checked)"></th>
+          <th class="sortable" data-key="storeName" onclick="setSort('storeName')">Store / Installation ID</th>
+          <th class="sortable" data-key="allowed" onclick="setSort('allowed')">Allowed</th>
+          <th>Found in</th>
+          <th class="sortable" data-key="totalRecords" onclick="setSort('totalRecords')">Records</th>
+          <th class="sortable" data-key="sizeBytes" onclick="setSort('sizeBytes')">Size</th>
+          <th class="sortable" data-key="lastSyncAt" onclick="setSort('lastSyncAt')">Last Sync</th>
+          <th class="sortable" data-key="syncCount" onclick="setSort('syncCount')">Sync Count</th>
+          <th>Fingerprint</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="tableBody">
+        <tr class="loading-row"><td colspan="10"><span class="spinner"></span>Loading installations…</td></tr>
+      </tbody>
+    </table>
+  </div>
 </div>
 
-<div id="toast"></div>
+<div id="toastStack"></div>
+
+<div class="modal-overlay" id="modalOverlay">
+  <div class="modal-box">
+    <h3 id="modalTitle">⚠️ Confirm deletion</h3>
+    <div class="modal-body" id="modalBody"></div>
+    <input type="text" id="modalInput" placeholder="Type DELETE to confirm" autocomplete="off">
+    <div class="modal-actions">
+      <button class="modal-cancel" onclick="closeModal(false)">Cancel</button>
+      <button class="modal-confirm" id="modalConfirmBtn" onclick="closeModal(true)">Delete</button>
+    </div>
+  </div>
+</div>
 
 <script>
 let adminKey = sessionStorage.getItem('relayAdminKey') || '';
 let installations = [];
 let selected = new Set();
+let activeFilter = 'all';
+let sortKey = null;
+let sortDir = 'asc';
+let expandedChips = new Set();
 
+/* ---------- Toast ---------- */
 function toast(msg, isError) {
-  const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.style.borderColor = isError ? 'var(--red-line)' : 'var(--border-soft)';
-  t.style.display = 'block';
-  clearTimeout(t._timer);
-  t._timer = setTimeout(() => { t.style.display = 'none'; }, 5000);
+  const stack = document.getElementById('toastStack');
+  const el = document.createElement('div');
+  el.className = 'toast' + (isError ? ' error' : '');
+  el.innerHTML = `<span>${isError ? '⚠️' : '✅'}</span><span>${escapeHtml(msg)}</span>`;
+  stack.appendChild(el);
+  setTimeout(() => {
+    el.style.transition = 'opacity .2s var(--ease), transform .2s var(--ease)';
+    el.style.opacity = '0';
+    el.style.transform = 'translateX(16px)';
+    setTimeout(() => el.remove(), 200);
+  }, 5000);
 }
 
+/* ---------- API ---------- */
 async function api(path, options = {}) {
   const res = await fetch(path, {
     ...options,
@@ -152,9 +401,12 @@ async function api(path, options = {}) {
   return data;
 }
 
+/* ---------- Auth ---------- */
 function login() {
   const val = document.getElementById('adminKeyInput').value.trim();
-  if (!val) return;
+  const err = document.getElementById('loginErr');
+  err.textContent = '';
+  if (!val) { err.textContent = 'Enter an admin key.'; return; }
   adminKey = val;
   sessionStorage.setItem('relayAdminKey', adminKey);
   boot();
@@ -163,11 +415,14 @@ function login() {
 function logout() {
   adminKey = '';
   sessionStorage.removeItem('relayAdminKey');
+  installations = [];
+  selected.clear();
   document.getElementById('adminKeyInput').value = '';
   document.getElementById('app').style.display = 'none';
   document.getElementById('loginWrap').style.display = 'block';
 }
 
+/* ---------- Helpers ---------- */
 function formatBytes(n) {
   if (!n) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
@@ -183,10 +438,9 @@ function formatDate(v) {
   return d.toLocaleString();
 }
 
-// BUG FIX: storeName/label/installationId come straight from client
-// devices (req.body.storeName, etc. on the RELAY server) — never trust
-// them raw inside innerHTML. Mirrors the escapeHtml() already used in
-// client-cost-allocation.html for the same reason.
+// BUG FIX (kept from original): storeName/label/installationId come
+// straight from client devices (req.body.storeName, etc. on the RELAY
+// server) — never trust them raw inside innerHTML.
 function escapeHtml(str) {
   return String(str == null ? '' : str)
     .replace(/&/g, '&amp;')
@@ -207,6 +461,53 @@ function escapeJsAttr(str) {
   return escapeHtml(jsEscaped);
 }
 
+/* ---------- Custom confirm modal (replaces window.prompt) ---------- */
+let modalResolver = null;
+function askConfirm(title, body, { requireText = null, confirmLabel = 'Delete' } = {}) {
+  return new Promise((resolve) => {
+    modalResolver = resolve;
+    document.getElementById('modalTitle').textContent = title;
+    document.getElementById('modalBody').textContent = body;
+    const input = document.getElementById('modalInput');
+    const confirmBtn = document.getElementById('modalConfirmBtn');
+    confirmBtn.textContent = confirmLabel;
+    if (requireText) {
+      input.style.display = 'block';
+      input.placeholder = `Type ${requireText} to confirm`;
+      input.value = '';
+      confirmBtn.classList.remove('enabled');
+      input.oninput = () => {
+        confirmBtn.classList.toggle('enabled', input.value.trim() === requireText);
+      };
+    } else {
+      input.style.display = 'none';
+      confirmBtn.classList.add('enabled');
+    }
+    const overlay = document.getElementById('modalOverlay');
+    overlay.classList.add('active');
+    setTimeout(() => (requireText ? input : confirmBtn).focus(), 30);
+    overlay.dataset.requireText = requireText || '';
+  });
+}
+function closeModal(confirmed) {
+  const overlay = document.getElementById('modalOverlay');
+  const requireText = overlay.dataset.requireText || '';
+  if (confirmed && requireText) {
+    const input = document.getElementById('modalInput');
+    if (input.value.trim() !== requireText) return; // guard against Enter-key bypass
+  }
+  overlay.classList.remove('active');
+  if (modalResolver) { modalResolver(confirmed); modalResolver = null; }
+}
+document.getElementById('modalInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') closeModal(true);
+  if (e.key === 'Escape') closeModal(false);
+});
+document.getElementById('modalOverlay').addEventListener('click', (e) => {
+  if (e.target.id === 'modalOverlay') closeModal(false);
+});
+
+/* ---------- Load & render ---------- */
 async function loadInstallations() {
   const data = await api('/relay/admin/api/installations');
   installations = data.installations || [];
@@ -217,6 +518,20 @@ async function loadInstallations() {
   renderTable();
   if (data.scanWarnings && data.scanWarnings.length) {
     toast('Some tables could not be scanned: ' + data.scanWarnings.join('; '), true);
+  }
+}
+
+async function manualRefresh() {
+  const btn = document.getElementById('refreshBtn');
+  btn.classList.add('spinning');
+  btn.disabled = true;
+  try {
+    await loadInstallations();
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    btn.classList.remove('spinning');
+    btn.disabled = false;
   }
 }
 
@@ -232,7 +547,7 @@ function findInstallation(id) {
   return installations.find(i => i.installationId === id) || null;
 }
 
-// Plain-language summary of what a delete will remove, shown in the confirm prompt.
+// Plain-language summary of what a delete will remove, shown in the confirm dialog.
 function describeDeletion(id) {
   const inst = findInstallation(id);
   if (!inst) return '';
@@ -248,23 +563,53 @@ function renderSummary() {
   const totalSize = installations.reduce((sum, i) => sum + (i.sizeBytes || 0), 0);
   const withData = installations.filter(i => i.hasCloudBackupData).length;
   const flagged = installations.filter(i => i.fingerprintFlagged).length;
+  const notAllowed = installations.filter(i => !i.allowed).length;
   document.getElementById('summaryRow').innerHTML = `
     <div class="summary-card"><div class="num">${installations.length}</div><div class="lbl">Total Installations</div></div>
     <div class="summary-card"><div class="num">${withData}</div><div class="lbl">With Cloud Backup Data</div></div>
     <div class="summary-card"><div class="num">${formatBytes(totalSize)}</div><div class="lbl">Total Stored Size</div></div>
-    <div class="summary-card"><div class="num">${flagged}</div><div class="lbl">Clone-Flagged</div></div>
-    <div class="summary-card"><div class="num">${installations.filter(i => !i.allowed).length}</div><div class="lbl">Not in Allow-List</div></div>
+    <div class="summary-card${flagged ? ' warn' : ''}"><div class="num">${flagged}</div><div class="lbl">Clone-Flagged</div></div>
+    <div class="summary-card${notAllowed ? ' danger' : ''}"><div class="num">${notAllowed}</div><div class="lbl">Not in Allow-List</div></div>
   `;
+}
+
+function onSearchInput() {
+  document.getElementById('searchClear').style.display = document.getElementById('search').value ? 'block' : 'none';
+  renderTable();
+}
+function clearSearch() {
+  document.getElementById('search').value = '';
+  document.getElementById('searchClear').style.display = 'none';
+  renderTable();
+}
+
+function setFilter(f) {
+  activeFilter = f;
+  document.querySelectorAll('.filter-chip').forEach(btn => btn.classList.toggle('active', btn.dataset.filter === f));
+  renderTable();
+}
+
+function setSort(key) {
+  if (sortKey === key) {
+    sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+  } else {
+    sortKey = key;
+    sortDir = 'asc';
+  }
+  document.querySelectorAll('thead th.sortable').forEach(th => {
+    th.classList.remove('sort-asc', 'sort-desc');
+    if (th.dataset.key === sortKey) th.classList.add(sortDir === 'asc' ? 'sort-asc' : 'sort-desc');
+  });
+  renderTable();
 }
 
 function toggleRow(id, checked) {
   if (checked) selected.add(id); else selected.delete(id);
-  updateBulkBar();
+  renderTable();
 }
 
 function toggleSelectAll(checked) {
-  const q = document.getElementById('search').value.trim().toLowerCase();
-  const visible = installations.filter(i => !q || i.installationId.toLowerCase().includes(q) || (i.storeName || '').toLowerCase().includes(q) || (i.label || '').toLowerCase().includes(q));
+  const visible = getFiltered();
   if (checked) visible.forEach(i => selected.add(i.installationId));
   else visible.forEach(i => selected.delete(i.installationId));
   renderTable();
@@ -281,33 +626,90 @@ function updateBulkBar() {
   bar.classList.toggle('active', selected.size > 0);
 }
 
-function renderTable() {
+function toggleChips(id) {
+  if (expandedChips.has(id)) expandedChips.delete(id); else expandedChips.add(id);
+  renderTable();
+}
+
+function copyId(id) {
+  const done = () => toast(`Copied ${id}`);
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(id).then(done).catch(() => toast('Could not copy to clipboard', true));
+  } else {
+    toast('Clipboard not available in this browser', true);
+  }
+}
+
+function getFiltered() {
   const q = document.getElementById('search').value.trim().toLowerCase();
-  const filtered = installations.filter(i =>
+  let list = installations.filter(i =>
     !q || i.installationId.toLowerCase().includes(q) || (i.storeName || '').toLowerCase().includes(q) || (i.label || '').toLowerCase().includes(q) ||
     (i.foundIn || []).some(k => (SOURCE_LABELS[k] || k).toLowerCase().includes(q))
   );
+  if (activeFilter === 'allowed') list = list.filter(i => i.allowed);
+  else if (activeFilter === 'not-allowed') list = list.filter(i => !i.allowed);
+  else if (activeFilter === 'flagged') list = list.filter(i => i.fingerprintFlagged);
+  else if (activeFilter === 'backup') list = list.filter(i => i.hasCloudBackupData);
+
+  if (sortKey) {
+    list = list.slice().sort((a, b) => {
+      let av = a[sortKey], bv = b[sortKey];
+      if (sortKey === 'storeName') { av = (av || '').toLowerCase(); bv = (bv || '').toLowerCase(); }
+      if (sortKey === 'lastSyncAt') { av = av ? new Date(av).getTime() : 0; bv = bv ? new Date(bv).getTime() : 0; }
+      if (sortKey === 'allowed') { av = av ? 1 : 0; bv = bv ? 1 : 0; }
+      av = av ?? 0; bv = bv ?? 0;
+      if (av < bv) return sortDir === 'asc' ? -1 : 1;
+      if (av > bv) return sortDir === 'asc' ? 1 : -1;
+      return 0;
+    });
+  }
+  return list;
+}
+
+function renderTable() {
+  const filtered = getFiltered();
+  document.getElementById('resultCount').textContent =
+    `${filtered.length} of ${installations.length} shown`;
+
+  if (!filtered.length) {
+    const msg = installations.length
+      ? 'No installations match your search or filter.'
+      : 'No installations found.';
+    document.getElementById('tableBody').innerHTML =
+      `<tr><td colspan="10"><div class="empty-state"><div class="big-ic">🗄️</div>${escapeHtml(msg)}</div></td></tr>`;
+    document.getElementById('selectAll').checked = false;
+    updateBulkBar();
+    return;
+  }
+
   const rows = filtered.map(i => {
     const safeId = escapeJsAttr(i.installationId);
+    const chips = (i.foundIn || []).map(k => escapeHtml(SOURCE_LABELS[k] || k));
+    const expanded = expandedChips.has(i.installationId);
+    const visibleChips = expanded ? chips : chips.slice(0, 3);
+    const hiddenCount = chips.length - visibleChips.length;
+    const chipsHtml = visibleChips.map(c => `<span class="chip">${c}</span>`).join('') +
+      (hiddenCount > 0 ? `<span class="chip chip-more" onclick="toggleChips('${safeId}')">+${hiddenCount} more</span>` : '') +
+      (expanded && chips.length > 3 ? `<span class="chip chip-more" onclick="toggleChips('${safeId}')">show less</span>` : '');
+    const walletHtml = (i.walletBalanceTokens !== null && i.walletBalanceTokens !== undefined)
+      ? `<div class="wallet-badge"><span class="badge badge-amber">💰 Wallet: ${escapeHtml(i.walletBalanceTokens)} tokens</span></div>` : '';
+
     return `
-    <tr>
-      <td><input type="checkbox" ${selected.has(i.installationId) ? 'checked' : ''} onchange="toggleRow('${safeId}', this.checked)"></td>
-      <td>
-        <div>${escapeHtml(i.storeName) || '<span class="muted">(no store name)</span>'}</div>
-        ${i.label ? `<div class="muted" style="font-size:.78rem;">🏷️ ${escapeHtml(i.label)}</div>` : ''}
-        <div class="id-cell">${escapeHtml(i.installationId)}</div>
+    <tr class="${selected.has(i.installationId) ? 'row-selected' : ''}">
+      <td class="cell-select"><input type="checkbox" ${selected.has(i.installationId) ? 'checked' : ''} onchange="toggleRow('${safeId}', this.checked)"></td>
+      <td data-label="Store / Installation ID">
+        <div class="store-name${i.storeName ? '' : ' empty-name'}">${escapeHtml(i.storeName) || '(no store name)'}</div>
+        ${i.label ? `<div class="row-label">🏷️ ${escapeHtml(i.label)}</div>` : ''}
+        <div class="id-cell"><span>${escapeHtml(i.installationId)}</span><button class="copy-btn" title="Copy ID" onclick="copyId('${safeId}')">⧉</button></div>
       </td>
-      <td>${i.allowed ? '<span class="badge badge-green">Allowed</span>' : '<span class="badge badge-red">Not allowed</span>'}</td>
-      <td>
-        ${(i.foundIn || []).map(k => `<span class="chip">${escapeHtml(SOURCE_LABELS[k] || k)}</span>`).join('')}
-        ${(i.walletBalanceTokens !== null && i.walletBalanceTokens !== undefined) ? `<div><span class="badge badge-amber">Wallet: ${escapeHtml(i.walletBalanceTokens)} tokens</span></div>` : ''}
-      </td>
-      <td>${i.totalRecords || 0} <span class="muted">(${i.moduleCount || 0} modules)</span></td>
-      <td>${formatBytes(i.sizeBytes)}</td>
-      <td>${formatDate(i.lastSyncAt)}</td>
-      <td>${i.syncCount || 0}</td>
-      <td>${i.fingerprintFlagged ? '<span class="badge badge-amber">Flagged</span>' : (i.fingerprintVerified ? '<span class="badge badge-green">Verified</span>' : '<span class="muted">—</span>')}</td>
-      <td>
+      <td data-label="Allowed">${i.allowed ? '<span class="badge badge-green">Allowed</span>' : '<span class="badge badge-red">Not allowed</span>'}</td>
+      <td data-label="Found in" class="chips-cell">${chipsHtml}${walletHtml}</td>
+      <td data-label="Records">${i.totalRecords || 0} <span class="muted">(${i.moduleCount || 0} modules)</span></td>
+      <td data-label="Size">${formatBytes(i.sizeBytes)}</td>
+      <td data-label="Last Sync">${formatDate(i.lastSyncAt)}</td>
+      <td data-label="Sync Count">${i.syncCount || 0}</td>
+      <td data-label="Fingerprint">${i.fingerprintFlagged ? '<span class="badge badge-amber">Flagged</span>' : (i.fingerprintVerified ? '<span class="badge badge-green">Verified</span>' : '<span class="muted">—</span>')}</td>
+      <td data-label="Actions">
         <div class="row-actions">
           ${i.hasCloudBackupData ? `<button class="btn-sm btn-primary" onclick="downloadBackup('${safeId}')">Backup</button>` : ''}
           <button class="btn-sm btn-danger" onclick="deleteOnly('${safeId}')">${i.hasCloudBackupData ? 'Delete only' : 'Delete'}</button>
@@ -317,11 +719,12 @@ function renderTable() {
     </tr>
   `;
   }).join('');
-  document.getElementById('tableBody').innerHTML = rows || `<tr><td colspan="10" class="muted">No installations found.</td></tr>`;
+  document.getElementById('tableBody').innerHTML = rows;
   document.getElementById('selectAll').checked = filtered.length > 0 && filtered.every(i => selected.has(i.installationId));
   updateBulkBar();
 }
 
+/* ---------- Backup / delete actions ---------- */
 // Triggers a real file download of the export JSON (uses an <a> click
 // against the authenticated endpoint via a signed fetch + blob, since
 // a plain link can't carry the x-relay-admin-key header).
@@ -352,8 +755,12 @@ async function downloadBackup(installationId) {
 }
 
 async function deleteOnly(installationId) {
-  const typed = prompt(`This permanently deletes ALL data for:\n${installationId}\n${describeDeletion(installationId)}\n\nThis cannot be undone. Type DELETE to confirm.`);
-  if (typed !== 'DELETE') { toast('Cancelled.'); return; }
+  const ok = await askConfirm(
+    '⚠️ Confirm deletion',
+    `This permanently deletes ALL data for:\n${installationId}\n${describeDeletion(installationId)}\n\nThis cannot be undone.`,
+    { requireText: 'DELETE' }
+  );
+  if (!ok) { toast('Cancelled.'); return; }
   try {
     await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/purge?confirm=DELETE`, { method: 'POST' });
     toast(`${installationId} has been permanently deleted.`);
@@ -364,13 +771,17 @@ async function deleteOnly(installationId) {
 }
 
 async function backupThenDelete(installationId) {
-  const ok = await downloadBackup(installationId);
-  if (!ok) {
+  const backedUp = await downloadBackup(installationId);
+  if (!backedUp) {
     toast('Backup failed — deletion was NOT performed, to avoid losing data with no copy.', true);
     return;
   }
-  const typed = prompt(`Backup downloaded. Now permanently delete ALL data for:\n${installationId}\n${describeDeletion(installationId)}\n\nType DELETE to confirm.`);
-  if (typed !== 'DELETE') { toast('Backup saved. Deletion cancelled.'); return; }
+  const ok = await askConfirm(
+    '⚠️ Confirm deletion',
+    `Backup downloaded. Now permanently delete ALL data for:\n${installationId}\n${describeDeletion(installationId)}`,
+    { requireText: 'DELETE' }
+  );
+  if (!ok) { toast('Backup saved. Deletion cancelled.'); return; }
   try {
     await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/purge?confirm=DELETE`, { method: 'POST' });
     toast(`Backup saved and ${installationId} has been permanently deleted.`);
@@ -414,8 +825,12 @@ async function bulkDeleteOnly() {
   const ids = [...selected];
   if (!ids.length) return;
   const walletTotal = ids.reduce((sum, id) => sum + ((findInstallation(id) || {}).walletBalanceTokens || 0), 0);
-  const typed = prompt(`This permanently deletes ALL data for ${ids.length} installation(s):\n${ids.join(', ')}\n${walletTotal ? `\nToken wallet balances that will be deleted: ${walletTotal} tokens.\n` : ''}\nThis cannot be undone. Type DELETE to confirm.`);
-  if (typed !== 'DELETE') { toast('Cancelled.'); return; }
+  const ok = await askConfirm(
+    '⚠️ Confirm bulk deletion',
+    `This permanently deletes ALL data for ${ids.length} installation(s):\n${ids.join(', ')}\n${walletTotal ? `\nToken wallet balances that will be deleted: ${walletTotal} tokens.\n` : ''}\nThis cannot be undone.`,
+    { requireText: 'DELETE' }
+  );
+  if (!ok) { toast('Cancelled.'); return; }
   await runBulkDelete(ids);
 }
 
@@ -423,13 +838,17 @@ async function bulkBackupThenDelete() {
   const ids = [...selected];
   if (!ids.length) return;
   const anyCloudData = ids.some(id => (findInstallation(id) || {}).hasCloudBackupData);
-  const ok = anyCloudData ? await bulkBackup() : true;
-  if (!ok) {
+  const backedUp = anyCloudData ? await bulkBackup() : true;
+  if (!backedUp) {
     toast('Bulk backup failed — deletion was NOT performed, to avoid losing data with no copy.', true);
     return;
   }
-  const typed = prompt(`${anyCloudData ? 'Backup downloaded. ' : 'None of the selected have Cloud Backup data, so nothing was backed up. '}Now permanently delete ALL data for ${ids.length} installation(s):\n${ids.join(', ')}\n\nType DELETE to confirm.`);
-  if (typed !== 'DELETE') { toast('Backup saved. Deletion cancelled.'); return; }
+  const ok = await askConfirm(
+    '⚠️ Confirm bulk deletion',
+    `${anyCloudData ? 'Backup downloaded. ' : 'None of the selected have Cloud Backup data, so nothing was backed up. '}Now permanently delete ALL data for ${ids.length} installation(s):\n${ids.join(', ')}`,
+    { requireText: 'DELETE' }
+  );
+  if (!ok) { toast('Backup saved. Deletion cancelled.'); return; }
   await runBulkDelete(ids);
 }
 
@@ -453,14 +872,20 @@ async function runBulkDelete(ids) {
   }
 }
 
+/* ---------- Boot ---------- */
 async function boot() {
+  document.getElementById('loginErr').textContent = '';
   document.getElementById('loginWrap').style.display = 'none';
   document.getElementById('app').style.display = 'block';
   try {
     await loadInstallations();
   } catch (err) {
-    toast(err.message, true);
-    if (String(err.message).toLowerCase().includes('admin key')) logout();
+    if (String(err.message).toLowerCase().includes('admin key')) {
+      logout();
+      document.getElementById('loginErr').textContent = err.message;
+    } else {
+      toast(err.message, true);
+    }
   }
 }
 
