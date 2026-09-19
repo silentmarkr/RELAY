@@ -227,6 +227,10 @@
             <label>Maximum credits per purchase</label>
             <input type="number" id="receiptCreditMaxInput" min="1" max="1000" step="1">
           </div>
+          <div class="field">
+            <label>Free customizations before OTP/credit required</label>
+            <input type="number" id="receiptCreditFreeLimitInput" min="0" max="1000" step="1">
+          </div>
           <div class="actions">
             <button class="btn btn-save" onclick="saveReceiptCreditPricing()">Save Receipt Credit Pricing</button>
           </div>
@@ -255,8 +259,9 @@ function renderReceiptCreditPricing() {
   document.getElementById('receiptCreditDiscountMinInput').value = p.discountMinQuantity;
   document.getElementById('receiptCreditDiscountPercentInput').value = p.discountPercent;
   document.getElementById('receiptCreditMaxInput').value = p.maxQuantity;
+  document.getElementById('receiptCreditFreeLimitInput').value = (typeof p.freeCustomizeLimit === 'number') ? p.freeCustomizeLimit : 2;
   const preview = document.getElementById('receiptCreditPricingPreview');
-  if (preview) preview.textContent = `Example: ${p.discountMinQuantity} credits or more gets ${p.discountPercent}% off. Current price: ₱${Number(p.pricePHP).toFixed(2)} per credit.`;
+  if (preview) preview.textContent = `Example: ${p.discountMinQuantity} credits or more gets ${p.discountPercent}% off. Current price: ₱${Number(p.pricePHP).toFixed(2)} per credit. First ${p.freeCustomizeLimit} customization(s) per device are free before an OTP or credit is required.`;
 }
 async function loadReceiptCreditPricing() {
   const data = await api('/relay/admin/api/pricing/receipt-credits');
@@ -267,7 +272,8 @@ async function saveReceiptCreditPricing() {
     pricePHP: Number(document.getElementById('receiptCreditPriceInput').value),
     discountMinQuantity: Number(document.getElementById('receiptCreditDiscountMinInput').value),
     discountPercent: Number(document.getElementById('receiptCreditDiscountPercentInput').value),
-    maxQuantity: Number(document.getElementById('receiptCreditMaxInput').value)
+    maxQuantity: Number(document.getElementById('receiptCreditMaxInput').value),
+    freeCustomizeLimit: Number(document.getElementById('receiptCreditFreeLimitInput').value)
   };
   try {
     const data = await api('/relay/admin/api/pricing/receipt-credits', { method:'POST', body: JSON.stringify(body) });

@@ -9912,7 +9912,12 @@ const RECEIPT_CREDIT_PRICING_DEFAULT = {
     pricePHP: 59,
     discountMinQuantity: 2,
     discountPercent: 5,
-    maxQuantity: 100
+    maxQuantity: 100,
+    // GAWA/BAGO: dating hardcoded sa OMNIPOS (FREE_CUSTOMIZE_LIMIT = 2), ngayon
+    // admin-configurable dito sa RELAY (tingnan ang /relay/admin/api/pricing/receipt-credits
+    // sa baba) at kinukuha ng OMNIPOS via /relay/receipt-credit-pricing, kasabay
+    // ng ibang Receipt Credit pricing fields.
+    freeCustomizeLimit: 2
 };
 let receiptCreditPricing = { ...RECEIPT_CREDIT_PRICING_DEFAULT };
 async function loadReceiptCreditPricing() {
@@ -9981,7 +9986,7 @@ app.post('/relay/request-receipt-credit-purchase',
         try {
             await notifyUnlockRequest({
                 subject: `💰 Receipt Customization Credit Purchase Request — ${storeName || installationId}`,
-                text: `May humiling bumili ng Receipt Customization credit (para sa customization beyond sa 2 free attempts).\n\n` +
+                text: `May humiling bumili ng Receipt Customization credit (para sa customization beyond sa ${receiptCreditPricing.freeCustomizeLimit} free attempts).\n\n` +
                       `Store: ${storeName || 'Hindi tiyak'}\n` +
                       `Installation ID: ${installationId}\n` +
                       `Hiniling ni: ${requestedBy || 'Hindi tiyak'}\n` +
@@ -10016,11 +10021,13 @@ app.post('/relay/admin/api/pricing/receipt-credits', requireAdminKey, async (req
     const discountMinQuantity = Number(body.discountMinQuantity);
     const discountPercent = Number(body.discountPercent);
     const maxQuantity = Number(body.maxQuantity);
+    const freeCustomizeLimit = Number(body.freeCustomizeLimit);
     if (!Number.isFinite(pricePHP) || pricePHP < 0) return res.status(400).json({ success: false, message: 'Invalid Receipt Credit price.' });
     if (!Number.isInteger(discountMinQuantity) || discountMinQuantity < 2 || discountMinQuantity > 1000) return res.status(400).json({ success: false, message: 'Discount start quantity must be a whole number from 2 to 1000.' });
     if (!Number.isFinite(discountPercent) || discountPercent < 0 || discountPercent > 90) return res.status(400).json({ success: false, message: 'Discount must be between 0% and 90%.' });
     if (!Number.isInteger(maxQuantity) || maxQuantity < 1 || maxQuantity > 1000) return res.status(400).json({ success: false, message: 'Maximum quantity must be a whole number from 1 to 1000.' });
-    receiptCreditPricing = { pricePHP: Math.round(pricePHP * 100) / 100, discountMinQuantity, discountPercent: Math.round(discountPercent * 100) / 100, maxQuantity };
+    if (!Number.isInteger(freeCustomizeLimit) || freeCustomizeLimit < 0 || freeCustomizeLimit > 1000) return res.status(400).json({ success: false, message: 'Free customizations count must be a whole number from 0 to 1000.' });
+    receiptCreditPricing = { pricePHP: Math.round(pricePHP * 100) / 100, discountMinQuantity, discountPercent: Math.round(discountPercent * 100) / 100, maxQuantity, freeCustomizeLimit };
     await saveReceiptCreditPricing();
     logActivity('SYSTEM', 'receipt_credit_pricing_updated', receiptCreditPricing);
     res.json({ success: true, pricing: { ...receiptCreditPricing } });
