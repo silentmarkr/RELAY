@@ -3661,6 +3661,7 @@ let branchSummaries = {};
 // Still does a periodic safety flush every BRANCH_PERSIST_MIN_INTERVAL_MS.
 const BRANCH_PERSIST_MIN_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const branchLastPersisted = new Map(); // `${groupHash}|${installationId}` -> { signature, at }
+const remoteOpsLastPersisted = new Map(); // same key shape, for remote-operations check-ins
 function branchEntrySignature(branchName, summary) {
     return `${branchName}|${JSON.stringify(summary)}`;
 }
@@ -6430,6 +6431,17 @@ app.post('/relay/remote-operations/checkin', requireApiKey, requireAllowedDevice
     }
     const cleanName = String(branchName || '').trim().slice(0, BRANCH_NAME_MAX_LEN) || 'Unnamed Branch';
     const cleanRemoteOperations = sanitizeRemoteOperationsPayload(remoteOperations);
+    // Same self-heal as /relay/branch-checkin: if this installation changed its Business Group Code,
+    // remove its old entry so a "ghost" branch (with stale live-staff numbers) isn't left behind.
+    let movedGroups = false;
+    for (const hash of Object.keys(branchSummaries)) {
+        if (hash === branchGroupKeyHash) continue;
+        if (branchSummaries[hash] && branchSummaries[hash][installationId]) {
+            delete branchSummaries[hash][installationId];
+            if (Object.keys(branchSummaries[hash]).length === 0) delete branchSummaries[hash];
+            movedGroups = true;
+        }
+    }
     if (!branchSummaries[branchGroupKeyHash]) branchSummaries[branchGroupKeyHash] = {};
     const existing = branchSummaries[branchGroupKeyHash][installationId] || {};
     branchSummaries[branchGroupKeyHash][installationId] = {
@@ -6438,7 +6450,16 @@ app.post('/relay/remote-operations/checkin', requireApiKey, requireAllowedDevice
         remoteOperations: cleanRemoteOperations,
         updatedAt: existing.updatedAt || Date.now()
     };
-    saveBranchSummaries(branchSummaries);
+    // Cost-optimization (same idea as branch-checkin): memory is always current, but only write to the
+    // persistent store when something actually changed, or as a periodic safety flush.
+    const opsPersistKey = `${branchGroupKeyHash}|${installationId}`;
+    const opsSignature = JSON.stringify([cleanName, cleanRemoteOperations.activeStaffCount, cleanRemoteOperations.todaySales,
+        cleanRemoteOperations.todayTransactions, (cleanRemoteOperations.recentTransactions || []).map((t) => t.id)]);
+    const opsPrev = remoteOpsLastPersisted.get(opsPersistKey);
+    if (movedGroups || !opsPrev || opsPrev.signature !== opsSignature || (Date.now() - opsPrev.at) >= BRANCH_PERSIST_MIN_INTERVAL_MS) {
+        saveBranchSummaries(branchSummaries);
+        remoteOpsLastPersisted.set(opsPersistKey, { signature: opsSignature, at: Date.now() });
+    }
     logActivity(installationId, 'remote_operations_checkin', {
         branchGroupKeyHash,
         activeStaffCount: cleanRemoteOperations.activeStaffCount,
