@@ -1292,7 +1292,7 @@ function getCloudTokenPackages() {
             maintenanceFeeTokens: monthlyPrice,
             estSyncTokensPerMonth: monthlyPrice,
             estTotalMonthlyTokens: bundleTokens,
-            tagline: `All-in: kasama na ang maintenance fee + tinatayang 1 buwan ng auto-sync. Isang bili lang, sakop na ang buong buwan.`
+            tagline: `All-in-one pricing: Includes maintenance fees plus roughly 30 days of auto-sync. One single payment covers your entire month.`
         };
     }
     return packages;
