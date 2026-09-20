@@ -1148,7 +1148,8 @@ const FEATURE_CATALOG_BASE = {
     rbac_management: { name: 'Roles & Permissions (RBAC) Management', price: null, category: 'module', isSubscription: true },
     multi_branch: { name: 'Multi-Branch Dashboard', price: null, category: 'module', isSubscription: true },
     ai_assistant: { name: 'OmniPOS AI Assistant', price: null, category: 'module', isSubscription: true },
-    cloud_backup: { name: 'Cloud Backup (Postgres)', price: null, category: 'module', isSubscription: true }
+    cloud_backup: { name: 'Cloud Backup (Postgres)', price: null, category: 'module', isSubscription: true },
+    remote_operations: { name: 'Remote Operations & Attendance', price: null, category: 'module', isSubscription: true }
 };
 const CLOUD_BACKUP_PLANS_BASE = {
     // AYOS: idinagdag ang autoBackupIntervalMs bilang bahagi ng plan config
@@ -2320,7 +2321,7 @@ async function creditCloudTokens(installationId, tokens, note, category = 'TOKEN
     invalidateWalletCache(installationId);
     return balanceAfter;
 }
-const MODULE_SUBSCRIPTION_FEATURE_IDS = ['rbac_management', 'multi_branch', 'ai_assistant'];
+const MODULE_SUBSCRIPTION_FEATURE_IDS = ['rbac_management', 'multi_branch', 'ai_assistant', 'remote_operations'];
 function isModuleSubscriptionFeature(featureId) {
     return MODULE_SUBSCRIPTION_FEATURE_IDS.includes(featureId);
 }
@@ -2342,6 +2343,11 @@ const MODULE_SUBSCRIPTION_PLANS_BASE = {
         id: 'ai_assistant',
         name: 'OmniPOS AI Assistant',
         price: { monthly: 179, yearly: 1790 }
+    },
+    remote_operations: {
+        id: 'remote_operations',
+        name: 'Remote Operations & Attendance',
+        price: { monthly: 249, yearly: 2490 }
     }
 };
 const MODULE_SUBSCRIPTION_BILLING_DAYS = { monthly: 30, yearly: 365 };
@@ -3672,6 +3678,28 @@ function sanitizeBranchSummaryPayload(raw) {
         out[field] = Number.isFinite(n) ? Math.max(0, n) : 0;
     }
     return out;
+}
+function sanitizeRemoteOperationsPayload(raw) {
+    const src = (raw && typeof raw === 'object') ? raw : {};
+    const activeStaffCount = Math.max(0, Math.min(10000, Math.floor(Number(src.activeStaffCount) || 0)));
+    const todaySales = Math.max(0, Number(src.todaySales) || 0);
+    const todayTransactions = Math.max(0, Math.floor(Number(src.todayTransactions) || 0));
+    const recentTransactions = Array.isArray(src.recentTransactions)
+        ? src.recentTransactions.slice(0, 25).map((transaction) => ({
+            id: String(transaction?.id || '').slice(0, 80),
+            cashier: String(transaction?.cashier || '').slice(0, 80),
+            total: Math.max(0, Number(transaction?.total) || 0),
+            paymentMethod: String(transaction?.paymentMethod || '').slice(0, 40),
+            at: Number(transaction?.at) || Date.now()
+        })).filter((transaction) => transaction.id || transaction.total > 0)
+        : [];
+    return {
+        activeStaffCount,
+        todaySales: Math.round(todaySales * 100) / 100,
+        todayTransactions,
+        recentTransactions,
+        updatedAt: Date.now()
+    };
 }
 // === Multi-Branch: hourly trend history (PRO) ===
 const BRANCH_HISTORY_PATH = path.join(__dirname, 'branch-history.json');
@@ -6363,9 +6391,11 @@ app.post('/relay/branch-checkin', requireApiKey, requireAllowedDevice, rateLimit
         saveBranchTransfers(branchTransfers);
     }
     if (!branchSummaries[branchGroupKeyHash]) branchSummaries[branchGroupKeyHash] = {};
+    const previousRemoteOperations = branchSummaries[branchGroupKeyHash][installationId]?.remoteOperations || null;
     branchSummaries[branchGroupKeyHash][installationId] = {
         branchName: cleanName,
         summary: cleanSummary,
+        remoteOperations: previousRemoteOperations,
         updatedAt: Date.now()
     };
     appendBranchHistoryPoint(branchGroupKeyHash, installationId, cleanSummary);
@@ -6378,6 +6408,87 @@ app.post('/relay/branch-checkin', requireApiKey, requireAllowedDevice, rateLimit
         branchLastPersisted.set(branchPersistKey, { signature: branchSig, at: Date.now() });
     }
     res.json({ success: true, message: 'Branch check-in recorded.' });
+});
+app.post('/relay/remote-operations/checkin', requireApiKey, requireAllowedDevice, rateLimit('remote-operations-checkin', 60, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
+    const { installationId, branchGroupKeyHash, branchName, remoteOperations } = req.body || {};
+    if (!installationId) {
+        return res.status(400).json({ success: false, message: 'Missing installationId.' });
+    }
+    if (!branchGroupKeyHash || !BRANCH_GROUP_HASH_RE.test(String(branchGroupKeyHash))) {
+        return res.status(400).json({ success: false, message: 'Missing or invalid branchGroupKeyHash format.' });
+    }
+    if (!isFeatureCurrentlyUnlocked(installationId, 'remote_operations')) {
+        return res.status(402).json({
+            success: false,
+            featureLocked: true,
+            featureId: 'remote_operations',
+            featureName: FEATURE_CATALOG_BASE.remote_operations.name,
+            isSubscription: true,
+            subscriptionPrice: MODULE_SUBSCRIPTION_PLANS.remote_operations.price,
+            message: 'Remote Operations & Attendance requires an active subscription.'
+        });
+    }
+    const cleanName = String(branchName || '').trim().slice(0, BRANCH_NAME_MAX_LEN) || 'Unnamed Branch';
+    const cleanRemoteOperations = sanitizeRemoteOperationsPayload(remoteOperations);
+    if (!branchSummaries[branchGroupKeyHash]) branchSummaries[branchGroupKeyHash] = {};
+    const existing = branchSummaries[branchGroupKeyHash][installationId] || {};
+    branchSummaries[branchGroupKeyHash][installationId] = {
+        branchName: cleanName,
+        summary: existing.summary || sanitizeBranchSummaryPayload(null),
+        remoteOperations: cleanRemoteOperations,
+        updatedAt: existing.updatedAt || Date.now()
+    };
+    saveBranchSummaries(branchSummaries);
+    logActivity(installationId, 'remote_operations_checkin', {
+        branchGroupKeyHash,
+        activeStaffCount: cleanRemoteOperations.activeStaffCount,
+        todayTransactions: cleanRemoteOperations.todayTransactions
+    });
+    res.json({ success: true, message: 'Remote operations check-in recorded.', updatedAt: cleanRemoteOperations.updatedAt });
+});
+app.get('/relay/remote-operations/summary', requireApiKey, requireAllowedDevice, rateLimit('remote-operations-summary', 120, 60 * 60 * 1000, (req) => req.query?.installationId), (req, res) => {
+    const installationId = String(req.query.installationId || '');
+    const groupKeyHash = String(req.query.groupKeyHash || '');
+    if (!installationId || !BRANCH_GROUP_HASH_RE.test(groupKeyHash)) {
+        return res.status(400).json({ success: false, message: 'Missing installationId or invalid groupKeyHash.' });
+    }
+    if (!isFeatureCurrentlyUnlocked(installationId, 'remote_operations')) {
+        return res.status(402).json({
+            success: false,
+            featureLocked: true,
+            featureId: 'remote_operations',
+            featureName: FEATURE_CATALOG_BASE.remote_operations.name,
+            isSubscription: true,
+            subscriptionPrice: MODULE_SUBSCRIPTION_PLANS.remote_operations.price,
+            message: 'Remote Operations & Attendance requires an active subscription.'
+        });
+    }
+    const group = branchSummaries[groupKeyHash] || {};
+    const branches = Object.entries(group)
+        .map(([branchInstallationId, entry]) => ({
+            installationId: branchInstallationId,
+            branchName: entry.branchName,
+            remoteOperations: entry.remoteOperations || null,
+            updatedAt: entry.remoteOperations?.updatedAt || entry.updatedAt || null
+        }))
+        .filter((branch) => branch.remoteOperations)
+        .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    const combined = branches.reduce((total, branch) => {
+        const operations = branch.remoteOperations || {};
+        total.activeStaffCount += Number(operations.activeStaffCount) || 0;
+        total.todaySales += Number(operations.todaySales) || 0;
+        total.todayTransactions += Number(operations.todayTransactions) || 0;
+        total.recentTransactions.push(...(operations.recentTransactions || []).map((transaction) => ({
+            ...transaction,
+            branchName: branch.branchName
+        })));
+        return total;
+    }, { activeStaffCount: 0, todaySales: 0, todayTransactions: 0, recentTransactions: [] });
+    combined.todaySales = Math.round(combined.todaySales * 100) / 100;
+    combined.recentTransactions = combined.recentTransactions
+        .sort((a, b) => (b.at || 0) - (a.at || 0))
+        .slice(0, 50);
+    res.json({ success: true, branchCount: branches.length, branches, combined });
 });
 app.get('/relay/branch-summary', requireApiKey, requireAllowedDevice, rateLimit('branch-summary', 120, 60 * 60 * 1000, (req) => req.query?.installationId), (req, res) => {
     const groupKeyHash = String(req.query.groupKeyHash || '');
