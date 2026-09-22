@@ -3680,6 +3680,9 @@ function sanitizeBranchSummaryPayload(raw) {
     }
     return out;
 }
+// Legacy plaintext validator — kept only so an installation that hasn't upgraded yet doesn't
+// get a hard error mid-rollout. New check-ins use sanitizeEncryptedBlob() below instead, since
+// RELAY is no longer meant to be able to read this payload (see ENCRYPTED_REMOTE_OPS_MAX_LEN).
 function sanitizeRemoteOperationsPayload(raw) {
     const src = (raw && typeof raw === 'object') ? raw : {};
     const activeStaffCount = Math.max(0, Math.min(10000, Math.floor(Number(src.activeStaffCount) || 0)));
@@ -3701,6 +3704,17 @@ function sanitizeRemoteOperationsPayload(raw) {
         recentTransactions,
         updatedAt: Date.now()
     };
+}
+// Blind-relay payload for Remote Operations: RELAY stores and forwards this opaque blob between
+// branches of the same group but cannot decrypt it (see OMNIPOS's encryptForGroup/decryptForGroup).
+// Format is "v1:<iv-b64>:<tag-b64>:<ciphertext-b64>". We only validate shape/size here, never content.
+const ENCRYPTED_REMOTE_OPS_RE = /^v1:[A-Za-z0-9+/]+=*:[A-Za-z0-9+/]+=*:[A-Za-z0-9+/]+=*$/;
+const ENCRYPTED_REMOTE_OPS_MAX_LEN = 200000; // generous headroom over the ~50-entry roster + 25 transactions this carries
+function sanitizeEncryptedBlob(raw) {
+    if (typeof raw !== 'string') return null;
+    if (raw.length === 0 || raw.length > ENCRYPTED_REMOTE_OPS_MAX_LEN) return null;
+    if (!ENCRYPTED_REMOTE_OPS_RE.test(raw)) return null;
+    return raw;
 }
 // === Multi-Branch: hourly trend history (PRO) ===
 const BRANCH_HISTORY_PATH = path.join(__dirname, 'branch-history.json');
@@ -6337,7 +6351,7 @@ app.post('/relay/integrity-checkin', requireApiKey, requireAllowedDevice, rateLi
     });
 });
 app.post('/relay/branch-checkin', requireApiKey, requireAllowedDevice, rateLimit('branch-checkin', 40, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
-    const { installationId, branchGroupKeyHash, branchName, summary } = req.body || {};
+    const { installationId, branchGroupKeyHash, branchName, summary, encryptedSummary } = req.body || {};
     if (!installationId) {
         return res.status(400).json({ success: false, message: 'Missing installationId.' });
     }
@@ -6345,7 +6359,20 @@ app.post('/relay/branch-checkin', requireApiKey, requireAllowedDevice, rateLimit
         return res.status(400).json({ success: false, message: 'Missing or invalid branchGroupKeyHash format (must be SHA-256 hex).' });
     }
     const cleanName = String(branchName || '').trim().slice(0, BRANCH_NAME_MAX_LEN) || 'Unnamed Branch';
-    const cleanSummary = sanitizeBranchSummaryPayload(summary);
+    // Blind-relay: prefer the encrypted blob; fall back to the legacy plaintext field only for an
+    // installation that hasn't upgraded yet, same pattern as /relay/remote-operations/checkin.
+    // RELAY no longer sums these figures itself — see /relay/branch-summary and /relay/branch-trend,
+    // where combining now happens on the OMNIPOS side after it decrypts each branch's blob locally.
+    let cleanEncryptedSummary = null;
+    let cleanSummary = null;
+    if (typeof encryptedSummary === 'string') {
+        cleanEncryptedSummary = sanitizeEncryptedBlob(encryptedSummary);
+        if (!cleanEncryptedSummary) {
+            return res.status(400).json({ success: false, message: 'Malformed encryptedSummary payload.' });
+        }
+    } else {
+        cleanSummary = sanitizeBranchSummaryPayload(summary);
+    }
     let changed = false;
     for (const hash of Object.keys(branchSummaries)) {
         if (hash === branchGroupKeyHash) continue;
@@ -6392,26 +6419,32 @@ app.post('/relay/branch-checkin', requireApiKey, requireAllowedDevice, rateLimit
         saveBranchTransfers(branchTransfers);
     }
     if (!branchSummaries[branchGroupKeyHash]) branchSummaries[branchGroupKeyHash] = {};
-    const previousRemoteOperations = branchSummaries[branchGroupKeyHash][installationId]?.remoteOperations || null;
+    const previousEntry = branchSummaries[branchGroupKeyHash][installationId] || {};
     branchSummaries[branchGroupKeyHash][installationId] = {
         branchName: cleanName,
         summary: cleanSummary,
-        remoteOperations: previousRemoteOperations,
+        encryptedSummary: cleanEncryptedSummary,
+        remoteOperations: previousEntry.remoteOperations || null,
+        encryptedRemoteOperations: previousEntry.encryptedRemoteOperations || null,
         updatedAt: Date.now()
     };
-    appendBranchHistoryPoint(branchGroupKeyHash, installationId, cleanSummary);
+    appendBranchHistoryPoint(branchGroupKeyHash, installationId, cleanEncryptedSummary ? { encryptedSummary: cleanEncryptedSummary } : cleanSummary);
     const branchPersistKey = `${branchGroupKeyHash}|${installationId}`;
-    const branchSig = branchEntrySignature(cleanName, cleanSummary);
     const branchPrev = branchLastPersisted.get(branchPersistKey);
     const branchDue = !branchPrev || (Date.now() - branchPrev.at) >= BRANCH_PERSIST_MIN_INTERVAL_MS;
-    if (changed || branchDue || !branchPrev || branchPrev.signature !== branchSig) {
+    // With an encrypted blob, the ciphertext differs on every call (fresh IV) even when the
+    // underlying sales figures are unchanged, so the old signature-based "did anything actually
+    // change" comparison no longer works for encrypted check-ins — fall back to a plain
+    // time-based throttle, same fix already applied to /relay/remote-operations/checkin.
+    const branchSig = cleanEncryptedSummary ? null : branchEntrySignature(cleanName, cleanSummary);
+    if (changed || branchDue || !branchPrev || (branchSig !== null && branchPrev.signature !== branchSig)) {
         saveBranchSummaries(branchSummaries);
         branchLastPersisted.set(branchPersistKey, { signature: branchSig, at: Date.now() });
     }
     res.json({ success: true, message: 'Branch check-in recorded.' });
 });
 app.post('/relay/remote-operations/checkin', requireApiKey, requireAllowedDevice, rateLimit('remote-operations-checkin', 60, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
-    const { installationId, branchGroupKeyHash, branchName, remoteOperations } = req.body || {};
+    const { installationId, branchGroupKeyHash, branchName, encryptedRemoteOperations, remoteOperations } = req.body || {};
     if (!installationId) {
         return res.status(400).json({ success: false, message: 'Missing installationId.' });
     }
@@ -6430,7 +6463,18 @@ app.post('/relay/remote-operations/checkin', requireApiKey, requireAllowedDevice
         });
     }
     const cleanName = String(branchName || '').trim().slice(0, BRANCH_NAME_MAX_LEN) || 'Unnamed Branch';
-    const cleanRemoteOperations = sanitizeRemoteOperationsPayload(remoteOperations);
+    // Prefer the new blind-relay blob; fall back to the legacy plaintext field only for an
+    // installation that hasn't upgraded yet, so a mixed-version group doesn't just break.
+    let cleanEncryptedRemoteOperations = null;
+    let cleanRemoteOperations = null;
+    if (typeof encryptedRemoteOperations === 'string') {
+        cleanEncryptedRemoteOperations = sanitizeEncryptedBlob(encryptedRemoteOperations);
+        if (!cleanEncryptedRemoteOperations) {
+            return res.status(400).json({ success: false, message: 'Malformed encryptedRemoteOperations payload.' });
+        }
+    } else {
+        cleanRemoteOperations = sanitizeRemoteOperationsPayload(remoteOperations);
+    }
     // Same self-heal as /relay/branch-checkin: if this installation changed its Business Group Code,
     // remove its old entry so a "ghost" branch (with stale live-staff numbers) isn't left behind.
     let movedGroups = false;
@@ -6444,28 +6488,32 @@ app.post('/relay/remote-operations/checkin', requireApiKey, requireAllowedDevice
     }
     if (!branchSummaries[branchGroupKeyHash]) branchSummaries[branchGroupKeyHash] = {};
     const existing = branchSummaries[branchGroupKeyHash][installationId] || {};
+    const updatedAt = Date.now();
     branchSummaries[branchGroupKeyHash][installationId] = {
         branchName: cleanName,
         summary: existing.summary || sanitizeBranchSummaryPayload(null),
+        encryptedRemoteOperations: cleanEncryptedRemoteOperations,
         remoteOperations: cleanRemoteOperations,
-        updatedAt: existing.updatedAt || Date.now()
+        updatedAt
     };
-    // Cost-optimization (same idea as branch-checkin): memory is always current, but only write to the
-    // persistent store when something actually changed, or as a periodic safety flush.
+    // Cost-optimization (same idea as branch-checkin): only write to the persistent store
+    // periodically. NOTE: unlike the plaintext era, we can no longer detect "nothing actually
+    // changed" by comparing content, because the ciphertext differs every single call (a fresh
+    // random IV each time) even when the underlying attendance/sales data is identical. So this
+    // is now a plain time-based throttle rather than a change-detection signature.
     const opsPersistKey = `${branchGroupKeyHash}|${installationId}`;
-    const opsSignature = JSON.stringify([cleanName, cleanRemoteOperations.activeStaffCount, cleanRemoteOperations.todaySales,
-        cleanRemoteOperations.todayTransactions, (cleanRemoteOperations.recentTransactions || []).map((t) => t.id)]);
     const opsPrev = remoteOpsLastPersisted.get(opsPersistKey);
-    if (movedGroups || !opsPrev || opsPrev.signature !== opsSignature || (Date.now() - opsPrev.at) >= BRANCH_PERSIST_MIN_INTERVAL_MS) {
+    if (movedGroups || !opsPrev || (Date.now() - opsPrev.at) >= BRANCH_PERSIST_MIN_INTERVAL_MS) {
         saveBranchSummaries(branchSummaries);
-        remoteOpsLastPersisted.set(opsPersistKey, { signature: opsSignature, at: Date.now() });
+        remoteOpsLastPersisted.set(opsPersistKey, { at: Date.now() });
     }
+    // Privacy: with the blind relay, RELAY (and whoever reads its logs) can no longer see the
+    // actual attendance/sales figures here — only that a check-in happened. That's intentional.
     logActivity(installationId, 'remote_operations_checkin', {
         branchGroupKeyHash,
-        activeStaffCount: cleanRemoteOperations.activeStaffCount,
-        todayTransactions: cleanRemoteOperations.todayTransactions
+        encrypted: !!cleanEncryptedRemoteOperations
     });
-    res.json({ success: true, message: 'Remote operations check-in recorded.', updatedAt: cleanRemoteOperations.updatedAt });
+    res.json({ success: true, message: 'Remote operations check-in recorded.', updatedAt });
 });
 app.get('/relay/remote-operations/summary', requireApiKey, requireAllowedDevice, rateLimit('remote-operations-summary', 120, 60 * 60 * 1000, (req) => req.query?.installationId), (req, res) => {
     const installationId = String(req.query.installationId || '');
@@ -6485,31 +6533,23 @@ app.get('/relay/remote-operations/summary', requireApiKey, requireAllowedDevice,
         });
     }
     const group = branchSummaries[groupKeyHash] || {};
+    // Blind relay: each branch's figures are an opaque ciphertext blob to us now (or, from an
+    // installation that hasn't upgraded yet, the legacy plaintext object). Either way we just
+    // pass it through — RELAY does not attempt to read or sum these fields anymore. Combining
+    // them into totals now happens on the OMNIPOS side, AFTER it decrypts each blob locally with
+    // the raw Business Group Code (which RELAY never receives). See decorateRemoteOperationsSummary
+    // in OMNIPOS's server.js.
     const branches = Object.entries(group)
         .map(([branchInstallationId, entry]) => ({
             installationId: branchInstallationId,
             branchName: entry.branchName,
-            remoteOperations: entry.remoteOperations || null,
-            updatedAt: entry.remoteOperations?.updatedAt || entry.updatedAt || null
+            encryptedRemoteOperations: entry.encryptedRemoteOperations || null,
+            remoteOperations: entry.remoteOperations || null, // legacy plaintext fallback only
+            updatedAt: (entry.remoteOperations && entry.remoteOperations.updatedAt) || entry.updatedAt || null
         }))
-        .filter((branch) => branch.remoteOperations)
+        .filter((branch) => branch.encryptedRemoteOperations || branch.remoteOperations)
         .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-    const combined = branches.reduce((total, branch) => {
-        const operations = branch.remoteOperations || {};
-        total.activeStaffCount += Number(operations.activeStaffCount) || 0;
-        total.todaySales += Number(operations.todaySales) || 0;
-        total.todayTransactions += Number(operations.todayTransactions) || 0;
-        total.recentTransactions.push(...(operations.recentTransactions || []).map((transaction) => ({
-            ...transaction,
-            branchName: branch.branchName
-        })));
-        return total;
-    }, { activeStaffCount: 0, todaySales: 0, todayTransactions: 0, recentTransactions: [] });
-    combined.todaySales = Math.round(combined.todaySales * 100) / 100;
-    combined.recentTransactions = combined.recentTransactions
-        .sort((a, b) => (b.at || 0) - (a.at || 0))
-        .slice(0, 50);
-    res.json({ success: true, branchCount: branches.length, branches, combined });
+    res.json({ success: true, branchCount: branches.length, branches, combined: null });
 });
 app.get('/relay/branch-summary', requireApiKey, requireAllowedDevice, rateLimit('branch-summary', 120, 60 * 60 * 1000, (req) => req.query?.installationId), (req, res) => {
     const groupKeyHash = String(req.query.groupKeyHash || '');
@@ -6517,19 +6557,20 @@ app.get('/relay/branch-summary', requireApiKey, requireAllowedDevice, rateLimit(
         return res.status(400).json({ success: false, message: 'Missing or invalid groupKeyHash query param format.' });
     }
     const group = branchSummaries[groupKeyHash] || {};
+    // Blind relay: each branch's figures are an opaque ciphertext blob to us now (or, from an
+    // installation that hasn't upgraded yet, the legacy plaintext object). We just pass it
+    // through — RELAY does not attempt to read or sum these fields anymore. Combining them into
+    // totals now happens on the OMNIPOS side, after it decrypts each blob locally with the raw
+    // Business Group Code (which RELAY never receives). See decorateBranchSummary in OMNIPOS's
+    // server.js — same pattern as /relay/remote-operations/summary.
     const branches = Object.entries(group).map(([installationId, entry]) => ({
         installationId,
         branchName: entry.branchName,
-        summary: entry.summary,
+        summary: entry.summary || null, // legacy plaintext fallback only
+        encryptedSummary: entry.encryptedSummary || null,
         updatedAt: entry.updatedAt
     })).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-    const combined = branches.reduce((acc, b) => {
-        for (const field of BRANCH_SUMMARY_NUMERIC_FIELDS) {
-            acc[field] = (acc[field] || 0) + (Number(b.summary && b.summary[field]) || 0);
-        }
-        return acc;
-    }, {});
-    res.json({ success: true, branchCount: branches.length, branches, combined });
+    res.json({ success: true, branchCount: branches.length, branches, combined: null });
 });
 app.get('/relay/branch-trend', requireApiKey, requireAllowedDevice, rateLimit('branch-trend', 120, 60 * 60 * 1000, (req) => req.query?.installationId), (req, res) => {
     const groupKeyHash = String(req.query.groupKeyHash || '');
@@ -6537,34 +6578,18 @@ app.get('/relay/branch-trend', requireApiKey, requireAllowedDevice, rateLimit('b
         return res.status(400).json({ success: false, message: 'Missing or invalid groupKeyHash query param format.' });
     }
     const group = branchSummaries[groupKeyHash] || {};
+    // Blind relay: each history point is either an opaque ciphertext blob (`encryptedSummary`) or,
+    // from an installation that hasn't upgraded yet, the legacy plaintext numeric fields — we just
+    // pass the raw points through. RELAY can no longer bucket-and-sum these into a combined trend
+    // line since it can't read the encrypted points; that combination now happens on the OMNIPOS
+    // side after it decrypts each branch's points locally. See decorateBranchTrend in OMNIPOS's
+    // server.js.
     const branches = Object.entries(group).map(([installationId, entry]) => ({
         installationId,
         branchName: entry.branchName,
         history: branchHistory[`${groupKeyHash}|${installationId}`] || []
     }));
-    // Combined trend: bucket all points from all branches into the nearest hour
-    // (rounded to the hour) and sum each branch's most recent point's grossSalesToday
-    // before that bucket — a way to derive the "total sales curve" across the day.
-    const bucketMap = new Map();
-    for (const b of branches) {
-        for (const point of b.history) {
-            const bucketTs = Math.floor(point.ts / (60 * 60 * 1000)) * (60 * 60 * 1000);
-            if (!bucketMap.has(bucketTs)) bucketMap.set(bucketTs, {});
-            bucketMap.get(bucketTs)[b.installationId] = point;
-        }
-    }
-    const sortedBuckets = Array.from(bucketMap.keys()).sort((a, b) => a - b);
-    const lastKnown = {};
-    const combinedHistory = sortedBuckets.map((ts) => {
-        const atBucket = bucketMap.get(ts);
-        for (const [id, point] of Object.entries(atBucket)) lastKnown[id] = point;
-        const acc = { ts };
-        for (const field of BRANCH_SUMMARY_NUMERIC_FIELDS) {
-            acc[field] = Object.values(lastKnown).reduce((sum, p) => sum + (Number(p[field]) || 0), 0);
-        }
-        return acc;
-    });
-    res.json({ success: true, branches, combinedHistory });
+    res.json({ success: true, branches, combinedHistory: null });
 });
 app.post('/relay/branch-transfer-request', requireApiKey, requireAllowedDevice, rateLimit('branch-transfer-request', 60, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
     const { installationId, branchGroupKeyHash, fromBranchName, toInstallationId, toBranchName, itemName, sku, qty, note } = req.body || {};
