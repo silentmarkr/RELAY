@@ -3472,7 +3472,7 @@ function recomputeUpgradeTierPricing() {
         const override = upgradeTierPricingOverrides[tier.id];
         tier.bundlePrice = (override && typeof override.bundlePrice === 'number') ? override.bundlePrice : base;
         if (override && typeof override.name === 'string' && override.name.trim()) {
-            tier.name = override.name.trim();
+            tier.name = override.name.replace(/\s*\(Complete\)\s*$/i, '').trim() || tier.name;
         }
         if (tier.id === 'pro') continue;
         if (override && Array.isArray(override.featureIds) && override.featureIds.length) {
@@ -6443,6 +6443,37 @@ app.post('/relay/branch-checkin', requireApiKey, requireAllowedDevice, rateLimit
     }
     res.json({ success: true, message: 'Branch check-in recorded.' });
 });
+// Called by OMNIPOS when a device CLEARS its Business Group Code (leaves the group).
+// Without this, the device's old entry sat in branchSummaries forever and kept
+// inflating the multi-terminal discount count. Removes only this installation's
+// own entry + trend history; shared transfer history is intentionally left alone.
+app.post('/relay/branch-leave', requireApiKey, requireAllowedDevice, rateLimit('branch-leave', 10, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
+    const { installationId } = req.body || {};
+    if (!installationId) {
+        return res.status(400).json({ success: false, message: 'Missing installationId.' });
+    }
+    let removedFromGroups = 0;
+    let historyChanged = false;
+    for (const hash of Object.keys(branchSummaries)) {
+        const group = branchSummaries[hash];
+        if (group && Object.prototype.hasOwnProperty.call(group, installationId)) {
+            delete group[installationId];
+            if (Object.keys(group).length === 0) delete branchSummaries[hash];
+            const persistKey = `${hash}|${installationId}`;
+            branchLastPersisted.delete(persistKey);
+            remoteOpsLastPersisted.delete(persistKey);
+            if (branchHistory[persistKey]) {
+                delete branchHistory[persistKey];
+                historyChanged = true;
+            }
+            removedFromGroups++;
+        }
+    }
+    if (removedFromGroups > 0) saveBranchSummaries(branchSummaries);
+    if (historyChanged) saveBranchHistory(branchHistory);
+    logActivity(installationId, 'branch_leave', { removedFromGroups });
+    res.json({ success: true, removedFromGroups });
+});
 app.post('/relay/remote-operations/checkin', requireApiKey, requireAllowedDevice, rateLimit('remote-operations-checkin', 60, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
     const { installationId, branchGroupKeyHash, branchName, encryptedRemoteOperations, remoteOperations } = req.body || {};
     if (!installationId) {
@@ -6540,6 +6571,7 @@ app.get('/relay/remote-operations/summary', requireApiKey, requireAllowedDevice,
     // the raw Business Group Code (which RELAY never receives). See decorateRemoteOperationsSummary
     // in OMNIPOS's server.js.
     const branches = Object.entries(group)
+        .filter(([branchInstallationId, entry]) => isBranchEntryListable(branchInstallationId, entry, installationId))
         .map(([branchInstallationId, entry]) => ({
             installationId: branchInstallationId,
             branchName: entry.branchName,
@@ -6563,7 +6595,8 @@ app.get('/relay/branch-summary', requireApiKey, requireAllowedDevice, rateLimit(
     // totals now happens on the OMNIPOS side, after it decrypts each blob locally with the raw
     // Business Group Code (which RELAY never receives). See decorateBranchSummary in OMNIPOS's
     // server.js — same pattern as /relay/remote-operations/summary.
-    const branches = Object.entries(group).map(([installationId, entry]) => ({
+    const requesterId = String(req.query.installationId || '');
+    const branches = Object.entries(group).filter(([installationId, entry]) => isBranchEntryListable(installationId, entry, requesterId)).map(([installationId, entry]) => ({
         installationId,
         branchName: entry.branchName,
         summary: entry.summary || null, // legacy plaintext fallback only
@@ -6584,7 +6617,8 @@ app.get('/relay/branch-trend', requireApiKey, requireAllowedDevice, rateLimit('b
     // line since it can't read the encrypted points; that combination now happens on the OMNIPOS
     // side after it decrypts each branch's points locally. See decorateBranchTrend in OMNIPOS's
     // server.js.
-    const branches = Object.entries(group).map(([installationId, entry]) => ({
+    const requesterId = String(req.query.installationId || '');
+    const branches = Object.entries(group).filter(([installationId, entry]) => isBranchEntryListable(installationId, entry, requesterId)).map(([installationId, entry]) => ({
         installationId,
         branchName: entry.branchName,
         history: branchHistory[`${groupKeyHash}|${installationId}`] || []
@@ -6731,11 +6765,44 @@ const MULTI_TERMINAL_DISCOUNT_TIERS_BASE = [
     { minDevices: 4, percent: 10 },
     { minDevices: 2, percent: 5 }
 ]; 
+// FIX (multi-terminal discount stayed active even after the other branches
+// were disconnected): branchSummaries entries are only ever ADDED on check-in.
+// Nothing removes them when a device clears its Business Group Code, is
+// uninstalled, or simply stops checking in — so the "ghost" entries kept
+// inflating the device count (and the discount) forever. Now only devices
+// that checked in recently are counted. A device that is no longer checking
+// in (including the requester itself) does not get the group discount.
+// Adjustable via MULTI_TERMINAL_ACTIVE_WINDOW_HOURS (default 48h).
+// FIX (ghost branches on the Branches page): a device that was uninstalled, had its
+// Business Group Code cleared while offline, etc. stayed in branchSummaries forever —
+// it showed up as a permanent "Offline" branch, its last (stale) sales figures were
+// still added into the combined totals, and it could be picked as a transfer
+// destination. Entries with no check-in for this long are now left out of the
+// Branches / Remote Operations listings (the requesting device's own entry is always
+// kept). Adjustable via BRANCH_LISTING_ACTIVE_WINDOW_DAYS (default 7).
+const BRANCH_LISTING_ACTIVE_WINDOW_MS = (Number(process.env.BRANCH_LISTING_ACTIVE_WINDOW_DAYS) > 0
+    ? Number(process.env.BRANCH_LISTING_ACTIVE_WINDOW_DAYS)
+    : 7) * 24 * 60 * 60 * 1000;
+function isBranchEntryListable(entryInstallationId, entry, requesterInstallationId) {
+    if (entryInstallationId === requesterInstallationId) return true;
+    const at = entry && (entry.updatedAt || (entry.remoteOperations && entry.remoteOperations.updatedAt));
+    return typeof at === 'number' && (Date.now() - at) <= BRANCH_LISTING_ACTIVE_WINDOW_MS;
+}
+const MULTI_TERMINAL_ACTIVE_WINDOW_MS = (Number(process.env.MULTI_TERMINAL_ACTIVE_WINDOW_HOURS) > 0
+    ? Number(process.env.MULTI_TERMINAL_ACTIVE_WINDOW_HOURS)
+    : 48) * 60 * 60 * 1000;
 function getGroupDeviceCount(installationId) {
+    const now = Date.now();
+    const isActive = (entry) => {
+        const at = entry && (entry.updatedAt || (entry.remoteOperations && entry.remoteOperations.updatedAt));
+        return typeof at === 'number' && (now - at) <= MULTI_TERMINAL_ACTIVE_WINDOW_MS;
+    };
     for (const hash of Object.keys(branchSummaries)) {
         const group = branchSummaries[hash];
         if (group && Object.prototype.hasOwnProperty.call(group, installationId)) {
-            return Object.keys(group).length;
+            if (!isActive(group[installationId])) return 1; 
+            const activeCount = Object.values(group).filter(isActive).length;
+            return Math.max(1, activeCount);
         }
     }
     return 1; 
