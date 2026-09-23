@@ -3454,7 +3454,7 @@ const UPGRADE_TIER_FEATURE_IDS_BASE = {
 let UPGRADE_TIERS = [
     { id: 'basic', name: 'Basic Upgrade', featureIds: [...UPGRADE_TIER_FEATURE_IDS_BASE.basic], bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.basic },
     { id: 'standard', name: 'Standard Upgrade', featureIds: [...UPGRADE_TIER_FEATURE_IDS_BASE.standard], bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.standard },
-    { id: 'pro', name: 'Pro Upgrade (Complete)', featureIds: Object.keys(FEATURE_CATALOG).filter(id => !isSubscriptionOnlyFeature(id)), bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.pro }
+    { id: 'pro', name: 'Pro Upgrade', featureIds: Object.keys(FEATURE_CATALOG).filter(id => !isSubscriptionOnlyFeature(id)), bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.pro }
 ];
 function recomputeProTierFeatureIds() {
     const proTier = UPGRADE_TIERS.find(t => t.id === 'pro');
