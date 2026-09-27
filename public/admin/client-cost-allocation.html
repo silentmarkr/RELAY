@@ -144,6 +144,25 @@
   .row-save-btn.dirty { border-color: var(--border-soft); color: var(--accent); background: var(--accent-soft); }
   .empty-state { text-align: center; padding: 40px 20px; color: var(--muted); font-size: .9rem; }
 
+  /* ---- Cost Safety Net (per-installation reserve/prepay picker, shown
+     inside the client details modal) ---- */
+  .safety-net-block {
+    border: 1.5px solid var(--border); border-radius: var(--radius-lg); padding: 12px 14px;
+    margin-top: 4px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .safety-net-title { font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted-dim); }
+  .safety-net-desc { font-size: .78rem; color: var(--muted); line-height: 1.4; }
+  .safety-net-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .safety-net-select {
+    padding: 8px 10px; border-radius: var(--radius); border: 1.5px solid var(--border);
+    background: var(--bg-raise); color: var(--text); font-family: var(--font-ui); font-size: .85rem; flex: 1 1 auto;
+  }
+  .safety-net-select:focus { outline: none; border-color: var(--accent); }
+  .safety-net-months { display: flex; align-items: center; gap: 6px; }
+  .safety-net-months input { width: 64px; }
+  .safety-net-info { font-size: .78rem; color: var(--muted); }
+  .safety-net-info .mono { font-size: .78rem; }
+
   /* ---- Client cards (used at every width — a card grid that reflows
      from a multi-column desktop layout down to one column on mobile,
      styled to match the app's own storage-usage cards: rounded bordered
@@ -599,6 +618,12 @@ let clientVisibleCount = CLIENT_PAGE_SIZE;
 let viewMode = 'list';
 let detailClientId = null;
 let detailReturnFocus = null;
+// GAWA/BAGO: COST SAFETY NET — per-installation mode/reserve settings,
+// hiwalay na na-load mula sa /relay/admin/api/cost-safety-net (hindi
+// bahagi ng /client-cost-allocation response) at pinagsasama lang sa UI
+// sa oras ng pag-render ng details modal.
+let costSafetyNetSettings = {};
+let costSafetyNetMeta = { defaultReserveMonths: 1.5, minReserveMonths: 1, maxReserveMonths: 2 };
 try {
   const savedView = localStorage.getItem('relayCostAllocationView');
   if (savedView === 'grid' || savedView === 'list') viewMode = savedView;
@@ -899,6 +924,92 @@ function clientMetricsHtml(c, v, withTotal) {
   `;
 }
 
+// ===================================================================
+// GAWA/BAGO: COST SAFETY NET picker (details modal lang, per installation
+// ID/device) — dito pinipili ng developer ang isa sa dalawang paraan para
+// protektahan ang estimated storage+sync cost buffer laban sa mga
+// "ibang bagay" na pagbili (Cloud Backup plan / module / à la carte
+// feature / Receipt Customization credit), o 'None' para sa dating
+// behavior. Tingnan ang server-side na paliwanag malapit sa
+// COST_SAFETY_NET_MODES sa RELAY server.js.
+// ===================================================================
+function costSafetyNetHtml(c, v) {
+  const s = costSafetyNetSettings[c.installationId] || { mode: 'none', reserveMonths: costSafetyNetMeta.defaultReserveMonths, reservedTokens: 0, balanceTokens: null };
+  const estimateMonthly = Number(c.baseCostPHP) || 0;
+  const months = s.reserveMonths || costSafetyNetMeta.defaultReserveMonths;
+  const reserveFloorPreview = Math.round(estimateMonthly * months * 100) / 100;
+  const modeOptions = [
+    ['none', 'None — no restriction (default)'],
+    ['reserve', 'Reserve threshold — flexible floor'],
+    ['prepay', 'Prepay & book — deduct/book upfront']
+  ].map(([val, label]) => `<option value="${val}"${s.mode === val ? ' selected' : ''}>${label}</option>`).join('');
+  const monthsFieldHidden = s.mode !== 'reserve' ? ' style="display:none;"' : '';
+  const prepayInfoHidden = s.mode !== 'prepay' ? ' style="display:none;"' : '';
+  const nextBookLabel = s.prepayCycleAnchor
+    ? new Date(new Date(s.prepayCycleAnchor).getTime() + 30 * 24 * 60 * 60 * 1000).toLocaleDateString()
+    : 'on next "other things" purchase attempt';
+  return `
+    <div class="safety-net-block">
+      <div class="safety-net-title">Cost Safety Net</div>
+      <div class="safety-net-desc">
+        Protects this client's estimated storage+sync cost (~${formatPHP(estimateMonthly)}/mo) from being spent on
+        other things (Cloud Backup plan, add-on features, Receipt Customization credits). Does not affect the
+        actual sync/restore/storage charges themselves — those keep running normally either way.
+      </div>
+      <div class="safety-net-row">
+        <select class="safety-net-select" id="safetyNetMode-${v.jsId}" onchange="onSafetyNetModeChange('${v.jsId}')">
+          ${modeOptions}
+        </select>
+      </div>
+      <div class="safety-net-row safety-net-months" id="safetyNetMonthsRow-${v.jsId}"${monthsFieldHidden}>
+        <span class="safety-net-info">Keep reserved:</span>
+        <input type="number" class="fee-input" id="safetyNetMonths-${v.jsId}" value="${months}" min="${costSafetyNetMeta.minReserveMonths}" max="${costSafetyNetMeta.maxReserveMonths}" step="0.5" oninput="onSafetyNetMonthsInput('${v.jsId}')">
+        <span class="safety-net-info">month(s) of cost ≈ <span class="mono" id="safetyNetFloorPreview-${v.jsId}">${formatPHP(reserveFloorPreview)}</span></span>
+      </div>
+      <div class="safety-net-row safety-net-info" id="safetyNetPrepayInfo-${v.jsId}"${prepayInfoHidden}>
+        Currently booked: <span class="mono">${formatPHP(s.reservedTokens || 0)}</span> · next re-book: ${escapeHtml(nextBookLabel)}
+      </div>
+      <div class="safety-net-row">
+        <button type="button" class="row-save-btn" onclick="saveCostSafetyNet('${v.jsId}')">💾 Save setting</button>
+      </div>
+    </div>
+  `;
+}
+
+function onSafetyNetModeChange(id) {
+  const mode = document.getElementById(`safetyNetMode-${id}`).value;
+  const monthsRow = document.getElementById(`safetyNetMonthsRow-${id}`);
+  const prepayRow = document.getElementById(`safetyNetPrepayInfo-${id}`);
+  if (monthsRow) monthsRow.style.display = mode === 'reserve' ? '' : 'none';
+  if (prepayRow) prepayRow.style.display = mode === 'prepay' ? '' : 'none';
+}
+
+function onSafetyNetMonthsInput(id) {
+  const c = findClient(id);
+  if (!c) return;
+  const months = Number(document.getElementById(`safetyNetMonths-${id}`).value) || costSafetyNetMeta.defaultReserveMonths;
+  const preview = document.getElementById(`safetyNetFloorPreview-${id}`);
+  if (preview) preview.textContent = formatPHP(Math.round((Number(c.baseCostPHP) || 0) * months * 100) / 100);
+}
+
+async function saveCostSafetyNet(id) {
+  const modeEl = document.getElementById(`safetyNetMode-${id}`);
+  const monthsEl = document.getElementById(`safetyNetMonths-${id}`);
+  if (!modeEl) return;
+  const mode = modeEl.value;
+  const reserveMonths = monthsEl ? Number(monthsEl.value) || costSafetyNetMeta.defaultReserveMonths : costSafetyNetMeta.defaultReserveMonths;
+  try {
+    await api('/relay/admin/api/cost-safety-net', {
+      method: 'POST',
+      body: JSON.stringify({ installationId: id, mode, reserveMonths })
+    });
+    toast('Cost safety net setting saved.');
+    await loadCostSafetyNet();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
 function renderClientCard(c) {
   const v = clientVM(c);
   const idBlock = v.displayLabel
@@ -982,6 +1093,7 @@ function renderClientDetail() {
   document.getElementById('detailBody').innerHTML = `
     <div class="detail-id"><span class="mono">${v.safeId}</span><button type="button" class="detail-copy" onclick="copyClientId('${v.jsId}')">⧉ Copy</button></div>
     <div class="detail-stack">${clientMetricsHtml(c, v, false)}</div>
+    ${costSafetyNetHtml(c, v)}
   `;
   document.getElementById('detailFoot').innerHTML = `
     <div class="client-card-total">
@@ -1084,7 +1196,7 @@ async function loadAllocation() {
   const refreshBtn = document.getElementById('refreshBtn');
   if (refreshBtn) refreshBtn.disabled = true;
   try {
-    const data = await api('/relay/admin/api/client-cost-allocation');
+    const [data] = await Promise.all([api('/relay/admin/api/client-cost-allocation'), loadCostSafetyNet()]);
     renderAllocation(data);
   } catch (err) {
     if (err.message !== 'forbidden') {
@@ -1092,6 +1204,25 @@ async function loadAllocation() {
     }
   } finally {
     if (refreshBtn) refreshBtn.disabled = false;
+  }
+}
+
+// GAWA/BAGO: COST SAFETY NET — hiwalay na loader (hindi bahagi ng
+// /client-cost-allocation) para sa cost_safety_mode/reserve_months/
+// reserved_tokens ng bawat installation. Tahimik itong nabibigo (e.g.
+// walang Postgres) — walang epekto sa ibang bahagi ng page.
+async function loadCostSafetyNet() {
+  try {
+    const data = await api('/relay/admin/api/cost-safety-net');
+    costSafetyNetSettings = data.settings || {};
+    costSafetyNetMeta = {
+      defaultReserveMonths: data.defaultReserveMonths ?? 1.5,
+      minReserveMonths: data.minReserveMonths ?? 1,
+      maxReserveMonths: data.maxReserveMonths ?? 2
+    };
+    if (detailClientId !== null) renderClientDetail();
+  } catch (err) {
+    if (err.message !== 'forbidden') console.warn('Cost safety net settings not loaded:', err.message);
   }
 }
 

@@ -1481,7 +1481,7 @@ async function consumeCloudTokensForSyncExact(installationId, sizeBytes, tier, n
             [installationId]
         );
         const walletRes = await client.query(
-            `SELECT balance_tokens, sync_fraction_accrued, sync_fraction_tier FROM cloud_token_wallets WHERE installation_id = $1 FOR UPDATE`,
+            `SELECT balance_tokens, sync_fraction_accrued, sync_fraction_tier, cost_safety_mode, reserved_tokens FROM cloud_token_wallets WHERE installation_id = $1 FOR UPDATE`,
             [installationId]
         );
         const row = walletRes.rows[0];
@@ -1506,6 +1506,10 @@ async function consumeCloudTokensForSyncExact(installationId, sizeBytes, tier, n
                 `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note, category, trigger_type) VALUES ($1, 'consume', $2, $3, $4, 'SYNC_CHARGE', $5)`,
                 [installationId, -wholeTokens, newBalance, note || null, trigger]
             );
+            // GAWA/BAGO: kung 'prepay' ang cost safety net mode, unti-unting
+            // "binabayaran" nitong totoong charge ang naka-book na reserba —
+            // tingnan ang paliwanag sa drawDownPrepayReserve().
+            await drawDownPrepayReserve(client, installationId, { mode: row.cost_safety_mode, reservedTokens: row.reserved_tokens }, wholeTokens);
         } else {
             // AYOS/BAGO: kahit walang WHOLE token na na-deduct (fraction pa
             // lang), itinatala pa rin ito sa lightweight na
@@ -1537,10 +1541,11 @@ async function consumeCloudTokensForRestore(installationId, sizeBytes, tier, not
             [installationId]
         );
         const walletRes = await client.query(
-            `SELECT balance_tokens FROM cloud_token_wallets WHERE installation_id = $1 FOR UPDATE`,
+            `SELECT balance_tokens, cost_safety_mode, reserved_tokens FROM cloud_token_wallets WHERE installation_id = $1 FOR UPDATE`,
             [installationId]
         );
-        const currentBalance = Number(walletRes.rows[0].balance_tokens);
+        const walletRow = walletRes.rows[0];
+        const currentBalance = Number(walletRow.balance_tokens);
         if (currentBalance < costTokens) {
             return { ok: false, insufficient: true, balanceTokens: currentBalance, costTokens };
         }
@@ -1553,6 +1558,8 @@ async function consumeCloudTokensForRestore(installationId, sizeBytes, tier, not
             `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note, category, trigger_type) VALUES ($1, 'consume', $2, $3, $4, 'RESTORE_CHARGE', 'manual')`,
             [installationId, -costTokens, newBalance, note || null]
         );
+        // GAWA/BAGO: 'prepay' cost safety net drawdown — tingnan ang paliwanag sa drawDownPrepayReserve().
+        await drawDownPrepayReserve(client, installationId, { mode: walletRow.cost_safety_mode, reservedTokens: walletRow.reserved_tokens }, costTokens);
         return { ok: true, balanceTokens: newBalance, tokensCharged: costTokens };
     });
 }
@@ -2187,6 +2194,38 @@ async function ensureCloudTokenSchema() {
     await pgPool.query(`ALTER TABLE cloud_token_wallets ADD COLUMN IF NOT EXISTS sync_fraction_accrued NUMERIC NOT NULL DEFAULT 0;`);
     await pgPool.query(`ALTER TABLE cloud_token_wallets ADD COLUMN IF NOT EXISTS sync_fraction_tier TEXT;`);
     // ===================================================================
+    // GAWA/BAGO: COST SAFETY NET columns — dalawang opsyonal na paraan
+    // (piliin per installation sa RELAY admin, tingnan ang
+    // /relay/admin/api/cost-safety-net sa ibaba) para hindi maubos ng
+    // client ang buong Omni Token balance sa "ibang bagay" (Cloud Backup
+    // plan / module subscription / à la carte feature purchases —
+    // FEATURE_UNLOCK/ADDON_PURCHASE) hanggang sa wala nang matitira para sa
+    // TUNAY na patuloy na developer cost (storage + sync sa Neon).
+    //   cost_safety_mode:      'none' (default, walang restriction) |
+    //                          'reserve' (dynamic floor, tingnan ang
+    //                          getCostSafetyNetFloor()) | 'prepay' (fixed
+    //                          booking per billing cycle, tingnan ang
+    //                          ensurePrepayBooked()).
+    //   reserve_months:        ilang buwang estimated storage+sync cost ang
+    //                          dapat manatiling naka-reserba (1–2, ginagamit
+    //                          lang kapag 'reserve' ang mode).
+    //   reserved_tokens:       ang kasalukuyang naka-book na halaga (₱/token)
+    //                          para sa 'prepay' mode — unti-unting nauubos
+    //                          habang tumatakbo ang totoong SYNC_CHARGE/
+    //                          RESTORE_CHARGE/STORAGE_HOLDING_FEE (tingnan
+    //                          ang drawDownPrepayReserve()), kaya hindi ito
+    //                          dobleng singil laban sa mga totoong charge na
+    //                          iyon.
+    //   prepay_cycle_anchor:   noong huling na-book (o na-reset) ang
+    //                          reserved_tokens — ginagamit para malaman kung
+    //                          kailan na dapat mag-book ulit ng bagong
+    //                          estimate (tingnan ang COST_SAFETY_NET_PREPAY_CYCLE_MS).
+    // ===================================================================
+    await pgPool.query(`ALTER TABLE cloud_token_wallets ADD COLUMN IF NOT EXISTS cost_safety_mode TEXT NOT NULL DEFAULT 'none';`);
+    await pgPool.query(`ALTER TABLE cloud_token_wallets ADD COLUMN IF NOT EXISTS reserve_months NUMERIC NOT NULL DEFAULT 1.5;`);
+    await pgPool.query(`ALTER TABLE cloud_token_wallets ADD COLUMN IF NOT EXISTS reserved_tokens NUMERIC NOT NULL DEFAULT 0;`);
+    await pgPool.query(`ALTER TABLE cloud_token_wallets ADD COLUMN IF NOT EXISTS prepay_cycle_anchor TIMESTAMPTZ;`);
+    // ===================================================================
     // AYOS/BAGO: idinagdag ang `category` column sa cloud_token_ledger —
     // dating ang paraan lang ng pag-identify kung anong klaseng entry ito
     // ay ang MANUAL na pag-parse ng `note` text (hal. maghahanap ng
@@ -2241,6 +2280,159 @@ const CLOUD_TOKEN_LEDGER_CATEGORIES = {
     STORAGE_HOLDING_FEE: 'Storage Holding Fee', // AYOS/BAGO: scheduled (hindi naka-depende sa bilang ng syncs) na bayad para sa datos na TULOY-TULOY na nakaupo sa Neon storage — naniningil kahit walang sync na naganap, dahil tuloy-tuloy din ang bayad ng developer kay Neon para sa storage na iyon
     REFUND: 'Refund'                        // ibinalik na tokens dahil sa failed/incomplete sync
 };
+// ===================================================================
+// GAWA/BAGO: COST SAFETY NET — tingnan ang paliwanag sa itaas (malapit sa
+// ALTER TABLE ng cost_safety_mode/reserve_months/reserved_tokens/
+// prepay_cycle_anchor) para sa disenyo. Buod:
+//   'none'    -> walang restriction, dating behavior (default) — hindi
+//                naaapektuhan ang mga installation na hindi pa dinisenyo
+//                rito maliban kung sinadya ng developer sa admin panel.
+//   'reserve' -> FLEXIBLE floor: hinahayaan ang bawat "ibang bagay" na
+//                pagbili MAGTULOY basta may matitirang balance na >=
+//                (estimated monthly storage+sync cost x reserve_months).
+//                Dynamic — kinukwenta ulit sa bawat pagsubok gamit ang
+//                pinaka-bagong estimate.
+//   'prepay'  -> mas mahigpit: sa simula ng bawat ~30-araw na billing
+//                cycle, "bino-book" (reserved_tokens) agad ang pinaka-
+//                bagong estimate ng susunod na buwang cost — hindi ito
+//                puwedeng magamit sa "ibang bagay" habang buo pa. SADYANG
+//                HINDI ito literal na dobleng pagbawas laban sa totoong
+//                SYNC_CHARGE/RESTORE_CHARGE/STORAGE_HOLDING_FEE na
+//                tumatakbo pa rin buong buwan (iyon ang magiging double-
+//                charge bug) — sa halip, kada totoong charge na iyon,
+//                kasabay itong binabawasan ang reserved_tokens (hanggang
+//                0, tingnan ang drawDownPrepayReserve()), kaya unti-unting
+//                "nabubuksan" ulit ang nakabook na pondo habang totoong
+//                nababayaran na ang gastos — pero hindi ito magagamit sa
+//                ibang bagay hangga't hindi pa ito na-cover ng totoong
+//                mga charge.
+// Mahalaga: WALA sa dalawang mode na ito ang humaharang/nakakaapekto sa
+// mismong SYNC_CHARGE/RESTORE_CHARGE/STORAGE_HOLDING_FEE — iyon ay dapat
+// pa ring tumakbo (at pinapayagang pumunta sa negatibo) anuman ang
+// setting dito, dahil totoong developer cost iyon (tingnan ang paliwanag
+// malapit sa consumeCloudTokensForSyncExact() at runStorageHoldingFeeSweep()).
+// Ang gina-gate LANG dito ay ang mga "ibang bagay" na pagbili: Cloud
+// Backup plan (FEATURE_UNLOCK), module subscription / à la carte feature
+// (ADDON_PURCHASE), at Receipt Customization credit (ADDON_PURCHASE).
+// ===================================================================
+const COST_SAFETY_NET_MODES = ['none', 'reserve', 'prepay'];
+const COST_SAFETY_NET_DEFAULT_RESERVE_MONTHS = 1.5; // gitna ng hiniling na "1-2 buwan"
+const COST_SAFETY_NET_MIN_RESERVE_MONTHS = 1;
+const COST_SAFETY_NET_MAX_RESERVE_MONTHS = 2;
+// Parehong 30-araw na basehan ng "isang buwan" na ginamit na sa
+// STORAGE_HOLDING_FEE_MONTH_MS, para tugma ang lahat ng "monthly" na
+// pagpapalagay sa buong Cloud Backup billing system na ito.
+const COST_SAFETY_NET_PREPAY_CYCLE_MS = 30 * 24 * 60 * 60 * 1000;
+// I-cache ang resulta ng (mabigat, tumatawag sa Neon API) computeClientCostAllocation()
+// nang ilang minuto lang — ang cost safety net ay isang PROTECTIVE buffer
+// (hindi kailangang-kailangan ng split-second na katumpakan), kaya
+// katanggap-tanggap ang bahagyang lumang estimate kapalit ng hindi
+// pagpapabagal/pagdagdag ng gastos sa bawat "ibang bagay" na pagbili.
+const COST_SAFETY_NET_ESTIMATE_CACHE_TTL_MS = 20 * 60 * 1000; // 20 minuto
+let costSafetyNetEstimateCache = { data: null, expiresAt: 0 };
+async function getEstimatedMonthlyCostAllocationCached() {
+    if (costSafetyNetEstimateCache.data && Date.now() < costSafetyNetEstimateCache.expiresAt) {
+        return costSafetyNetEstimateCache.data;
+    }
+    let allocation;
+    try {
+        allocation = await computeClientCostAllocation();
+    } catch (err) {
+        allocation = { success: false, message: err.message };
+    }
+    costSafetyNetEstimateCache = { data: allocation, expiresAt: Date.now() + COST_SAFETY_NET_ESTIMATE_CACHE_TTL_MS };
+    return allocation;
+}
+// Ang "estimated monthly storage+sync cost" ng isang installation — ito
+// mismo ang `baseCostPHP` (storageCostPHP + computeCostPHP) na kinukwenta
+// na ng computeClientCostAllocation(), SINASADYANG HINDI kasama ang
+// maintenanceFeePHP (ang presyo ng Cloud Backup PLAN mismo) dahil iyon ay
+// isa nang "ibang bagay" na dapat protektahan ng safety net na ito, hindi
+// bahagi ng dapat i-reserve. FAIL-OPEN kapag hindi makuha ang estimate
+// (hal. hindi pa naka-configure ang Neon API) — 0 ang ibabalik, ibig
+// sabihin walang restriction sa halip na basta harangan ang lahat ng
+// pagbili dahil lang sa hindi available ang cost data.
+async function getEstimatedMonthlyStorageSyncCostPHP(installationId) {
+    const allocation = await getEstimatedMonthlyCostAllocationCached();
+    if (!allocation || !allocation.success || !Array.isArray(allocation.clients)) return 0;
+    const mine = allocation.clients.find((c) => c.installationId === installationId);
+    return mine ? Math.max(0, Number(mine.baseCostPHP) || 0) : 0;
+}
+async function getWalletCostSafetyRow(installationId) {
+    await getOrCreateCloudTokenWallet(installationId);
+    const result = await queryWithRetry(
+        pgPool,
+        `SELECT balance_tokens, cost_safety_mode, reserve_months, reserved_tokens, prepay_cycle_anchor FROM cloud_token_wallets WHERE installation_id = $1`,
+        [installationId]
+    );
+    const row = result.rows[0] || {};
+    return {
+        balanceTokens: Number(row.balance_tokens) || 0,
+        mode: COST_SAFETY_NET_MODES.includes(row.cost_safety_mode) ? row.cost_safety_mode : 'none',
+        reserveMonths: Number(row.reserve_months) || COST_SAFETY_NET_DEFAULT_RESERVE_MONTHS,
+        reservedTokens: Number(row.reserved_tokens) || 0,
+        prepayCycleAnchor: row.prepay_cycle_anchor || null
+    };
+}
+// Para sa 'prepay' mode: kung wala pang naka-book (walang anchor) o
+// lumagpas na ng ~30 araw mula sa huling pagka-book, mag-book ulit gamit
+// ang pinaka-bagong estimate. Ligtas itong tawagin nang paulit-ulit
+// (idempotent sa loob ng parehong cycle) — hindi tatawag ng UPDATE kung
+// hindi pa panahon.
+async function ensurePrepayBooked(installationId, existingSettings) {
+    const settings = existingSettings || await getWalletCostSafetyRow(installationId);
+    const anchorMs = settings.prepayCycleAnchor ? new Date(settings.prepayCycleAnchor).getTime() : null;
+    const needsNewCycle = !anchorMs || (Date.now() - anchorMs) >= COST_SAFETY_NET_PREPAY_CYCLE_MS;
+    if (!needsNewCycle) return settings;
+    const estimate = await getEstimatedMonthlyStorageSyncCostPHP(installationId);
+    const bookedTokens = Math.round(estimate * 100) / 100;
+    await queryWithRetry(
+        pgPool,
+        `UPDATE cloud_token_wallets SET reserved_tokens = $2, prepay_cycle_anchor = now(), updated_at = now() WHERE installation_id = $1`,
+        [installationId, bookedTokens]
+    );
+    invalidateWalletCache(installationId);
+    logActivity(installationId, 'cost_safety_net_prepay_booked', { bookedTokens, estimateMonthlyCostPHP: estimate });
+    return { ...settings, reservedTokens: bookedTokens, prepayCycleAnchor: new Date().toISOString() };
+}
+// Ang PANGUNAHING function na tinatawag ng bawat "ibang bagay" na pagbili
+// (activate-cloud-backup, activate-purchase, activate-receipt-credit) —
+// ibinabalik ang `floor`: ang pinakamababang balance na dapat MATIRA
+// PAGKATAPOS ng pagbiling ito (0 kung 'none' ang mode, ibig sabihin walang
+// restriction).
+async function getCostSafetyNetFloor(installationId) {
+    const settings = await getWalletCostSafetyRow(installationId);
+    if (settings.mode === 'reserve') {
+        const estimateMonthlyCostPHP = await getEstimatedMonthlyStorageSyncCostPHP(installationId);
+        const reserveMonths = Math.min(COST_SAFETY_NET_MAX_RESERVE_MONTHS, Math.max(COST_SAFETY_NET_MIN_RESERVE_MONTHS, settings.reserveMonths || COST_SAFETY_NET_DEFAULT_RESERVE_MONTHS));
+        return { floor: Math.round(estimateMonthlyCostPHP * reserveMonths * 100) / 100, mode: 'reserve', estimateMonthlyCostPHP, reserveMonths };
+    }
+    if (settings.mode === 'prepay') {
+        const refreshed = await ensurePrepayBooked(installationId, settings);
+        return { floor: Math.round((Number(refreshed.reservedTokens) || 0) * 100) / 100, mode: 'prepay' };
+    }
+    return { floor: 0, mode: 'none' };
+}
+// Tinatawag pagkatapos ng bawat TUNAY na SYNC_CHARGE/RESTORE_CHARGE/
+// STORAGE_HOLDING_FEE na aktwal na may WHOLE token na na-deduct
+// (`tokensCharged`) — kung 'prepay' ang mode ng installation na ito,
+// unti-unting binabawasan ang reserved_tokens (hanggang 0 lang, hindi
+// kailanman negative) para hindi ito maging dobleng singil laban sa
+// mismong pagbawas na ginawa na ng caller sa balance_tokens. Dapat
+// tawagin SA LOOB ng parehong transaksyon/lock (`client`) ng caller.
+// Walang epekto kung 'none'/'reserve' ang mode (0 pa rin ang reserved_tokens
+// nila, walang babawasin).
+async function drawDownPrepayReserve(client, installationId, walletModeAndReserved, tokensCharged) {
+    if (!tokensCharged || tokensCharged <= 0) return;
+    if (!walletModeAndReserved || walletModeAndReserved.mode !== 'prepay') return;
+    const currentReserved = Number(walletModeAndReserved.reservedTokens) || 0;
+    if (currentReserved <= 0) return;
+    const newReserved = Math.max(0, currentReserved - tokensCharged);
+    await client.query(
+        `UPDATE cloud_token_wallets SET reserved_tokens = $2 WHERE installation_id = $1`,
+        [installationId, newReserved]
+    );
+}
 // AYOS (cost-optimization): i-cache sa memory ang buong /relay/cloud-tokens/wallet
 // response (balance + last-20 ledger + pending purchases) — 3 Neon queries kada
 // tawag dati, at hanggang 120x/oras kada device pwedeng tawagin. Ang cache ay
@@ -2972,10 +3164,11 @@ async function runStorageHoldingFeeSweep() {
                     const elapsedMs = Date.now() - new Date(metaRow.storage_fee_last_billed_at).getTime();
                     if (elapsedMs < STORAGE_HOLDING_FEE_MIN_INTERVAL_MS) return;
                     const walletRes = await client.query(
-                        `SELECT balance_tokens FROM cloud_token_wallets WHERE installation_id = $1 FOR UPDATE`,
+                        `SELECT balance_tokens, cost_safety_mode, reserved_tokens FROM cloud_token_wallets WHERE installation_id = $1 FOR UPDATE`,
                         [installationId]
                     );
-                    const currentBalance = Number(walletRes.rows[0].balance_tokens);
+                    const walletRow = walletRes.rows[0];
+                    const currentBalance = Number(walletRow.balance_tokens);
                     const costFraction = computeStorageHoldingFeeCostPHP(metaRow.size_bytes, elapsedMs, rate);
                     const baseFraction = Number(metaRow.storage_fee_fraction_accrued) || 0;
                     const newFraction = baseFraction + costFraction;
@@ -3005,6 +3198,8 @@ async function runStorageHoldingFeeSweep() {
                             `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note, category, trigger_type) VALUES ($1, 'consume', $2, $3, $4, 'STORAGE_HOLDING_FEE', 'automatic')`,
                             [installationId, -wholeTokens, newBalance, `Storage holding fee — ${formatDuration(elapsedMs)}`]
                         );
+                        // GAWA/BAGO: 'prepay' cost safety net drawdown — tingnan ang paliwanag sa drawDownPrepayReserve().
+                        await drawDownPrepayReserve(client, installationId, { mode: walletRow.cost_safety_mode, reservedTokens: walletRow.reserved_tokens }, wholeTokens);
                     }
                 });
                 invalidateWalletCache(installationId);
@@ -8091,32 +8286,53 @@ app.post('/relay/cloud-tokens/activate-cloud-backup', requireApiKey, requireAllo
         return res.status(cached.status).json(cached.body);
     }
     try {
-        // NOTE: this is a single atomic UPDATE (WHERE balance_tokens >=
-        // requiredTokens), so exactly one of two things can happen: (a)
-        // the tokens are successfully deducted AND the activation token
-        // is issued, or (b) the balance is left untouched and no token
-        // is issued. No partial state is possible.
+        // NOTE: this is a single atomic UPDATE (WHERE balance_tokens - cost
+        // >= floor), so exactly one of two things can happen: (a) the
+        // tokens are successfully deducted AND the activation token is
+        // issued, or (b) the balance is left untouched and no token is
+        // issued. No partial state is possible.
         await getOrCreateCloudTokenWallet(installationId);
+        // GAWA/BAGO: COST SAFETY NET — Cloud Backup plan activation ay
+        // isang "ibang bagay" na pagbili (FEATURE_UNLOCK), kaya sakop ito
+        // ng reserve/prepay floor. `floor` ay 0 kapag 'none' ang mode ng
+        // installation na ito (walang epekto sa dating behavior).
+        const safetyNet = await getCostSafetyNetFloor(installationId);
+        const effectiveFloor = requiredTokens > 0 ? safetyNet.floor : 0;
         const deductResult = await queryWithRetry(
             pgPool,
             `UPDATE cloud_token_wallets SET balance_tokens = balance_tokens - $2, updated_at = now()
-             WHERE installation_id = $1 AND balance_tokens >= $2 RETURNING balance_tokens`,
-            [installationId, requiredTokens]
+             WHERE installation_id = $1 AND balance_tokens - $2 >= $3 RETURNING balance_tokens`,
+            [installationId, requiredTokens, effectiveFloor]
         );
         if (!deductResult.rows[0]) {
             const currentResult = await queryWithRetry(pgPool, 'SELECT balance_tokens FROM cloud_token_wallets WHERE installation_id = $1', [installationId]);
+            const currentBalance = currentResult.rows[0] ? Number(currentResult.rows[0].balance_tokens) : 0;
+            // Kung sapat na sana ang balance para sa pagbiling ito, at ang
+            // reserve/prepay floor lang ang naghadlang, ipaalam nang malinaw
+            // sa user (sa halip na basta "insufficient") — para malaman
+            // niyang hindi ito dahil sa kakulangan ng tokens sa totoo lang,
+            // kundi dahil pinoprotektahan ang storage/sync buffer.
+            const reserveProtected = currentBalance >= requiredTokens && effectiveFloor > 0;
             const insufficientBody = {
                 success: false,
                 insufficient: true,
-                balanceTokens: currentResult.rows[0] ? Number(currentResult.rows[0].balance_tokens) : 0,
+                reserveProtected,
+                costSafetyNetMode: safetyNet.mode,
+                reserveFloorTokens: effectiveFloor,
+                balanceTokens: currentBalance,
                 requiredTokens,
-                message: `Insufficient Omni Tokens. ${requiredTokens} token(s) are needed for ${CLOUD_BACKUP_PLANS[tier].name} (${billingCycle}). Please buy more Omni Tokens first, then try again.`
+                message: reserveProtected
+                    ? `This purchase is blocked by this account's cost safety net (${safetyNet.mode === 'prepay' ? 'prepaid storage/sync booking' : 'reserve threshold'}). Completing it would leave the balance below the ${effectiveFloor} token buffer set aside for storage/sync costs. Buy more Omni Tokens first, then try again.`
+                    : `Insufficient Omni Tokens. ${requiredTokens} token(s) are needed for ${CLOUD_BACKUP_PLANS[tier].name} (${billingCycle}). Please buy more Omni Tokens first, then try again.`
             };
+            if (reserveProtected) {
+                logActivity(installationId, 'cost_safety_net_purchase_blocked', { requiredTokens, balanceTokens: currentBalance, floor: effectiveFloor, mode: safetyNet.mode, item: 'cloud_backup' });
+            }
             // NOTE: an "insufficient" result is NOT cached as an
             // idempotent result — this way, if the requestor buys more
-            // tokens and retries with the same clientRequestId, a fresh
-            // attempt is still made instead of forever replaying the
-            // old "insufficient" response.
+            // tokens (or the buffer frees up) and retries with the same
+            // clientRequestId, a fresh attempt is still made instead of
+            // forever replaying the old "insufficient" response.
             return res.status(402).json(insufficientBody);
         }
         const balanceAfter = Number(deductResult.rows[0].balance_tokens);
@@ -8301,24 +8517,42 @@ app.post('/relay/cloud-tokens/activate-purchase', requireApiKey, requireAllowedD
     }
     try {
         await getOrCreateCloudTokenWallet(installationId);
+        // GAWA/BAGO: COST SAFETY NET — à la carte feature / module
+        // subscription purchases ay "ibang bagay" (ADDON_PURCHASE), kaya
+        // sakop ito ng reserve/prepay floor. `floor` ay 0 kapag 'none' ang
+        // mode (walang epekto sa dating behavior), at hindi rin ito
+        // ginagamit kung ₱0/free ang item (walang matitirang balance na
+        // masisira ng isang libreng activation).
+        const safetyNet = await getCostSafetyNetFloor(installationId);
+        const effectiveFloor = requiredTokens > 0 ? safetyNet.floor : 0;
         // requiredTokens could be 0 for a free/₱0 item — an UPDATE with
-        // "balance_tokens >= 0" always matches (even at 0 balance), which
-        // is the correct behavior (nothing to actually charge).
+        // "balance_tokens - 0 >= 0" always matches (even at 0 balance),
+        // which is the correct behavior (nothing to actually charge).
         const deductResult = await queryWithRetry(
             pgPool,
             `UPDATE cloud_token_wallets SET balance_tokens = balance_tokens - $2, updated_at = now()
-             WHERE installation_id = $1 AND balance_tokens >= $2 RETURNING balance_tokens`,
-            [installationId, requiredTokens]
+             WHERE installation_id = $1 AND balance_tokens - $2 >= $3 RETURNING balance_tokens`,
+            [installationId, requiredTokens, effectiveFloor]
         );
         if (!deductResult.rows[0]) {
             const currentResult = await queryWithRetry(pgPool, 'SELECT balance_tokens FROM cloud_token_wallets WHERE installation_id = $1', [installationId]);
+            const currentBalance = currentResult.rows[0] ? Number(currentResult.rows[0].balance_tokens) : 0;
+            const reserveProtected = currentBalance >= requiredTokens && effectiveFloor > 0;
             const insufficientBody = {
                 success: false,
                 insufficient: true,
-                balanceTokens: currentResult.rows[0] ? Number(currentResult.rows[0].balance_tokens) : 0,
+                reserveProtected,
+                costSafetyNetMode: safetyNet.mode,
+                reserveFloorTokens: effectiveFloor,
+                balanceTokens: currentBalance,
                 requiredTokens,
-                message: `Insufficient Omni Tokens. ${requiredTokens} token(s) are needed for this purchase. Please buy more Omni Tokens first, then try again.`
+                message: reserveProtected
+                    ? `This purchase is blocked by this account's cost safety net (${safetyNet.mode === 'prepay' ? 'prepaid storage/sync booking' : 'reserve threshold'}). Completing it would leave the balance below the ${effectiveFloor} token buffer set aside for storage/sync costs. Buy more Omni Tokens first, then try again.`
+                    : `Insufficient Omni Tokens. ${requiredTokens} token(s) are needed for this purchase. Please buy more Omni Tokens first, then try again.`
             };
+            if (reserveProtected) {
+                logActivity(installationId, 'cost_safety_net_purchase_blocked', { requiredTokens, balanceTokens: currentBalance, floor: effectiveFloor, mode: safetyNet.mode, item: 'addon_purchase', featureIds });
+            }
             return res.status(402).json(insufficientBody);
         }
         const balanceAfter = Number(deductResult.rows[0].balance_tokens);
@@ -8439,6 +8673,68 @@ app.get('/relay/admin/api/client-cost-allocation', requireAdminKey, async (req, 
     } catch (err) {
         console.error('⚠️  /relay/admin/api/client-cost-allocation error:', err.message);
         res.status(500).json({ success: false, message: 'Could not compute client cost allocation.' });
+    }
+});
+// ===================================================================
+// GAWA/BAGO: COST SAFETY NET admin API — dito pinipili ng developer, per
+// installation ID/device, kung alin sa dalawang paraan (o wala) ang
+// gagamitin para protektahan ang storage/sync cost buffer laban sa mga
+// "ibang bagay" na pagbili. Tingnan ang paliwanag malapit sa
+// COST_SAFETY_NET_MODES sa itaas.
+// ===================================================================
+app.get('/relay/admin/api/cost-safety-net', requireAdminKey, async (req, res) => {
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured.' });
+    try {
+        const { rows } = await queryWithRetry(
+            pgPool,
+            `SELECT installation_id, balance_tokens, cost_safety_mode, reserve_months, reserved_tokens, prepay_cycle_anchor FROM cloud_token_wallets`,
+            []
+        );
+        const settings = {};
+        for (const r of rows) {
+            settings[r.installation_id] = {
+                mode: COST_SAFETY_NET_MODES.includes(r.cost_safety_mode) ? r.cost_safety_mode : 'none',
+                reserveMonths: Number(r.reserve_months) || COST_SAFETY_NET_DEFAULT_RESERVE_MONTHS,
+                reservedTokens: Number(r.reserved_tokens) || 0,
+                prepayCycleAnchor: r.prepay_cycle_anchor,
+                balanceTokens: Number(r.balance_tokens) || 0
+            };
+        }
+        res.json({ success: true, defaultReserveMonths: COST_SAFETY_NET_DEFAULT_RESERVE_MONTHS, minReserveMonths: COST_SAFETY_NET_MIN_RESERVE_MONTHS, maxReserveMonths: COST_SAFETY_NET_MAX_RESERVE_MONTHS, settings });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+app.post('/relay/admin/api/cost-safety-net', requireAdminKey, async (req, res) => {
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured.' });
+    const installationId = String(req.body?.installationId || '').trim();
+    const mode = String(req.body?.mode || '').trim();
+    if (!installationId) return res.status(400).json({ success: false, message: 'Missing installationId.' });
+    if (!COST_SAFETY_NET_MODES.includes(mode)) {
+        return res.status(400).json({ success: false, message: `Invalid mode. Must be one of: ${COST_SAFETY_NET_MODES.join(', ')}.` });
+    }
+    let reserveMonths = Number(req.body?.reserveMonths);
+    if (!isFinite(reserveMonths)) reserveMonths = COST_SAFETY_NET_DEFAULT_RESERVE_MONTHS;
+    reserveMonths = Math.round(Math.min(COST_SAFETY_NET_MAX_RESERVE_MONTHS, Math.max(COST_SAFETY_NET_MIN_RESERVE_MONTHS, reserveMonths)) * 100) / 100;
+    try {
+        await getOrCreateCloudTokenWallet(installationId);
+        // AYOS: anumang paglipat ng mode (papunta man o palayo sa 'prepay')
+        // ay nire-reset ang reserved_tokens/prepay_cycle_anchor — kung
+        // papunta sa 'prepay', para agad mag-book (ensurePrepayBooked) ang
+        // pinaka-bagong estimate sa susunod na "ibang bagay" na pagbili sa
+        // halip na maghintay pa ng buong cycle; kung palayo dito, para
+        // walang matirang naka-book na halaga na hindi na ginagamit ng
+        // bagong mode.
+        await queryWithRetry(
+            pgPool,
+            `UPDATE cloud_token_wallets SET cost_safety_mode = $2, reserve_months = $3, reserved_tokens = 0, prepay_cycle_anchor = NULL, updated_at = now() WHERE installation_id = $1`,
+            [installationId, mode, reserveMonths]
+        );
+        invalidateWalletCache(installationId);
+        logActivity(installationId, 'cost_safety_net_mode_changed', { mode, reserveMonths });
+        res.json({ success: true, installationId, mode, reserveMonths });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
     }
 });
 // ===================================================================
@@ -10390,21 +10686,36 @@ app.post('/relay/cloud-tokens/activate-receipt-credit', requireApiKey, requireAl
     }
     try {
         await getOrCreateCloudTokenWallet(installationId);
+        // GAWA/BAGO: COST SAFETY NET — Receipt Customization credit ay
+        // "ibang bagay" (ADDON_PURCHASE) din, kaya sakop ito ng reserve/
+        // prepay floor, kaparehong pattern ng activate-purchase sa itaas.
+        const safetyNet = await getCostSafetyNetFloor(installationId);
+        const effectiveFloor = requiredTokens > 0 ? safetyNet.floor : 0;
         const deductResult = await queryWithRetry(
             pgPool,
             `UPDATE cloud_token_wallets SET balance_tokens = balance_tokens - $2, updated_at = now()
-             WHERE installation_id = $1 AND balance_tokens >= $2 RETURNING balance_tokens`,
-            [installationId, requiredTokens]
+             WHERE installation_id = $1 AND balance_tokens - $2 >= $3 RETURNING balance_tokens`,
+            [installationId, requiredTokens, effectiveFloor]
         );
         if (!deductResult.rows[0]) {
             const currentResult = await queryWithRetry(pgPool, 'SELECT balance_tokens FROM cloud_token_wallets WHERE installation_id = $1', [installationId]);
+            const currentBalance = currentResult.rows[0] ? Number(currentResult.rows[0].balance_tokens) : 0;
+            const reserveProtected = currentBalance >= requiredTokens && effectiveFloor > 0;
             const insufficientBody = {
                 success: false,
                 insufficient: true,
-                balanceTokens: currentResult.rows[0] ? Number(currentResult.rows[0].balance_tokens) : 0,
+                reserveProtected,
+                costSafetyNetMode: safetyNet.mode,
+                reserveFloorTokens: effectiveFloor,
+                balanceTokens: currentBalance,
                 requiredTokens,
-                message: `Insufficient Omni Tokens. ${requiredTokens} token(s) are needed for a Receipt Customization credit. Please buy more Omni Tokens first, then try again.`
+                message: reserveProtected
+                    ? `This purchase is blocked by this account's cost safety net (${safetyNet.mode === 'prepay' ? 'prepaid storage/sync booking' : 'reserve threshold'}). Completing it would leave the balance below the ${effectiveFloor} token buffer set aside for storage/sync costs. Buy more Omni Tokens first, then try again.`
+                    : `Insufficient Omni Tokens. ${requiredTokens} token(s) are needed for a Receipt Customization credit. Please buy more Omni Tokens first, then try again.`
             };
+            if (reserveProtected) {
+                logActivity(installationId, 'cost_safety_net_purchase_blocked', { requiredTokens, balanceTokens: currentBalance, floor: effectiveFloor, mode: safetyNet.mode, item: 'receipt_credit' });
+            }
             // Not cached as an idempotent result, same reasoning as activate-purchase:
             // a retry after topping up should make a fresh attempt, not replay "insufficient".
             return res.status(402).json(insufficientBody);
