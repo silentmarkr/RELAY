@@ -3483,10 +3483,13 @@ function projectFullPeriodCUHours(usage) {
 // laki ng database at dalas ng backup ng bawat client:
 //   - storage cost  -> hinahati ayon sa share ng size_bytes bawat client
 //     (mas malaking naka-store na data = mas malaking share ng storage cost)
-//   - compute cost   -> hinahati ayon sa share ng sync_count bawat client
-//     (mas madalas mag-backup/mag-poke sa admin panel = mas malaking share
-//     ng compute cost, dahil bawat sync/health-check ay gumagamit ng
-//     compute time)
+//   - compute cost   -> hinahati ayon sa share ng (size_bytes x sync_count)
+//     bawat client, HINDI sync_count lang (tingnan ang AYOS note malapit
+//     sa totalSyncWeightedBytes sa ibaba) — mas madalas mag-backup AT/O
+//     mas malaki ang nada-download/na-upload kada sync = mas malaking
+//     share ng compute cost, dahil bawat sync ay gumagamit ng compute
+//     time na naka-proporsyon sa laki ng datos na pino-proseso, hindi
+//     lang basta bilang ng beses na tumakbo ito
 // Ang kabuuan ng lahat ng client na baseCostPHP ay dapat === sa totoong
 // Neon cost (walang extra, walang kulang) — sinisiguro ito sa pamamagitan
 // ng pag-assign ng anumang centavo na natitira (rounding remainder) sa
@@ -3584,13 +3587,40 @@ async function computeClientCostAllocation(simulatedTierOverride) {
     const restoreCountRecentByClient = new Map(restoreRecentResult.rows.map(r => [r.installation_id, Number(r.recent_count) || 0]));
     const totalSizeBytes = rows.reduce((sum, r) => sum + (Number(r.size_bytes) || 0), 0);
     const totalSyncCount = rows.reduce((sum, r) => sum + (Number(r.sync_count) || 0), 0);
+    // AYOS (bugfix): dati, hinahati ang compute cost base LANG sa BILANG
+    // ng sync (sync_count) ng bawat client. Ibig sabihin, kapag pareho
+    // ang bilang ng sync ng dalawang client (hal. 1 sync bawat isa —
+    // karaniwan sa mga bagong-connect na device), MAGKAPAREHONG 50/50 ang
+    // computeShare nila KAHIT magkaiba ng malaki ang laki ng datos nila
+    // (hal. 0.2MB vs 8.1MB) — at dahil kadalasang mas maliit pa (o
+    // negligible) ang totoong storage cost kumpara sa compute cost, ang
+    // resulta ay MAGKAPAREHONG baseCostPHP din — kaya magkapareho rin ang
+    // Cost Safety Net reserve/prepay floor nila, kahit malinaw na iba ang
+    // dapat i-reserve para sa isang maliit vs malaking client. Mali ito:
+    // mas maraming datos ang kailangang i-proseso (kaya mas maraming
+    // compute) sa isang malaking sync kumpara sa isang maliit na sync,
+    // kahit iisa lang ang bilang ng sync sa dalawa. Ngayon, hinahati ang
+    // compute cost base sa "sync-weighted bytes" (size_bytes x sync_count
+    // bawat client) sa halip na sync_count lang — kaya kahit pareho ang
+    // bilang ng sync, ang client na may mas malaking datos ay makakakuha
+    // ng mas malaking share ng compute cost din (hindi lang ng storage
+    // cost), at magkakaiba na ang reserve/prepay floor nila ayon sa
+    // aktwal na laki ng kani-kanilang datos.
+    const totalSyncWeightedBytes = rows.reduce((sum, r) => sum + ((Number(r.size_bytes) || 0) * (Number(r.sync_count) || 0)), 0);
     const n = rows.length;
 
     let clients = rows.map((r) => {
         const sizeBytes = Number(r.size_bytes) || 0;
         const syncCount = Number(r.sync_count) || 0;
+        const syncWeightedBytes = sizeBytes * syncCount;
         const storageShare = totalSizeBytes > 0 ? sizeBytes / totalSizeBytes : (n > 0 ? 1 / n : 0);
-        const computeShare = totalSyncCount > 0 ? syncCount / totalSyncCount : (n > 0 ? 1 / n : 0);
+        // Fallback sa dating sync_count-only na paghahati kapag walang
+        // (o zero) size_bytes ang lahat ng client na may sync (hal. bagong
+        // deploy pa lang, walang naitalang laki ng datos) — para hindi
+        // maging 0/0 o basta mahati nang hindi makatarungan sa lahat.
+        const computeShare = totalSyncWeightedBytes > 0
+            ? syncWeightedBytes / totalSyncWeightedBytes
+            : (totalSyncCount > 0 ? syncCount / totalSyncCount : (n > 0 ? 1 / n : 0));
         const storageCostPHP = totalStorageCostPHP * storageShare;
         const computeCostPHP = totalComputeCostPHP * computeShare;
         const baseCostPHP = storageCostPHP + computeCostPHP;
