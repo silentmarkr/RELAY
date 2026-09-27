@@ -2343,6 +2343,34 @@ async function getEstimatedMonthlyCostAllocationCached() {
     costSafetyNetEstimateCache = { data: allocation, expiresAt: Date.now() + COST_SAFETY_NET_ESTIMATE_CACHE_TTL_MS };
     return allocation;
 }
+// GAWA/BAGO: hiwalay na cache para sa SIMULATED tier na version ng
+// allocation — sinasadyang hindi ito pinaghahalo sa
+// costSafetyNetEstimateCache sa itaas (na siyang TOTOONG/unsimulated na
+// bersyon), para hindi ito aksidenteng maging basehan ng anumang totoong
+// billing report. Kasama sa cache key ang tier mismo, kaya kung
+// magpalit ang admin ng simulated tier (hal. 'launch' -> 'scale'),
+// hindi gagamitin ang lumang cached na resulta ng ibang tier.
+let costSafetyNetSimulatedEstimateCache = { tier: null, data: null, expiresAt: 0 };
+async function getSimulatedMonthlyCostAllocationCached(simulatedTierId) {
+    if (
+        costSafetyNetSimulatedEstimateCache.data &&
+        costSafetyNetSimulatedEstimateCache.tier === simulatedTierId &&
+        Date.now() < costSafetyNetSimulatedEstimateCache.expiresAt
+    ) {
+        return costSafetyNetSimulatedEstimateCache.data;
+    }
+    let allocation;
+    try {
+        allocation = await computeClientCostAllocation(simulatedTierId);
+    } catch (err) {
+        allocation = { success: false, message: err.message };
+    }
+    costSafetyNetSimulatedEstimateCache = { tier: simulatedTierId, data: allocation, expiresAt: Date.now() + COST_SAFETY_NET_ESTIMATE_CACHE_TTL_MS };
+    return allocation;
+}
+function invalidateCostSafetyNetSimulatedEstimateCache() {
+    costSafetyNetSimulatedEstimateCache = { tier: null, data: null, expiresAt: 0 };
+}
 // Ang "estimated monthly storage+sync cost" ng isang installation — ito
 // mismo ang `baseCostPHP` (storageCostPHP + computeCostPHP) na kinukwenta
 // na ng computeClientCostAllocation(), SINASADYANG HINDI kasama ang
@@ -2353,7 +2381,15 @@ async function getEstimatedMonthlyCostAllocationCached() {
 // sabihin walang restriction sa halip na basta harangan ang lahat ng
 // pagbili dahil lang sa hindi available ang cost data.
 async function getEstimatedMonthlyStorageSyncCostPHP(installationId) {
-    const allocation = await getEstimatedMonthlyCostAllocationCached();
+    // GAWA/BAGO: kapag naka-set ang costSafetyNetSimulatedTier (at valid
+    // itong tier — 'free'/'launch'/'scale', hindi 'enterprise'), gamitin
+    // ang SIMULATED na allocation (pinilit ang RATES ng tier na iyon,
+    // pero totoong LIVE usage/share pa rin ang basehan) — PARA LANG dito
+    // sa Cost Safety Net floor estimate. Kapag disabled/invalid, 100%
+    // kaparehong dating behavior (totoong detected/fallback tier).
+    const allocation = isValidSimulatableNeonTier(costSafetyNetSimulatedTier)
+        ? await getSimulatedMonthlyCostAllocationCached(costSafetyNetSimulatedTier)
+        : await getEstimatedMonthlyCostAllocationCached();
     if (!allocation || !allocation.success || !Array.isArray(allocation.clients)) return 0;
     const mine = allocation.clients.find((c) => c.installationId === installationId);
     return mine ? Math.max(0, Number(mine.baseCostPHP) || 0) : 0;
@@ -2918,6 +2954,67 @@ function saveNeonConfiguredPlans(obj) {
 }
 let neonConfiguredPlans = { cloudBackup: 'free', devices: 'free', build: 'free' };
 // ===================================================================
+// GAWA/BAGO: COST SAFETY NET — SIMULATED TIER (para lang sa
+// getEstimatedMonthlyStorageSyncCostPHP() / getCostSafetyNetFloor() sa
+// ibaba, HINDI ito ginagamit ng totoong computeClientCostAllocation()/
+// billing tracker na tinitignan ng mismong admin allocation page).
+//
+// Konteksto: sinasadya ang computeNeonRealCost() sa ibaba na gamitin
+// ang AKTWAL na plan na sinasabi ng Neon API (detectedTierId) sa halip
+// na ang admin "configured plan" dropdown (neonConfiguredPlans) — para
+// hindi maulit ang dating bug na lumalabas na $0 ang totoong billing
+// kahit may totoong gastos na (tingnan ang paliwanag sa computeNeonRealCost).
+// Ibig sabihin, kahit i-set ng developer ang neonConfiguredPlans papuntang
+// "Launch"/"Scale" habang Free pa talaga ang Neon account, hindi
+// magbabago ang totoong ginagamit na rates dahil na-detect naman
+// successfully ang totoong "Free" mula sa Neon API mismo.
+//
+// Ito ang tamang paraan para pa ring ma-simulate ng developer na "kung
+// Launch/Scale na kami, ganito na kalaki ang buwanang gastos" PARA LANG
+// sa Cost Safety Net reserve/prepay floor (proteksyon laban sa "ibang
+// bagay" na pagbili — Cloud Backup plan, module subscription, atbp. —
+// hindi para sa totoong developer cost tracking, na dapat manatiling
+// 100% tumpak/live batay sa totoong Neon usage+plan).
+//   null/hindi naka-set = disabled — gamitin ang TOTOONG detected
+//                         (o fallback dropdown) na tier, katulad ng
+//                         dati (walang pagbabago sa behavior).
+//   'free'/'launch'/'scale' = i-FORCE ang RATES na ito (hindi lang
+//                             fallback) sa pag-compute ng estimate na
+//                             ginagamit LANG ng Cost Safety Net floor.
+// Kapag umabot na ang totoong detected tier sa parehong tier gaya ng
+// simulated (hal. talagang nag-Launch na ang account), magmamatch na
+// silang dalawa — walang kailangang baguhin/i-disable pa.
+// ===================================================================
+const COST_SAFETY_NET_SIMULATED_TIER_PATH = path.join(__dirname, 'cost-safety-net-simulated-tier.json');
+async function loadCostSafetyNetSimulatedTier() {
+    const fromStore = await getPersistentJSON('cost-safety-net-simulated-tier', null);
+    if (fromStore !== null) return (fromStore && fromStore.tier) || null;
+    try {
+        const parsed = JSON.parse(fs.readFileSync(COST_SAFETY_NET_SIMULATED_TIER_PATH, 'utf8'));
+        return (parsed && parsed.tier) || null;
+    } catch (err) {
+        return null;
+    }
+}
+function saveCostSafetyNetSimulatedTier(tierOrNull) {
+    const obj = { tier: tierOrNull || null };
+    if (pgPoolDevices || pgPool || redisClient) {
+        setPersistentJSON('cost-safety-net-simulated-tier', obj);
+    }
+    try {
+        fs.writeFileSync(COST_SAFETY_NET_SIMULATED_TIER_PATH, JSON.stringify(obj, null, 2));
+    } catch (err) {
+        console.error('Hindi ma-save ang cost-safety-net-simulated-tier.json:', err);
+    }
+}
+// Tanging 'free'/'launch'/'scale' lang ang puwede — hindi 'enterprise'
+// (customPricing: true, walang flat rate na pwedeng gamitin bilang
+// simulation basis, tingnan ang computeNeonRealCost()).
+function isValidSimulatableNeonTier(tierId) {
+    return NEON_PRICING_TIER_IDS.includes(tierId) && NEON_PRICING_BASE[tierId] && !NEON_PRICING_BASE[tierId].customPricing;
+}
+let costSafetyNetSimulatedTier = null;
+// ===================================================================
 // PER-CLIENT COST ALLOCATION (Cloud Backup Neon project lang)
 // ===================================================================
 // Iisang Neon project ang Cloud Backup para sa LAHAT ng client (bawat
@@ -3311,11 +3408,21 @@ function normalizeNeonPlanId(rawPlanId) {
 // totoong gastos na — ito mismo ang dating bug dito. Ang dropdown ay
 // ginagamit na lang bilang FALLBACK kapag hindi na-detect/na-recognize
 // ang plan_id na ibinalik ng Neon (hal. bagong plan name sa hinaharap).
-function computeNeonRealCost(usage, fallbackConfiguredPlan) {
+// GAWA/BAGO: opsyonal na ikatlong parameter `forceTierId` — kapag
+// binigyan, ito mismo (hindi ang detected/fallback) ang gagamitin
+// bilang RATES, gaano man "totoo" ang detectedTierId. Ito ay SADYANG
+// hiwalay sa `fallbackConfiguredPlan` (na FALLBACK LANG kapag hindi
+// na-detect): `forceTierId` ay laging nananalo, dahil layunin nito ay
+// i-OVERRIDE ang totoong detected tier para sa Cost Safety Net
+// simulated-tier na feature (tingnan ang costSafetyNetSimulatedTier sa
+// itaas) — HINDI ito dapat gamitin/i-pasa ng anumang code path na
+// nag-uulat ng totoong developer cost (walang forceTierId doon, kaya
+// walang pagbabago sa dating behavior nito).
+function computeNeonRealCost(usage, fallbackConfiguredPlan, forceTierId) {
     if (!usage) return null;
     const detectedTierId = normalizeNeonPlanId(usage.planId);
-    const tierId = detectedTierId || fallbackConfiguredPlan;
-    const usedFallback = !detectedTierId;
+    const tierId = forceTierId || detectedTierId || fallbackConfiguredPlan;
+    const usedFallback = !forceTierId && !detectedTierId;
     const tier = NEON_PRICING[tierId];
     if (!tier || tier.customPricing) return null;
     const cuHours = usage.computeTimeSeconds !== null ? usage.computeTimeSeconds / 3600 : null;
@@ -3334,6 +3441,7 @@ function computeNeonRealCost(usage, fallbackConfiguredPlan) {
         totalMonthlyCostUSD: totalUSD !== null ? Math.round(totalUSD * 100) / 100 : null,
         tierUsedForRates: tierId,
         usedFallbackPlan: usedFallback,
+        simulatedTierForced: !!forceTierId,
         rawPlanId: usage.planId,
         consumptionPeriodStart: usage.consumptionPeriodStart
     };
@@ -3386,7 +3494,21 @@ function projectFullPeriodCUHours(usage) {
 // Kada client, dinadagdag pa ang maintenanceFeePHP (flat, HINDI Neon
 // consumption — bayad para sa monitoring/pagpapanatili) para sa
 // finalPricePHP na ipapakita sa OMNIPOS admin panel ng client na iyon.
-async function computeClientCostAllocation() {
+// GAWA/BAGO: opsyonal na `simulatedTierOverride` param ('free'/'launch'/
+// 'scale') — kapag binigyan, PIPILITIN nitong gamitin ang RATES ng
+// tier na iyon (sa halip na ang totoong detected/fallback tier) sa
+// pag-compute ng totalCostUSD/PHP, PERO ang PROPORTIONAL na paghahati
+// papunta sa bawat client (storageShare/computeShare, mula sa totoong
+// size_bytes/sync_count sa cloud_backup_meta) ay HINDI nagbabago —
+// parehong totoong LIVE usage pa rin ang basehan, iba lang ang rate na
+// inaaplay dito. Kapag WALANG binigay (undefined, ang default), 100%
+// kaparehong behavior ng dati — ginagamit ito ng lahat ng dating caller
+// (client-cost-allocation admin page, reconciliation, atbp.). Ang
+// bagong parameter na ito ay tinatawag LANG ng Cost Safety Net simulated
+// tier na estimate function (tingnan ang getSimulatedMonthlyCostAllocationCached()
+// sa ibaba) — kailanman hindi ito dapat makaapekto sa totoong billing
+// report/tracker.
+async function computeClientCostAllocation(simulatedTierOverride) {
     if (!pgPool) {
         return { success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL) para sa Cloud Backup.' };
     }
@@ -3400,7 +3522,7 @@ async function computeClientCostAllocation() {
             message: 'Walang Neon account API na naka-configure (NEON_API_KEY/NEON_CLOUD_BACKUP_PROJECT_ID) — hindi makukuha ang totoong consumption para hatiin sa mga client.'
         };
     }
-    const realCost = computeNeonRealCost(neonUsage, neonConfiguredPlans.cloudBackup || 'free');
+    const realCost = computeNeonRealCost(neonUsage, neonConfiguredPlans.cloudBackup || 'free', simulatedTierOverride || null);
     const projection = projectFullPeriodCUHours(neonUsage);
     // Piliin ang batayan ng total cost na hahatiin: gamitin ang PROJECTED
     // full-period compute (mas makatotohanan bilang "monthly figure") kung
@@ -3408,7 +3530,7 @@ async function computeClientCostAllocation() {
     // lang ang aktwal na cost-so-far ng elapsed period at ilagay ang
     // ⚠️ warning na "unstable, sample pa lang" — kaparehong pattern ng
     // /relay/admin/api/db-health.
-    const tier = NEON_PRICING[normalizeNeonPlanId(neonUsage.planId) || (neonConfiguredPlans.cloudBackup || 'free')];
+    const tier = NEON_PRICING[simulatedTierOverride || normalizeNeonPlanId(neonUsage.planId) || (neonConfiguredPlans.cloudBackup || 'free')];
     let totalComputeCostUSD = realCost ? realCost.computeCostUSD : null;
     let totalStorageCostUSD = realCost ? realCost.storageCostUSD : null;
     const usingProjection = !!(projection && !projection.lowConfidence && tier && typeof tier.computeRatePerCUHourUSD === 'number');
@@ -3556,6 +3678,11 @@ async function computeClientCostAllocation() {
         success: true,
         checkedAt: Date.now(),
         exchangeRate: { usdToPhp: rate, source: exchangeRate.source, fetchedAt: exchangeRate.fetchedAt },
+        // GAWA/BAGO: makikita ng caller (hal. Cost Safety Net floor
+        // computation) kung ang RATES na ginamit dito ay pinilit
+        // (simulated) sa halip na totoong detected/fallback tier — wala
+        // itong epekto sa totoong bill, ipinapakita lang para malinaw.
+        simulatedTierOverride: simulatedTierOverride || null,
         costBasis: usingProjection ? 'projected-full-period' : 'elapsed-period-actual',
         warning: usingProjection
             ? null
@@ -8738,6 +8865,46 @@ app.post('/relay/admin/api/cost-safety-net', requireAdminKey, async (req, res) =
     }
 });
 // ===================================================================
+// GAWA/BAGO: COST SAFETY NET — SIMULATED TIER admin endpoints. Global
+// (isa lang, hindi per-installation) — pinipilit ang RATES na gagamitin
+// ng getEstimatedMonthlyStorageSyncCostPHP() / getCostSafetyNetFloor()
+// PARA LANG sa reserve/prepay floor computation. Tingnan ang mahabang
+// paliwanag malapit sa deklarasyon ng costSafetyNetSimulatedTier sa
+// itaas kung bakit hiwalay ito sa neonConfiguredPlans (fallback-lang)
+// dropdown at hindi nakakaapekto sa totoong billing/report.
+// ===================================================================
+app.get('/relay/admin/api/cost-safety-net/simulated-tier', requireAdminKey, (req, res) => {
+    res.json({
+        success: true,
+        simulatedTier: costSafetyNetSimulatedTier || null,
+        options: NEON_PRICING_TIER_IDS.filter((t) => isValidSimulatableNeonTier(t))
+    });
+});
+app.post('/relay/admin/api/cost-safety-net/simulated-tier', requireAdminKey, (req, res) => {
+    const raw = req.body?.tier;
+    // Walang laman/`null` = i-disable ang simulation, balik sa totoong
+    // detected/fallback tier (dating behavior).
+    if (raw === null || raw === undefined || raw === '') {
+        costSafetyNetSimulatedTier = null;
+        saveCostSafetyNetSimulatedTier(null);
+        invalidateCostSafetyNetSimulatedEstimateCache();
+        console.log('🛡️  Na-disable ang Cost Safety Net simulated tier — babalik sa totoong detected/fallback Neon plan.');
+        return res.json({ success: true, simulatedTier: null });
+    }
+    const tier = String(raw).trim().toLowerCase();
+    if (!isValidSimulatableNeonTier(tier)) {
+        return res.status(400).json({
+            success: false,
+            message: `Invalid tier. Options: ${NEON_PRICING_TIER_IDS.filter((t) => isValidSimulatableNeonTier(t)).join(', ')}.`
+        });
+    }
+    costSafetyNetSimulatedTier = tier;
+    saveCostSafetyNetSimulatedTier(tier);
+    invalidateCostSafetyNetSimulatedEstimateCache();
+    console.log(`🛡️  Na-set ang Cost Safety Net simulated tier tungong "${tier}" via admin panel (PARA LANG sa reserve/prepay floor estimate — hindi apektado ang totoong billing).`);
+    res.json({ success: true, simulatedTier: tier });
+});
+// ===================================================================
 // GAWA/BAGO: RECONCILIATION REPORT — sinasagot nito ang "lugi ba ako?"
 // gamit ang TOTOONG pera, hindi estimate/projection. Kumukuha ng
 // KABUUANG na-charge sa mga customer para sa Cloud Backup (mula sa
@@ -11980,7 +12147,8 @@ async function bootstrapStores() {
         clientMaintenanceFeeConfig,
         clientMaintenanceFeePaidUntil,
         ACTIVATION_FLAGS,
-        cloudBackupActualBills
+        cloudBackupActualBills,
+        costSafetyNetSimulatedTier
     ] = await Promise.all([
         loadAllowedDevices(),
         loadDeviceLabels(),
@@ -12010,7 +12178,8 @@ async function bootstrapStores() {
         loadClientMaintenanceFeeConfig(),
         loadClientMaintenanceFeePaidUntil(),
         loadActivationFlags(),
-        loadCloudBackupActualBills()
+        loadCloudBackupActualBills(),
+        loadCostSafetyNetSimulatedTier()
     ]);
     recomputeFeatureCatalog();
     if (Object.keys(featureCatalogOverrides).length > 0) {
@@ -12052,6 +12221,10 @@ async function bootstrapStores() {
         if (stillFreeKeys.length > 0) {
             console.log(`ℹ️  Paalala: "free" pa rin ang configured Neon plan para sa: ${stillFreeKeys.join(', ')}. Kung may bayad ka na talaga dito, i-set ito nang tama sa Database Health admin panel (ligtas naman ang aktwal na sinisingil sa customer dahil may fallback-to-launch protection, pero para tumpak ang "REAL na usage" report).`);
         }
+    }
+    if (!isValidSimulatableNeonTier(costSafetyNetSimulatedTier)) costSafetyNetSimulatedTier = null;
+    if (costSafetyNetSimulatedTier) {
+        console.log(`🛡️  Cost Safety Net simulated tier ay AKTIBO: "${costSafetyNetSimulatedTier}" — ito lang ang basehan ng reserve/prepay floor estimate; hindi apektado ang totoong billing/report.`);
     }
     if (!cloudBackupActualBills || typeof cloudBackupActualBills !== 'object') cloudBackupActualBills = {};
     if (!clientMaintenanceFeeConfig || typeof clientMaintenanceFeeConfig !== 'object') clientMaintenanceFeeConfig = JSON.parse(JSON.stringify(CLIENT_MAINTENANCE_FEE_DEFAULT));

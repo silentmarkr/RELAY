@@ -477,6 +477,30 @@
       <button class="icon-btn" onclick="window.location.href='pricing.html'">💳 Edit tier pricing</button>
     </div>
 
+    <!-- GAWA/BAGO: COST SAFETY NET — SIMULATED TIER (global, isa lang).
+         Hiwalay ito sa totoong Neon plan detection sa itaas — pinipilit
+         lang ang RATES na gagamitin sa Cost Safety Net reserve/prepay
+         floor estimate (Devices page, per-installation), HINDI apektado
+         ang totoong "Total Neon Cost" / bawat client na baseCostPHP sa
+         page na ito. Tingnan ang paliwanag sa server.js malapit sa
+         costSafetyNetSimulatedTier. -->
+    <div class="stat-card" style="margin-bottom:16px;">
+      <div class="stat-label">🛡️ Cost Safety Net — Simulated Tier</div>
+      <div class="stat-sub" style="margin-top:4px;">
+        Kung Free pa ang totoong Neon plan pero gusto mong i-simulate ang gastos
+        na parang Launch/Scale na — PARA LANG ito sa Cost Safety Net reserve/prepay
+        floor (Devices page). Hindi ito nagbabago sa totoong Neon cost/report sa
+        itaas o sa aktwal na binabayad ng customer.
+      </div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:10px;">
+        <select id="safetyNetSimTierSelect" style="padding:6px 10px; border-radius:6px; border:1px solid var(--border-soft); background:var(--bg); color:var(--text);">
+          <option value="">Disabled — use real detected/fallback plan</option>
+        </select>
+        <button class="icon-btn" onclick="saveSafetyNetSimulatedTier()">💾 I-save</button>
+        <span class="stat-sub" id="safetyNetSimTierStatus"></span>
+      </div>
+    </div>
+
     <!-- GAWA/BAGO: RECONCILIATION — totoong charged-to-customers (mula sa
          cloud_token_ledger) vs totoong Neon invoice (mano-manong ilalagay,
          dahil walang public API si Neon para dito). Ito ang pinaka-diretsong
@@ -1226,11 +1250,44 @@ async function loadCostSafetyNet() {
   }
 }
 
+// GAWA/BAGO: COST SAFETY NET — SIMULATED TIER (global) loader/saver.
+// Hiwalay na endpoint mula sa /cost-safety-net (per-installation
+// mode/reserveMonths) — tingnan ang paliwanag sa server.js.
+const NEON_TIER_LABELS = { free: 'Free', launch: 'Launch', scale: 'Scale' };
+async function loadSafetyNetSimulatedTier() {
+  const select = document.getElementById('safetyNetSimTierSelect');
+  const statusEl = document.getElementById('safetyNetSimTierStatus');
+  try {
+    const data = await api('/relay/admin/api/cost-safety-net/simulated-tier');
+    // I-preserve ang "Disabled" option, dagdagan ng mga totoong pagpipilian
+    // mula sa server (para hindi mag-drift kung magbago man ang listahan doon).
+    select.innerHTML = '<option value="">Disabled — use real detected/fallback plan</option>' +
+      (data.options || []).map((t) => `<option value="${t}">${NEON_TIER_LABELS[t] || t}</option>`).join('');
+    select.value = data.simulatedTier || '';
+    statusEl.textContent = data.simulatedTier
+      ? `Active: simulating "${NEON_TIER_LABELS[data.simulatedTier] || data.simulatedTier}" rates for the safety net floor only.`
+      : 'Disabled — using the real detected/fallback Neon plan.';
+  } catch (err) {
+    if (err.message !== 'forbidden') console.warn('Cost safety net simulated tier not loaded:', err.message);
+  }
+}
+async function saveSafetyNetSimulatedTier() {
+  const select = document.getElementById('safetyNetSimTierSelect');
+  const tier = select.value || null;
+  try {
+    await api('/relay/admin/api/cost-safety-net/simulated-tier', { method: 'POST', body: JSON.stringify({ tier }) });
+    toast(tier ? `Simulated tier set to "${NEON_TIER_LABELS[tier] || tier}".` : 'Simulated tier disabled.');
+    await loadSafetyNetSimulatedTier();
+  } catch (err) {
+    if (err.message !== 'forbidden') toast(err.message || 'Failed to save simulated tier.', 'error');
+  }
+}
+
 async function boot() {
   if (!adminKey) return;
   try {
     document.getElementById('reconMonthInput').value = new Date().toISOString().slice(0, 7);
-    await Promise.all([loadAllocation(), loadReconciliation(), loadRetentionReview(), loadNearQuotaReview(), loadStorageFeeDebtors()]);
+    await Promise.all([loadAllocation(), loadReconciliation(), loadRetentionReview(), loadNearQuotaReview(), loadStorageFeeDebtors(), loadSafetyNetSimulatedTier()]);
     // BUGFIX: each loader above swallows its own errors internally (so a
     // wrong admin key's 'forbidden' rejection never reaches this Promise.all),
     // but a 403 inside any of them still calls logout(), which clears
