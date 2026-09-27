@@ -1142,6 +1142,7 @@ const FEATURE_CATALOG_BASE = {
     galaxyambient: { name: 'Galaxy Ambient Pro', price: 149, category: 'theme' },
     purchase_orders: { name: 'Purchase Orders Module', price: 999, category: 'module' },
     batch_lot_tracking: { name: 'Batch/Lot Tracking & Expiry Management', price: 799, category: 'module' },
+    inventory_tools: { name: 'Inventory Tools', price: 999, category: 'module' },
     customer_crm: { name: 'Customer Profiles, Loyalty & Debtors', price: 799, category: 'module' }, 
     promo_codes: { name: 'Promo Codes Module', price: 499, category: 'module' },
     advanced_reports: { name: 'Sales Analytics & Advanced Reports', price: 799, category: 'module' },
