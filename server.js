@@ -3654,6 +3654,7 @@ async function computeClientCostAllocation(simulatedTierOverride) {
             sizeBytes,
             sizeMB: Math.round((sizeBytes / (1024 * 1024)) * 100) / 100,
             syncCount,
+            syncWeightedBytes,
             totalRecords: r.total_records,
             lastSyncAt: r.last_sync_at,
             // AYOS/BAGO: tracking-only fields (hindi kasama sa charging
@@ -3720,6 +3721,16 @@ async function computeClientCostAllocation(simulatedTierOverride) {
         totalComputeCostPHP: Math.round(totalComputeCostPHP * 100) / 100,
         totalStorageCostPHP: Math.round(totalStorageCostPHP * 100) / 100,
         totalCostPHP: roundedTotal,
+        // AYOS/BAGO: idinagdag ang mga TOTALS na ginamit sa storageShare/
+        // computeShare denominator ng bawat client (tingnan ang AYOS note
+        // malapit sa totalSyncWeightedBytes sa itaas) — kailangan ito ng
+        // admin UI (client-cost-allocation.html) para maipakita ang BUONG
+        // formula (hindi lang ang final na number) kung paano nakuha ang
+        // Cost Safety Net buffer ng bawat client, transparent hanggang sa
+        // pinaka-raw na size_bytes/sync_count na basehan.
+        totalSizeBytes,
+        totalSyncCount,
+        totalSyncWeightedBytes,
         clientCount: clients.length,
         clients: clients.sort((a, b) => b.finalPricePHP - a.finalPricePHP)
     };
@@ -7901,6 +7912,27 @@ app.get('/relay/cloud-tokens/wallet', requireApiKey, requireAllowedDevice, rateL
         // sa RELAY /relay/cloud-backup/restore).
         const realRestoreCostTokensExact = Math.round((await getCloudTokenCostPerRestoreExact(sizeBytesForRealCost, tierForWallet)) * 1000) / 1000;
         const realRestoreCostTokens = await getCloudTokenCostPerRestore(sizeBytesForRealCost, tierForWallet);
+        // GAWA/BAGO: ipinapasa na rin sa OMNIPOS/client ang Cost Safety Net
+        // status ng installation na ito (mode + buffer amount + next
+        // re-book, kapag prepay) — para makita ng client mismo (sa Omni
+        // Tokens page niya) kung bakit maaaring mai-block ang isang "ibang
+        // bagay" na pagbili, HINDI lang pagkatapos mag-block (tingnan ang
+        // "Blocked by Cost Safety Net" modal) kundi maaga pa lang. `null`
+        // kapag 'none' ang mode (walang dapat ipakita).
+        const walletSafetyNet = await getCostSafetyNetFloor(installationId);
+        let costSafetyNetForWallet = null;
+        if (walletSafetyNet.mode !== 'none') {
+            let nextRebookLabel = null;
+            if (walletSafetyNet.mode === 'prepay') {
+                // Re-fetch: baka bago lang na-book (ensurePrepayBooked(),
+                // sa loob ng getCostSafetyNetFloor() sa itaas) ang anchor.
+                const row = await getWalletCostSafetyRow(installationId);
+                nextRebookLabel = row.prepayCycleAnchor
+                    ? new Date(new Date(row.prepayCycleAnchor).getTime() + COST_SAFETY_NET_PREPAY_CYCLE_MS).toISOString()
+                    : null;
+            }
+            costSafetyNetForWallet = { mode: walletSafetyNet.mode, floor: walletSafetyNet.floor, nextRebookLabel };
+        }
         const responseBody = {
             success: true,
             balanceTokens: Number(wallet.balance_tokens),
@@ -7913,7 +7945,8 @@ app.get('/relay/cloud-tokens/wallet', requireApiKey, requireAllowedDevice, rateL
             realRestoreCostTokens,
             realRestoreCostTokensExact,
             realRestoreCostBasedOnKnownSize: knownSizeBytes > 0,
-            realRestoreCostSizeBytesUsed: sizeBytesForRealCost
+            realRestoreCostSizeBytesUsed: sizeBytesForRealCost,
+            costSafetyNet: costSafetyNetForWallet
         };
         setWalletCache(installationId, responseBody);
         res.json(responseBody);
@@ -9388,6 +9421,27 @@ async function runCostAlertSweep() {
                 usageMissing = !usage;
                 const realCost = usage ? computeNeonRealCost(usage, neonConfiguredPlans[key] || 'free') : null;
                 usedFallback = !!(realCost && realCost.usedFallbackPlan);
+                // AYOS/BAGO: kapag matagumpay na na-detect (HINDI fallback) ang
+                // totoong plan mula mismo sa Neon API, at IBA ito sa kasalukuyang
+                // naka-set na admin dropdown (neonConfiguredPlans[key]), i-auto-
+                // sync/i-persist ito bilang BAGONG fallback — kaya kung bumili
+                // ang developer ng Launch/Scale plan sa Neon, awtomatikong
+                // "ma-a-adopt" ito bilang fallback (hindi na kailangang manual
+                // i-set sa admin panel). Layunin: kung sakaling mabigo/mag-down
+                // man ang detection sa hinaharap, ang HULING KILALANG-TOTOONG
+                // paid plan ang gagamiting fallback, HINDI ang static na 'free'
+                // default (na siyang dating bug na dahilan ng maling ₱0/underestimated
+                // na "REAL na usage" report habang naka-fallback). HINDI nito
+                // binabago ang RATES na totoong ginamit sa sweep na ito (iyon ay
+                // palaging batay sa detectedTierId mismo, tingnan ang paliwanag
+                // sa computeNeonRealCost()) — pag-uupdate lang ito ng fallback
+                // PARA SA SUSUNOD na pagkakataong kailangan ito.
+                if (realCost && !realCost.usedFallbackPlan && realCost.tierUsedForRates && realCost.tierUsedForRates !== (neonConfiguredPlans[key] || 'free')) {
+                    const previousFallback = neonConfiguredPlans[key] || 'free';
+                    neonConfiguredPlans = { ...neonConfiguredPlans, [key]: realCost.tierUsedForRates };
+                    saveNeonConfiguredPlans(neonConfiguredPlans);
+                    logActivity(null, 'neon_fallback_plan_auto_synced', { key, previousFallback, newFallback: realCost.tierUsedForRates });
+                }
             } catch (err) {
                 usageMissing = true;
             }
