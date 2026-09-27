@@ -162,6 +162,25 @@
   .safety-net-months input { width: 64px; }
   .safety-net-info { font-size: .78rem; color: var(--muted); }
   .safety-net-info .mono { font-size: .78rem; }
+  /* GAWA/BAGO: collapsible "how is this calculated" panel — DEFAULT
+     HIDDEN (see costSafetyNetHtml()/toggleSafetyNetFormula()), para hindi
+     bumigat/dumami ang laman ng modal para sa mga admin na hindi
+     interesado sa breakdown, pero kitang-kita agad kung i-toggle. */
+  .safety-net-formula-toggle {
+    padding: 4px 0; border: none; background: none; color: var(--muted);
+    font-size: .74rem; cursor: pointer; text-align: left; text-decoration: underline dotted;
+  }
+  .safety-net-formula-toggle:hover { color: var(--accent); }
+  .safety-net-formula {
+    border: 1px dashed var(--border); border-radius: var(--radius); padding: 10px 12px;
+    background: var(--bg); display: flex; flex-direction: column; gap: 10px;
+  }
+  .safety-net-formula-section strong { font-size: .74rem; color: var(--text); }
+  .safety-net-formula-section ul { margin: 4px 0 0 18px; padding: 0; font-size: .74rem; color: var(--muted); line-height: 1.5; }
+  .safety-net-formula-pre {
+    font-family: var(--font-mono); font-size: .72rem; line-height: 1.6; color: var(--muted);
+    white-space: pre-wrap; margin: 6px 0 0 0; overflow-x: auto;
+  }
 
   /* ---- Client cards (used at every width — a card grid that reflows
      from a multi-column desktop layout down to one column on mobile,
@@ -994,10 +1013,128 @@ function costSafetyNetHtml(c, v) {
         Currently booked: <span class="mono">${formatPHP(s.reservedTokens || 0)}</span> · next re-book: ${escapeHtml(nextBookLabel)}
       </div>
       <div class="safety-net-row">
+        <button type="button" class="safety-net-formula-toggle" id="safetyNetFormulaToggleBtn-${v.jsId}" onclick="toggleSafetyNetFormula('${v.jsId}')">▸ How is this buffer calculated?</button>
+      </div>
+      <div class="safety-net-formula" id="safetyNetFormulaBox-${v.jsId}" style="display:none;">
+        ${costSafetyNetFormulaHtml(c, s, months, reserveFloorPreview, nextBookLabel)}
+      </div>
+      <div class="safety-net-row">
         <button type="button" class="row-save-btn" onclick="saveCostSafetyNet('${v.jsId}')">💾 Save setting</button>
       </div>
     </div>
   `;
+}
+
+// GAWA/BAGO: default-hidden na breakdown (tingnan ang .safety-net-formula
+// CSS at ang toggle button sa itaas) — ipinapakita ang BUONG formula kung
+// paano nakuha ang estimated storage+sync cost (baseCostPHP) ng client na
+// ito, mula sa pinaka-raw na size_bytes/sync_count share, hanggang sa
+// reserve floor (× reserve months) o prepay booked amount, para hindi na
+// kailangang hulaan/tiwalaan na lang ng admin ang final na number.
+function costSafetyNetFormulaHtml(c, s, months, reserveFloorPreview, nextBookLabel) {
+  const totals = lastAllocation || {};
+  const sizeBytes = Number(c.sizeBytes) || 0;
+  const syncCount = Number(c.syncCount) || 0;
+  const syncWeightedBytes = Number(c.syncWeightedBytes) || (sizeBytes * syncCount);
+  const totalSizeBytes = Number(totals.totalSizeBytes) || 0;
+  const totalSyncCount = Number(totals.totalSyncCount) || 0;
+  const totalSyncWeightedBytes = Number(totals.totalSyncWeightedBytes) || 0;
+  const totalStorageCostPHP = Number(totals.totalStorageCostPHP) || 0;
+  const totalComputeCostPHP = Number(totals.totalComputeCostPHP) || 0;
+  const storagePct = c.storageSharePercent != null ? c.storageSharePercent : 0;
+  const computePct = c.computeSharePercent != null ? c.computeSharePercent : 0;
+  const storageCostPHP = Number(c.storageCostPHP) || 0;
+  const computeCostPHP = Number(c.computeCostPHP) || 0;
+  const baseCostPHP = Number(c.baseCostPHP) || 0;
+  // Kung 0 ang lahat ng totalSyncWeightedBytes (hal. walang size_bytes
+  // pa ang sinuman), sync_count-only ang totoong ginamit sa server bilang
+  // fallback (tingnan ang AYOS note sa computeClientCostAllocation()) —
+  // ipinapakita ito nang tapat dito imbes na magpanggap na weighted-bytes
+  // pa rin ang basehan.
+  const computeUsedFallback = totalSyncWeightedBytes <= 0 && totalSyncCount > 0;
+  const computeBasisLine = computeUsedFallback
+    ? `sync_count share (fallback, walang size_bytes datos pa) = ${syncCount} / ${totalSyncCount} = ${computePct}%`
+    : `sync-weighted bytes share = ${fmtBytes(syncWeightedBytes)} / ${fmtBytes(totalSyncWeightedBytes)} = ${computePct}%`;
+  const computeRawLine = computeUsedFallback
+    ? ''
+    : `  sync-weighted bytes = ${fmtBytes(sizeBytes)} × ${syncCount} sync(s) = ${fmtBytes(syncWeightedBytes)}\n`;
+
+  let modeSection = '';
+  if (s.mode === 'reserve') {
+    modeSection = `
+      <div class="safety-net-formula-section">
+        <strong>Reserve floor (current mode) — recalculated live on every "other things" purchase attempt</strong>
+        <pre class="safety-net-formula-pre">reserve floor = baseCostPHP × reserve months (${months}, clamped 1–2)
+              = ${formatPHP(baseCostPHP)} × ${months}
+              = ${formatPHP(reserveFloorPreview)}</pre>
+      </div>`;
+  } else if (s.mode === 'prepay') {
+    modeSection = `
+      <div class="safety-net-formula-section">
+        <strong>Prepay booked amount (current mode) — fixed for the ~30-day cycle, not live</strong>
+        <pre class="safety-net-formula-pre">booked  = baseCostPHP at the moment of last booking
+        = ${formatPHP(s.reservedTokens || 0)}
+next re-book: ${nextBookLabel}
+
+If re-booked RIGHT NOW using today's live numbers, it would book:
+        = ${formatPHP(baseCostPHP)}
+(This can differ from the actual booked figure above until the next re-book, or until the mode is switched away and back.)</pre>
+      </div>`;
+  } else {
+    modeSection = `
+      <div class="safety-net-formula-section">
+        <strong>Mode is "None"</strong>
+        <pre class="safety-net-formula-pre">No restriction applied — the baseCostPHP breakdown below is shown for reference only.</pre>
+      </div>`;
+  }
+
+  return `
+    <div class="safety-net-formula-section">
+      <strong>Reserve vs Prepay — quick guide</strong>
+      <ul>
+        <li><b>Reserve</b>: flexible floor, recalculated from the latest live estimate every time an "other things" purchase is attempted. Simpler, always fresh — good default.</li>
+        <li><b>Prepay</b>: books the estimate upfront at the start of each ~30-day cycle and holds it fixed until the next cycle (or next re-book), regardless of mid-cycle changes. Use when this client's data size/usage changes quickly and a guaranteed buffer from day one matters more than always-fresh numbers.</li>
+      </ul>
+    </div>
+    <div class="safety-net-formula-section">
+      <strong>Where this client's ${formatPHP(baseCostPHP)}/mo estimate (baseCostPHP) comes from</strong>
+      <pre class="safety-net-formula-pre">Storage cost:
+  size_bytes share = ${fmtBytes(sizeBytes)} / ${fmtBytes(totalSizeBytes)} = ${storagePct}%
+  storage cost pool (all clients) = ${formatPHP(totalStorageCostPHP)}
+  storage cost = ${formatPHP(totalStorageCostPHP)} × ${storagePct}% = ${formatPHP(storageCostPHP)}
+
+Compute cost (weighted by size_bytes × sync_count, NOT sync_count alone —
+see AYOS bugfix note in computeClientCostAllocation(), server.js):
+${computeRawLine}  ${computeBasisLine}
+  compute cost pool (all clients) = ${formatPHP(totalComputeCostPHP)}
+  compute cost = ${formatPHP(totalComputeCostPHP)} × ${computePct}% = ${formatPHP(computeCostPHP)}
+
+Estimated monthly storage+sync cost (baseCostPHP):
+  = storage cost + compute cost
+  = ${formatPHP(storageCostPHP)} + ${formatPHP(computeCostPHP)}
+  = ${formatPHP(baseCostPHP)} / month</pre>
+    </div>
+    ${modeSection}
+  `;
+}
+
+// Maliit na byte formatter (B/KB/MB/GB) para madaling basahin ang mga raw
+// size_bytes value sa loob ng formula breakdown sa itaas.
+function fmtBytes(bytes) {
+  const n = Number(bytes) || 0;
+  if (n >= 1024 * 1024 * 1024) return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(2)} KB`;
+  return `${n} B`;
+}
+
+function toggleSafetyNetFormula(id) {
+  const box = document.getElementById(`safetyNetFormulaBox-${id}`);
+  const btn = document.getElementById(`safetyNetFormulaToggleBtn-${id}`);
+  if (!box) return;
+  const showing = box.style.display !== 'none';
+  box.style.display = showing ? 'none' : '';
+  if (btn) btn.textContent = showing ? '▸ How is this buffer calculated?' : '▾ Hide formula';
 }
 
 function onSafetyNetModeChange(id) {
@@ -1006,6 +1143,9 @@ function onSafetyNetModeChange(id) {
   const prepayRow = document.getElementById(`safetyNetPrepayInfo-${id}`);
   if (monthsRow) monthsRow.style.display = mode === 'reserve' ? '' : 'none';
   if (prepayRow) prepayRow.style.display = mode === 'prepay' ? '' : 'none';
+  // NOTE: hindi na-re-render ang formula box dito dahil kailangan niya ng
+  // bagong `s`/`months`/etc. mula sa parent card re-render — awtomatiko
+  // itong nagiging tama sa susunod na buksan ng modal o pagkatapos i-Save.
 }
 
 function onSafetyNetMonthsInput(id) {
