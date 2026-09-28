@@ -1368,6 +1368,278 @@ function computeRealCloudBackupSyncCostPHP(sizeBytes, tier, usdToPhpRate) {
     // Universal Safety Margin — tingnan ang paliwanag sa itaas.
     return perSyncCostUSD * rate * CLOUD_BACKUP_COST_SAFETY_MARGIN_MULTIPLIER;
 }
+// ===================================================================
+// GAWA/BAGO: DEVICES/LICENSE REAL-TIME COST ESTIMATE — kaparehong
+// "safe-by-default, laging available kahit Free tier pa/walang naka-
+// configure na Neon API key" na approach gaya ng
+// computeRealCloudBackupSyncCostPHP() sa itaas, pero para sa Devices/
+// License na Neon database (tingnan ang paliwanag sa devicesActivityCompute
+// sa NEON_PRICING_BASE). Buwanang (monthly) total ang ibinabalik dito
+// (hindi "per sync", dahil tuloy-tuloy ang paggamit ng database na ito),
+// na siyang hahatiin pa sa bilang ng currently-allowed na installation
+// para makuha ang PER-CLIENT na estimate (tingnan ang
+// computeDeviceLicenseCostAllocation() sa ibaba).
+//
+// FALLBACK BEHAVIOR (kaparehong pattern ng Cloud Backup): kapag
+// neonConfiguredPlans.devices ay "free" (o wala pang naka-set), hindi ito
+// makatotohanang batayan kung mayroon palang totoong bayad na Neon
+// account sa likod nito — kaya bumabalik ito sa "Scale" rate (pinaka-
+// mataas/pinaka-conservative na paid tier) bilang safe-by-default
+// fallback, PARA LAGING may makikitang hindi-zero na realtime estimate
+// ang client kahit "Free" pa ang naka-configure. Sa sandaling ma-set ng
+// admin (o awtomatikong ma-detect, tingnan ang stillFreeKeys polling loop
+// sa ibaba) ang TUNAY na binibiling Neon tier para sa Devices/License, ang
+// rate NG TIER NA IYON (hindi na ang Scale safe-fallback) ang gagamitin —
+// ibig sabihin, awtomatikong lilipat ang estimate papuntang totoong
+// presyo ng Neon sa sandaling may binili nang plan.
+// ===================================================================
+function computeRealDeviceLicenseMonthlyCostPHP(sizeBytes, usdToPhpRate) {
+    const sizeBytesSafe = Math.max(0, Number(sizeBytes) || 0);
+    const sizeGB = sizeBytesSafe / (1024 * 1024 * 1024);
+    const sizeMB = sizeBytesSafe / (1024 * 1024);
+    const neonPlanId = neonConfiguredPlans.devices || 'free';
+    let neonTier = NEON_PRICING[neonPlanId];
+    const usedFallbackPlan = !neonTier || !neonTier.storageRatePerGBMonthUSD;
+    if (usedFallbackPlan) neonTier = NEON_PRICING.scale;
+    // STORAGE component — buwanan na agad ito (walang per-sync proration
+    // dahil walang discrete na "sync interval" ang devices/license data).
+    const monthlyStorageCostUSD = sizeGB * neonTier.storageRatePerGBMonthUSD;
+    // COMPUTE component — tingnan ang paliwanag sa devicesActivityCompute
+    // sa NEON_PRICING_BASE kung bakit buwanan (hindi per-operation) ang
+    // assumed compute-seconds dito.
+    const computeRateUSD = (typeof neonTier.computeRatePerCUHourUSD === 'number' && neonTier.computeRatePerCUHourUSD > 0)
+        ? neonTier.computeRatePerCUHourUSD
+        : NEON_PRICING.scale.computeRatePerCUHourUSD;
+    const computeAssumption = NEON_PRICING.devicesActivityCompute || NEON_PRICING_BASE.devicesActivityCompute;
+    const assumedComputeSecondsPerMonth = (computeAssumption.assumedBaseSecondsPerDay * 30) + (sizeMB * computeAssumption.assumedSecondsPerMBPerMonth);
+    const assumedComputeCUHours = computeAssumption.assumedCU * (assumedComputeSecondsPerMonth / 3600);
+    const monthlyComputeCostUSD = assumedComputeCUHours * computeRateUSD;
+    const monthlyCostUSD = monthlyStorageCostUSD + monthlyComputeCostUSD;
+    const rate = usdToPhpRate || EXCHANGE_RATE_FALLBACK_USD_TO_PHP;
+    // Universal Safety Margin — tingnan ang paliwanag malapit sa
+    // computeRealCloudBackupSyncCostPHP() sa itaas.
+    return {
+        monthlyCostPHP: monthlyCostUSD * rate * CLOUD_BACKUP_COST_SAFETY_MARGIN_MULTIPLIER,
+        tierUsedForRates: usedFallbackPlan ? 'scale' : neonPlanId,
+        usedFallbackPlan
+    };
+}
+// Async wrapper — kinukuha ang kasalukuyang USD->PHP exchange rate at ang
+// kasalukuyang laki (bytes) ng Devices/License na Neon database, tapos
+// ipinapasa sa computeRealDeviceLicenseMonthlyCostPHP() sa itaas.
+async function getDeviceLicenseMonthlyCostEstimate() {
+    const [{ rate }, sizeBytes] = await Promise.all([
+        getUsdToPhpRate(),
+        getPgDatabaseSizeBytes(pgPoolDevices)
+    ]);
+    const result = computeRealDeviceLicenseMonthlyCostPHP(sizeBytes || 0, rate);
+    return { ...result, sizeBytes: sizeBytes || 0 };
+}
+// ===================================================================
+// AYOS/BAGO (naitama batay sa feedback ng user): dating pantay-pantay
+// (total / bilang ng device) ang hati dito — NAPAG-ISIPAN NA MULI ito
+// dahil dapat naka-depende ang bawat client sa TOTOONG NILANG AKTWAL na
+// na-store na datos (parehong prinsipyo ng Cloud Backup: mas malaking
+// footprint = mas malaking share), HINDI basta hatiin nang pantay-pantay
+// sa lahat kahit magkaiba ang aktwal na ginamit nila. Ngayon, hinahanap
+// muna ang PER-INSTALLATION na attributable bytes (mga tables na may
+// sariling installation_id column — relay_devices, relay_device_fingerprints,
+// relay_clone_splits, relay_ai_credit_usage, relay_ai_credit_requests —
+// EXCLUDE ang shared/'__default__' rows), tapos hinahati ang total cost
+// PROPORTIONAL sa share ng bawat client dito (kaparehong paraan ng
+// computeClientCostAllocation() sa itaas para sa Cloud Backup). Ang
+// generic relay_kv_store (shared settings/logs, hindi per-client) ay
+// HINDI kasama sa per-client na attribution — bahagi lang ito ng TOTAL
+// cost (denominator), pero hindi maiaatas sa isang partikular na client.
+// Kung walang attributable na datos pa (bagong-bago pang deployment,
+// walang laman ang mga tables na ito), pansamantalang bumabalik sa
+// pantay-pantay na hati bilang huling fallback na lang — malinaw itong
+// nakalagay sa costBasis/warning ng resulta.
+// ===================================================================
+async function getPerInstallationDeviceAttributableBytes(pool) {
+    const { rows } = await queryWithRetry(pool, `
+        SELECT installation_id, SUM(bytes)::bigint AS bytes FROM (
+            SELECT installation_id, pg_column_size(t.*) AS bytes FROM relay_devices t WHERE installation_id <> '__default__'
+            UNION ALL
+            SELECT installation_id, pg_column_size(t.*) AS bytes FROM relay_device_fingerprints t WHERE installation_id <> '__default__'
+            UNION ALL
+            SELECT installation_id, pg_column_size(t.*) AS bytes FROM relay_clone_splits t WHERE installation_id <> '__default__'
+            UNION ALL
+            SELECT installation_id, pg_column_size(t.*) AS bytes FROM relay_ai_credit_usage t WHERE installation_id <> '__default__'
+            UNION ALL
+            SELECT installation_id, pg_column_size(t.*) AS bytes FROM relay_ai_credit_requests t WHERE installation_id <> '__default__'
+        ) combined
+        GROUP BY installation_id
+    `, []);
+    const map = new Map();
+    for (const row of rows) {
+        map.set(row.installation_id, Number(row.bytes) || 0);
+    }
+    return map;
+}
+// Laki (bytes) ng MGA TABLE na pag-aari ng Devices/License data lang —
+// ginagamit kapag SHARED ang database/Neon project sa Cloud Backup, para
+// hindi masama ang laki/gastos ng Cloud Backup sa hinahati dito.
+async function getDevicesOwnedTablesBytes(pool) {
+    try {
+        const { rows } = await queryWithRetry(pool, `
+            SELECT COALESCE(SUM(pg_total_relation_size(c.oid)), 0)::bigint AS bytes
+            FROM pg_class c
+            WHERE c.oid IN (
+                SELECT to_regclass(n)::oid FROM unnest(ARRAY[
+                    'relay_devices','relay_device_fingerprints','relay_clone_splits',
+                    'relay_ai_credit_usage','relay_ai_credit_requests','relay_kv_store'
+                ]) AS n WHERE to_regclass(n) IS NOT NULL
+            )
+        `, []);
+        return rows && rows[0] ? Number(rows[0].bytes) || 0 : 0;
+    } catch (err) {
+        console.warn('⚠️  Hindi makuha ang laki ng Devices/License tables:', err.message);
+        return 0;
+    }
+}
+// Nagpapasya kung anong RATES/formula ang gagamitin, ayon sa hiniling:
+//  1) May PAID tier na (na-detect ng Neon API o naka-set sa configured
+//     plan) -> TOTOONG Neon formula ('real-neon-usage' kapag may live usage,
+//     'configured-plan-estimate' kapag wala pang usage data).
+//  2) Free / walang paid tier -> REFERENCE TIER na pinili ng admin:
+//     - may live Neon usage -> TOTOONG usage x rates ng reference tier
+//       ('reference-tier-usage')
+//     - walang live usage   -> laki ng DB + assumed compute x rates ng
+//       reference tier ('reference-tier-estimate')
+function isPaidNeonTierId(tierId) {
+    const t = NEON_PRICING[tierId];
+    return !!(t && !t.customPricing && typeof t.storageRatePerGBMonthUSD === 'number' && t.storageRatePerGBMonthUSD > 0);
+}
+function resolveDevicesCostFormula(devicesUsage) {
+    const detected = devicesUsage ? normalizeNeonPlanId(devicesUsage.planId) : null;
+    if (detected && isPaidNeonTierId(detected)) return { mode: 'real', tierId: detected };
+    const configured = neonConfiguredPlans.devices || 'free';
+    if (!detected && isPaidNeonTierId(configured)) return { mode: 'real', tierId: configured };
+    return { mode: 'reference', tierId: isValidDevicesReferenceTier(devicesCostReferenceTier) ? devicesCostReferenceTier : DEVICES_REFERENCE_TIER_DEFAULT };
+}
+// Estimate (walang live usage) para sa ISANG tier na piniling rates.
+function estimateDeviceLicenseMonthlyCostPHPForTier(sizeBytes, usdToPhpRate, tierId) {
+    const tier = NEON_PRICING[tierId] || NEON_PRICING.scale;
+    const sizeBytesSafe = Math.max(0, Number(sizeBytes) || 0);
+    const sizeGB = sizeBytesSafe / (1024 * 1024 * 1024);
+    const sizeMB = sizeBytesSafe / (1024 * 1024);
+    const assumption = NEON_PRICING.devicesActivityCompute || NEON_PRICING_BASE.devicesActivityCompute;
+    const computeSeconds = (assumption.assumedBaseSecondsPerDay * 30) + (sizeMB * assumption.assumedSecondsPerMBPerMonth);
+    const cuHours = assumption.assumedCU * (computeSeconds / 3600);
+    const usd = (sizeGB * (tier.storageRatePerGBMonthUSD || 0)) + (cuHours * (tier.computeRatePerCUHourUSD || 0));
+    return usd * (usdToPhpRate || EXCHANGE_RATE_FALLBACK_USD_TO_PHP) * CLOUD_BACKUP_COST_SAFETY_MARGIN_MULTIPLIER;
+}
+// Cache — ang computation na ito ay may 5 table scan + Neon API call +
+// FX lookup, at tinatawag ng bawat client (kada refresh) at ng admin
+// db-health. Ang cache key ay kasama ang mga setting na nagpapabago ng
+// resulta, kaya awtomatikong nag-i-invalidate kapag binago ang mga ito.
+const DEVICES_COST_ALLOCATION_CACHE_TTL_MS = 10 * 60 * 1000;
+let devicesCostAllocationCache = { key: null, data: null, expiresAt: 0, inflight: null };
+function invalidateDevicesCostAllocationCache() {
+    devicesCostAllocationCache = { key: null, data: null, expiresAt: 0, inflight: null };
+}
+async function computeDeviceLicenseCostAllocation() {
+    const cacheKey = `${devicesCostReferenceTier}|${neonConfiguredPlans.devices || 'free'}`;
+    const c = devicesCostAllocationCache;
+    if (c.data && c.key === cacheKey && Date.now() < c.expiresAt) return c.data;
+    if (c.inflight && c.key === cacheKey) return c.inflight;
+    const promise = computeDeviceLicenseCostAllocationUncached()
+        .then((data) => {
+            // Huwag i-cache ang failure para agad makabawi.
+            devicesCostAllocationCache = { key: cacheKey, data, expiresAt: data && data.success ? Date.now() + DEVICES_COST_ALLOCATION_CACHE_TTL_MS : 0, inflight: null };
+            return data;
+        })
+        .catch((err) => {
+            devicesCostAllocationCache = { key: null, data: null, expiresAt: 0, inflight: null };
+            throw err;
+        });
+    devicesCostAllocationCache = { ...devicesCostAllocationCache, key: cacheKey, inflight: promise };
+    return promise;
+}
+async function computeDeviceLicenseCostAllocationUncached() {
+    if (!pgPoolDevices && !pgPool) {
+        return { success: false, message: 'Hindi pa naka-configure ang Postgres para sa Devices/License data.' };
+    }
+    const pool = pgPoolDevices || pgPool;
+    // SHARED ba ang DB/Neon project sa Cloud Backup? Kung oo, hindi
+    // pwedeng gamitin ang buong-project na size/usage (masasama ang
+    // Cloud Backup at magdodoble-singil) — table-level size + estimate lang.
+    const sharedWithCloudBackup = !DEVICES_DB_IS_SEPARATE
+        || (!!NEON_DEVICES_PROJECT_ID && NEON_DEVICES_PROJECT_ID === NEON_CLOUD_BACKUP_PROJECT_ID);
+    const [{ rate }, rawDbBytes, rawUsage] = await Promise.all([
+        getUsdToPhpRate(),
+        sharedWithCloudBackup ? getDevicesOwnedTablesBytes(pool) : getPgDatabaseSizeBytes(pool),
+        sharedWithCloudBackup ? Promise.resolve(null) : getNeonProjectUsage(NEON_DEVICES_PROJECT_ID)
+    ]);
+    const usdToPhp = rate || EXCHANGE_RATE_FALLBACK_USD_TO_PHP;
+    const formula = resolveDevicesCostFormula(rawUsage);
+    let totalCostPHP = null;
+    let costBasis;
+    let formulaTier = formula.tierId;
+    let usedFallbackPlan = false;
+    if (rawUsage) {
+        // Totoong usage — rates ng totoong paid tier, o ng reference tier
+        // kapag Free ang account (forceTierId = reference).
+        const realCost = computeNeonRealCost(rawUsage, neonConfiguredPlans.devices || 'free', formula.tierId);
+        if (realCost && typeof realCost.totalMonthlyCostUSD === 'number') {
+            totalCostPHP = realCost.totalMonthlyCostUSD * usdToPhp;
+            costBasis = formula.mode === 'real' ? 'real-neon-usage' : 'reference-tier-usage';
+        }
+    }
+    if (totalCostPHP === null) {
+        totalCostPHP = estimateDeviceLicenseMonthlyCostPHPForTier(rawDbBytes || 0, usdToPhp, formula.tierId);
+        costBasis = formula.mode === 'real' ? 'configured-plan-estimate' : 'reference-tier-estimate';
+    }
+    let perInstallationBytes = new Map();
+    try {
+        perInstallationBytes = await getPerInstallationDeviceAttributableBytes(pool);
+    } catch (err) {
+        console.warn('⚠️  Hindi makuha ang per-installation attributable bytes para sa Devices/License cost allocation:', err.message);
+    }
+    const totalAttributableBytes = Array.from(perInstallationBytes.values()).reduce((a, b) => a + b, 0);
+    let allowedInstallationIds = [];
+    try {
+        const result = await queryWithRetry(pool, 'SELECT installation_id FROM relay_devices WHERE allowed = true', []);
+        allowedInstallationIds = result.rows.map(r => r.installation_id);
+    } catch (err) {
+        console.warn('⚠️  Hindi mabilang ang allowed devices para sa Devices/License cost allocation:', err.message);
+    }
+    // Kasama ang lahat ng may attributable bytes (kahit na-revoke na pero
+    // may naiwang datos) para walang nawawalang bahagi ng total sa split.
+    // PAALALA: 100% ng total cost (kasama ang shared relay_kv_store) ang
+    // hinahati sa lahat ng nasa listahan, ayon sa bytes nila.
+    const allClientIds = Array.from(new Set([...allowedInstallationIds, ...perInstallationBytes.keys()]));
+    const usingProportionalSplit = totalAttributableBytes > 0;
+    const clients = allClientIds.map((installationId) => {
+        const bytes = perInstallationBytes.get(installationId) || 0;
+        const sharePHP = usingProportionalSplit
+            ? totalCostPHP * (bytes / totalAttributableBytes)
+            : (allClientIds.length > 0 ? totalCostPHP / allClientIds.length : totalCostPHP);
+        return {
+            installationId,
+            bytes,
+            sizeMB: Math.round((bytes / (1024 * 1024)) * 1000) / 1000,
+            sharePHP: Math.round(sharePHP * 100) / 100
+        };
+    });
+    return {
+        success: true,
+        checkedAt: Date.now(),
+        costBasis,
+        formulaTier,
+        formulaMode: formula.mode,
+        sharedWithCloudBackup,
+        usedFallbackPlan,
+        splitBasis: usingProportionalSplit ? 'proportional-by-your-stored-data' : 'equal-split-no-attributable-data-yet',
+        clientCount: allClientIds.length,
+        totalCostPHP: Math.round(totalCostPHP * 100) / 100,
+        clients,
+        warning: !usingProportionalSplit
+            ? 'Wala pang sapat na naka-imbak na device/license data para tumpak na mahati ayon sa aktwal na gamit — pantay-pantay muna ang hati hanggang magkaroon ng datos.'
+            : null
+    };
+}
 // "Ilustratibong" sample size lang (hal. sa packages catalog, kung saan
 // wala pang partikular na installation/aktwal na laki ng datos na
 // mapagbabatayan) — 5MB, katulad ng halimbawang ginamit sa paghingi ng
@@ -2782,6 +3054,26 @@ const NEON_PRICING_BASE = {
         assumedCU: 0.25,          // Neon's smallest/minimum compute size (official, hindi assumption)
         assumedBaseSeconds: 5,    // SEED LANG (mas konserbatibo) — papalitan ng measured value pagkatapos ng ilang totoong sync
         assumedSecondsPerMB: 0.7  // SEED LANG (mas konserbatibo) — papalitan ng measured value pagkatapos ng ilang totoong sync
+    },
+    // GAWA/BAGO: kaparehong compute-cost assumption gaya ng cloudBackupSyncCompute
+    // sa itaas, pero para sa Devices/License na Neon database (pgPoolDevices —
+    // device allow-list, fingerprints, clone-splits, AT ang generic relay_kv_store
+    // na kinakargahan ng halos lahat ng admin settings/logs). Walang malinaw na
+    // "isang sync" na unit dito tulad ng Cloud Backup (walang autoBackupIntervalMs
+    // bawat tier) — tuloy-tuloy/"always-on" ang paggamit nito (device-allow
+    // lookups, heartbeat, integrity/branch/backup check-ins, atbp.), kaya BUWANANG
+    // (hindi per-operation) na assumed compute-seconds ang ginagamit dito:
+    // assumedBaseSecondsPerDay (24/7 na overhead kahit walang partikular na
+    // aktibidad) x 30 araw, dagdag ang assumedSecondsPerMBPerMonth batay sa
+    // kasalukuyang laki ng database (mas malaking datos = mas madalas/mabigat na
+    // query kada buwan). SEED/conservative na values lang ito — walang self-
+    // calibrating regression dito (hindi tulad ng cloudBackupSyncCompute, na may
+    // recordCloudBackupSyncTiming() na TOTOONG measured timing) dahil walang
+    // discrete na "operation" na pwedeng i-time nang isa-isa.
+    devicesActivityCompute: {
+        assumedCU: 0.25,                 // Neon's smallest/minimum compute size (official, hindi assumption)
+        assumedBaseSecondsPerDay: 90,     // SEED — konserbatibong tantiya ng araw-araw na compute mula sa device-allow lookups/heartbeat/check-ins
+        assumedSecondsPerMBPerMonth: 4    // SEED — karagdagang buwanang compute batay sa laki ng devices/license database
     }
 };
 const NEON_PRICING_OVERRIDES_PATH = path.join(__dirname, 'neon-pricing-overrides.json');
@@ -3014,6 +3306,49 @@ function isValidSimulatableNeonTier(tierId) {
     return NEON_PRICING_TIER_IDS.includes(tierId) && NEON_PRICING_BASE[tierId] && !NEON_PRICING_BASE[tierId].customPricing;
 }
 let costSafetyNetSimulatedTier = null;
+// ===================================================================
+// DEVICES/LICENSE COST SHARE — REFERENCE TIER ("kopya ng Neon tier")
+// Ito ang tier na ang RATES (compute + storage) ay gagamitin bilang
+// formula ng Devices/License cost share HABANG WALA pang totoong bayad
+// na Neon plan (Free ang plan / hindi ma-detect). Kapag may binili nang
+// paid tier (na-detect ng Neon API, o naka-set sa configured plan
+// dropdown), AUTOMATIC nang lilipat sa totoong Neon formula/gastos —
+// hindi na ginagamit ang reference tier. Pareho pa rin ang hatian:
+// proportional sa aktwal na storage na nagamit ng bawat client.
+// ===================================================================
+const DEVICES_REFERENCE_TIER_PATH = path.join(__dirname, 'devices-cost-reference-tier.json');
+const DEVICES_REFERENCE_TIER_DEFAULT = 'scale';
+let devicesCostReferenceTier = DEVICES_REFERENCE_TIER_DEFAULT;
+async function loadDevicesCostReferenceTier() {
+    let tier = null;
+    const fromStore = await getPersistentJSON('devices-cost-reference-tier', null);
+    if (fromStore !== null) {
+        tier = fromStore && fromStore.tier;
+    } else {
+        try {
+            tier = JSON.parse(fs.readFileSync(DEVICES_REFERENCE_TIER_PATH, 'utf8')).tier;
+        } catch (err) {
+            tier = null;
+        }
+    }
+    return isValidSimulatableNeonTier(tier) && tier !== 'free' ? tier : DEVICES_REFERENCE_TIER_DEFAULT;
+}
+function saveDevicesCostReferenceTier(tier) {
+    const obj = { tier };
+    if (pgPoolDevices || pgPool || redisClient) {
+        setPersistentJSON('devices-cost-reference-tier', obj);
+    }
+    try {
+        fs.writeFileSync(DEVICES_REFERENCE_TIER_PATH, JSON.stringify(obj, null, 2));
+    } catch (err) {
+        console.error('Hindi ma-save ang devices-cost-reference-tier.json:', err);
+    }
+}
+// Tanging paid tiers na may flat rates (launch/scale) — hindi 'free' (0 ang
+// rates, kaya walang saysay bilang formula) at hindi 'enterprise' (custom).
+function isValidDevicesReferenceTier(tierId) {
+    return isValidSimulatableNeonTier(tierId) && tierId !== 'free';
+}
 // ===================================================================
 // PER-CLIENT COST ALLOCATION (Cloud Backup Neon project lang)
 // ===================================================================
@@ -8865,6 +9200,81 @@ app.get('/relay/admin/api/client-cost-allocation', requireAdminKey, async (req, 
         res.status(500).json({ success: false, message: 'Could not compute client cost allocation.' });
     }
 });
+// GAWA/BAGO: kaparehong pattern ng /relay/cloud-backup/cost-allocation sa
+// itaas, pero para sa Devices/License na Neon database — tingnan ang
+// computeDeviceLicenseCostAllocation() para sa buong paliwanag (estimate
+// kapag Free tier/walang Neon API key pa, awtomatikong lilipat sa totoong
+// Neon usage cost sa sandaling na-configure/na-detect na ang totoong
+// binibiling tier).
+app.get('/relay/devices/cost-allocation', requireApiKey, requireAllowedDevice, rateLimit('devices-cost-allocation', 30, 60 * 60 * 1000, (req) => req.query?.installationId), async (req, res) => {
+    const installationId = String(req.query.installationId || '').trim();
+    if (!installationId) {
+        return res.status(400).json({ success: false, message: 'Missing installationId.' });
+    }
+    try {
+        const allocation = await computeDeviceLicenseCostAllocation();
+        if (!allocation.success) {
+            return res.status(503).json(allocation);
+        }
+        const mine = allocation.clients.find(c => c.installationId === installationId);
+        if (!mine) {
+            return res.json({
+                success: true,
+                hasUsage: false,
+                message: 'No Devices/License data recorded yet for this installation.',
+                costBasis: allocation.costBasis,
+                formulaTier: allocation.formulaTier,
+                splitBasis: allocation.splitBasis,
+                warning: allocation.warning
+            });
+        }
+        // Sinasadyang HINDI isinasama ang totalCostPHP/clientCount/bytes ng
+        // ibang client — sariling share lang ang lumalabas sa client.
+        res.json({
+            success: true,
+            hasUsage: true,
+            checkedAt: allocation.checkedAt,
+            costBasis: allocation.costBasis,
+            formulaTier: allocation.formulaTier,
+            splitBasis: allocation.splitBasis,
+            warning: allocation.warning,
+            yourShare: { installationId: mine.installationId, sizeMB: mine.sizeMB, sharePHP: mine.sharePHP }
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+app.get('/relay/admin/api/devices-cost-share/reference-tier', requireAdminKey, (req, res) => {
+    res.json({
+        success: true,
+        referenceTier: devicesCostReferenceTier,
+        options: NEON_PRICING_TIER_IDS.filter((t) => isValidDevicesReferenceTier(t))
+    });
+});
+app.post('/relay/admin/api/devices-cost-share/reference-tier', requireAdminKey, (req, res) => {
+    const tier = String(req.body?.tier || '').trim().toLowerCase();
+    if (!isValidDevicesReferenceTier(tier)) {
+        return res.status(400).json({
+            success: false,
+            message: `Invalid tier. Options: ${NEON_PRICING_TIER_IDS.filter((t) => isValidDevicesReferenceTier(t)).join(', ')}.`
+        });
+    }
+    devicesCostReferenceTier = tier;
+    saveDevicesCostReferenceTier(tier);
+    invalidateDevicesCostAllocationCache();
+    dbHealthCache = { at: 0, payload: null };
+    console.log(`🗄️  Na-set ang Devices/License cost share reference tier tungong "${tier}" via admin panel.`);
+    res.json({ success: true, referenceTier: tier });
+});
+app.get('/relay/admin/api/devices-cost-allocation', requireAdminKey, async (req, res) => {
+    try {
+        const allocation = await computeDeviceLicenseCostAllocation();
+        res.json(allocation);
+    } catch (err) {
+        console.error('⚠️  /relay/admin/api/devices-cost-allocation error:', err.message);
+        res.status(500).json({ success: false, message: 'Could not compute Devices/License cost allocation.' });
+    }
+});
 // ===================================================================
 // GAWA/BAGO: COST SAFETY NET admin API — dito pinipili ng developer, per
 // installation ID/device, kung alin sa dalawang paraan (o wala) ang
@@ -11274,7 +11684,7 @@ app.get('/relay/admin/api/db-health', requireAdminKey, async (req, res) => {
         if (dbHealthCache.payload && (Date.now() - dbHealthCache.at) < DB_HEALTH_CACHE_MS && req.query.force !== '1') {
             return res.json({ ...dbHealthCache.payload, cached: true });
         }
-        const [cloudBackupBytes, devicesBytes, buildBytes, cloudBackupTables, devicesTables, buildTables, exchangeRate, cloudBackupNeonUsage, devicesNeonUsage, buildNeonUsage] = await Promise.all([
+        const [cloudBackupBytes, devicesBytes, buildBytes, cloudBackupTables, devicesTables, buildTables, exchangeRate, cloudBackupNeonUsage, devicesNeonUsage, buildNeonUsage, devicesCostAllocation] = await Promise.all([
             getPgDatabaseSizeBytes(pgPool),
             getPgDatabaseSizeBytes(pgPoolDevices),
             getPgDatabaseSizeBytes(pgPoolBuild),
@@ -11284,7 +11694,11 @@ app.get('/relay/admin/api/db-health', requireAdminKey, async (req, res) => {
             getUsdToPhpRate(),
             getNeonProjectUsage(NEON_CLOUD_BACKUP_PROJECT_ID),
             getNeonProjectUsage(NEON_DEVICES_PROJECT_ID),
-            getNeonProjectUsage(NEON_BUILD_PROJECT_ID)
+            getNeonProjectUsage(NEON_BUILD_PROJECT_ID),
+            computeDeviceLicenseCostAllocation().catch((err) => {
+                console.warn('⚠️  Devices/License cost allocation failed (db-health):', err.message);
+                return null;
+            })
         ]);
         // Halimbawang compute assumption — ito na lang ang FALLBACK kapag
         // wala pang totoong Neon usage data (o wala pang isang oras na
@@ -11342,7 +11756,16 @@ app.get('/relay/admin/api/db-health', requireAdminKey, async (req, res) => {
             },
             databases: {
                 cloudBackup: buildDbEntry('Cloud Backup (DATABASE_URL)', cloudBackupBytes, cloudBackupTables, neonConfiguredPlans.cloudBackup || 'free', cloudBackupNeonUsage),
-                devices: buildDbEntry('Devices / License' + (DEVICES_DB_IS_SEPARATE ? ' (RELAY_DEVICES_DATABASE_URL)' : ' (shared sa DATABASE_URL)'), devicesBytes, devicesTables, neonConfiguredPlans.devices || 'free', devicesNeonUsage),
+                devices: {
+                    ...buildDbEntry('Devices / License' + (DEVICES_DB_IS_SEPARATE ? ' (RELAY_DEVICES_DATABASE_URL)' : ' (shared sa DATABASE_URL)'), devicesBytes, devicesTables, neonConfiguredPlans.devices || 'free', devicesNeonUsage),
+                    // GAWA/BAGO: laging-available na per-client cost allocation
+                    // (realtime estimate kapag Free tier/walang Neon API key pa,
+                    // totoong Neon usage cost sa sandaling na-configure na —
+                    // tingnan ang computeDeviceLicenseCostAllocation()).
+                    clientCostAllocation: devicesCostAllocation,
+                    costShareReferenceTier: devicesCostReferenceTier,
+                    costShareReferenceTierOptions: NEON_PRICING_TIER_IDS.filter((t) => isValidDevicesReferenceTier(t))
+                },
                 build: buildDbEntry('Build / Push' + (pgPoolBuild ? ' (RELAY_BUILD_DATABASE_URL)' : ' (not configured — walang RELAY_BUILD_DATABASE_URL)'), buildBytes, buildTables, neonConfiguredPlans.build || 'free', buildNeonUsage)
             },
             neonPricing: NEON_PRICING
@@ -11364,6 +11787,7 @@ app.post('/relay/admin/api/db-health/plan', requireAdminKey, (req, res) => {
     }
     neonConfiguredPlans = { ...neonConfiguredPlans, [database]: tier };
     saveNeonConfiguredPlans(neonConfiguredPlans);
+    invalidateDevicesCostAllocationCache();
     dbHealthCache = { at: 0, payload: null };
     console.log(`🗄️  Na-set ang configured Neon plan ng "${database}" tungong "${tier}" via admin panel.`);
     res.json({ success: true, neonConfiguredPlans });
@@ -12232,7 +12656,8 @@ async function bootstrapStores() {
         clientMaintenanceFeePaidUntil,
         ACTIVATION_FLAGS,
         cloudBackupActualBills,
-        costSafetyNetSimulatedTier
+        costSafetyNetSimulatedTier,
+        devicesCostReferenceTier
     ] = await Promise.all([
         loadAllowedDevices(),
         loadDeviceLabels(),
@@ -12263,7 +12688,8 @@ async function bootstrapStores() {
         loadClientMaintenanceFeePaidUntil(),
         loadActivationFlags(),
         loadCloudBackupActualBills(),
-        loadCostSafetyNetSimulatedTier()
+        loadCostSafetyNetSimulatedTier(),
+        loadDevicesCostReferenceTier()
     ]);
     recomputeFeatureCatalog();
     if (Object.keys(featureCatalogOverrides).length > 0) {

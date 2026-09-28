@@ -2407,6 +2407,35 @@ function renderDbHealthEntry(dbKey, entry, phpRate) {
         </div>
       </div>`;
   }
+  // Devices/License lang: selector ng "kopya ng Neon tier" na gagamiting formula
+  // ng client cost share habang Free pa ang Neon plan. Kapag paid na ang
+  // plan (na-detect/naka-set), awtomatikong ang totoong Neon formula na ang gamit.
+  let costShareBlock = '';
+  if (dbKey === 'devices' && entry.costShareReferenceTier) {
+    const alloc = entry.clientCostAllocation;
+    const basisLabels = {
+      'real-neon-usage': 'TOTOONG Neon usage at rates ng aktwal na paid plan',
+      'configured-plan-estimate': 'Estimate gamit ang rates ng configured paid plan',
+      'reference-tier-usage': 'TOTOONG usage x rates ng reference tier',
+      'reference-tier-estimate': 'Estimate (laki ng DB + assumed compute) x rates ng reference tier'
+    };
+    const refOptions = (entry.costShareReferenceTierOptions || ['launch', 'scale']).map(t =>
+      `<option value="${t}" ${entry.costShareReferenceTier === t ? 'selected' : ''}>${t.charAt(0).toUpperCase() + t.slice(1)}</option>`
+    ).join('');
+    const allocLine = alloc && alloc.success
+      ? `Ginagamit ngayon: <strong>${basisLabels[alloc.costBasis] || alloc.costBasis}</strong> (${alloc.formulaTier}) · Total: ${alloc.totalCostPHP.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} PHP · ${alloc.clientCount} client(s), hati ayon sa storage${alloc.sharedWithCloudBackup ? ' · ⚠️ shared sa Cloud Backup DB/project — table-level estimate lang' : ''}`
+      : 'Wala pang makuhang cost share computation.';
+    costShareBlock = `
+      <div style="margin-top:8px; padding:8px 10px; border-radius:8px; background:var(--accent-bg,#12293b); border:1px solid var(--accent-line,#1f4a63);">
+        <div style="font-size:12px; font-weight:600; color:var(--accent,#6cf);">🧮 Client cost share formula (Platform Infrastructure Cost Share)</div>
+        <div style="font-size:11px; color:var(--muted); margin-top:3px;">
+          Reference Neon tier (gagamitin habang Free pa ang Neon plan):
+          <select onchange="setDevicesCostShareTier(this.value)" style="padding:4px 8px; border-radius:6px; border:1px solid var(--border-soft); background:var(--bg); color:var(--text); font-size:11px;">${refOptions}</select>
+        </div>
+        <div style="font-size:11px; color:var(--muted); margin-top:4px;">${allocLine}</div>
+        <div style="font-size:11px; color:var(--muted); margin-top:2px;">Kapag paid na ang Neon plan, awtomatikong lilipat sa totoong Neon formula. Pareho pa rin ang hatian: proportional sa storage ng bawat client.</div>
+      </div>`;
+  }
   const rowsHtml = entry.tierComparison.map(t => {
     if (t.customPricing) {
       return `<tr><td>${t.name}</td><td colspan="3" style="color:var(--muted); font-size:12px;">${t.notes}</td></tr>`;
@@ -2450,11 +2479,19 @@ function renderDbHealthEntry(dbKey, entry, phpRate) {
       </div>
       ${allowanceLine}
       ${realUsageBlock}
+      ${costShareBlock}
       <table style="width:100%; margin-top:8px; border-collapse:collapse; font-size:12px;">
         <thead><tr style="text-align:left; color:var(--muted); font-size:11px;"><th>Tier</th><th>Storage cost</th><th>Compute rate</th><th>Status</th></tr></thead>
         <tbody>${rowsHtml}</tbody>
       </table>
     </div>`;
+}
+async function setDevicesCostShareTier(tier) {
+  try {
+    const res = await api('/relay/admin/api/devices-cost-share/reference-tier', { method: 'POST', body: JSON.stringify({ tier }) });
+    if (res.success) { toast('Cost share reference tier updated.', 'success'); loadDbHealth(true); }
+    else toast(res.message || 'Could not update.', 'error');
+  } catch (err) {   }
 }
 async function setDbHealthPlan(database, tier) {
   try {
