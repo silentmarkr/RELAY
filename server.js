@@ -1578,12 +1578,24 @@ async function computeDeviceLicenseCostAllocationUncached() {
     let costBasis;
     let formulaTier = formula.tierId;
     let usedFallbackPlan = false;
+    let usingProjection = false;
     if (rawUsage) {
         // Totoong usage — rates ng totoong paid tier, o ng reference tier
         // kapag Free ang account (forceTierId = reference).
         const realCost = computeNeonRealCost(rawUsage, neonConfiguredPlans.devices || 'free', formula.tierId);
         if (realCost && typeof realCost.totalMonthlyCostUSD === 'number') {
-            totalCostPHP = realCost.totalMonthlyCostUSD * usdToPhp;
+            let computeUSD = realCost.computeCostUSD;
+            const storageUSD = realCost.storageCostUSD;
+            // Parehong pattern ng Cloud Backup: i-project ang compute papuntang
+            // BUONG billing period kapag may sapat nang datos (>= 24 oras),
+            // para hindi mukhang mababa ang "monthly" figure sa simula ng buwan.
+            const projection = projectFullPeriodCUHours(rawUsage);
+            const tierRates = NEON_PRICING[formula.tierId];
+            if (projection && !projection.lowConfidence && tierRates && typeof tierRates.computeRatePerCUHourUSD === 'number') {
+                computeUSD = projection.projectedCUHoursFullPeriod * tierRates.computeRatePerCUHourUSD;
+                usingProjection = true;
+            }
+            totalCostPHP = ((computeUSD || 0) + (storageUSD || 0)) * usdToPhp;
             costBasis = formula.mode === 'real' ? 'real-neon-usage' : 'reference-tier-usage';
         }
     }
@@ -1629,6 +1641,7 @@ async function computeDeviceLicenseCostAllocationUncached() {
         costBasis,
         formulaTier,
         formulaMode: formula.mode,
+        periodBasis: usingProjection ? 'projected-full-period' : 'elapsed-period-actual',
         sharedWithCloudBackup,
         usedFallbackPlan,
         splitBasis: usingProportionalSplit ? 'proportional-by-your-stored-data' : 'equal-split-no-attributable-data-yet',
