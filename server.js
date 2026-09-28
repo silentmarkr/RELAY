@@ -9152,6 +9152,38 @@ app.post('/relay/cloud-tokens/activate-purchase', requireApiKey, requireAllowedD
         res.status(500).json({ success: false, message: err.message });
     }
 });
+// CLIENT-FACING Cloud Backup cost share: kapag Free pa ang Neon plan (0 ang
+// rates kaya ₱0.00 ang lalabas), gagamitin ang rates ng REFERENCE TIER na
+// pinili sa admin (parehong selector ng Devices/License). Kapag paid na ang
+// plan (na-detect ng Neon API o naka-set sa configured plan), totoong Neon
+// formula na ang gamit — walang override. Para lang ito sa client-facing
+// endpoint; ang admin allocation/reconciliation ay nananatiling TOTOONG
+// bill (walang override) para hindi malito ang "lugi ba ako" report.
+const CLOUD_BACKUP_CLIENT_ALLOCATION_CACHE_TTL_MS = 10 * 60 * 1000;
+let cloudBackupClientAllocationCache = { key: null, data: null, expiresAt: 0 };
+function invalidateCloudBackupClientAllocationCache() {
+    cloudBackupClientAllocationCache = { key: null, data: null, expiresAt: 0 };
+}
+async function getCloudBackupClientFacingAllocation() {
+    const usage = await getNeonProjectUsage(NEON_CLOUD_BACKUP_PROJECT_ID);
+    let overrideTier = null;
+    if (usage) {
+        const detected = normalizeNeonPlanId(usage.planId);
+        const configured = neonConfiguredPlans.cloudBackup || 'free';
+        const isPaid = detected ? isPaidNeonTierId(detected) : isPaidNeonTierId(configured);
+        if (!isPaid) {
+            overrideTier = isValidDevicesReferenceTier(devicesCostReferenceTier) ? devicesCostReferenceTier : DEVICES_REFERENCE_TIER_DEFAULT;
+        }
+    }
+    const key = `${overrideTier || 'real'}|${neonConfiguredPlans.cloudBackup || 'free'}`;
+    const c = cloudBackupClientAllocationCache;
+    if (c.data && c.key === key && Date.now() < c.expiresAt) return c.data;
+    const allocation = await computeClientCostAllocation(overrideTier || undefined);
+    if (allocation && allocation.success) {
+        cloudBackupClientAllocationCache = { key, data: allocation, expiresAt: Date.now() + CLOUD_BACKUP_CLIENT_ALLOCATION_CACHE_TTL_MS };
+    }
+    return allocation;
+}
 // Ang bahaging ito lang ang makikita ng isang OMNIPOS installation sa
 // sarili niyang admin panel: kanya-kanyang share sa TOTAL na Neon cost
 // (base sa proporsyon ng laki ng data at dalas ng backup), dagdag ang
@@ -9163,7 +9195,7 @@ app.get('/relay/cloud-backup/cost-allocation', requireApiKey, requireAllowedDevi
         return res.status(400).json({ success: false, message: 'Missing installationId.' });
     }
     try {
-        const allocation = await computeClientCostAllocation();
+        const allocation = await getCloudBackupClientFacingAllocation();
         if (!allocation.success) {
             return res.status(503).json(allocation);
         }
@@ -9174,6 +9206,7 @@ app.get('/relay/cloud-backup/cost-allocation', requireApiKey, requireAllowedDevi
                 hasUsage: false,
                 message: 'No Cloud Backup usage recorded yet for this installation in the current billing period.',
                 costBasis: allocation.costBasis,
+                formulaTier: allocation.simulatedTierOverride || null,
                 warning: allocation.warning
             });
         }
@@ -9182,6 +9215,8 @@ app.get('/relay/cloud-backup/cost-allocation', requireApiKey, requireAllowedDevi
             hasUsage: true,
             checkedAt: allocation.checkedAt,
             costBasis: allocation.costBasis,
+            // may laman lang kapag reference tier ang ginamit (Free pa ang Neon)
+            formulaTier: allocation.simulatedTierOverride || null,
             warning: allocation.warning,
             clientCount: allocation.clientCount,
             totalCostPHP: allocation.totalCostPHP,
@@ -9262,6 +9297,7 @@ app.post('/relay/admin/api/devices-cost-share/reference-tier', requireAdminKey, 
     devicesCostReferenceTier = tier;
     saveDevicesCostReferenceTier(tier);
     invalidateDevicesCostAllocationCache();
+    invalidateCloudBackupClientAllocationCache();
     dbHealthCache = { at: 0, payload: null };
     console.log(`🗄️  Na-set ang Devices/License cost share reference tier tungong "${tier}" via admin panel.`);
     res.json({ success: true, referenceTier: tier });
@@ -11788,6 +11824,7 @@ app.post('/relay/admin/api/db-health/plan', requireAdminKey, (req, res) => {
     neonConfiguredPlans = { ...neonConfiguredPlans, [database]: tier };
     saveNeonConfiguredPlans(neonConfiguredPlans);
     invalidateDevicesCostAllocationCache();
+    invalidateCloudBackupClientAllocationCache();
     dbHealthCache = { at: 0, payload: null };
     console.log(`🗄️  Na-set ang configured Neon plan ng "${database}" tungong "${tier}" via admin panel.`);
     res.json({ success: true, neonConfiguredPlans });
