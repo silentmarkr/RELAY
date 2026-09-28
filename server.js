@@ -278,7 +278,24 @@ async function ensureCloudBackupSchema() {
     // ===================================================================
     await pgPool.query(`ALTER TABLE cloud_backup_meta ADD COLUMN IF NOT EXISTS storage_fee_last_billed_at TIMESTAMPTZ;`);
     await pgPool.query(`ALTER TABLE cloud_backup_meta ADD COLUMN IF NOT EXISTS storage_fee_fraction_accrued NUMERIC NOT NULL DEFAULT 0;`);
-    console.log('✅ Cloud backup Postgres schema ready (cloud_backup_modules, cloud_backup_meta).');
+    // METERED per-client hourly consumption (client-facing cost share). Ang bawat
+    // sync/restore ay nagdaragdag ng TOTOONG na-measure na compute seconds sa
+    // hour bucket ng client — ito ang basehan ng singil, hindi ang share sa
+    // buong Neon project (na kasama ang dev/test usage bago pa mag-subscribe).
+    await pgPool.query(`ALTER TABLE cloud_backup_meta ADD COLUMN IF NOT EXISTS first_sync_at TIMESTAMPTZ;`);
+    await pgPool.query(`UPDATE cloud_backup_meta SET first_sync_at = COALESCE(last_sync_at, now()) WHERE first_sync_at IS NULL;`);
+    await pgPool.query(`
+        CREATE TABLE IF NOT EXISTS cloud_backup_usage_hourly (
+            installation_id TEXT NOT NULL,
+            hour_start TIMESTAMPTZ NOT NULL,
+            sync_count INTEGER NOT NULL DEFAULT 0,
+            restore_count INTEGER NOT NULL DEFAULT 0,
+            bytes_synced BIGINT NOT NULL DEFAULT 0,
+            compute_seconds NUMERIC NOT NULL DEFAULT 0,
+            PRIMARY KEY (installation_id, hour_start)
+        );
+    `);
+    console.log('✅ Cloud backup Postgres schema ready (cloud_backup_modules, cloud_backup_meta, cloud_backup_usage_hourly).');
 }
 async function ensureDeviceLicenseSchema() {
     if (!pgPoolDevices) return;
@@ -3485,8 +3502,9 @@ function getCloudBackupTierPricePHP(tier) {
 // walang internet, nag-expire ang free API, atbp.) — laging ipapakita
 // sa UI kung "live" o "fallback" ang rate na ginamit, kasama ang oras
 // noong huling successful fetch.
-const EXCHANGE_RATE_FALLBACK_USD_TO_PHP = 58.7;
-const EXCHANGE_RATE_FALLBACK_NOTE_DATE = '2026-01';
+// UPDATED 2026-09-28: mid-market USD->PHP ~62.4-62.5 (Wise/Xe/Pluang). Fallback lang ito kapag pumalya ang live fetch.
+const EXCHANGE_RATE_FALLBACK_USD_TO_PHP = 62.5;
+const EXCHANGE_RATE_FALLBACK_NOTE_DATE = '2026-09';
 const EXCHANGE_RATE_CACHE_MS = 6 * 60 * 60 * 1000;
 let exchangeRateCache = { at: 0, rate: null, source: null, fetchedAt: null };
 async function getUsdToPhpRate() {
@@ -5149,6 +5167,7 @@ app.post('/relay/admin/api/devices/:installationId/purge', requireAdminKey, asyn
             try {
                 await runPgWriteTx(pgPool, async (client) => {
                     const modulesResult = await client.query('DELETE FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
+                    await client.query('DELETE FROM cloud_backup_usage_hourly WHERE installation_id = $1', [installationId]);
                     const metaResult = await client.query('DELETE FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
                     summary.deletedCloudBackupModuleRows = modulesResult.rowCount;
                     summary.deletedCloudBackupMetaRows = metaResult.rowCount;
@@ -7916,9 +7935,10 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
         }
         await runPgWriteTx(pgPool, async (client) => {
             await client.query(
-                `INSERT INTO cloud_backup_meta (installation_id, store_name, total_records, module_count, size_bytes, last_sync_at, sync_count)
-                 VALUES ($1, $2, $3, $4, $5, now(), 1)
+                `INSERT INTO cloud_backup_meta (installation_id, store_name, total_records, module_count, size_bytes, last_sync_at, sync_count, first_sync_at)
+                 VALUES ($1, $2, $3, $4, $5, now(), 1, now())
                  ON CONFLICT (installation_id) DO UPDATE SET
+                    first_sync_at = COALESCE(cloud_backup_meta.first_sync_at, now()),
                     store_name = excluded.store_name,
                     total_records = excluded.total_records,
                     module_count = excluded.module_count,
@@ -7939,6 +7959,7 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
         // manual na admin review).
         const writeDurationSeconds = Math.max(0, (Date.now() - writeStartedAtMs) / 1000);
         recordCloudBackupSyncTiming(projectedSizeMB, writeDurationSeconds);
+        recordClientHourlyUsage(installationId, { syncs: 1, bytes: totalSizeBytes, computeSeconds: writeDurationSeconds });
         const tierForResponse = tier;
         const quotaMBForResponse = quotaMB;
         const sizeMBForResponse = Math.round((totalSizeBytes / (1024 * 1024)) * 100) / 100;
@@ -9177,6 +9198,103 @@ let cloudBackupClientAllocationCache = { key: null, data: null, expiresAt: 0 };
 function invalidateCloudBackupClientAllocationCache() {
     cloudBackupClientAllocationCache = { key: null, data: null, expiresAt: 0 };
 }
+
+// ===================================================================
+// METERED per-client hourly consumption (client-facing lang).
+// Bakit: dati, ang buong Neon project cost (naka-project sa 744h, kasama ang
+// dev/test/idle usage bago pa mag-subscribe ang client) ay hinahati sa mga
+// client — kaya ang bagong subscriber na may 95% share ay agad na nasisingil
+// ng buong buwan. Ngayon: ang singil ay batay LANG sa sariling na-measure
+// na hourly usage ng client mula nang siya ay nag-umpisa (first_sync_at):
+//   compute = (sum ng measured sync/restore seconds + 1 autosuspend tail
+//             kada ACTIVE na oras) x CU x rate
+//   storage = laki ngayon x oras na naka-store / 744 x rate
+// Kung walang hourly rows pa (legacy client), tantiya mula sa sync_count
+// gamit ang calibrated base/perMB. Ang admin allocation ay HINDI ginagalaw.
+// ===================================================================
+const NEON_AUTOSUSPEND_TAIL_SECONDS = 300; // default autosuspend ng Neon (5 min) — compute ay gising pa pagkatapos ng huling query
+async function recordClientHourlyUsage(installationId, { syncs = 0, restores = 0, bytes = 0, computeSeconds = 0 } = {}) {
+    if (!pgPool || !installationId) return;
+    try {
+        await queryWithRetry(
+            pgPool,
+            `INSERT INTO cloud_backup_usage_hourly (installation_id, hour_start, sync_count, restore_count, bytes_synced, compute_seconds)
+             VALUES ($1, date_trunc('hour', now()), $2, $3, $4, $5)
+             ON CONFLICT (installation_id, hour_start) DO UPDATE SET
+                sync_count = cloud_backup_usage_hourly.sync_count + excluded.sync_count,
+                restore_count = cloud_backup_usage_hourly.restore_count + excluded.restore_count,
+                bytes_synced = cloud_backup_usage_hourly.bytes_synced + excluded.bytes_synced,
+                compute_seconds = cloud_backup_usage_hourly.compute_seconds + excluded.compute_seconds`,
+            [installationId, syncs, restores, Math.max(0, Math.round(bytes)), Math.max(0, Number(computeSeconds) || 0)]
+        );
+    } catch (err) {
+        console.warn('⚠️ CLOUD_BACKUP hourly usage record failed:', err.message);
+    }
+}
+async function applyMeteredClientCosts(allocation, usage, tierId, rate) {
+    const tier = NEON_PRICING[tierId] || NEON_PRICING.scale;
+    const cc = NEON_PRICING.cloudBackupSyncCompute || NEON_PRICING_BASE.cloudBackupSyncCompute;
+    const computeRateUSD = (typeof tier.computeRatePerCUHourUSD === 'number' && tier.computeRatePerCUHourUSD > 0) ? tier.computeRatePerCUHourUSD : NEON_PRICING.scale.computeRatePerCUHourUSD;
+    const storageRateUSD = (typeof tier.storageRatePerGBMonthUSD === 'number' && tier.storageRatePerGBMonthUSD > 0) ? tier.storageRatePerGBMonthUSD : NEON_PRICING.scale.storageRatePerGBMonthUSD;
+    const nowMs = Date.now();
+    const periodStartMs = usage && usage.consumptionPeriodStart ? new Date(usage.consumptionPeriodStart).getTime() : NaN;
+    const periodFloorMs = Number.isFinite(periodStartMs) ? periodStartMs : (nowMs - NEON_BILLING_PERIOD_HOURS * 3600 * 1000);
+    const ids = allocation.clients.map(c => c.installationId);
+    const metaRows = ids.length ? (await queryWithRetry(pgPool, 'SELECT installation_id, first_sync_at FROM cloud_backup_meta WHERE installation_id = ANY($1)', [ids])).rows : [];
+    const usageRows = ids.length ? (await queryWithRetry(pgPool,
+        `SELECT h.installation_id, SUM(h.compute_seconds)::float AS secs, COUNT(*)::int AS active_hours, SUM(h.sync_count)::int AS syncs
+         FROM cloud_backup_usage_hourly h
+         JOIN cloud_backup_meta m ON m.installation_id = h.installation_id
+         WHERE h.installation_id = ANY($1)
+           AND h.hour_start >= to_timestamp($2::float8 / 1000.0)
+           AND h.hour_start >= date_trunc('hour', COALESCE(m.first_sync_at, now()))
+         GROUP BY h.installation_id`,
+        [ids, periodFloorMs])).rows : [];
+    const firstSync = new Map(metaRows.map(r => [r.installation_id, r.first_sync_at ? new Date(r.first_sync_at).getTime() : null]));
+    const usageBy = new Map(usageRows.map(r => [r.installation_id, r]));
+    let sumStorage = 0, sumCompute = 0;
+    const clients = allocation.clients.map((c) => {
+        const sinceMs = Math.max(periodFloorMs, firstSync.get(c.installationId) || nowMs);
+        const hoursHeld = Math.min(NEON_BILLING_PERIOD_HOURS, Math.max(0, (nowMs - sinceMs) / 3600000));
+        const sizeGB = (c.sizeBytes || 0) / 1e9;
+        const storageUSD = sizeGB * storageRateUSD * (hoursHeld / NEON_BILLING_PERIOD_HOURS);
+        const u = usageBy.get(c.installationId);
+        let computeSeconds;
+        if (u && u.secs > 0) {
+            computeSeconds = u.secs + NEON_AUTOSUSPEND_TAIL_SECONDS * u.active_hours;
+        } else {
+            const perSync = cc.assumedBaseSeconds + cc.assumedSecondsPerMB * (c.sizeBytes || 0) / (1024 * 1024);
+            const syncs = Math.max(0, c.syncCount || 0);
+            computeSeconds = syncs * perSync + NEON_AUTOSUSPEND_TAIL_SECONDS * Math.min(syncs, Math.max(1, Math.ceil(hoursHeld)));
+        }
+        const computeUSD = (computeSeconds / 3600) * cc.assumedCU * computeRateUSD;
+        // Parehong 30% safety margin ng sync/restore pricing — sumasakop sa idle compute, dev/test usage at estimate error na hindi na-meter.
+        const storageCostPHP = storageUSD * rate * CLOUD_BACKUP_COST_SAFETY_MARGIN_MULTIPLIER;
+        const computeCostPHP = computeUSD * rate * CLOUD_BACKUP_COST_SAFETY_MARGIN_MULTIPLIER;
+        sumStorage += storageCostPHP; sumCompute += computeCostPHP;
+        return { ...c, storageCostPHP, computeCostPHP, meteredSince: new Date(sinceMs).toISOString(), meteredHours: Math.round(hoursHeld * 100) / 100, meteredComputeSeconds: Math.round(computeSeconds) };
+    }).map((c) => {
+        const base = Math.round((c.storageCostPHP + c.computeCostPHP) * 100) / 100;
+        return {
+            ...c,
+            storageSharePercent: sumStorage > 0 ? Math.round((c.storageCostPHP / sumStorage) * 10000) / 100 : 0,
+            computeSharePercent: sumCompute > 0 ? Math.round((c.computeCostPHP / sumCompute) * 10000) / 100 : 0,
+            storageCostPHP: Math.round(c.storageCostPHP * 100) / 100,
+            computeCostPHP: Math.round(c.computeCostPHP * 100) / 100,
+            baseCostPHP: base,
+            finalPricePHP: Math.round((base + c.maintenanceFeePHP) * 100) / 100
+        };
+    });
+    return {
+        ...allocation,
+        projectTotalCostPHP: allocation.totalCostPHP,
+        totalCostPHP: Math.round((sumStorage + sumCompute) * 100) / 100,
+        costBasis: 'metered-hourly',
+        safetyMarginMultiplier: CLOUD_BACKUP_COST_SAFETY_MARGIN_MULTIPLIER,
+        warning: null,
+        clients
+    };
+}
 async function getCloudBackupClientFacingAllocation() {
     const usage = await getNeonProjectUsage(NEON_CLOUD_BACKUP_PROJECT_ID);
     let overrideTier = null;
@@ -9191,8 +9309,14 @@ async function getCloudBackupClientFacingAllocation() {
     const key = `${overrideTier || 'real'}|${neonConfiguredPlans.cloudBackup || 'free'}`;
     const c = cloudBackupClientAllocationCache;
     if (c.data && c.key === key && Date.now() < c.expiresAt) return c.data;
-    const allocation = await computeClientCostAllocation(overrideTier || undefined);
+    let allocation = await computeClientCostAllocation(overrideTier || undefined);
     if (allocation && allocation.success) {
+        try {
+            const tierIdForRates = overrideTier || normalizeNeonPlanId(usage && usage.planId) || (neonConfiguredPlans.cloudBackup || 'free');
+            allocation = await applyMeteredClientCosts(allocation, usage, tierIdForRates, (allocation.exchangeRate && allocation.exchangeRate.usdToPhp) || EXCHANGE_RATE_FALLBACK_USD_TO_PHP);
+        } catch (err) {
+            console.error('⚠️ applyMeteredClientCosts failed, using pool allocation:', err.message);
+        }
         cloudBackupClientAllocationCache = { key, data: allocation, expiresAt: Date.now() + CLOUD_BACKUP_CLIENT_ALLOCATION_CACHE_TTL_MS };
     }
     return allocation;
@@ -9627,6 +9751,7 @@ async function purgeCloudBackupDataForInstallation(installationId) {
     }
     await runPgWriteTx(pgPool, async (client) => {
         await client.query('DELETE FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
+        await client.query('DELETE FROM cloud_backup_usage_hourly WHERE installation_id = $1', [installationId]);
         await client.query('DELETE FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
     });
     return { purged: true };
@@ -10224,6 +10349,11 @@ app.post('/relay/cloud-backup/restore', requireApiKey, requireAllowedDevice, rat
             'UPDATE cloud_backup_meta SET restore_count = restore_count + 1, last_restore_at = now() WHERE installation_id = $1',
             [installationId]
         );
+        {
+            const rsMB = (Number(metaResult.rows[0].size_bytes) || 0) / (1024 * 1024);
+            const cc = NEON_PRICING.cloudBackupSyncCompute || NEON_PRICING_BASE.cloudBackupSyncCompute;
+            recordClientHourlyUsage(installationId, { restores: 1, computeSeconds: cc.assumedBaseSeconds + cc.assumedSecondsPerMB * rsMB });
+        }
         logActivity(installationId, 'cloud_backup_restored', {
             moduleCount: modulesResult.rows.length,
             lastSyncAt: metaResult.rows[0].last_sync_at,
