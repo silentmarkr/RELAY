@@ -1343,6 +1343,81 @@ function getCloudTokenPackages() {
 // kailangang i-adjust ang laki ng cushion (hal. 1.30 = +30%).
 // ===================================================================
 const CLOUD_BACKUP_COST_SAFETY_MARGIN_MULTIPLIER = 1.30;
+// ===================================================================
+// GAWA/BAGO (anti-lugi #1): AUTOSUSPEND TAIL + MINIMUM BILLABLE PER SYNC.
+// Dati, ang token charge sa bawat sync/restore ay ang measured/assumed na
+// ACTIVE seconds lang (base + MB x s/MB). Pero pagkatapos ng huling query,
+// gising pa rin ang Neon compute nang buong autosuspend delay (default
+// 300s = 5 min) — at BINABAYARAN ito ng developer. Sa maliliit na sync
+// (hal. 40s na active), ~340s ang TOTOONG gising kaya ~8x ang agwat, at
+// hindi kayang takpan ng 30% margin. Ngayon: billable = active + tail,
+// at may minimum floor kada operation. Parehong naka-env para madaling
+// i-adjust (NEON_AUTOSUSPEND_TAIL_SECONDS, CLOUD_BACKUP_MIN_BILLABLE_SYNC_SECONDS).
+// TALA: kung mag-sync ang ilang client nang sabay-sabay (iisang tail lang
+// ang binabayaran ng Neon), ang sobra ay napupunta sa iyo bilang margin.
+// ===================================================================
+function readNonNegativeEnvNumber(name, fallback) {
+    const raw = process.env[name];
+    if (raw === undefined || raw === null || String(raw).trim() === '') return fallback;
+    const n = Number(raw);
+    return (Number.isFinite(n) && n >= 0) ? n : fallback;
+}
+const NEON_AUTOSUSPEND_TAIL_SECONDS = readNonNegativeEnvNumber('NEON_AUTOSUSPEND_TAIL_SECONDS', 300); // default autosuspend ng Neon (5 min) — gising pa ang compute pagkatapos ng huling query
+const CLOUD_BACKUP_MIN_BILLABLE_SYNC_SECONDS = readNonNegativeEnvNumber('CLOUD_BACKUP_MIN_BILLABLE_SYNC_SECONDS', 340); // pinakamababang sisingilin kada sync/restore (active + tail), kahit gaano kaliit ang data
+function computeBillableComputeSeconds(activeSeconds) {
+    const active = Math.max(0, Number(activeSeconds) || 0);
+    return Math.max(active + NEON_AUTOSUSPEND_TAIL_SECONDS, CLOUD_BACKUP_MIN_BILLABLE_SYNC_SECONDS);
+}
+// ===================================================================
+// GAWA/BAGO (anti-lugi #4): DEBT LIMIT + LOCKOUT + RETENTION.
+// Ang storage holding fee ay sinasadyang tuloy-tuloy na naniningil kahit
+// ubos na ang balance (hindi maiiwasang gastos ng developer kay Neon) —
+// pero dati WALANG hangganan ang pagiging negatibo at puwedeng mag-sync
+// pa ang client habang negatibo (fraction accrual < 1 token). Ngayon:
+//   1) MAX DEBT: hanggang -CLOUD_TOKEN_MAX_DEBT_TOKENS lang ang balance;
+//      lampas doon, hindi na nadadagdagan ang utang (ikaw na ang sumasalo
+//      ng sobra, pero may ceiling na).
+//   2) LOCKOUT (read-only): habang negatibo — at hanggang umabot sa
+//      CLOUD_TOKEN_DEBT_RESUME_BUFFER_TOKENS ang balance pagkatapos ng
+//      top-up (minimum top-up = utang + buffer) — bawal ang sync/restore.
+//   3) RETENTION: kapag lampas CLOUD_BACKUP_DEBT_PURGE_DAYS na sa utang
+//      (debt_since), buburahin ang cloud backup data (para tumigil ang
+//      storage fee). 0 = naka-off ang auto-purge. Local data ng client sa
+//      OMNIPOS ay HINDI ginagalaw.
+// ===================================================================
+const CLOUD_TOKEN_MAX_DEBT_TOKENS = readNonNegativeEnvNumber('CLOUD_TOKEN_MAX_DEBT_TOKENS', 50);
+const CLOUD_TOKEN_DEBT_RESUME_BUFFER_TOKENS = readNonNegativeEnvNumber('CLOUD_TOKEN_DEBT_RESUME_BUFFER_TOKENS', 20);
+const CLOUD_BACKUP_DEBT_PURGE_DAYS = readNonNegativeEnvNumber('CLOUD_BACKUP_DEBT_PURGE_DAYS', 60);
+function evaluateCloudTokenDebtLock(balanceTokens, debtSince) {
+    const balance = Number(balanceTokens) || 0;
+    if (balance < 0) {
+        return { locked: true, tokensToResume: Math.ceil((-balance) + CLOUD_TOKEN_DEBT_RESUME_BUFFER_TOKENS) };
+    }
+    if (debtSince && balance < CLOUD_TOKEN_DEBT_RESUME_BUFFER_TOKENS) {
+        return { locked: true, tokensToResume: Math.ceil(CLOUD_TOKEN_DEBT_RESUME_BUFFER_TOKENS - balance) };
+    }
+    return { locked: false, tokensToResume: 0 };
+}
+// GAWA/BAGO: paunang babala bago ang debt-retention purge. Kapareho ng
+// kondisyon ng runCloudBackupDebtPurgeSweep(): negatibo ang balance, may
+// debt_since, may backup na nakatago sa cloud (size_bytes > 0), at naka-on
+// ang auto-purge (CLOUD_BACKUP_DEBT_PURGE_DAYS > 0). Kung hindi tugma,
+// null ang ibabalik (walang babalang ipapakita).
+function computeCloudBackupPurgeWarning(balanceTokens, debtSince, hasBackup) {
+    if (!(CLOUD_BACKUP_DEBT_PURGE_DAYS > 0)) return null;
+    if (!hasBackup) return null;
+    if (!(Number(balanceTokens) < 0) || !debtSince) return null;
+    const since = new Date(debtSince).getTime();
+    if (!Number.isFinite(since)) return null;
+    const purgeAtMs = since + CLOUD_BACKUP_DEBT_PURGE_DAYS * 24 * 60 * 60 * 1000;
+    return {
+        purgeAt: new Date(purgeAtMs).toISOString(),
+        daysUntilPurge: Math.max(0, Math.ceil((purgeAtMs - Date.now()) / (24 * 60 * 60 * 1000)))
+    };
+}
+function buildCloudTokenDebtMessage(lock, actionLabel) {
+    return `Cloud Backup ${actionLabel} is paused: this account has an unpaid Omni Tokens balance. Buy at least ${lock.tokensToResume} more Omni Tokens to resume. Nothing was charged and nothing was written to the cloud.`;
+}
 function computeRealCloudBackupSyncCostPHP(sizeBytes, tier, usdToPhpRate) {
     const plan = CLOUD_BACKUP_PLANS[tier] || CLOUD_BACKUP_PLANS.basic;
     const sizeBytesSafe = Math.max(0, Number(sizeBytes) || 0);
@@ -1377,10 +1452,17 @@ function computeRealCloudBackupSyncCostPHP(sizeBytes, tier, usdToPhpRate) {
         ? neonTier.computeRatePerCUHourUSD
         : NEON_PRICING.scale.computeRatePerCUHourUSD;
     const computeAssumption = NEON_PRICING.cloudBackupSyncCompute || NEON_PRICING_BASE.cloudBackupSyncCompute;
-    const assumedComputeSeconds = computeAssumption.assumedBaseSeconds + (sizeMB * computeAssumption.assumedSecondsPerMB);
+    const assumedActiveSeconds = computeAssumption.assumedBaseSeconds + (sizeMB * computeAssumption.assumedSecondsPerMB);
+    // GAWA/BAGO: isama ang autosuspend tail + minimum floor (tingnan ang computeBillableComputeSeconds()).
+    const assumedComputeSeconds = computeBillableComputeSeconds(assumedActiveSeconds);
     const assumedComputeCUHours = computeAssumption.assumedCU * (assumedComputeSeconds / 3600);
     const perSyncComputeCostUSD = assumedComputeCUHours * computeRateUSD;
-    const perSyncCostUSD = perSyncStorageCostUSD + perSyncComputeCostUSD;
+    // BUGFIX (double-charge): ang storage ay singil na ng runStorageHoldingFeeSweep()
+    // (araw-araw, batay sa aktwal na laki at oras). Kung isasama pa rito ang
+    // perSyncStorageCostUSD, dalawang beses nababayaran ng client ang storage.
+    // Compute lang ang per-sync charge ngayon; nananatiling nakalkula sa itaas ang
+    // perSyncStorageCostUSD para madaling ibalik kung kailangan.
+    const perSyncCostUSD = perSyncComputeCostUSD;
     const rate = usdToPhpRate || EXCHANGE_RATE_FALLBACK_USD_TO_PHP;
     // Universal Safety Margin — tingnan ang paliwanag sa itaas.
     return perSyncCostUSD * rate * CLOUD_BACKUP_COST_SAFETY_MARGIN_MULTIPLIER;
@@ -1737,7 +1819,9 @@ function computeRealCloudBackupRestoreCostPHP(sizeBytes, tier, usdToPhpRate) {
         ? neonTier.computeRatePerCUHourUSD
         : NEON_PRICING.scale.computeRatePerCUHourUSD;
     const computeAssumption = NEON_PRICING.cloudBackupSyncCompute || NEON_PRICING_BASE.cloudBackupSyncCompute;
-    const assumedComputeSeconds = computeAssumption.assumedBaseSeconds + (sizeMB * computeAssumption.assumedSecondsPerMB);
+    const assumedActiveSeconds = computeAssumption.assumedBaseSeconds + (sizeMB * computeAssumption.assumedSecondsPerMB);
+    // GAWA/BAGO: parehong autosuspend tail + minimum floor gaya ng sync — gising din ang compute pagkatapos ng restore.
+    const assumedComputeSeconds = computeBillableComputeSeconds(assumedActiveSeconds);
     const assumedComputeCUHours = computeAssumption.assumedCU * (assumedComputeSeconds / 3600);
     const restoreComputeCostUSD = assumedComputeCUHours * computeRateUSD;
     const perRestoreCostUSD = restoreStorageCostUSD + restoreComputeCostUSD;
@@ -1783,10 +1867,15 @@ async function consumeCloudTokensForSyncExact(installationId, sizeBytes, tier, n
             [installationId]
         );
         const walletRes = await client.query(
-            `SELECT balance_tokens, sync_fraction_accrued, sync_fraction_tier, cost_safety_mode, reserved_tokens FROM cloud_token_wallets WHERE installation_id = $1 FOR UPDATE`,
+            `SELECT balance_tokens, sync_fraction_accrued, sync_fraction_tier, cost_safety_mode, reserved_tokens, debt_since FROM cloud_token_wallets WHERE installation_id = $1 FOR UPDATE`,
             [installationId]
         );
         const row = walletRes.rows[0];
+        // GAWA/BAGO: read-only habang may utang (o hindi pa naaabot ang resume buffer) — kasama ang fractional (< 1 token) na sync.
+        const debtLock = evaluateCloudTokenDebtLock(row.balance_tokens, row.debt_since);
+        if (debtLock.locked) {
+            return { ok: false, insufficient: true, inDebt: true, tokensToResume: debtLock.tokensToResume, balanceTokens: Number(row.balance_tokens) };
+        }
         const baseFraction = Number(row.sync_fraction_accrued) || 0;
         const newFraction = baseFraction + costFraction;
         const wholeTokens = Math.floor(newFraction);
@@ -1800,7 +1889,7 @@ async function consumeCloudTokensForSyncExact(installationId, sizeBytes, tier, n
         }
         const newBalance = currentBalance - wholeTokens;
         await client.query(
-            `UPDATE cloud_token_wallets SET balance_tokens = $2, sync_fraction_accrued = $3, sync_fraction_tier = $4, updated_at = now() WHERE installation_id = $1`,
+            `UPDATE cloud_token_wallets SET balance_tokens = $2, sync_fraction_accrued = $3, sync_fraction_tier = $4, debt_since = NULL, updated_at = now() WHERE installation_id = $1`,
             [installationId, newBalance, remainder, tier]
         );
         if (wholeTokens > 0) {
@@ -1843,17 +1932,22 @@ async function consumeCloudTokensForRestore(installationId, sizeBytes, tier, not
             [installationId]
         );
         const walletRes = await client.query(
-            `SELECT balance_tokens, cost_safety_mode, reserved_tokens FROM cloud_token_wallets WHERE installation_id = $1 FOR UPDATE`,
+            `SELECT balance_tokens, cost_safety_mode, reserved_tokens, debt_since FROM cloud_token_wallets WHERE installation_id = $1 FOR UPDATE`,
             [installationId]
         );
         const walletRow = walletRes.rows[0];
         const currentBalance = Number(walletRow.balance_tokens);
+        // GAWA/BAGO: read-only habang may utang — tingnan ang evaluateCloudTokenDebtLock().
+        const restoreDebtLock = evaluateCloudTokenDebtLock(currentBalance, walletRow.debt_since);
+        if (restoreDebtLock.locked) {
+            return { ok: false, insufficient: true, inDebt: true, tokensToResume: restoreDebtLock.tokensToResume, balanceTokens: currentBalance, costTokens };
+        }
         if (currentBalance < costTokens) {
             return { ok: false, insufficient: true, balanceTokens: currentBalance, costTokens };
         }
         const newBalance = currentBalance - costTokens;
         await client.query(
-            `UPDATE cloud_token_wallets SET balance_tokens = $2, updated_at = now() WHERE installation_id = $1`,
+            `UPDATE cloud_token_wallets SET balance_tokens = $2, debt_since = NULL, updated_at = now() WHERE installation_id = $1`,
             [installationId, newBalance]
         );
         await client.query(
@@ -2523,10 +2617,19 @@ async function ensureCloudTokenSchema() {
     //                          kailan na dapat mag-book ulit ng bagong
     //                          estimate (tingnan ang COST_SAFETY_NET_PREPAY_CYCLE_MS).
     // ===================================================================
-    await pgPool.query(`ALTER TABLE cloud_token_wallets ADD COLUMN IF NOT EXISTS cost_safety_mode TEXT NOT NULL DEFAULT 'none';`);
+    await pgPool.query(`ALTER TABLE cloud_token_wallets ADD COLUMN IF NOT EXISTS cost_safety_mode TEXT NOT NULL DEFAULT 'reserve';`);
+    // AYOS/BAGO: DEFAULT na ang 'reserve' (dati 'none') — walang safety net ang
+    // bagong wallet dati hangga't hindi mano-manong sinet ng admin.
+    // `cost_safety_mode_explicit` = true kapag ang admin mismo ang pumili ng
+    // mode (kasama ang sadyang 'none'), kaya hindi ito ibabalik sa 'reserve'.
+    await pgPool.query(`ALTER TABLE cloud_token_wallets ADD COLUMN IF NOT EXISTS cost_safety_mode_explicit BOOLEAN NOT NULL DEFAULT false;`);
+    await pgPool.query(`ALTER TABLE cloud_token_wallets ALTER COLUMN cost_safety_mode SET DEFAULT 'reserve';`);
+    await pgPool.query(`UPDATE cloud_token_wallets SET cost_safety_mode = 'reserve' WHERE cost_safety_mode = 'none' AND cost_safety_mode_explicit = false;`);
     await pgPool.query(`ALTER TABLE cloud_token_wallets ADD COLUMN IF NOT EXISTS reserve_months NUMERIC NOT NULL DEFAULT 1.5;`);
     await pgPool.query(`ALTER TABLE cloud_token_wallets ADD COLUMN IF NOT EXISTS reserved_tokens NUMERIC NOT NULL DEFAULT 0;`);
     await pgPool.query(`ALTER TABLE cloud_token_wallets ADD COLUMN IF NOT EXISTS prepay_cycle_anchor TIMESTAMPTZ;`);
+    // GAWA/BAGO (anti-lugi #4): kailan unang naging negatibo ang balance — batayan ng lockout at ng debt-retention purge.
+    await pgPool.query(`ALTER TABLE cloud_token_wallets ADD COLUMN IF NOT EXISTS debt_since TIMESTAMPTZ;`);
     // ===================================================================
     // AYOS/BAGO: idinagdag ang `category` column sa cloud_token_ledger —
     // dating ang paraan lang ng pag-identify kung anong klaseng entry ito
@@ -2682,19 +2785,49 @@ function invalidateCostSafetyNetSimulatedEstimateCache() {
 // (hal. hindi pa naka-configure ang Neon API) — 0 ang ibabalik, ibig
 // sabihin walang restriction sa halip na basta harangan ang lahat ng
 // pagbili dahil lang sa hindi available ang cost data.
+// AYOS/BAGO: HINDI na fail-open (floor = 0) kapag hindi makuha ang Neon
+// estimate. Pagkakasunod-sunod: (1) huling matagumpay na estimate ng
+// installation na ito, (2) lokal na conservative estimate (isang buong
+// buwan ng storage holding fee batay sa size_bytes + minimum na buwanang
+// halaga). May alert (console + activity log, throttled) para makita ng
+// admin na fallback ang ginagamit.
+const COST_SAFETY_NET_FALLBACK_MIN_MONTHLY_PHP = readNonNegativeEnvNumber('COST_SAFETY_NET_FALLBACK_MIN_MONTHLY_PHP', 25);
+const costSafetyNetLastGoodEstimate = new Map(); // installationId -> PHP
+const costSafetyNetFallbackAlertAt = new Map();  // installationId -> ms
+const COST_SAFETY_NET_FALLBACK_ALERT_INTERVAL_MS = 60 * 60 * 1000;
+function alertCostSafetyNetFallback(installationId, source, reason) {
+    const last = costSafetyNetFallbackAlertAt.get(installationId) || 0;
+    if (Date.now() - last < COST_SAFETY_NET_FALLBACK_ALERT_INTERVAL_MS) return;
+    costSafetyNetFallbackAlertAt.set(installationId, Date.now());
+    console.error(`⚠️ COST SAFETY NET: walang magamit na Neon estimate para sa ${installationId} (${reason}) — gumagamit ng fallback: ${source}.`);
+    try { logActivity(installationId, 'cost_safety_net_estimate_fallback', { source, reason }); } catch (e) { /* alert lang ito */ }
+}
 async function getEstimatedMonthlyStorageSyncCostPHP(installationId) {
-    // GAWA/BAGO: kapag naka-set ang costSafetyNetSimulatedTier (at valid
-    // itong tier — 'free'/'launch'/'scale', hindi 'enterprise'), gamitin
-    // ang SIMULATED na allocation (pinilit ang RATES ng tier na iyon,
-    // pero totoong LIVE usage/share pa rin ang basehan) — PARA LANG dito
-    // sa Cost Safety Net floor estimate. Kapag disabled/invalid, 100%
-    // kaparehong dating behavior (totoong detected/fallback tier).
     const allocation = isValidSimulatableNeonTier(costSafetyNetSimulatedTier)
         ? await getSimulatedMonthlyCostAllocationCached(costSafetyNetSimulatedTier)
         : await getEstimatedMonthlyCostAllocationCached();
-    if (!allocation || !allocation.success || !Array.isArray(allocation.clients)) return 0;
-    const mine = allocation.clients.find((c) => c.installationId === installationId);
-    return mine ? Math.max(0, Number(mine.baseCostPHP) || 0) : 0;
+    if (allocation && allocation.success && Array.isArray(allocation.clients)) {
+        const mine = allocation.clients.find((c) => c.installationId === installationId);
+        // Wala sa allocation = wala pang backup data/gastos ang installation na ito.
+        const value = mine ? Math.max(0, Number(mine.baseCostPHP) || 0) : 0;
+        costSafetyNetLastGoodEstimate.set(installationId, value);
+        return value;
+    }
+    const reason = (allocation && allocation.message) ? String(allocation.message).slice(0, 200) : 'allocation unavailable';
+    if (costSafetyNetLastGoodEstimate.has(installationId)) {
+        alertCostSafetyNetFallback(installationId, 'last known estimate', reason);
+        return costSafetyNetLastGoodEstimate.get(installationId);
+    }
+    let localEstimate = COST_SAFETY_NET_FALLBACK_MIN_MONTHLY_PHP;
+    try {
+        const metaRes = await queryWithRetry(pgPool, `SELECT size_bytes FROM cloud_backup_meta WHERE installation_id = $1`, [installationId]);
+        const sizeBytes = metaRes.rows[0] ? Number(metaRes.rows[0].size_bytes) || 0 : 0;
+        const { rate } = await getUsdToPhpRate();
+        const holdingMonth = computeStorageHoldingFeeCostPHP(sizeBytes, STORAGE_HOLDING_FEE_MONTH_MS, rate);
+        localEstimate = Math.max(COST_SAFETY_NET_FALLBACK_MIN_MONTHLY_PHP, holdingMonth);
+    } catch (err) { /* gamitin ang minimum */ }
+    alertCostSafetyNetFallback(installationId, 'local conservative estimate', reason);
+    return Math.round(localEstimate * 100) / 100;
 }
 async function getWalletCostSafetyRow(installationId) {
     await getOrCreateCloudTokenWallet(installationId);
@@ -2706,7 +2839,8 @@ async function getWalletCostSafetyRow(installationId) {
     const row = result.rows[0] || {};
     return {
         balanceTokens: Number(row.balance_tokens) || 0,
-        mode: COST_SAFETY_NET_MODES.includes(row.cost_safety_mode) ? row.cost_safety_mode : 'none',
+        // AYOS/BAGO: kapag walang/invalid ang naka-save na mode, 'reserve' (hindi 'none') ang fallback — fail-closed, kaayon ng DEFAULT ng column.
+        mode: COST_SAFETY_NET_MODES.includes(row.cost_safety_mode) ? row.cost_safety_mode : 'reserve',
         reserveMonths: Number(row.reserve_months) || COST_SAFETY_NET_DEFAULT_RESERVE_MONTHS,
         reservedTokens: Number(row.reserved_tokens) || 0,
         prepayCycleAnchor: row.prepay_cycle_anchor || null
@@ -2825,13 +2959,13 @@ async function pruneCloudSyncActivity() {
 }
 setInterval(pruneCloudSyncActivity, 24 * 60 * 60 * 1000);
 async function getOrCreateCloudTokenWallet(installationId) {
-    const result = await queryWithRetry(pgPool, 'SELECT installation_id, balance_tokens, auto_sync_enabled FROM cloud_token_wallets WHERE installation_id = $1', [installationId]);
+    const result = await queryWithRetry(pgPool, 'SELECT installation_id, balance_tokens, auto_sync_enabled, debt_since FROM cloud_token_wallets WHERE installation_id = $1', [installationId]);
     if (result.rows[0]) return result.rows[0];
     const inserted = await queryWithRetry(
         pgPool,
         `INSERT INTO cloud_token_wallets (installation_id, balance_tokens, auto_sync_enabled) VALUES ($1, 0, true)
          ON CONFLICT (installation_id) DO UPDATE SET installation_id = EXCLUDED.installation_id
-         RETURNING installation_id, balance_tokens, auto_sync_enabled`,
+         RETURNING installation_id, balance_tokens, auto_sync_enabled, debt_since`,
         [installationId]
     );
     return inserted.rows[0];
@@ -2840,9 +2974,11 @@ async function creditCloudTokens(installationId, tokens, note, category = 'TOKEN
     await getOrCreateCloudTokenWallet(installationId);
     const result = await queryWithRetry(
         pgPool,
-        `UPDATE cloud_token_wallets SET balance_tokens = balance_tokens + $2, updated_at = now()
+        `UPDATE cloud_token_wallets SET balance_tokens = balance_tokens + $2,
+            debt_since = CASE WHEN balance_tokens + $2 >= $3::numeric THEN NULL ELSE debt_since END,
+            updated_at = now()
          WHERE installation_id = $1 RETURNING balance_tokens`,
-        [installationId, tokens]
+        [installationId, tokens, CLOUD_TOKEN_DEBT_RESUME_BUFFER_TOKENS]
     );
     const balanceAfter = result.rows[0] ? Number(result.rows[0].balance_tokens) : null;
     await queryWithRetry(
@@ -3569,6 +3705,7 @@ async function getUsdToPhpRate() {
 // "rent" mismo, walang paglaktaw.
 // ===================================================================
 const STORAGE_HOLDING_FEE_MIN_INTERVAL_MS = 20 * 60 * 60 * 1000; // ~20 oras — takip para hindi ma-double-charge kung mas madalas tumakbo ang sweep kaysa sa layunin nitong 24-oras na cadence
+const CLOUD_BACKUP_HISTORY_STORAGE_FACTOR = readNonNegativeEnvNumber('CLOUD_BACKUP_HISTORY_STORAGE_FACTOR', 1);
 const STORAGE_HOLDING_FEE_MONTH_MS = 30 * 24 * 60 * 60 * 1000; // batayan ng "isang buwan" para sa prorating (kaayon ng ginamit na sa computeRealCloudBackupSyncCostPHP)
 function computeStorageHoldingFeeCostPHP(sizeBytes, elapsedMs, usdToPhpRate) {
     const sizeBytesSafe = Math.max(0, Number(sizeBytes) || 0);
@@ -3579,7 +3716,15 @@ function computeStorageHoldingFeeCostPHP(sizeBytes, elapsedMs, usdToPhpRate) {
     // Safe-by-default fallback — pareho ng ginawang fix sa sync/restore cost
     // functions sa itaas: Scale (pinakamataas na rate) sa halip na Launch.
     if (!neonTier || !neonTier.storageRatePerGBMonthUSD) neonTier = NEON_PRICING.scale;
-    const monthlyStorageCostUSD = sizeGB * neonTier.storageRatePerGBMonthUSD;
+    // AYOS/BAGO: isama ang Neon instant-restore/history storage ($/GB-buwan)
+    // — dati storage rate lang ang sinisingil kaya kulang kapag malaki ang
+    // history. Ang laki ng history ay ipinapalagay bilang
+    // CLOUD_BACKUP_HISTORY_STORAGE_FACTOR x size ng backup (default 1.0;
+    // itaas kung mataas ang churn ng data).
+    const historyRateUSD = (typeof NEON_PRICING.instantRestoreRatePerGBMonthUSD === 'number')
+        ? NEON_PRICING.instantRestoreRatePerGBMonthUSD
+        : NEON_PRICING_BASE.instantRestoreRatePerGBMonthUSD;
+    const monthlyStorageCostUSD = sizeGB * (neonTier.storageRatePerGBMonthUSD + historyRateUSD * CLOUD_BACKUP_HISTORY_STORAGE_FACTOR);
     const fractionOfMonth = elapsedMsSafe / STORAGE_HOLDING_FEE_MONTH_MS;
     const proRatedCostUSD = monthlyStorageCostUSD * fractionOfMonth;
     const rate = usdToPhpRate || EXCHANGE_RATE_FALLBACK_USD_TO_PHP;
@@ -3640,12 +3785,19 @@ async function runStorageHoldingFeeSweep() {
                     // Sinasadyang WALANG "insufficient" gate dito — tingnan
                     // ang paliwanag sa itaas kung bakit dapat itong tuloy-
                     // tuloy magsingil, kahit umabot pa sa negatibong balance.
-                    const newBalance = currentBalance - wholeTokens;
+                    // GAWA/BAGO (anti-lugi #4): MAX DEBT — hindi na bababa sa
+                    // -CLOUD_TOKEN_MAX_DEBT_TOKENS ang balance. Ang sobra ay hindi
+                    // na sinisingil (ceiling ng exposure mo); kung nasa/lampas na
+                    // sa limit, 0 na ang bagong singil.
+                    const debtFloor = -CLOUD_TOKEN_MAX_DEBT_TOKENS;
+                    const uncappedBalance = currentBalance - wholeTokens;
+                    const newBalance = Math.max(uncappedBalance, Math.min(currentBalance, debtFloor));
+                    const chargedTokens = currentBalance - newBalance;
                     await client.query(
                         `UPDATE cloud_backup_meta SET storage_fee_last_billed_at = now(), storage_fee_fraction_accrued = $2 WHERE installation_id = $1`,
                         [installationId, remainder]
                     );
-                    if (wholeTokens > 0) {
+                    if (chargedTokens > 0) {
                         await client.query(
                             `UPDATE cloud_token_wallets SET balance_tokens = $2, updated_at = now() WHERE installation_id = $1`,
                             [installationId, newBalance]
@@ -3659,10 +3811,17 @@ async function runStorageHoldingFeeSweep() {
                         // scheduled job ito, walang manual path).
                         await client.query(
                             `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note, category, trigger_type) VALUES ($1, 'consume', $2, $3, $4, 'STORAGE_HOLDING_FEE', 'automatic')`,
-                            [installationId, -wholeTokens, newBalance, `Storage holding fee — ${formatDuration(elapsedMs)}`]
+                            [installationId, -chargedTokens, newBalance, `Storage holding fee — ${formatDuration(elapsedMs)}${chargedTokens < wholeTokens ? ' (capped at debt limit)' : ''}`]
                         );
                         // GAWA/BAGO: 'prepay' cost safety net drawdown — tingnan ang paliwanag sa drawDownPrepayReserve().
-                        await drawDownPrepayReserve(client, installationId, { mode: walletRow.cost_safety_mode, reservedTokens: walletRow.reserved_tokens }, wholeTokens);
+                        await drawDownPrepayReserve(client, installationId, { mode: walletRow.cost_safety_mode, reservedTokens: walletRow.reserved_tokens }, chargedTokens);
+                    }
+                    // GAWA/BAGO: itala kung kailan unang naging negatibo (batayan ng lockout/purge) — kasama ang mga wallet na negatibo na bago pa ang update na ito.
+                    if (newBalance < 0) {
+                        await client.query(
+                            `UPDATE cloud_token_wallets SET debt_since = COALESCE(debt_since, now()) WHERE installation_id = $1`,
+                            [installationId]
+                        );
                     }
                 });
                 invalidateWalletCache(installationId);
@@ -3676,6 +3835,59 @@ async function runStorageHoldingFeeSweep() {
 }
 setInterval(runStorageHoldingFeeSweep, 24 * 60 * 60 * 1000);
 setTimeout(runStorageHoldingFeeSweep, 90 * 1000); // unang check, 90 segundo pagkatapos mag-boot
+// GAWA/BAGO (anti-lugi #4): DEBT RETENTION PURGE — buburahin ang cloud backup
+// data ng mga wallet na lampas CLOUD_BACKUP_DEBT_PURGE_DAYS nang negatibo,
+// para tumigil ang storage fee na ikaw ang sumasalo. Hindi ginagalaw ang
+// wallet/ledger (mananatili ang history at ang utang) o ang local data ng
+// client sa sarili niyang OMNIPOS. Kung nakabayad na siya bago tumakbo ito,
+// muling chine-check sa loob ng lock at hindi buburahin.
+async function runCloudBackupDebtPurgeSweep() {
+    if (!pgPool) return;
+    if (!(CLOUD_BACKUP_DEBT_PURGE_DAYS > 0)) return;
+    try {
+        const candidates = await pgPool.query(
+            `SELECT w.installation_id
+               FROM cloud_token_wallets w
+               JOIN cloud_backup_meta m ON m.installation_id = w.installation_id
+              WHERE w.balance_tokens < 0
+                AND w.debt_since IS NOT NULL
+                AND w.debt_since < now() - ($1::numeric * interval '1 day')
+                AND m.size_bytes > 0`,
+            [CLOUD_BACKUP_DEBT_PURGE_DAYS]
+        );
+        let purgedCount = 0;
+        for (const { installation_id: installationId } of candidates.rows) {
+            try {
+                const purged = await runPgWriteTx(pgPool, async (client) => {
+                    const w = await client.query(
+                        `SELECT balance_tokens, debt_since FROM cloud_token_wallets WHERE installation_id = $1 FOR UPDATE`,
+                        [installationId]
+                    );
+                    const wr = w.rows[0];
+                    if (!wr || !(Number(wr.balance_tokens) < 0) || !wr.debt_since) return false;
+                    await client.query('DELETE FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
+                    await client.query('DELETE FROM cloud_backup_usage_hourly WHERE installation_id = $1', [installationId]);
+                    await client.query('DELETE FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
+                    return true;
+                });
+                if (purged) {
+                    purgedCount++;
+                    logActivity(installationId, 'cloud_backup_debt_purge', { purgedBy: 'automatic', reason: 'negative Omni Tokens balance past retention limit', purgeAfterDays: CLOUD_BACKUP_DEBT_PURGE_DAYS });
+                    invalidateWalletCache(installationId);
+                }
+            } catch (err) {
+                console.error(`⚠️ CLOUD_BACKUP_DEBT_PURGE: hindi na-purge ang installation ${installationId}:`, err.message);
+            }
+        }
+        if (purgedCount > 0) {
+            console.log(`🗑️  CLOUD_BACKUP_DEBT_PURGE: nabura ang Cloud Backup data ng ${purgedCount} installation(s) na lampas ${CLOUD_BACKUP_DEBT_PURGE_DAYS} araw nang may utang na tokens.`);
+        }
+    } catch (err) {
+        console.error('⚠️ runCloudBackupDebtPurgeSweep error:', err.message);
+    }
+}
+setInterval(runCloudBackupDebtPurgeSweep, 24 * 60 * 60 * 1000);
+setTimeout(runCloudBackupDebtPurgeSweep, 210 * 1000);
 // ===================================================================
 // NEON ACCOUNT API — kunin ang TUNAY na compute/storage usage ng
 // kasalukuyang billing period direkta mula sa Neon account (GET
@@ -7646,6 +7858,18 @@ app.post('/relay/cloud-backup/upload/start', requireApiKey, requireAllowedDevice
         // upload na ito (hindi na basta tier-derived/maintenance-fee-based
         // na estimate) — tingnan ang comment sa getCloudTokenCostPerSyncExact().
         const minCostForPrecheck = await getCloudTokenCostPerSyncExact(sizeBytesForPrecheck, tierForPrecheck);
+        const precheckDebtLock = evaluateCloudTokenDebtLock(walletRow.balance_tokens, walletRow.debt_since);
+        if (precheckDebtLock.locked) {
+            logActivity(installationId, 'cloud_backup_blocked', { reason: 'in_debt', balanceTokens: Number(walletRow.balance_tokens) });
+            return res.status(402).json({
+                success: false,
+                insufficientTokens: true,
+                inDebt: true,
+                tokensToResume: precheckDebtLock.tokensToResume,
+                balanceTokens: Number(walletRow.balance_tokens),
+                message: buildCloudTokenDebtMessage(precheckDebtLock, 'sync')
+            });
+        }
         if (Number(walletRow.balance_tokens) < minCostForPrecheck) {
             logActivity(installationId, 'cloud_backup_blocked', { reason: 'insufficient_tokens', balanceTokens: Number(walletRow.balance_tokens) });
             return res.status(402).json({
@@ -7875,12 +8099,15 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
     }
     if (!tokenConsumeResult.ok) {
         cleanupCloudBackupUploadSession(String(uploadId));
-        logActivity(installationId, 'cloud_backup_blocked', { reason: 'insufficient_tokens', balanceTokens: tokenConsumeResult.balanceTokens });
+        logActivity(installationId, 'cloud_backup_blocked', { reason: tokenConsumeResult.inDebt ? 'in_debt' : 'insufficient_tokens', balanceTokens: tokenConsumeResult.balanceTokens });
         return res.status(402).json({
             success: false,
             insufficientTokens: true,
+            ...(tokenConsumeResult.inDebt ? { inDebt: true, tokensToResume: tokenConsumeResult.tokensToResume } : {}),
             balanceTokens: tokenConsumeResult.balanceTokens,
-            message: 'Insufficient Cloud Backup (Omni Tokens) balance. Nothing was written to the cloud — please buy more tokens to keep syncing.'
+            message: tokenConsumeResult.inDebt
+                ? buildCloudTokenDebtMessage({ tokensToResume: tokenConsumeResult.tokensToResume }, 'sync')
+                : 'Insufficient Cloud Backup (Omni Tokens) balance. Nothing was written to the cloud — please buy more tokens to keep syncing.'
         });
     }
     // AYOS/BAGO: itatala ang timestamp bago magsimula ang aktwal na
@@ -8302,6 +8529,8 @@ app.get('/relay/cloud-tokens/wallet', requireApiKey, requireAllowedDevice, rateL
             }
             costSafetyNetForWallet = { mode: walletSafetyNet.mode, floor: walletSafetyNet.floor, nextRebookLabel };
         }
+        const walletDebtLock = evaluateCloudTokenDebtLock(wallet.balance_tokens, wallet.debt_since);
+        const walletPurgeWarning = computeCloudBackupPurgeWarning(wallet.balance_tokens, wallet.debt_since, knownSizeBytes > 0);
         const responseBody = {
             success: true,
             balanceTokens: Number(wallet.balance_tokens),
@@ -8315,7 +8544,14 @@ app.get('/relay/cloud-tokens/wallet', requireApiKey, requireAllowedDevice, rateL
             realRestoreCostTokensExact,
             realRestoreCostBasedOnKnownSize: knownSizeBytes > 0,
             realRestoreCostSizeBytesUsed: sizeBytesForRealCost,
-            costSafetyNet: costSafetyNetForWallet
+            costSafetyNet: costSafetyNetForWallet,
+            // FIX: expose the debt lockout state so OMNIPOS can pre-check it and show the
+            // "Cloud Backup paused" message early (same rule the sync/restore endpoints enforce).
+            inDebt: walletDebtLock.locked,
+            tokensToResume: walletDebtLock.tokensToResume,
+            // GAWA/BAGO: null kung walang nakaambang purge; kung meron, ilang araw na lang bago mabura ang cloud backup.
+            daysUntilPurge: walletPurgeWarning ? walletPurgeWarning.daysUntilPurge : null,
+            purgeAt: walletPurgeWarning ? walletPurgeWarning.purgeAt : null
         };
         setWalletCache(installationId, responseBody);
         res.json(responseBody);
@@ -8762,8 +8998,11 @@ app.post('/relay/cloud-tokens/check-and-consume', requireApiKey, requireAllowedD
             return res.status(402).json({
                 success: false,
                 insufficient: true,
+                ...(result.inDebt ? { inDebt: true, tokensToResume: result.tokensToResume } : {}),
                 balanceTokens: result.balanceTokens,
-                message: 'Insufficient Cloud Backup tokens. Please buy more tokens to keep syncing.'
+                message: result.inDebt
+                    ? buildCloudTokenDebtMessage({ tokensToResume: result.tokensToResume }, 'sync')
+                    : 'Insufficient Cloud Backup tokens. Please buy more tokens to keep syncing.'
             });
         }
         res.json({ success: true, balanceTokens: result.balanceTokens, tokensCharged: result.tokensCharged });
@@ -9212,7 +9451,7 @@ function invalidateCloudBackupClientAllocationCache() {
 // Kung walang hourly rows pa (legacy client), tantiya mula sa sync_count
 // gamit ang calibrated base/perMB. Ang admin allocation ay HINDI ginagalaw.
 // ===================================================================
-const NEON_AUTOSUSPEND_TAIL_SECONDS = 300; // default autosuspend ng Neon (5 min) — compute ay gising pa pagkatapos ng huling query
+// NEON_AUTOSUSPEND_TAIL_SECONDS: nakadeklara na sa itaas (katabi ng CLOUD_BACKUP_COST_SAFETY_MARGIN_MULTIPLIER).
 async function recordClientHourlyUsage(installationId, { syncs = 0, restores = 0, bytes = 0, computeSeconds = 0 } = {}) {
     if (!pgPool || !installationId) return;
     try {
@@ -9264,7 +9503,9 @@ async function applyMeteredClientCosts(allocation, usage, tierId, rate) {
             computeSeconds = u.secs + NEON_AUTOSUSPEND_TAIL_SECONDS * u.active_hours;
         } else {
             const perSync = cc.assumedBaseSeconds + cc.assumedSecondsPerMB * (c.sizeBytes || 0) / (1024 * 1024);
-            const syncs = Math.max(0, c.syncCount || 0);
+            // BUGFIX: lifetime ang c.syncCount — huwag i-charge lahat sa kasalukuyang
+            // period. I-cap sa max 1 sync bawat oras na hawak ng data ng client.
+            const syncs = Math.min(Math.max(0, c.syncCount || 0), Math.max(1, Math.ceil(hoursHeld)));
             computeSeconds = syncs * perSync + NEON_AUTOSUSPEND_TAIL_SECONDS * Math.min(syncs, Math.max(1, Math.ceil(hoursHeld)));
         }
         const computeUSD = (computeSeconds / 3600) * cc.assumedCU * computeRateUSD;
@@ -9355,8 +9596,9 @@ app.get('/relay/cloud-backup/cost-allocation', requireApiKey, requireAllowedDevi
             // may laman lang kapag reference tier ang ginamit (Free pa ang Neon)
             formulaTier: allocation.simulatedTierOverride || null,
             warning: allocation.warning,
-            clientCount: allocation.clientCount,
-            totalCostPHP: allocation.totalCostPHP,
+            // BUGFIX (privacy): sinasadyang walang clientCount/totalCostPHP — iisang
+            // shared API key ang gamit ng lahat ng client, kaya nailalantad nito
+            // ang laki ng negosyo/singil ng iba (kapareho ng Devices endpoint).
             yourShare: mine
         });
     } catch (err) {
@@ -9500,7 +9742,7 @@ app.post('/relay/admin/api/cost-safety-net', requireAdminKey, async (req, res) =
         // bagong mode.
         await queryWithRetry(
             pgPool,
-            `UPDATE cloud_token_wallets SET cost_safety_mode = $2, reserve_months = $3, reserved_tokens = 0, prepay_cycle_anchor = NULL, updated_at = now() WHERE installation_id = $1`,
+            `UPDATE cloud_token_wallets SET cost_safety_mode = $2, cost_safety_mode_explicit = true, reserve_months = $3, reserved_tokens = 0, prepay_cycle_anchor = NULL, updated_at = now() WHERE installation_id = $1`,
             [installationId, mode, reserveMonths]
         );
         invalidateWalletCache(installationId);
@@ -9635,7 +9877,10 @@ app.get('/relay/admin/api/cloud-backup/reconciliation', requireAdminKey, async (
         const { rows } = await queryWithRetry(
             pgPool,
             `SELECT
-                COALESCE(SUM(CASE WHEN type = 'consume' AND category IN ('SYNC_CHARGE','RESTORE_CHARGE','FEATURE_UNLOCK','STORAGE_HOLDING_FEE') THEN -tokens ELSE 0 END), 0) AS gross_charged_php,
+                COALESCE(SUM(CASE WHEN type = 'consume' AND category IN ('SYNC_CHARGE','RESTORE_CHARGE','STORAGE_HOLDING_FEE') THEN -tokens ELSE 0 END), 0) AS gross_charged_php,
+                COALESCE(SUM(CASE WHEN type = 'consume' AND category IN ('SYNC_CHARGE','RESTORE_CHARGE','STORAGE_HOLDING_FEE')
+                                  THEN LEAST(-tokens, GREATEST(0, -balance_after)) ELSE 0 END), 0) AS unpaid_php,
+                COALESCE(SUM(CASE WHEN type = 'consume' AND category = 'FEATURE_UNLOCK' THEN -tokens ELSE 0 END), 0) AS plan_php,
                 COALESCE(SUM(CASE WHEN type = 'purchase' AND category = 'REFUND' THEN tokens ELSE 0 END), 0) AS refunded_php,
                 COUNT(*) FILTER (WHERE category = 'SYNC_CHARGE') AS sync_charge_count,
                 COUNT(*) FILTER (WHERE category = 'RESTORE_CHARGE') AS restore_charge_count,
@@ -9645,8 +9890,21 @@ app.get('/relay/admin/api/cloud-backup/reconciliation', requireAdminKey, async (
              WHERE created_at >= to_timestamp($1 / 1000.0) AND created_at < to_timestamp($2 / 1000.0)`,
             [range.start, range.end]
         );
+        const debtRes = await queryWithRetry(
+            pgPool,
+            `SELECT COALESCE(SUM(-balance_tokens), 0) AS outstanding_debt_php FROM cloud_token_wallets WHERE balance_tokens < 0`,
+            []
+        );
         const r = rows[0] || {};
-        const grossChargedPHP = Math.round(Number(r.gross_charged_php || 0) * 100) / 100;
+        // AYOS/BAGO: FEATURE_UNLOCK (plan/activation) ay hindi na kasama sa
+        // cost-recovery figure (hindi ito bayad sa Neon cost), at ang mga
+        // singil na naging utang (balance_after < 0) ay ibinabawas dahil
+        // hindi pa bayad. Ang outstanding debt ngayon ay hiwalay na ipinapakita.
+        const chargedRaw = Number(r.gross_charged_php || 0);
+        const unpaidPHP = Math.round(Number(r.unpaid_php || 0) * 100) / 100;
+        const planRevenuePHP = Math.round(Number(r.plan_php || 0) * 100) / 100;
+        const outstandingDebtPHP = Math.round(Number(debtRes.rows[0]?.outstanding_debt_php || 0) * 100) / 100;
+        const grossChargedPHP = Math.round((chargedRaw - unpaidPHP) * 100) / 100;
         const refundedPHP = Math.round(Number(r.refunded_php || 0) * 100) / 100;
         const netChargedPHP = Math.round((grossChargedPHP - refundedPHP) * 100) / 100;
         const actualBillEntry = cloudBackupActualBills[month] || null;
@@ -9658,6 +9916,9 @@ app.get('/relay/admin/api/cloud-backup/reconciliation', requireAdminKey, async (
             netChargedPHP,
             grossChargedPHP,
             refundedPHP,
+            unpaidChargesPHP: unpaidPHP,
+            planRevenuePHP,
+            outstandingDebtPHP,
             syncChargeCount: Number(r.sync_charge_count || 0),
             restoreChargeCount: Number(r.restore_charge_count || 0),
             activationCount: Number(r.activation_count || 0),
@@ -10310,6 +10571,7 @@ app.post('/relay/cloud-backup/restore', requireApiKey, requireAllowedDevice, rat
     if (!pgPool) {
         return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
     }
+    let restoreTokensChargedForRefund = 0;
     try {
         const metaResult = await queryWithRetry(pgPool, 'SELECT * FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
         if (!metaResult.rows[0]) {
@@ -10337,6 +10599,7 @@ app.post('/relay/cloud-backup/restore', requireApiKey, requireAllowedDevice, rat
                 message: `Insufficient Cloud Backup tokens (balance: ${chargeResult.balanceTokens}, needed: ~${tokenCostPerRestoreExact} for this restore). Please buy more Omni Tokens on the Omni Tokens page.`
             });
         }
+        restoreTokensChargedForRefund = Number(chargeResult.tokensCharged) || 0;
         const modulesResult = await queryWithRetry(pgPool, 'SELECT module, data, record_count FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
         const modules = {};
         modulesResult.rows.forEach((r) => { modules[r.module] = r.data; });
@@ -10395,6 +10658,13 @@ app.post('/relay/cloud-backup/restore', requireApiKey, requireAllowedDevice, rat
         res.send(restoreResponseGzipped);
     } catch (err) {
         console.error('⚠️ CLOUD_BACKUP: hindi na-kuha mula sa Postgres:', err.message);
+        // BUGFIX: kung na-charge na ang restore pero pumalya bago maipadala ang data, i-refund.
+        if (restoreTokensChargedForRefund > 0 && !res.headersSent) {
+            await creditCloudTokens(installationId, restoreTokensChargedForRefund, 'Refund — failed restore', 'REFUND').catch((refundErr) => {
+                console.error('⚠️ CLOUD_TOKENS: failed to refund after a failed restore:', refundErr.message);
+            });
+        }
+        if (res.headersSent) return;
         res.status(500).json({ success: false, message: 'May error habang kinukuha mula sa Postgres: ' + err.message });
     }
 });

@@ -1456,7 +1456,9 @@ async function loadReconciliation() {
     const data = await api(`/relay/admin/api/cloud-backup/reconciliation?month=${encodeURIComponent(month)}`);
     const rows = [
       `<div>Na-charge sa customers (net, bawas refund): <strong>${formatPHP(data.netChargedPHP)}</strong></div>`,
-      `<div style="font-size:12px; color:var(--muted);">— ${data.syncChargeCount} sync charge, ${data.restoreChargeCount} restore charge, ${data.activationCount} activation</div>`
+      `<div style="font-size:12px; color:var(--muted);">— ${data.syncChargeCount} sync charge, ${data.restoreChargeCount} restore charge, ${data.storageFeeChargeCount} storage fee (hindi kasama ang ${data.activationCount} plan activation)</div>`,
+      `<div style="font-size:12px; color:var(--muted);">Plan/activation (hiwalay, hindi cost-recovery): ${formatPHP(data.planRevenuePHP || 0)}</div>`,
+      `<div style="font-size:12px; color:var(--muted);">Hindi pa bayad na singil ngayong buwan (ibinawas na sa itaas): ${formatPHP(data.unpaidChargesPHP || 0)} · Kabuuang utang ng lahat ng wallet ngayon: <strong>${formatPHP(data.outstandingDebtPHP || 0)}</strong></div>`
     ];
     if (data.actualBill) {
       const plColor = data.status === 'lugi' ? 'var(--red,#ff5c72)' : 'var(--green,#4ade80)';
