@@ -785,6 +785,7 @@ async function saveAiInstallationSettings() {
     if (!data?.success) throw new Error(data?.message || 'Save failed');
     toast(`AI credit override saved for ${id}.`, 'success');
     loadAiCreditSettings();
+    loadAiPlans();
   } catch (err) { toast(err.message || 'Could not save customer override.', 'error'); }
 }
 async function resetAiInstallationSettings() {
@@ -805,6 +806,7 @@ async function resetAiInstallationSettings() {
       toast(`Reset done. Removed: ${data.removedTier ? 'AI plan, ' : ''}${data.removedExtraPacks || 0} extra pack(s)${data.usageCleared ? '; used credits & today\'s count cleared' : ''}.${nowTxt}`, 'success');
     }
     loadAiCreditSettings();
+    loadAiPlans(); // i-refresh agad ang Clients/Extra daily/Capacity breakdown para tugma sa bagong estado
   } catch (err) { toast(err.message || 'Could not reset customer override.', 'error'); }
 }
 // ===== OMNI AI: PROVIDER STATUS + UPGRADE TIERS (RELAY authority) =====
@@ -877,18 +879,21 @@ function renderAiBreakdownBox(b, c) {
   if (!c.enabled) {
     formula = `<div class="meta">⚪ OFF — i-set ang <b>Total daily capacity</b> sa ibaba (0 = off) para gumana ang formula ng extra credit.</div>`;
   } else {
-    const left = Number(c.leftover) || 0;
+    const baseDaily = Number(base.dailyTotal) || 0;
+    const rawLeft = Number(c.capacity) - tiersTotal - baseDaily - extraDaily;
+    const left = Math.max(0, rawLeft); // hindi kailanman nagne-negative
+    const over = Math.max(0, -rawLeft);
     formula = `<div style="font-size:12px; font-weight:700; margin:0 0 4px;">Formula ng Extra Credit (tanong/araw)</div>
       <div style="display:grid; grid-template-columns:1fr auto; gap:2px 12px; font-size:12px; max-width:460px;">
         <span>Cloudflare daily limit (Total daily capacity)</span><b style="text-align:right;">${n(c.capacity)}</b>
         <span>− Total ng client tier plans (${tiers.map(t => escapeHtml(t.name || t.id)).join(' + ') || 'walang tier'})</span><b style="text-align:right;">${n(tiersTotal)}</b>
+        <span>− Base clients (${n(base.clients)} client(s), may active AI)</span><b style="text-align:right;">${n(baseDaily)}</b>
         <span>− Extra daily na naibenta na</span><b style="text-align:right;">${n(extraDaily)}</b>
         <span style="border-top:1px solid var(--line); padding-top:3px; font-weight:700;">= Extra credit na puwede pang bilhin (daily)</span>
         <b style="text-align:right; border-top:1px solid var(--line); padding-top:3px; color:${left > 0 ? 'var(--success,#69db7c)' : 'var(--danger,#ff6b6b)'};">${n(left)}</b>
       </div>`;
-    if (base.clients > 0) {
-      const afterBase = Number(c.capacity) - tiersTotal - extraDaily - Number(base.dailyTotal || 0);
-      formula += `<div class="meta" style="margin-top:6px;">Paalala: ang Base clients (${n(base.clients)} client(s), ${n(base.dailyTotal)}/araw kung sabay-sabay gamitin) ay <b>hindi kasama</b> sa formula/lock sa itaas. Kung isasama sila, ang matitira ay <b style="color:${afterBase >= 0 ? 'var(--success,#69db7c)' : 'var(--danger,#ff6b6b)'};">${n(afterBase)}</b>${afterBase < 0 ? ' (lampas sa capacity)' : ''}.</div>`;
+    if (over > 0) {
+      formula += `<div class="meta" style="margin-top:6px;">Paalala: lampas na ng <b style="color:var(--danger,#ff6b6b);">${n(over)}</b> ang kabuuang daily na hawak ng lahat ng client sa Total daily capacity, kaya <b>0</b> na ang puwedeng ibenta.</div>`;
     }
   }
   box.innerHTML = `<div class="meta" style="margin-bottom:6px;">Buwan: ${escapeHtml(b.month || '')} · Kabuuang tier clients: <b>${n(tierClients)}</b> · Base: <b>${n(base.clients)}</b>. Ang ∞ (unlimited) na tier ay binibilang na katumbas ng buong capacity.</div>
@@ -1136,7 +1141,7 @@ async function aiNeuronRedetect() {
   toast('Na-check ulit ang Cloudflare plan.', 'success');
 }
 async function saveAiNeuronSettings() {
-  if (!aiNeuronState) return;
+  if (!aiNeuronState) return false;
   const cfg = aiNeuronReadConfig();
   const body = {
     planOverride: cfg.override, paidDailyNeurons: cfg.paidBudget,
@@ -1149,9 +1154,11 @@ async function saveAiNeuronSettings() {
     aiNeuDraft = null;
     toast('Neurons settings saved.', 'success');
     renderAiNeuronBox();
-  } else {
-    toast((data && data.message) || 'Save failed.', 'error');
+    loadAiPlans(); // ang auto Total daily capacity ay sumusunod agad sa bagong neurons settings
+    return true;
   }
+  toast((data && data.message) || 'Save failed.', 'error');
+  return false;
 }
 function aiSimUseActual() {
   aiSimRows.forEach((r) => { aiSimCounts[r.key] = r.actual; });
@@ -1168,33 +1175,56 @@ async function aiSimApplyCapacity() {
   const cfg = aiNeuronReadConfig();
   const R = aiNeuronCompute(cfg, [], [], 0);
   if (!(R.capQ > 0)) { toast('Lagyan muna ng tokens at rate para makuha ang capacity.', 'error'); return; }
-  const ok = await confirmAction({ title: 'Gawing Total daily capacity?', message: `I-se-set ang Total daily capacity sa ${aiNeuFmt(R.capQ)} tanong/araw (${aiNeuFmt(R.budget)} neurons ÷ ${aiNeuFmt(R.perQ, 1)} neurons kada tanong). Ito ang gagamitin ng auto-lock ng Plus/Pro at ng extra credit.` });
+  const ok = await confirmAction({ title: 'Gawing AUTO ang Total daily capacity?', message: `Sasave ang Neurons Planner settings at ise-set ang Total daily capacity sa AUTO: ${aiNeuFmt(R.capQ)} tanong/araw (${aiNeuFmt(R.budget)} neurons ÷ ${aiNeuFmt(R.perQ, 1)} neurons kada tanong). Kusa na itong susunod sa Neurons Planner. Ito ang gagamitin ng auto-lock ng Plus/Pro at ng extra credit.` });
   if (!ok) return;
-  const el = document.getElementById('aiCapacityInput');
-  if (!el) { toast('Hindi makita ang Total daily capacity box. I-refresh ang tab.', 'error'); return; }
-  el.value = R.capQ;
-  saveAiCapacity();
+  const saved = await saveAiNeuronSettings();
+  if (!saved) return;
+  const data = await aiApi('/relay/admin/api/ai-plans/capacity', { method:'POST', body:JSON.stringify({ auto:true, lockedTierIds: (document.getElementById('aiCapacityTiers')?.value) || 'plus,pro' }) });
+  if (data?.success) { toast('Total daily capacity ay AUTO na.', 'success'); loadAiPlans(); } else toast(data?.message || 'Save failed.', 'error');
 }
 function renderAiCapacityBox(c) {
   const box = document.getElementById('aiCapacityBox');
   if (!box || !c) return;
   const status = !c.enabled ? '⚪ OFF (capacity = 0)'
-    : (c.locked ? `🔒 LOCKED hanggang katapusan ng buwan — ${escapeHtml(c.lockReason || '')}` : '🟢 Bukas pa');
+    : (c.locked ? `🔒 LOCKED hanggang katapusan ng buwan — ${escapeHtml(c.lockReason || '')}`
+      : (Number(c.committed) >= Number(c.capacity) ? '🟠 Puno na ang capacity (walang matitira)' : '🟢 Bukas pa'));
+  const auto = c.capacityAuto !== false;
+  const autoTxt = auto
+    ? `<div class="meta" style="margin:0 0 6px;">⚙️ AUTO — kinukuha sa Neurons Planner: ${Number(c.autoNeuronsPerDay || 0).toLocaleString()} neurons/araw (${escapeHtml(c.autoPlan === 'paid' ? 'Paid' : 'Free')}) ÷ ${Number(c.autoPerQuestion || 0).toFixed(1)} neurons kada tanong = <b>${c.capacity}</b> tanong/araw. Kusang nagbabago kapag binago ang Neurons Planner.</div>`
+    : `<div class="meta" style="margin:0 0 6px;">✍️ MANUAL — mano-manong itinakda. Lagyan ng tsek ang Auto para sundin ang Neurons Planner.</div>`;
   box.innerHTML = `<div style="font-weight:700;">${status}</div>
-    <div class="meta" style="margin:4px 0 8px;">Committed: <b>${c.committed}</b> / ${c.capacity} tanong kada araw (tier + extra cap ng lahat ngayong buwan; extra: ${c.extraDaily || 0}, natitira: ${c.leftover ?? '—'}). Naka-lock na tier: ${escapeHtml((c.lockedTierIds||[]).join(', '))}</div>
+    <div class="meta" style="margin:4px 0 8px;">Committed: <b>${c.committed}</b> / ${c.capacity} tanong kada araw (tier: ${c.tiersDaily || 0} + base: ${c.baseDaily || 0} + extra: ${c.extraDaily || 0}; natitira: ${c.leftover ?? '—'}${c.overCapacity > 0 ? `, lampas ng ${c.overCapacity}` : ''}). Naka-lock na tier: ${escapeHtml((c.lockedTierIds||[]).join(', '))}</div>
+    ${autoTxt}
+    <label style="display:flex; gap:6px; align-items:center; font-size:12px; margin-bottom:8px;">
+      <input id="aiCapacityAuto" type="checkbox" ${auto ? 'checked' : ''} onchange="aiCapacityAutoToggle(${Number(c.manualCapacity) || 0}, ${Number(c.capacity) || 0})"> Auto (galing sa Neurons Planner)
+    </label>
     <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-      <input id="aiCapacityInput" type="number" min="0" value="${c.capacity}" style="width:130px;" placeholder="Total daily capacity">
+      <input id="aiCapacityInput" type="number" min="0" value="${auto ? c.capacity : (Number(c.manualCapacity) || 0)}" ${auto ? 'disabled' : ''} style="width:130px;" placeholder="Total daily capacity">
       <input id="aiCapacityTiers" type="text" value="${escapeHtml((c.lockedTierIds||[]).join(','))}" style="width:130px;" placeholder="plus,pro">
       <button class="btn-primary" onclick="saveAiCapacity()">💾 Save</button>
       <button class="btn-ghost" onclick="unlockAiTiers()">🔓 Unlock ngayong buwan</button>
     </div>`;
 }
+function aiCapacityAutoToggle(manual, current) {
+  const cb = document.getElementById('aiCapacityAuto');
+  const el = document.getElementById('aiCapacityInput');
+  if (!cb || !el) return;
+  el.disabled = cb.checked;
+  el.value = cb.checked ? current : (manual > 0 ? manual : current);
+}
 async function saveAiCapacity() {
-  const dailyCapacity = Number(document.getElementById('aiCapacityInput').value);
+  const auto = !!document.getElementById('aiCapacityAuto')?.checked;
   const lockedTierIds = document.getElementById('aiCapacityTiers').value;
-  if (!Number.isInteger(dailyCapacity) || dailyCapacity < 0) { toast('Capacity must be a whole number >= 0 (0 = off).', 'error'); return; }
-  const data = await aiApi('/relay/admin/api/ai-plans/capacity', { method:'POST', body:JSON.stringify({ dailyCapacity, lockedTierIds }) });
-  if (data?.success) { toast('Capacity saved.', 'success'); loadAiPlans(); } else toast(data?.message || 'Save failed.', 'error');
+  const body = { auto, lockedTierIds };
+  if (!auto) {
+    const dailyCapacity = Number(document.getElementById('aiCapacityInput').value);
+    if (!Number.isInteger(dailyCapacity) || dailyCapacity < 0) { toast('Capacity must be a whole number >= 0 (0 = off).', 'error'); return false; }
+    body.dailyCapacity = dailyCapacity;
+  }
+  const data = await aiApi('/relay/admin/api/ai-plans/capacity', { method:'POST', body:JSON.stringify(body) });
+  if (data?.success) { toast(auto ? 'Capacity: AUTO (sinusundan ang Neurons Planner).' : 'Capacity saved (manual).', 'success'); loadAiPlans(); return true; }
+  toast(data?.message || 'Save failed.', 'error');
+  return false;
 }
 async function unlockAiTiers() {
   const data = await aiApi('/relay/admin/api/ai-plans/unlock', { method:'POST', body:'{}' });

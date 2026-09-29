@@ -430,6 +430,9 @@ async function ensureDeviceLicenseSchema() {
             updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
         );
     `);
+    // AUTO capacity: kapag TRUE (default), ang Total daily capacity ay awtomatikong kinukuha sa Neurons Planner
+    // (neurons/araw ÷ neurons kada tanong). Ang daily_capacity column ay nagiging manual value na lang kapag FALSE.
+    await pgPoolDevices.query(`ALTER TABLE relay_ai_capacity ADD COLUMN IF NOT EXISTS auto_capacity BOOLEAN NOT NULL DEFAULT TRUE`);
     await pgPoolDevices.query(`
         CREATE TABLE IF NOT EXISTS relay_ai_tier_lock (
             month_key    TEXT PRIMARY KEY,
@@ -5650,6 +5653,11 @@ app.post('/relay/admin/api/devices/:installationId/purge', requireAdminKey, asyn
         await purgeRows(pgPoolDevices, 'relay_ai_credit_usage');
         await purgeRows(pgPoolDevices, 'relay_ai_credit_requests');
         await purgeRows(pgPoolDevices, 'relay_ai_credit_settings');
+        await purgeRows(pgPoolDevices, 'relay_ai_tier_purchases');
+        await purgeRows(pgPoolDevices, 'relay_ai_extra_purchases');
+        await purgeRows(pgPoolDevices, 'relay_ai_daily_usage');
+        clearRelayAiPurchaseMemory(installationId);
+        await releaseRelayAiLockIfFreed(relayAiMonthKey(), true);
         await purgeRows(pgPoolDevices, 'relay_device_fingerprints');
         await purgeRows(pgPoolDevices, 'relay_clone_splits');
 
@@ -7546,22 +7554,120 @@ function acquireAiTierGlobalLock() {
     aiTierGlobalChain = prev.then(() => next);
     return prev.then(() => release);
 }
+// Ang installation ay "live" kung nasa client data pa (issuedUnlocks) at may active AI subscription.
+// Ito ang iisang batayan ng lahat ng bilang ng clients/tier/extra sa capacity at sa admin breakdown.
+function isRelayAiInstallationLive(installationId) {
+    if (!installationId || installationId === RELAY_AI_DEFAULT_SETTINGS_ID) return false;
+    return hasActiveRelayAiSubscription(installationId);
+}
+// Linisin ang in-memory na purchase dedupe/in-flight ng isang installation (pagkatapos ng reset/purge)
+// para hindi maibalik ang lumang cached na "nabili na" response sa retry na may parehong clientRequestId.
+function clearRelayAiPurchaseMemory(installationId) {
+    const prefix = `${installationId}:`;
+    for (const key of [...aiTierPurchaseDedupe.keys()]) if (key.startsWith(prefix)) aiTierPurchaseDedupe.delete(key);
+    for (const key of [...aiExtraPurchaseDedupe.keys()]) if (key.startsWith(prefix)) aiExtraPurchaseDedupe.delete(key);
+}
+// Kapag na-reset/na-purge ang isang client at may nabakante nang capacity, buksan ulit ang lock na
+// dulot lang ng "puno na" (capacity_reached*). Hindi ginagalaw ang lock na 'purchase_would_exceed_capacity'.
+// useGlobalLock=false kapag hawak na ng caller ang global lock (hindi re-entrant).
+async function releaseRelayAiLockIfFreed(monthKey, useGlobalLock) {
+    if (!pgPoolDevices) return;
+    let release = null;
+    try {
+        if (useGlobalLock) release = await acquireAiTierGlobalLock();
+        const st = await getRelayAiCapacityState(monthKey);
+        if (!st.enabled || !st.locked) return;
+        if (!/^capacity_reached/.test(String(st.lockReason || ''))) return;
+        if (st.committed >= st.capacity) return;
+        await pgPoolDevices.query(`DELETE FROM relay_ai_tier_lock WHERE month_key = $1 AND reason LIKE 'capacity_reached%'`, [monthKey]);
+    } catch (err) {
+        console.error('⚠️ AI tier lock release check failed:', err.message);
+    } finally {
+        if (release) release();
+    }
+}
 function relayAiEffectiveCap(dailyCap, capacity) {
     const c = Number(dailyCap) || 0;
     return c === 0 ? capacity : c;
 }
+// Base clients = mga client na may active AI subscription pero WALANG tier na nabili ngayong buwan.
+// Kasama sila sa committed capacity (daily cap nila: override o default; unlimited = buong capacity).
+// purchasedIds = lahat ng installation na may tier purchase ngayong buwan (para hindi madoble ang bilang).
+async function getRelayAiBaseState(capacity, purchasedIds, clientOrPool = pgPoolDevices) {
+    const defaults = await getRelayAiDefaultSettings(clientOrPool);
+    const defaultDaily = Number(defaults.dailyCap) || 0;
+    const overrides = await clientOrPool.query(
+        `SELECT installation_id, daily_cap FROM relay_ai_credit_settings WHERE installation_id <> $1`, [RELAY_AI_DEFAULT_SETTINGS_ID]);
+    const overrideCap = new Map();
+    overrides.rows.forEach((r) => {
+        if (r.daily_cap !== null && r.daily_cap !== undefined) overrideCap.set(r.installation_id, Number(r.daily_cap) || 0);
+    });
+    let clients = 0, dailyTotal = 0, unlimitedClients = 0;
+    for (const id of Object.keys(issuedUnlocks || {})) {
+        if (purchasedIds.has(id) || !isRelayAiInstallationLive(id)) continue;
+        clients += 1;
+        const cap = overrideCap.has(id) ? overrideCap.get(id) : defaultDaily;
+        dailyTotal += relayAiEffectiveCap(cap, capacity);
+        if (cap === 0) unlimitedClients += 1;
+    }
+    return { clients, dailyTotal, unlimitedClients, dailyCapDefault: defaultDaily };
+}
+// Daily cap na kasalukuyang nakabilang para sa isang Base client (walang tier). 0 kung hindi siya Base.
+async function getRelayAiBaseCapForClient(installationId, capacity, clientOrPool = pgPoolDevices) {
+    if (!isRelayAiInstallationLive(installationId)) return 0;
+    const defaults = await getRelayAiDefaultSettings(clientOrPool);
+    const o = await clientOrPool.query(`SELECT daily_cap FROM relay_ai_credit_settings WHERE installation_id = $1`, [installationId]);
+    const raw = (o.rows[0] && o.rows[0].daily_cap !== null && o.rows[0].daily_cap !== undefined) ? Number(o.rows[0].daily_cap) || 0 : (Number(defaults.dailyCap) || 0);
+    return relayAiEffectiveCap(raw, capacity);
+}
+// Awtomatikong Total daily capacity mula sa Neurons Planner (kapareho ng "capacityQuestions" ng /ai-neurons).
+// Hindi naghihintay sa network: gamit ang huling nakuhang Cloudflare plan detection (unknown = Free, kapareho ng planner);
+// kapag luma na ang detection, tahimik itong nire-refresh sa background.
+let relayAiPlanRefreshInFlight = false;
+async function getRelayAiAutoCapacity() {
+    const settings = await getAiNeuronSettings();
+    const det = cfPlanDetectCache;
+    const ttl = det && det.plan === 'unknown' ? 60 * 1000 : 10 * 60 * 1000;
+    if ((!det || Date.now() - det.checkedAt >= ttl) && !relayAiPlanRefreshInFlight) {
+        relayAiPlanRefreshInFlight = true;
+        resolveCfPlanDetection(false).catch(() => {}).finally(() => { relayAiPlanRefreshInFlight = false; });
+    }
+    const plan = settings.planOverride !== 'auto' ? settings.planOverride : (det && det.plan === 'paid' ? 'paid' : 'free');
+    const neuronsPerDay = plan === 'paid' ? settings.paidDailyNeurons : CF_FREE_NEURONS_PER_DAY;
+    const perQuestion = aiNeuronsPerQuestion(settings);
+    return { capacity: perQuestion > 0 ? Math.floor(neuronsPerDay / perQuestion) : 0, plan, neuronsPerDay, perQuestion };
+}
 async function getRelayAiCapacityState(monthKey, clientOrPool = pgPoolDevices) {
-    const cfg = await clientOrPool.query(`SELECT daily_capacity, locked_tier_ids FROM relay_ai_capacity WHERE id = 'global'`);
-    const capacity = cfg.rows[0] ? Number(cfg.rows[0].daily_capacity) || 0 : 0;
+    const cfg = await clientOrPool.query(`SELECT daily_capacity, locked_tier_ids, auto_capacity FROM relay_ai_capacity WHERE id = 'global'`);
+    const manualCapacity = cfg.rows[0] ? Number(cfg.rows[0].daily_capacity) || 0 : 0;
+    // Walang saved row pa = auto (default).
+    const capacityAuto = cfg.rows[0] ? cfg.rows[0].auto_capacity !== false : true;
+    let autoInfo = null;
+    if (capacityAuto) {
+        try { autoInfo = await getRelayAiAutoCapacity(); }
+        catch (autoErr) { console.error('⚠️ Auto capacity compute failed:', autoErr.message); }
+    }
+    // Kung pumalya ang auto compute, huwag mag-lock/mag-block nang mali: gamitin ang huling manual value.
+    const capacity = capacityAuto ? (autoInfo ? autoInfo.capacity : manualCapacity) : manualCapacity;
     const lockedTierIds = String(cfg.rows[0]?.locked_tier_ids || 'plus,pro').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
+    // Ang bilang ay kinukuha LANG sa mga installation na aktwal pang umiiral/aktibo sa client data
+    // (issuedUnlocks + active AI subscription — parehong batayan ng Base clients). Kaya kapag na-reset/
+    // na-purge/na-deactivate ang isang client, agad na nawawala ang tier at extra daily niya sa total.
     const sum = await clientOrPool.query(
-        `SELECT daily_cap FROM relay_ai_tier_purchases WHERE month_key = $1`, [monthKey]);
-    const extraRes = await clientOrPool.query(`SELECT COALESCE(SUM(daily_bonus),0)::int AS n FROM relay_ai_extra_purchases WHERE month_key = $1`, [monthKey]);
-    const extraDaily = Number(extraRes.rows[0]?.n) || 0;
-    const committed = sum.rows.reduce((a, r) => a + relayAiEffectiveCap(r.daily_cap, capacity), 0) + extraDaily;
+        `SELECT installation_id, daily_cap FROM relay_ai_tier_purchases WHERE month_key = $1`, [monthKey]);
+    const extraRes = await clientOrPool.query(`SELECT installation_id, daily_bonus FROM relay_ai_extra_purchases WHERE month_key = $1 AND daily_bonus > 0`, [monthKey]);
+    const extraDaily = extraRes.rows.reduce((a, r) => a + (isRelayAiInstallationLive(r.installation_id) ? (Number(r.daily_bonus) || 0) : 0), 0);
+    const tiersDaily = sum.rows.reduce((a, r) => a + (isRelayAiInstallationLive(r.installation_id) ? relayAiEffectiveCap(r.daily_cap, capacity) : 0), 0);
+    const base = await getRelayAiBaseState(capacity, new Set(sum.rows.map((r) => r.installation_id)), clientOrPool);
+    const committed = tiersDaily + base.dailyTotal + extraDaily;
     const lock = await clientOrPool.query(`SELECT locked_at, reason FROM relay_ai_tier_lock WHERE month_key = $1`, [monthKey]);
     return {
-        enabled: capacity > 0, capacity, committed, extraDaily, leftover: capacity > 0 ? Math.max(0, capacity - committed) : null, lockedTierIds,
+        enabled: capacity > 0, capacity, capacityAuto, manualCapacity,
+        autoPlan: autoInfo ? autoInfo.plan : null, autoNeuronsPerDay: autoInfo ? autoInfo.neuronsPerDay : null,
+        autoPerQuestion: autoInfo ? autoInfo.perQuestion : null,
+        committed, extraDaily, tiersDaily, baseDaily: base.dailyTotal, baseClients: base.clients,
+        overCapacity: capacity > 0 ? Math.max(0, committed - capacity) : 0,
+        leftover: capacity > 0 ? Math.max(0, capacity - committed) : null, lockedTierIds,
         locked: capacity > 0 && !!lock.rows[0],
         lockedAt: lock.rows[0]?.locked_at || null, lockReason: lock.rows[0]?.reason || null
     };
@@ -7572,18 +7678,10 @@ async function getRelayAiCapacityState(monthKey, clientOrPool = pgPoolDevices) {
 // ang Base ay ang mga client na may active Omni AI subscription pero walang tier na nabili ngayong buwan.
 async function getRelayAiPlanBreakdown(monthKey, tiers, capState) {
     const capacity = Number(capState.capacity) || 0;
-    const defaults = await getRelayAiDefaultSettings();
-    const defaultDaily = Number(defaults.dailyCap) || 0;
     const purchases = await pgPoolDevices.query(
         `SELECT installation_id, tier_id, tier_name, daily_cap FROM relay_ai_tier_purchases WHERE month_key = $1`, [monthKey]);
-    const overrides = await pgPoolDevices.query(
-        `SELECT installation_id, daily_cap FROM relay_ai_credit_settings WHERE installation_id <> $1`, [RELAY_AI_DEFAULT_SETTINGS_ID]);
     const extraBuyers = await pgPoolDevices.query(
-        `SELECT COUNT(DISTINCT installation_id)::int AS n FROM relay_ai_extra_purchases WHERE month_key = $1 AND daily_bonus > 0`, [monthKey]);
-    const overrideCap = new Map();
-    overrides.rows.forEach((r) => {
-        if (r.daily_cap !== null && r.daily_cap !== undefined) overrideCap.set(r.installation_id, Number(r.daily_cap) || 0);
-    });
+        `SELECT DISTINCT installation_id FROM relay_ai_extra_purchases WHERE month_key = $1 AND daily_bonus > 0`, [monthKey]);
     const rows = new Map();
     (tiers || []).forEach((t) => rows.set(t.id, {
         id: t.id, name: t.name, enabled: !!t.enabled, removed: false, priceTokens: t.priceTokens,
@@ -7592,6 +7690,7 @@ async function getRelayAiPlanBreakdown(monthKey, tiers, capState) {
     const purchasedIds = new Set();
     purchases.rows.forEach((p) => {
         purchasedIds.add(p.installation_id);
+        if (!isRelayAiInstallationLive(p.installation_id)) return; // wala na sa client data — hindi binibilang
         let row = rows.get(p.tier_id);
         if (!row) { // tier na binura na pero may bumili pa ngayong buwan
             row = { id: p.tier_id, name: p.tier_name, enabled: false, removed: true, priceTokens: null,
@@ -7603,21 +7702,14 @@ async function getRelayAiPlanBreakdown(monthKey, tiers, capState) {
         row.dailyTotal += relayAiEffectiveCap(cap, capacity);
         if (cap === 0) row.unlimitedClients += 1;
     });
-    let baseClients = 0, baseDaily = 0, baseUnlimited = 0;
-    for (const id of Object.keys(issuedUnlocks || {})) {
-        if (id === RELAY_AI_DEFAULT_SETTINGS_ID || purchasedIds.has(id) || !hasActiveRelayAiSubscription(id)) continue;
-        baseClients += 1;
-        const cap = overrideCap.has(id) ? overrideCap.get(id) : defaultDaily;
-        baseDaily += relayAiEffectiveCap(cap, capacity);
-        if (cap === 0) baseUnlimited += 1;
-    }
+    const baseState = await getRelayAiBaseState(capacity, purchasedIds);
     const tierRows = Array.from(rows.values());
     return {
-        base: { clients: baseClients, dailyCapDefault: defaultDaily, dailyTotal: baseDaily, unlimitedClients: baseUnlimited },
+        base: { clients: baseState.clients, dailyCapDefault: baseState.dailyCapDefault, dailyTotal: baseState.dailyTotal, unlimitedClients: baseState.unlimitedClients },
         tiers: tierRows,
         tiersDailyTotal: tierRows.reduce((a, r) => a + r.dailyTotal, 0),
         extraDaily: Number(capState.extraDaily) || 0,
-        extraClients: Number(extraBuyers.rows[0]?.n) || 0
+        extraClients: extraBuyers.rows.filter((r) => isRelayAiInstallationLive(r.installation_id)).length
     };
 }
 async function lockRelayAiTiers(monthKey, state, reason) {
@@ -7626,13 +7718,15 @@ async function lockRelayAiTiers(monthKey, state, reason) {
          ON CONFLICT (month_key) DO NOTHING`, [monthKey, state.committed, state.capacity, reason]);
 }
 // Ibinabalik ang { blocked, reason } para sa isang tier na gustong bilhin/i-upgrade.
-function relayAiTierCapacityVerdict(state, tier, current) {
+// baseCap = daily cap na nakabilang na ngayon para sa client bilang Base (kapag wala pa siyang tier);
+// papalitan ito ng tier niya, kaya ibinabawas sa delta para hindi madoble.
+function relayAiTierCapacityVerdict(state, tier, current, baseCap = 0) {
     // Kung ubos na ang daily quota ng AI provider, walang customer ang makakagamit ng daily cap
     // (o credits) ngayon, kaya walang sinoman ang dapat makabili ng plan hanggang mag-reset.
     if (getAiProviderExhaustion().exhausted) return { blocked: true, reason: 'provider_exhausted' };
     if (!state.enabled || !state.lockedTierIds.includes(tier.id)) return { blocked: false };
     if (state.locked) return { blocked: true, reason: 'locked' };
-    const delta = relayAiEffectiveCap(tier.dailyCap, state.capacity) - (current ? relayAiEffectiveCap(current.dailyCap, state.capacity) : 0);
+    const delta = relayAiEffectiveCap(tier.dailyCap, state.capacity) - (current ? relayAiEffectiveCap(current.dailyCap, state.capacity) : (Number(baseCap) || 0));
     if (state.committed + delta > state.capacity) return { blocked: true, reason: 'would_exceed' };
     return { blocked: false };
 }
@@ -7656,8 +7750,8 @@ async function getRelayAiExtraSettings(clientOrPool = pgPoolDevices) {
     return { enabled: row ? !!row.enabled : false, monthlyPool: row ? Number(row.monthly_pool) || 0 : 0, maxPerClient: row ? Number(row.max_per_client) || 0 : 0 };
 }
 async function getRelayAiExtraSold(monthKey, clientOrPool = pgPoolDevices) {
-    const r = await clientOrPool.query(`SELECT COALESCE(SUM(credits),0)::int AS n FROM relay_ai_extra_purchases WHERE month_key = $1`, [monthKey]);
-    return Number(r.rows[0]?.n) || 0;
+    const r = await clientOrPool.query(`SELECT installation_id, credits FROM relay_ai_extra_purchases WHERE month_key = $1`, [monthKey]);
+    return r.rows.reduce((a, row) => a + (isRelayAiInstallationLive(row.installation_id) ? (Number(row.credits) || 0) : 0), 0);
 }
 async function getRelayAiExtraForClient(installationId, monthKey, clientOrPool = pgPoolDevices) {
     if (!installationId || installationId === RELAY_AI_DEFAULT_SETTINGS_ID) return 0;
@@ -7735,9 +7829,10 @@ app.get('/relay/ai-assistant/plans', requireApiKey, requireAllowedDevice, rateLi
         const status = await getRelayAiCreditStatus(installationId);
         const current = await getRelayAiActiveTier(installationId, status.month);
         const capState = await getRelayAiCapacityState(status.month);
+        const baseCap = current ? 0 : await getRelayAiBaseCapForClient(installationId, capState.capacity);
         const plans = tiers.map((t) => {
             const isCurrent = !!current && current.id === t.id;
-            const verdict = relayAiTierCapacityVerdict(capState, t, current);
+            const verdict = relayAiTierCapacityVerdict(capState, t, current, baseCap);
             const upgradeable = !current || t.priceTokens > current.priceTokens;
             const canPurchase = upgradeable && !verdict.blocked;
             const costTokens = canPurchase ? Math.max(0, t.priceTokens - (current ? current.tokensSpent : 0)) : 0;
@@ -7790,7 +7885,8 @@ app.post('/relay/ai-assistant/plans/purchase', requireApiKey, requireAllowedDevi
             return res.status(409).json({ success: false, message: `Mayroon ka nang ${current.name} plan ngayong buwan — mas mataas na plan lang ang puwedeng i-upgrade.` });
         }
         const capState = await getRelayAiCapacityState(monthKey);
-        const capVerdict = relayAiTierCapacityVerdict(capState, tier, current);
+        const baseCapForClient = current ? 0 : await getRelayAiBaseCapForClient(installationId, capState.capacity);
+        const capVerdict = relayAiTierCapacityVerdict(capState, tier, current, baseCapForClient);
         if (capVerdict.blocked) {
             // Ang provider-exhausted ay pansamantala lang (nagre-reset araw-araw) — huwag i-lock ang buong buwan.
             if (capVerdict.reason !== 'provider_exhausted' && !capState.locked) await lockRelayAiTiers(monthKey, capState, 'purchase_would_exceed_capacity');
@@ -8082,15 +8178,25 @@ app.get('/relay/admin/api/ai-plans', requireAdminKey, async (req, res) => {
 });
 app.post('/relay/admin/api/ai-plans/capacity', requireAdminKey, async (req, res) => {
     if (!pgPoolDevices) return res.status(503).json({ success: false, message: 'Devices/License database is not configured.' });
-    const dailyCapacity = normalizeRelayAiSettingNumber(req.body?.dailyCapacity, NaN, 0, 100000000);
-    if (!Number.isFinite(dailyCapacity)) return res.status(400).json({ success: false, message: 'dailyCapacity must be a whole number >= 0 (0 = off).' });
+    let dailyCapacity = normalizeRelayAiSettingNumber(req.body?.dailyCapacity, NaN, 0, 100000000);
+    // Kung walang "auto" na ipinadala (lumang admin page) at may dailyCapacity = manual; kung wala ring number = auto.
+    const autoCapacity = typeof req.body?.auto === 'boolean' ? req.body.auto : !Number.isFinite(dailyCapacity);
+    if (!autoCapacity && !Number.isFinite(dailyCapacity)) return res.status(400).json({ success: false, message: 'dailyCapacity must be a whole number >= 0 (0 = off).' });
+    if (autoCapacity && !Number.isFinite(dailyCapacity)) {
+        // Auto: hindi kailangan ang manual value; panatilihin ang dating naka-save.
+        try {
+            const cur = await pgPoolDevices.query(`SELECT daily_capacity FROM relay_ai_capacity WHERE id = 'global'`);
+            dailyCapacity = cur.rows[0] ? Number(cur.rows[0].daily_capacity) || 0 : 0;
+        } catch (_) { dailyCapacity = 0; }
+    }
     const ids = (Array.isArray(req.body?.lockedTierIds) ? req.body.lockedTierIds : String(req.body?.lockedTierIds || 'plus,pro').split(','))
         .map(x => String(x).trim().toLowerCase()).filter(x => /^[a-z0-9_-]{1,30}$/.test(x));
     try {
         await pgPoolDevices.query(
-            `INSERT INTO relay_ai_capacity (id, daily_capacity, locked_tier_ids, updated_at) VALUES ('global', $1, $2, now())
-             ON CONFLICT (id) DO UPDATE SET daily_capacity = EXCLUDED.daily_capacity, locked_tier_ids = EXCLUDED.locked_tier_ids, updated_at = now()`,
-            [dailyCapacity, ids.join(',') || 'plus,pro']);
+            `INSERT INTO relay_ai_capacity (id, daily_capacity, locked_tier_ids, auto_capacity, updated_at) VALUES ('global', $1, $2, $3, now())
+             ON CONFLICT (id) DO UPDATE SET daily_capacity = EXCLUDED.daily_capacity, locked_tier_ids = EXCLUDED.locked_tier_ids, auto_capacity = EXCLUDED.auto_capacity, updated_at = now()`,
+            [dailyCapacity, ids.join(',') || 'plus,pro', autoCapacity]);
+        await releaseRelayAiLockIfFreed(relayAiMonthKey(), true);
         return res.json({ success: true, capacity: await getRelayAiCapacityState(relayAiMonthKey()) });
     } catch (err) {
         console.error('AI capacity save error:', err.message);
@@ -8302,6 +8408,8 @@ app.post('/relay/admin/api/ai-neurons/settings', requireAdminKey, async (req, re
         }
         aiNeuronSettingsCache = next;
         setPersistentJSON('ai-neuron-settings', next);
+        // Nagbago ang neurons -> nagbago ang auto Total daily capacity; buksan ulit ang lock kung may bakante na.
+        if (pgPoolDevices) await releaseRelayAiLockIfFreed(relayAiMonthKey(), true);
         const det = await resolveCfPlanDetection(false);
         return res.json(buildAiNeuronPayload(next, det));
     } catch (err) {
@@ -8686,7 +8794,8 @@ app.post('/relay/admin/api/ai-credits/installation/reset', requireAdminKey, asyn
             if (!keepUsage) {
                 const u1 = await client.query(`DELETE FROM relay_ai_credit_usage WHERE installation_id = $1 AND month_key = $2`, [installationId, monthKey]);
                 const u2 = await client.query(`DELETE FROM relay_ai_daily_usage WHERE installation_id = $1 AND day_key = $2`, [installationId, dayKey]);
-                removedUsageRows = (u1.rowCount || 0) + (u2.rowCount || 0);
+                const u3 = await client.query(`DELETE FROM relay_ai_credit_requests WHERE installation_id = $1 AND month_key = $2`, [installationId, monthKey]);
+                removedUsageRows = (u1.rowCount || 0) + (u2.rowCount || 0) + (u3.rowCount || 0);
                 usageCleared = true;
             }
             await client.query('COMMIT');
@@ -8695,6 +8804,10 @@ app.post('/relay/admin/api/ai-credits/installation/reset', requireAdminKey, asyn
             throw txErr;
         } finally {
             client.release();
+        }
+        if (!keepPurchases) {
+            clearRelayAiPurchaseMemory(installationId);
+            await releaseRelayAiLockIfFreed(monthKey, false);
         }
         if (removedTier || removedExtraPacks || usageCleared) {
             logActivity(installationId, 'ai_purchases_reset_by_admin', { month: monthKey, removedTier, removedExtraPacks, usageCleared });
