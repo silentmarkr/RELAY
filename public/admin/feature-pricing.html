@@ -790,12 +790,12 @@ async function saveAiInstallationSettings() {
 async function resetAiInstallationSettings() {
   const id = document.getElementById('aiOverrideInstallation')?.value.trim();
   if (!id) { toast('Enter an installation ID first.', 'error'); return; }
-  const ok = await confirmAction({ title:'Use Default AI Credits?', message:`This removes the custom AI credit override for ${id} AND any AI plan (Plus/Pro) and extra credit packs they bought this month. They will immediately use the RELAY Default settings. Tokens are NOT refunded.`, confirmLabel:'Yes, use Default', danger:false });
+  const ok = await confirmAction({ title:'Use Default AI Credits?', message:`This removes the custom AI credit override for ${id} AND any AI plan (Plus/Pro) and extra credit packs they bought this month, and resets their used credits this month and today's question count to 0. They will immediately use the RELAY Default settings. Tokens are NOT refunded.`, confirmLabel:'Yes, use Default', danger:false });
   if (!ok) return;
   try {
     const data = await aiApi('/relay/admin/api/ai-credits/installation/reset', { method:'POST', body:JSON.stringify({ installationId:id}) });
     if (!data?.success) throw new Error(data?.message || 'Reset failed');
-    toast(`Reset done. Removed: ${data.removedTier ? 'AI plan, ' : ''}${data.removedExtraPacks || 0} extra pack(s). Default is active.`, 'success');
+    toast(`Reset done. Removed: ${data.removedTier ? 'AI plan, ' : ''}${data.removedExtraPacks || 0} extra pack(s)${data.usageCleared ? '; used credits & today\'s count cleared' : ''}. Default is active.`, 'success');
     loadAiCreditSettings();
   } catch (err) { toast(err.message || 'Could not reset customer override.', 'error'); }
 }

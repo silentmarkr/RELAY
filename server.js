@@ -7627,6 +7627,9 @@ async function lockRelayAiTiers(monthKey, state, reason) {
 }
 // Ibinabalik ang { blocked, reason } para sa isang tier na gustong bilhin/i-upgrade.
 function relayAiTierCapacityVerdict(state, tier, current) {
+    // Kung ubos na ang daily quota ng AI provider, walang customer ang makakagamit ng daily cap
+    // (o credits) ngayon, kaya walang sinoman ang dapat makabili ng plan hanggang mag-reset.
+    if (getAiProviderExhaustion().exhausted) return { blocked: true, reason: 'provider_exhausted' };
     if (!state.enabled || !state.lockedTierIds.includes(tier.id)) return { blocked: false };
     if (state.locked) return { blocked: true, reason: 'locked' };
     const delta = relayAiEffectiveCap(tier.dailyCap, state.capacity) - (current ? relayAiEffectiveCap(current.dailyCap, state.capacity) : 0);
@@ -7634,6 +7637,10 @@ function relayAiTierCapacityVerdict(state, tier, current) {
     return { blocked: false };
 }
 const RELAY_AI_TIER_LOCK_MESSAGE = 'Naka-lock muna ang Plus/Pro AI upgrade ngayong buwan dahil puno na ang kabuuang daily AI capacity. Magbubukas ulit sa susunod na buwan.';
+const RELAY_AI_PROVIDER_EXHAUSTED_BUY_MESSAGE = 'Hindi muna available ang pagbili ng AI plan at extra credits dahil naubos na ang daily AI capacity ng system ngayon. Subukan muli pagkatapos mag-reset (8:00 AM PH time).';
+function relayAiTierBlockMessage(verdict) {
+    return verdict && verdict.reason === 'provider_exhausted' ? RELAY_AI_PROVIDER_EXHAUSTED_BUY_MESSAGE : RELAY_AI_TIER_LOCK_MESSAGE;
+}
 // ---- Extra credit packs ---------------------------------------------------
 // Ang binili ay idinadagdag sa monthly limit ng client ngayong buwan lang.
 // Ang daily cap ng client ay hindi nito binabago.
@@ -7681,12 +7688,14 @@ function mapRelayAiExtraPackRow(r) {
     return { id: r.id, name: r.name, credits: Number(r.credits), dailyBonus: Number(r.daily_bonus) || 0, priceTokens: Number(r.price_tokens), sortOrder: Number(r.sort_order) || 0, enabled: !!r.enabled };
 }
 function relayAiExtraPackVerdict(pack, es, sold, clientBought, capState) {
+    if (getAiProviderExhaustion().exhausted) return { ok: false, reason: RELAY_AI_PROVIDER_EXHAUSTED_BUY_MESSAGE };
     if (!es.enabled) return { ok: false, reason: 'Hindi available ang extra credits sa ngayon.' };
     if (!pack.enabled) return { ok: false, reason: 'Hindi available ang pack na ito.' };
     if (es.monthlyPool > 0 && sold + pack.credits > es.monthlyPool) return { ok: false, reason: 'Kulang na ang natitirang extra credits ngayong buwan para sa pack na ito.' };
     if (es.maxPerClient > 0 && clientBought + pack.credits > es.maxPerClient) return { ok: false, reason: `Umabot ka na sa limit na ${es.maxPerClient} extra credits ngayong buwan.` };
     // Ang extra daily cap ay kinukuha sa natitirang (hindi pa nagagamit) na kabuuang daily capacity.
-    if (capState && capState.enabled && pack.dailyBonus > 0 && pack.dailyBonus > capState.leftover) {
+    // Kapag naka-lock na ang capacity ngayong buwan, walang extra daily cap na maibebenta kahit may natitira pa.
+    if (capState && capState.enabled && pack.dailyBonus > 0 && (capState.locked || pack.dailyBonus > capState.leftover)) {
         return { ok: false, reason: 'Puno na ang kabuuang daily AI capacity ngayong buwan, walang extra cap na maibibigay.' };
     }
     return { ok: true };
@@ -7732,7 +7741,7 @@ app.get('/relay/ai-assistant/plans', requireApiKey, requireAllowedDevice, rateLi
             const upgradeable = !current || t.priceTokens > current.priceTokens;
             const canPurchase = upgradeable && !verdict.blocked;
             const costTokens = canPurchase ? Math.max(0, t.priceTokens - (current ? current.tokensSpent : 0)) : 0;
-            return { ...t, isCurrent, canPurchase, costTokens, locked: upgradeable && !isCurrent && verdict.blocked, lockedReason: (upgradeable && !isCurrent && verdict.blocked) ? RELAY_AI_TIER_LOCK_MESSAGE : null };
+            return { ...t, isCurrent, canPurchase, costTokens, locked: upgradeable && !isCurrent && verdict.blocked, lockedReason: (upgradeable && !isCurrent && verdict.blocked) ? relayAiTierBlockMessage(verdict) : null };
         });
         return res.json({
             success: true,
@@ -7783,8 +7792,9 @@ app.post('/relay/ai-assistant/plans/purchase', requireApiKey, requireAllowedDevi
         const capState = await getRelayAiCapacityState(monthKey);
         const capVerdict = relayAiTierCapacityVerdict(capState, tier, current);
         if (capVerdict.blocked) {
-            if (!capState.locked) await lockRelayAiTiers(monthKey, capState, 'purchase_would_exceed_capacity');
-            return res.status(423).json({ success: false, locked: true, message: RELAY_AI_TIER_LOCK_MESSAGE });
+            // Ang provider-exhausted ay pansamantala lang (nagre-reset araw-araw) — huwag i-lock ang buong buwan.
+            if (capVerdict.reason !== 'provider_exhausted' && !capState.locked) await lockRelayAiTiers(monthKey, capState, 'purchase_would_exceed_capacity');
+            return res.status(423).json({ success: false, locked: true, providerExhausted: capVerdict.reason === 'provider_exhausted', message: relayAiTierBlockMessage(capVerdict) });
         }
         const costTokens = Math.max(0, tier.priceTokens - (current ? current.tokensSpent : 0));
         await getOrCreateCloudTokenWallet(installationId);
@@ -8642,36 +8652,59 @@ app.post('/relay/admin/api/ai-credits/installation', requireAdminKey, async (req
     }
 });
 app.post('/relay/admin/api/ai-credits/installation/reset', requireAdminKey, async (req, res) => {
+    let releaseGlobalLock = null;
     try {
         if (!pgPoolDevices) return res.status(503).json({ success: false, message: 'Devices/License database is not configured.' });
         const installationId = String(req.body?.installationId || '').trim();
-        if (!installationId || installationId === RELAY_AI_DEFAULT_SETTINGS_ID) {
+        if (!installationId || installationId === RELAY_AI_DEFAULT_SETTINGS_ID || installationId.length > 200) {
             return res.status(400).json({ success: false, message: 'Valid installationId is required.' });
         }
-        // BAGO: dati, ang custom override row lang ang binubura. Ang binili ng client
-        // ngayong buwan (AI upgrade tier at extra credit packs) ay nasa hiwalay na
-        // table at patuloy na nagdadagdag sa cap kahit "reset" na — kaya hindi nawawala
-        // ang extra cap/tier. Ngayon, kasama na silang binubura (buwan na ito lang;
-        // walang token refund). Ipasa ang keepPurchases:true para override lang ang alisin.
+        // Ang \"reset\" ay may tatlong bahagi:
+        //  1) alisin ang custom override row (balik sa RELAY Default),
+        //  2) alisin ang AI plan at extra credit packs na nabili ngayong buwan (walang token refund),
+        //  3) i-zero ang nagamit nang monthly credits at ang bilang ng tanong NGAYONG ARAW.
+        // Dati, (1) at (2) lang ang ginagawa kaya kahit \"reset\" na, ubos pa rin ang credits/daily limit ng client.
+        // keepPurchases:true = override lang ang alisin. keepUsage:true = huwag galawin ang nagamit na credits/daily count.
         const keepPurchases = req.body?.keepPurchases === true;
+        const keepUsage = req.body?.keepUsage === true;
         const monthKey = relayAiMonthKey();
-        await pgPoolDevices.query(`DELETE FROM relay_ai_credit_settings WHERE installation_id = $1`, [installationId]);
-        let removedTier = 0, removedExtraPacks = 0;
-        if (!keepPurchases) {
-            const t = await pgPoolDevices.query(`DELETE FROM relay_ai_tier_purchases WHERE installation_id = $1 AND month_key = $2`, [installationId, monthKey]);
-            removedTier = t.rowCount || 0;
-            const x = await pgPoolDevices.query(`DELETE FROM relay_ai_extra_purchases WHERE installation_id = $1 AND month_key = $2`, [installationId, monthKey]);
-            removedExtraPacks = x.rowCount || 0;
-            if (removedTier || removedExtraPacks) {
-                logActivity(installationId, 'ai_purchases_reset_by_admin', { month: monthKey, removedTier, removedExtraPacks });
+        const dayKey = relayAiDayKey();
+        // Kapareho ng purchase routes: serialize para hindi magkasalungat ang \"committed\" capacity.
+        releaseGlobalLock = await acquireAiTierGlobalLock();
+        let removedTier = 0, removedExtraPacks = 0, usageCleared = false;
+        const client = await pgPoolDevices.connect();
+        try {
+            await client.query('BEGIN');
+            await client.query(`DELETE FROM relay_ai_credit_settings WHERE installation_id = $1`, [installationId]);
+            if (!keepPurchases) {
+                const t = await client.query(`DELETE FROM relay_ai_tier_purchases WHERE installation_id = $1 AND month_key = $2`, [installationId, monthKey]);
+                removedTier = t.rowCount || 0;
+                const x = await client.query(`DELETE FROM relay_ai_extra_purchases WHERE installation_id = $1 AND month_key = $2`, [installationId, monthKey]);
+                removedExtraPacks = x.rowCount || 0;
             }
+            if (!keepUsage) {
+                await client.query(`DELETE FROM relay_ai_credit_usage WHERE installation_id = $1 AND month_key = $2`, [installationId, monthKey]);
+                await client.query(`DELETE FROM relay_ai_daily_usage WHERE installation_id = $1 AND day_key = $2`, [installationId, dayKey]);
+                usageCleared = true;
+            }
+            await client.query('COMMIT');
+        } catch (txErr) {
+            try { await client.query('ROLLBACK'); } catch (_) {}
+            throw txErr;
+        } finally {
+            client.release();
+        }
+        if (removedTier || removedExtraPacks || usageCleared) {
+            logActivity(installationId, 'ai_purchases_reset_by_admin', { month: monthKey, removedTier, removedExtraPacks, usageCleared });
         }
         const effective = await getRelayAiCreditStatus(installationId);
-        console.log(`🤖 AI credit override reset for ${installationId}; default is active again (tier removed: ${removedTier}, extra packs removed: ${removedExtraPacks}).`);
-        return res.json({ success: true, installationId, removedTier, removedExtraPacks, keptPurchases: keepPurchases, settings: effective });
+        console.log(`🤖 AI credit override reset for ${installationId}; default is active again (tier removed: ${removedTier}, extra packs removed: ${removedExtraPacks}, usage cleared: ${usageCleared}).`);
+        return res.json({ success: true, installationId, removedTier, removedExtraPacks, keptPurchases: keepPurchases, usageCleared, settings: effective });
     } catch (err) {
         console.error('AI credit installation reset error:', err.message);
         return res.status(503).json({ success: false, message: 'Unable to reset installation AI credit override.' });
+    } finally {
+        if (releaseGlobalLock) releaseGlobalLock();
     }
 });
 app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 1000), async (req, res) => {
