@@ -1136,6 +1136,10 @@ a:focus-visible,
           <button class="btn-ghost" onclick="loadAiPlans()">🔄 Refresh</button>
         </div>
         <hr style="border:0; border-top:1px solid var(--line); margin:14px 0;">
+        <div style="font-size:12px; font-weight:700; margin-bottom:6px;">Auto-lock ng Plus/Pro (Total Daily Capacity)</div>
+        <div id="aiCapacityBox" style="padding:10px; border:1px solid var(--line); border-radius:10px; margin-bottom:12px;">Loading...</div>
+        <div style="font-size:12px; font-weight:700; margin-bottom:6px;">Extra Credits (top-up gamit ang Omni Tokens)</div>
+        <div id="aiExtraBox" style="padding:10px; border:1px solid var(--line); border-radius:10px; margin-bottom:12px;">Loading...</div>
         <div style="font-size:12px; font-weight:700; margin-bottom:6px;">Upgrade Tiers</div>
         <div id="aiTierList" class="empty">Loading...</div>
         <div style="font-size:12px; font-weight:700; margin:14px 0 6px;">Magdagdag ng bagong tier</div>
@@ -2901,12 +2905,101 @@ function renderAiProviderBox(p) {
       <div class="meta" style="margin-top:4px;">Model: ${escapeHtml(p.model || '—')} · Cloudflare ${p.configured ? 'configured' : 'HINDI configured'}</div>`;
   }
 }
+function renderAiCapacityBox(c) {
+  const box = document.getElementById('aiCapacityBox');
+  if (!box || !c) return;
+  const status = !c.enabled ? '⚪ OFF (capacity = 0)'
+    : (c.locked ? `🔒 LOCKED hanggang katapusan ng buwan — ${escapeHtml(c.lockReason || '')}` : '🟢 Bukas pa');
+  box.innerHTML = `<div style="font-weight:700;">${status}</div>
+    <div class="meta" style="margin:4px 0 8px;">Committed: <b>${c.committed}</b> / ${c.capacity} tanong kada araw (tier + extra cap ng lahat ngayong buwan; extra: ${c.extraDaily || 0}, natitira: ${c.leftover ?? '—'}). Naka-lock na tier: ${escapeHtml((c.lockedTierIds||[]).join(', '))}</div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+      <input id="aiCapacityInput" type="number" min="0" value="${c.capacity}" style="width:130px;" placeholder="Total daily capacity">
+      <input id="aiCapacityTiers" type="text" value="${escapeHtml((c.lockedTierIds||[]).join(','))}" style="width:130px;" placeholder="plus,pro">
+      <button class="btn-primary" onclick="saveAiCapacity()">💾 Save</button>
+      <button class="btn-ghost" onclick="unlockAiTiers()">🔓 Unlock ngayong buwan</button>
+    </div>`;
+}
+async function saveAiCapacity() {
+  const dailyCapacity = Number(document.getElementById('aiCapacityInput').value);
+  const lockedTierIds = document.getElementById('aiCapacityTiers').value;
+  if (!Number.isInteger(dailyCapacity) || dailyCapacity < 0) { toast('Capacity must be a whole number >= 0 (0 = off).', 'error'); return; }
+  const data = await api('/relay/admin/api/ai-plans/capacity', { method:'POST', body:JSON.stringify({ dailyCapacity, lockedTierIds }) });
+  if (data?.success) { toast('Capacity saved.', 'success'); loadAiPlans(); } else toast(data?.message || 'Save failed.', 'error');
+}
+async function unlockAiTiers() {
+  const data = await api('/relay/admin/api/ai-plans/unlock', { method:'POST', body:'{}' });
+  if (data?.success) { toast('Na-unlock ang tiers ngayong buwan.', 'success'); loadAiPlans(); } else toast(data?.message || 'Unlock failed.', 'error');
+}
+function aiExtraPackRowHtml(p, isNew) {
+  const v = (x) => escapeHtml(x === undefined || x === null ? '' : String(x));
+  return `<div data-extra-pack style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin:6px 0;">
+    <input data-f="id" value="${v(p.id)}" ${isNew ? '' : 'readonly'} placeholder="id" style="width:90px;">
+    <input data-f="name" value="${v(p.name)}" placeholder="Pangalan" style="width:120px;">
+    <input data-f="credits" type="number" min="1" value="${v(p.credits)}" placeholder="credits" style="width:80px;">
+    <input data-f="dailyBonus" type="number" min="0" value="${v(p.dailyBonus || 0)}" placeholder="+/araw" title="Extra daily cap (tanong/araw) na kinukuha sa natitirang capacity" style="width:70px;">
+    <input data-f="priceTokens" type="number" min="1" value="${v(p.priceTokens)}" placeholder="tokens" style="width:80px;">
+    <input data-f="sortOrder" type="number" value="${v(p.sortOrder || 0)}" style="width:55px;" title="sort">
+    <label style="font-size:12px;"><input data-f="enabled" type="checkbox" ${p.enabled === false ? '' : 'checked'}> on</label>
+    <button class="btn-primary" onclick="saveAiExtraPack(this)">💾</button>
+    ${isNew ? '' : `<button class="btn-ghost" onclick="deleteAiExtraPack('${v(p.id)}')">🗑</button>`}
+    ${isNew ? '' : `<span class="meta">${v(p.pricePerCredit)} token/credit · +${v(p.dailyBonus || 0)}/araw · ${v(p.salesThisMonth)} benta ngayong buwan</span>`}
+  </div>`;
+}
+async function loadAiExtra() {
+  const box = document.getElementById('aiExtraBox');
+  if (!box) return;
+  let d;
+  try { d = await api('/relay/admin/api/ai-extra'); } catch (e) { return; }
+  if (!d?.success) { box.textContent = d?.message || 'Could not load extra credits.'; return; }
+  const es = d.settings;
+  const avail = d.availableCredits === null ? 'walang limit' : `${d.availableCredits} natitira`;
+  box.innerHTML = `<div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+      <label style="font-size:12px;"><input id="aiExtraEnabled" type="checkbox" ${es.enabled ? 'checked' : ''}> Bukas ang bentahan</label>
+      <label style="font-size:12px;">Pool/buwan <input id="aiExtraPool" type="number" min="0" value="${es.monthlyPool}" style="width:90px;"></label>
+      <label style="font-size:12px;">Max/client <input id="aiExtraMax" type="number" min="0" value="${es.maxPerClient}" style="width:90px;"></label>
+      <button class="btn-primary" onclick="saveAiExtraSettings()">💾 Save</button>
+    </div>
+    <div class="meta" style="margin:6px 0;">0 = walang limit. Nabenta ngayong buwan: <b>${d.soldCredits}</b> credits (${avail}). Pinakamurang tier rate: ${d.cheapestTierRate ?? '—'} token/credit — panatilihing mas mataas dito ang presyo ng packs para hindi matalo ang tiers.</div>
+    ${d.packs.map(p => aiExtraPackRowHtml(p, false)).join('')}
+    <div class="meta" style="margin-top:8px;">Magdagdag ng pack:</div>
+    ${aiExtraPackRowHtml({ enabled: true, sortOrder: d.packs.length + 1 }, true)}`;
+}
+async function saveAiExtraSettings() {
+  const body = {
+    enabled: document.getElementById('aiExtraEnabled').checked,
+    monthlyPool: Number(document.getElementById('aiExtraPool').value),
+    maxPerClient: Number(document.getElementById('aiExtraMax').value)
+  };
+  const data = await api('/relay/admin/api/ai-extra/settings', { method:'POST', body:JSON.stringify(body) });
+  if (data?.success) { toast('Extra credit settings saved.', 'success'); loadAiExtra(); } else toast(data?.message || 'Save failed.', 'error');
+}
+async function saveAiExtraPack(btn) {
+  const row = btn.closest('[data-extra-pack]');
+  const get = (f) => row.querySelector(`[data-f="${f}"]`);
+  const body = {
+    id: get('id').value.trim().toLowerCase(), name: get('name').value.trim(),
+    credits: Number(get('credits').value), dailyBonus: Number(get('dailyBonus').value || 0), priceTokens: Number(get('priceTokens').value),
+    sortOrder: Number(get('sortOrder').value || 0), enabled: get('enabled').checked
+  };
+  if (!body.id || !body.name || !Number.isInteger(body.credits) || body.credits < 1 || !Number.isInteger(body.priceTokens) || body.priceTokens < 1 || !Number.isInteger(body.dailyBonus) || body.dailyBonus < 0) {
+    toast('Invalid pack: kailangan ang ID, pangalan, credits ≥ 1, tokens ≥ 1, +/araw ≥ 0.', 'error'); return;
+  }
+  const data = await api('/relay/admin/api/ai-extra/pack', { method:'POST', body:JSON.stringify(body) });
+  if (data?.success) { toast('Pack saved.', 'success'); loadAiExtra(); } else toast(data?.message || 'Save failed.', 'error');
+}
+async function deleteAiExtraPack(id) {
+  if (!confirm(`Burahin ang pack na "${id}"?`)) return;
+  const data = await api(`/relay/admin/api/ai-extra/pack/${encodeURIComponent(id)}`, { method:'DELETE' });
+  if (data?.success) { toast('Pack deleted.', 'success'); loadAiExtra(); } else toast(data?.message || 'Delete failed.', 'error');
+}
 async function loadAiPlans(providerOnly) {
   let data;
   try { data = await api('/relay/admin/api/ai-plans'); } catch (err) { return; }
   if (!data?.success) { if (!providerOnly) toast(data?.message || 'Could not load AI plans.', 'error'); return; }
   renderAiProviderBox(data.provider);
   if (providerOnly) return;
+  renderAiCapacityBox(data.capacity);
+  loadAiExtra();
   const list = document.getElementById('aiTierList');
   if (list) list.innerHTML = data.tiers.length ? data.tiers.map(t => aiTierRowHtml(t, false)).join('') : '<div class="empty">Walang tier. Magdagdag sa ibaba.</div>';
   const nw = document.getElementById('aiTierNew');
