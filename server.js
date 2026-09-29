@@ -707,6 +707,32 @@ async function callCloudflareWorkersAI(messages, vision) {
         clearTimeout(timeout);
     }
 }
+// Meta's Llama 3.2 vision model on Cloudflare Workers AI requires a
+// one-time license acceptance per account (send the prompt "agree").
+// Until that is done, every image request fails with a "Model Agreement"
+// error, which made Omni AI look like it could never analyze pictures.
+// This helper detects that specific error, submits the acceptance once,
+// and lets the caller retry the original request a single time.
+async function acceptCfVisionModelLicenseIfNeeded(url, errMsg) {
+    if (!/agree/i.test(String(errMsg || ''))) return false;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+        await fetch(url, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${CF_AI_API_TOKEN}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt: 'agree' }),
+            signal: controller.signal
+        });
+        console.log('ℹ️ Submitted the Cloudflare vision model license acceptance; retrying the image request once.');
+        return true;
+    } catch (err) {
+        console.error('⚠️ Could not submit the Cloudflare vision model license acceptance:', err && err.message ? err.message : err);
+        return false;
+    } finally {
+        clearTimeout(timeout);
+    }
+}
 // FIX: ang /ai/v1/chat/completions (OpenAI-compatible) endpoint ay may
 // bug/limitation para sa @cf/meta/llama-3.2-11b-vision-instruct kapag
 // naka-embed ang larawan sa loob ng "content" array (OpenAI multimodal
@@ -719,7 +745,7 @@ async function callCloudflareWorkersAI(messages, vision) {
 // kung saan HIWALAY na field ang larawan ("image": raw byte array —
 // hindi base64 string/data URL) sa "messages" (plain text content
 // lang, walang image_url sa loob).
-async function callCloudflareVisionAI(messages) {
+async function callCloudflareVisionAI(messages, licenseRetried = false) {
     const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/${CF_AI_VISION_MODEL}`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30000);
@@ -767,10 +793,16 @@ async function callCloudflareVisionAI(messages) {
         try { data = JSON.parse(raw); } catch (e) { data = null; }
         if (!cfRes.ok || !data) {
             const errMsg = (data && data.errors && data.errors[0] && data.errors[0].message) || `Cloudflare Vision AI request failed (HTTP ${cfRes.status}).`;
+            if (!licenseRetried && await acceptCfVisionModelLicenseIfNeeded(url, errMsg)) {
+                return callCloudflareVisionAI(messages, true);
+            }
             return { success: false, message: errMsg };
         }
         if (data.success === false) {
             const errMsg = (data.errors && data.errors[0] && data.errors[0].message) || 'Cloudflare Vision AI request failed.';
+            if (!licenseRetried && await acceptCfVisionModelLicenseIfNeeded(url, errMsg)) {
+                return callCloudflareVisionAI(messages, true);
+            }
             return { success: false, message: errMsg };
         }
         const answer = data.result && data.result.response;
