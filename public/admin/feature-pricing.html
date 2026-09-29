@@ -19,6 +19,7 @@
     --accent: #22e5ff;
     --accent-hover: #ff2ee6;
     --accent-soft: rgba(34, 229, 255, 0.16);
+    --accent-dim: rgba(34, 229, 255, 0.45);
     --accent-text: #031014;
     --green: #3ddc84;
     --green-bg: rgba(61, 220, 132, 0.12);
@@ -138,6 +139,38 @@
   #toast.show { opacity: 1; }
   #toast.error { border-color: var(--red-line); color: var(--red); }
   .hidden { display: none !important; }
+  .ai-section .card {
+    position: relative; background: var(--card); border: 1px solid var(--accent-dim);
+    border-radius: var(--radius-lg); padding: 18px; margin-bottom: 14px;
+  }
+  .ai-section .card h2 { font-family: var(--font-ui); font-size: 1rem; font-weight: 700; margin: 0 0 14px; }
+  .ai-section .backup-note { font-size: 12px; color: var(--muted); margin-top: 8px; line-height: 1.55; }
+  .ai-section .meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .ai-section .row {
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;
+    padding: 12px 14px; border-radius: var(--radius); background: rgba(255,255,255,.025);
+    margin-bottom: 8px; border: 1px solid var(--border);
+  }
+  .ai-section .row:hover { border-color: var(--border-soft); }
+  .ai-section .empty {
+    color: var(--muted-dim); font-family: var(--font-mono); font-size: 12px; text-align: center;
+    padding: 26px 10px; border: 1px dashed var(--border-soft); border-radius: var(--radius);
+    background: rgba(255,255,255,.015);
+  }
+  .ai-section input[type="text"], .ai-section input[type="number"] {
+    padding: 8px 10px; border-radius: var(--radius); border: 1.5px solid var(--border);
+    background: var(--bg-raise); color: var(--text); font-family: var(--font-mono); font-size: .9rem;
+    max-width: 100%;
+  }
+  .ai-section input[type="text"]:focus, .ai-section input[type="number"]:focus { outline: none; border-color: var(--accent); }
+  .ai-section input[type="checkbox"] { accent-color: var(--accent); }
+  .ai-section .btn-primary, .ai-section .btn-ghost {
+    padding: 9px 14px; border-radius: var(--radius); cursor: pointer; font-family: var(--font-ui); font-size: .88rem;
+  }
+  .ai-section .btn-primary { background: var(--accent-soft); border: 1.5px solid var(--border-soft); color: var(--accent); }
+  .ai-section .btn-primary:hover { background: var(--accent); color: var(--accent-text); }
+  .ai-section .btn-ghost { background: transparent; border: 1.5px solid var(--border); color: var(--text); }
+  .ai-section .btn-ghost:hover { border-color: var(--border-soft); background: var(--card-hover); }
   @media (max-width: 720px) {
     .topbar { padding: 12px 14px; flex-wrap: wrap; gap: 10px; }
     .topbar-actions { flex-wrap: wrap; width: 100%; gap: 8px; }
@@ -158,7 +191,7 @@
     <div class="topbar-brand">
       <div>
         <div class="topbar-title">🎨 Feature Pricing</div>
-        <div class="topbar-sub">OmniPOS Unlock Relay — pricing for Pro Themes & Modules</div>
+        <div class="topbar-sub">OmniPOS Unlock Relay — pricing for Pro Themes, Modules & Omni AI</div>
       </div>
     </div>
     <div class="topbar-actions" style="display:flex;gap:8px;">
@@ -183,6 +216,8 @@
       <button class="tab-btn" data-tab="modules" onclick="setTab('modules')">🧩 Modules</button>
       <button class="tab-btn" data-tab="tiers" onclick="setTab('tiers')">📦 Bundle Price</button>
       <button class="tab-btn" data-tab="receiptCredits" onclick="setTab('receiptCredits')">🧾 Receipt Credits</button>
+      <button class="tab-btn" data-tab="aiCredits" onclick="setTab('aiCredits')">🤖 AI Credits</button>
+      <button class="tab-btn" data-tab="aiPlans" onclick="setTab('aiPlans')">⚡ Omni AI</button>
     </div>
     <div class="tab-section" id="section-themes">
       <div class="section-label">🎨 Pro Themes</div>
@@ -239,6 +274,64 @@
         </div>
       </div>
     </div>
+    <div class="tab-section ai-section" id="section-ai-credits">
+      <div class="card" id="cardAiCredits" style="border:1px solid var(--accent-dim);">
+        <h2>🤖 AI Credits — RELAY Authority</h2>
+        <div class="backup-note">
+          Dito mismo sa RELAY/Neon naka-save ang tunay na AI credit limit at per-request cost. Hindi ito kinokontrol ng OMNIPOS client .env. Ang <b>Default</b> ay para sa lahat ng walang custom override; puwedeng magtakda ng sariling limit para sa isang installation/customer.
+        </div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; margin-top:12px;">
+          <label style="font-size:12px; color:var(--muted);">Monthly credits<input type="number" min="1" step="1" id="aiDefaultMonthly" style="width:100%; margin-top:4px;"></label>
+          <label style="font-size:12px; color:var(--muted);">Text cost<input type="number" min="1" step="1" id="aiDefaultText" style="width:100%; margin-top:4px;"></label>
+          <label style="font-size:12px; color:var(--muted);">File cost<input type="number" min="1" step="1" id="aiDefaultFile" style="width:100%; margin-top:4px;"></label>
+          <label style="font-size:12px; color:var(--muted);">Image cost<input type="number" min="1" step="1" id="aiDefaultImage" style="width:100%; margin-top:4px;"></label>
+          <label style="font-size:12px; color:var(--muted);">Daily cap (tanong/araw, 0 = walang limit)<input type="number" min="0" step="1" id="aiDefaultDaily" style="width:100%; margin-top:4px;"></label>
+        </div>
+        <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+          <button class="btn-primary" onclick="saveAiDefaultSettings()">💾 Save Default AI Credits</button>
+          <span id="aiDefaultMeta" class="meta"></span>
+        </div>
+        <hr style="border:0; border-top:1px solid var(--line); margin:14px 0;">
+        <div style="font-size:12px; font-weight:700; margin-bottom:6px;">Customer / Installation Override</div>
+        <input type="text" id="aiOverrideInstallation" placeholder="Installation ID" maxlength="200" style="width:100%;">
+        <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; margin-top:8px;">
+          <label style="font-size:12px; color:var(--muted);">Monthly credits<input type="number" min="1" step="1" id="aiOverrideMonthly" style="width:100%; margin-top:4px;"></label>
+          <label style="font-size:12px; color:var(--muted);">Text cost<input type="number" min="1" step="1" id="aiOverrideText" style="width:100%; margin-top:4px;"></label>
+          <label style="font-size:12px; color:var(--muted);">File cost<input type="number" min="1" step="1" id="aiOverrideFile" style="width:100%; margin-top:4px;"></label>
+          <label style="font-size:12px; color:var(--muted);">Image cost<input type="number" min="1" step="1" id="aiOverrideImage" style="width:100%; margin-top:4px;"></label>
+          <label style="font-size:12px; color:var(--muted);">Daily cap (blangko = sundin ang Default, 0 = walang limit)<input type="number" min="0" step="1" id="aiOverrideDaily" placeholder="Default" style="width:100%; margin-top:4px;"></label>
+        </div>
+        <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="btn-primary" onclick="saveAiInstallationSettings()">💾 Save Customer Override</button>
+          <button class="btn-ghost" onclick="resetAiInstallationSettings()">↩️ Use Default</button>
+          <button class="btn-ghost" onclick="loadAiCreditSettings()">🔄 Refresh</button>
+        </div>
+        <div id="aiOverrideList" style="margin-top:12px;" class="empty">Loading...</div>
+      </div>
+    </div>
+    <div class="tab-section ai-section" id="section-ai-plans">
+      <div class="card" id="cardAiPlans" style="border:1px solid var(--accent-dim);">
+        <h2>⚡ Omni AI — Provider Status &amp; Upgrade Tiers</h2>
+        <div class="backup-note">
+          Ang <b>Provider status</b> ay awtomatikong nagla-lock kapag naubos ang Cloudflare daily quota (10k neurons) — agad na tatanggihan ang AI requests hanggang 00:00 UTC (8:00 AM PH), walang hintay at walang nasisingil na credits. I-<b>Clear</b> ito pagkatapos mag-upgrade sa Workers Paid. Ang <b>Tiers</b> ang lalabas sa Help page ng client kapag naabot niya ang daily/monthly limit; binibili gamit ang Omni Tokens (≈ ₱1 bawat token) at valid hanggang katapusan ng buwan. Ang daily cap ay <b>0 = walang limit</b>.
+        </div>
+        <div id="aiProviderBox" style="margin-top:12px; padding:10px; border:1px solid var(--line); border-radius:10px;">Loading...</div>
+        <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="btn-primary" onclick="aiProviderAction('clear')">✅ Clear (provider OK na)</button>
+          <button class="btn-ghost" onclick="aiProviderAction('exhaust')">🚫 Lock hanggang 00:00 UTC</button>
+          <button class="btn-ghost" onclick="loadAiPlans()">🔄 Refresh</button>
+        </div>
+        <hr style="border:0; border-top:1px solid var(--line); margin:14px 0;">
+        <div style="font-size:12px; font-weight:700; margin-bottom:6px;">Auto-lock ng Plus/Pro (Total Daily Capacity)</div>
+        <div id="aiCapacityBox" style="padding:10px; border:1px solid var(--line); border-radius:10px; margin-bottom:12px;">Loading...</div>
+        <div style="font-size:12px; font-weight:700; margin-bottom:6px;">Extra Credits (top-up gamit ang Omni Tokens)</div>
+        <div id="aiExtraBox" style="padding:10px; border:1px solid var(--line); border-radius:10px; margin-bottom:12px;">Loading...</div>
+        <div style="font-size:12px; font-weight:700; margin-bottom:6px;">Upgrade Tiers</div>
+        <div id="aiTierList" class="empty">Loading...</div>
+        <div style="font-size:12px; font-weight:700; margin:14px 0 6px;">Magdagdag ng bagong tier</div>
+        <div id="aiTierNew"></div>
+      </div>
+    </div>
 </main>
 </div>
 <div id="toast"></div>
@@ -287,7 +380,7 @@ function setTab(tab) {
   document.querySelectorAll('#filterTabs .tab-btn').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.tab === tab);
   });
-  const sections = { themes: 'section-themes', modules: 'section-modules', tiers: 'section-tiers', receiptCredits: 'section-receipt-credits' };
+  const sections = { themes: 'section-themes', modules: 'section-modules', tiers: 'section-tiers', receiptCredits: 'section-receipt-credits', aiCredits: 'section-ai-credits', aiPlans: 'section-ai-plans' };
   Object.entries(sections).forEach(([key, id]) => {
     document.getElementById(id).classList.toggle('hidden', !(tab === 'all' || tab === key));
   });
@@ -326,6 +419,7 @@ function login() {
   boot();
 }
 function logout() {
+  stopAiPoll();
   adminKey = '';
   sessionStorage.removeItem('relayAdminKey');
   document.getElementById('app').classList.add('hidden');
@@ -559,6 +653,329 @@ async function saveSuggestedDiscountPercent() {
     toast(err.message, 'error');
   }
 }
+
+// ===== Helpers para sa inilipat na AI Credits / Omni AI code =====
+// Ang aiApi ay kapareho ng api() ng index.html: ibinabalik ang JSON (hindi nagta-throw
+// sa {success:false}), para gumana ang mga `data?.success` check ng mga function sa ibaba.
+async function aiApi(path, opts = {}) {
+  let res;
+  try {
+    res = await fetch(path, {
+      ...opts,
+      headers: {
+        'Content-Type': 'application/json',
+        'x-relay-admin-key': adminKey,
+        ...(opts.headers || {})
+      }
+    });
+  } catch (err) {
+    return { success: false, message: 'Network error. Try again.' };
+  }
+  if (res.status === 403) {
+    document.getElementById('loginError').innerText = 'Incorrect admin key.';
+    logout();
+    return { success: false, message: 'forbidden' };
+  }
+  if (res.status === 429) return { success: false, message: 'Too many requests. Please wait a moment.' };
+  return res.json().catch(() => ({ success: false, message: `Request failed (${res.status})` }));
+}
+function escapeAttr(str) {
+  return String(str).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+}
+function confirmAction({ title, message }) {
+  return Promise.resolve(window.confirm(`${title}\n\n${message}`));
+}
+function startAiPoll() {
+  if (window.__aiProviderPoll) clearInterval(window.__aiProviderPoll);
+  window.__aiProviderPoll = setInterval(() => { if (adminKey) loadAiPlans(true); }, 60000);
+}
+function stopAiPoll() {
+  if (window.__aiProviderPoll) { clearInterval(window.__aiProviderPoll); window.__aiProviderPoll = null; }
+}
+
+// RELAY AI CREDIT SETTINGS — server/Neon is authoritative.
+// (Inilipat mula sa home page ng admin index.html papunta sa Feature Pricing tabs.)
+let relayAiCreditSettingsCache = null;
+function fillAiSettingInputs(prefix, settings) {
+  if (!settings) return;
+  const map = { monthly: settings.monthlyCredits, text: settings.textCost, file: settings.fileCost, image: settings.imageCost, daily: settings.dailyCap };
+  Object.entries(map).forEach(([key, value]) => {
+    const el = document.getElementById(`ai${prefix}${key[0].toUpperCase()}${key.slice(1)}`);
+    if (el) el.value = (value === null || value === undefined) ? '' : value;
+  });
+}
+function readAiSettingInputs(prefix) {
+  const get = (key) => Number(document.getElementById(`ai${prefix}${key[0].toUpperCase()}${key.slice(1)}`)?.value);
+  const dailyRaw = document.getElementById(`ai${prefix}Daily`)?.value;
+  // Override: blangko = inherit (null). Default: blangko = invalid (NaN).
+  const dailyCap = (dailyRaw === '' || dailyRaw === undefined) ? (prefix === 'Override' ? null : NaN) : Number(dailyRaw);
+  return { monthlyCredits: get('monthly'), textCost: get('text'), fileCost: get('file'), imageCost: get('image'), dailyCap };
+}
+function validateAiSettingInputs(settings) {
+  const dailyOk = settings.dailyCap === null || (Number.isInteger(settings.dailyCap) && settings.dailyCap >= 0);
+  const { dailyCap: _dc, ...core } = settings;
+  if (!dailyOk || !Object.values(core).every(Number.isInteger) || settings.monthlyCredits < 1 || settings.textCost < 1 || settings.fileCost < settings.textCost || settings.imageCost < settings.fileCost) {
+    toast('Invalid AI credit values. Required: monthly ≥ 1, text ≥ 1, file ≥ text, image ≥ file.', 'error');
+    return false;
+  }
+  return true;
+}
+async function loadAiCreditSettings() {
+  let data;
+  try { data = await aiApi('/relay/admin/api/ai-credits/settings'); } catch (err) { return; }
+  if (!data?.success) { toast(data?.message || 'Could not load AI credit settings.', 'error'); return; }
+  relayAiCreditSettingsCache = data;
+  fillAiSettingInputs('Default', data.defaults);
+  // AYOS: dating blangko ang Override number fields (Monthly/Text/File/Image)
+  // hangga't hindi pa pinipili ang isang existing override sa list. Kapag
+  // nag-type ang admin ng BAGONG target installation ID at direktang pinindot
+  // ang "Save Customer Override", Number(undefined) -> NaN ang mga blangkong
+  // field, kaya laging bumabagsak ang client-side validation (validateAiSettingInputs)
+  // bago pa man makarating ang request sa server — kaya parang "hindi
+  // gumagana" ang buong feature. I-prefill ang Override fields ng Default
+  // values bilang sensible starting point (mao-overwrite pa rin ito ng
+  // selectAiOverride() kapag umiiral na ang override na pinili).
+  fillAiSettingInputs('Override', data.defaults);
+  const meta = document.getElementById('aiDefaultMeta');
+  if (meta) meta.innerText = `Current month: ${data.month} · Default ${data.defaults.source || 'Relay'}`;
+  const list = document.getElementById('aiOverrideList');
+  if (!list) return;
+  if (!data.overrides?.length) { list.innerHTML = '<div class="empty">No customer overrides. Everyone uses the Default.</div>'; return; }
+  list.innerHTML = `<div style="font-size:11px;color:var(--muted);margin-bottom:6px;">Customer overrides (${data.overrides.length})</div>` + data.overrides.map(o => `
+    <div class="row" style="margin-bottom:6px; padding:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; cursor:pointer;" onclick="selectAiOverride('${escapeAttr(o.installationId)}')">
+      <code style="flex:1 1 240px;">${escapeHtml(o.installationId)}</code>
+      <span>${o.monthlyCredits}/mo</span><span>used ${o.used}</span><span>left ${o.remaining}</span>
+      <span class="meta">T${o.textCost} · F${o.fileCost} · I${o.imageCost}</span>
+      <span class="meta">${o.dailyCap === null || o.dailyCap === undefined ? 'daily: default' : (o.dailyCap === 0 ? 'daily: ∞' : 'daily: ' + o.dailyCap)}</span>
+    </div>`).join('');
+}
+function escapeHtml(str) {
+  return String(str).replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
+}
+function selectAiOverride(installationId) {
+  const o = (relayAiCreditSettingsCache?.overrides || []).find(x => x.installationId === installationId);
+  const idEl = document.getElementById('aiOverrideInstallation');
+  if (idEl) idEl.value = installationId;
+  if (o) {
+    fillAiSettingInputs('Override', o);
+    toast('Loaded customer override.', 'info');
+  }
+}
+async function saveAiDefaultSettings() {
+  const settings = readAiSettingInputs('Default');
+  if (!validateAiSettingInputs(settings)) return;
+  try {
+    const data = await aiApi('/relay/admin/api/ai-credits/default', { method:'POST', body:JSON.stringify(settings) });
+    if (!data?.success) throw new Error(data?.message || 'Save failed');
+    toast('Default AI credits saved on RELAY/Neon.', 'success');
+    loadAiCreditSettings();
+  } catch (err) { toast(err.message || 'Could not save AI credit default.', 'error'); }
+}
+async function saveAiInstallationSettings() {
+  const id = document.getElementById('aiOverrideInstallation')?.value.trim();
+  if (!id) { toast('Enter an installation ID first.', 'error'); return; }
+  const settings = readAiSettingInputs('Override');
+  if (!validateAiSettingInputs(settings)) return;
+  try {
+    const data = await aiApi('/relay/admin/api/ai-credits/installation', { method:'POST', body:JSON.stringify({ installationId:id, ...settings }) });
+    if (!data?.success) throw new Error(data?.message || 'Save failed');
+    toast(`AI credit override saved for ${id}.`, 'success');
+    loadAiCreditSettings();
+  } catch (err) { toast(err.message || 'Could not save customer override.', 'error'); }
+}
+async function resetAiInstallationSettings() {
+  const id = document.getElementById('aiOverrideInstallation')?.value.trim();
+  if (!id) { toast('Enter an installation ID first.', 'error'); return; }
+  const ok = await confirmAction({ title:'Use Default AI Credits?', message:`This removes the custom AI credit override for ${id} AND any AI plan (Plus/Pro) and extra credit packs they bought this month. They will immediately use the RELAY Default settings. Tokens are NOT refunded.`, confirmLabel:'Yes, use Default', danger:false });
+  if (!ok) return;
+  try {
+    const data = await aiApi('/relay/admin/api/ai-credits/installation/reset', { method:'POST', body:JSON.stringify({ installationId:id}) });
+    if (!data?.success) throw new Error(data?.message || 'Reset failed');
+    toast(`Reset done. Removed: ${data.removedTier ? 'AI plan, ' : ''}${data.removedExtraPacks || 0} extra pack(s). Default is active.`, 'success');
+    loadAiCreditSettings();
+  } catch (err) { toast(err.message || 'Could not reset customer override.', 'error'); }
+}
+// ===== OMNI AI: PROVIDER STATUS + UPGRADE TIERS (RELAY authority) =====
+function aiTierRowHtml(t, isNew) {
+  const id = escapeAttr(t.id || '');
+  const v = (x) => escapeAttr(x === undefined || x === null ? '' : x);
+  const idField = isNew
+    ? `<label style="font-size:11px;color:var(--muted);">ID<input type="text" data-f="id" maxlength="30" placeholder="hal. starter" style="width:100%;"></label>`
+    : `<label style="font-size:11px;color:var(--muted);">ID<input type="text" data-f="id" value="${id}" readonly style="width:100%;opacity:.7;"></label>`;
+  const stats = isNew ? '' : `<span class="meta">${t.buyersThisMonth || 0} buyer(s) ngayong buwan · ${t.tokensThisMonth || 0} tokens</span>`;
+  return `
+    <div class="row" data-tier="${id}" style="margin-bottom:8px; padding:8px;">
+      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:8px; align-items:end;">
+        ${idField}
+        <label style="font-size:11px;color:var(--muted);">Pangalan<input type="text" data-f="name" maxlength="40" value="${v(t.name)}" style="width:100%;"></label>
+        <label style="font-size:11px;color:var(--muted);">Presyo (Omni Tokens)<input type="number" min="0" step="1" data-f="priceTokens" value="${v(t.priceTokens)}" style="width:100%;"></label>
+        <label style="font-size:11px;color:var(--muted);">Monthly credits<input type="number" min="1" step="1" data-f="monthlyCredits" value="${v(t.monthlyCredits)}" style="width:100%;"></label>
+        <label style="font-size:11px;color:var(--muted);">Daily cap (0 = ∞)<input type="number" min="0" step="1" data-f="dailyCap" value="${v(t.dailyCap)}" style="width:100%;"></label>
+        <label style="font-size:11px;color:var(--muted);">Order<input type="number" step="1" data-f="sortOrder" value="${v(t.sortOrder === undefined ? 0 : t.sortOrder)}" style="width:100%;"></label>
+        <label style="font-size:12px;"><input type="checkbox" data-f="enabled" ${t.enabled === false ? '' : 'checked'}> Enabled</label>
+      </div>
+      <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+        <button class="btn-primary" onclick="saveAiTier(this)">💾 ${isNew ? 'Add tier' : 'Save'}</button>
+        ${isNew ? '' : `<button class="btn-ghost" onclick="deleteAiTier('${id}')">🗑️ Delete</button>`}
+        ${stats}
+      </div>
+    </div>`;
+}
+function renderAiProviderBox(p) {
+  const box = document.getElementById('aiProviderBox');
+  if (!box || !p) return;
+  const fmt = (ms) => ms ? new Date(ms).toLocaleString() : '—';
+  if (p.exhausted) {
+    box.innerHTML = `<div style="color:var(--danger,#ff6b6b); font-weight:700;">🚫 EXHAUSTED — tinatanggihan ang AI requests hanggang ${escapeHtml(fmt(p.retryAt))}</div>
+      <div class="meta" style="margin-top:4px;">Source: ${escapeHtml(p.source || 'auto')} · na-detect: ${escapeHtml(fmt(p.detectedAt))}</div>
+      <div class="meta">${escapeHtml(p.reason || '')}</div>`;
+  } else {
+    box.innerHTML = `<div style="color:var(--success,#69db7c); font-weight:700;">✅ Provider OK — tumatanggap ng AI requests</div>
+      <div class="meta" style="margin-top:4px;">Model: ${escapeHtml(p.model || '—')} · Cloudflare ${p.configured ? 'configured' : 'HINDI configured'}</div>`;
+  }
+}
+function renderAiCapacityBox(c) {
+  const box = document.getElementById('aiCapacityBox');
+  if (!box || !c) return;
+  const status = !c.enabled ? '⚪ OFF (capacity = 0)'
+    : (c.locked ? `🔒 LOCKED hanggang katapusan ng buwan — ${escapeHtml(c.lockReason || '')}` : '🟢 Bukas pa');
+  box.innerHTML = `<div style="font-weight:700;">${status}</div>
+    <div class="meta" style="margin:4px 0 8px;">Committed: <b>${c.committed}</b> / ${c.capacity} tanong kada araw (tier + extra cap ng lahat ngayong buwan; extra: ${c.extraDaily || 0}, natitira: ${c.leftover ?? '—'}). Naka-lock na tier: ${escapeHtml((c.lockedTierIds||[]).join(', '))}</div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+      <input id="aiCapacityInput" type="number" min="0" value="${c.capacity}" style="width:130px;" placeholder="Total daily capacity">
+      <input id="aiCapacityTiers" type="text" value="${escapeHtml((c.lockedTierIds||[]).join(','))}" style="width:130px;" placeholder="plus,pro">
+      <button class="btn-primary" onclick="saveAiCapacity()">💾 Save</button>
+      <button class="btn-ghost" onclick="unlockAiTiers()">🔓 Unlock ngayong buwan</button>
+    </div>`;
+}
+async function saveAiCapacity() {
+  const dailyCapacity = Number(document.getElementById('aiCapacityInput').value);
+  const lockedTierIds = document.getElementById('aiCapacityTiers').value;
+  if (!Number.isInteger(dailyCapacity) || dailyCapacity < 0) { toast('Capacity must be a whole number >= 0 (0 = off).', 'error'); return; }
+  const data = await aiApi('/relay/admin/api/ai-plans/capacity', { method:'POST', body:JSON.stringify({ dailyCapacity, lockedTierIds }) });
+  if (data?.success) { toast('Capacity saved.', 'success'); loadAiPlans(); } else toast(data?.message || 'Save failed.', 'error');
+}
+async function unlockAiTiers() {
+  const data = await aiApi('/relay/admin/api/ai-plans/unlock', { method:'POST', body:'{}' });
+  if (data?.success) { toast('Na-unlock ang tiers ngayong buwan.', 'success'); loadAiPlans(); } else toast(data?.message || 'Unlock failed.', 'error');
+}
+function aiExtraPackRowHtml(p, isNew) {
+  const v = (x) => escapeHtml(x === undefined || x === null ? '' : String(x));
+  return `<div data-extra-pack style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin:6px 0;">
+    <input data-f="id" value="${v(p.id)}" ${isNew ? '' : 'readonly'} placeholder="id" style="width:90px;">
+    <input data-f="name" value="${v(p.name)}" placeholder="Pangalan" style="width:120px;">
+    <input data-f="credits" type="number" min="1" value="${v(p.credits)}" placeholder="credits" style="width:80px;">
+    <input data-f="dailyBonus" type="number" min="0" value="${v(p.dailyBonus || 0)}" placeholder="+/araw" title="Extra daily cap (tanong/araw) na kinukuha sa natitirang capacity" style="width:70px;">
+    <input data-f="priceTokens" type="number" min="1" value="${v(p.priceTokens)}" placeholder="tokens" style="width:80px;">
+    <input data-f="sortOrder" type="number" value="${v(p.sortOrder || 0)}" style="width:55px;" title="sort">
+    <label style="font-size:12px;"><input data-f="enabled" type="checkbox" ${p.enabled === false ? '' : 'checked'}> on</label>
+    <button class="btn-primary" onclick="saveAiExtraPack(this)">💾</button>
+    ${isNew ? '' : `<button class="btn-ghost" onclick="deleteAiExtraPack('${v(p.id)}')">🗑</button>`}
+    ${isNew ? '' : `<span class="meta">${v(p.pricePerCredit)} token/credit · +${v(p.dailyBonus || 0)}/araw · ${v(p.salesThisMonth)} benta ngayong buwan</span>`}
+  </div>`;
+}
+async function loadAiExtra() {
+  const box = document.getElementById('aiExtraBox');
+  if (!box) return;
+  let d;
+  try { d = await aiApi('/relay/admin/api/ai-extra'); } catch (e) { return; }
+  if (!d?.success) { box.textContent = d?.message || 'Could not load extra credits.'; return; }
+  const es = d.settings;
+  const avail = d.availableCredits === null ? 'walang limit' : `${d.availableCredits} natitira`;
+  box.innerHTML = `<div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+      <label style="font-size:12px;"><input id="aiExtraEnabled" type="checkbox" ${es.enabled ? 'checked' : ''}> Bukas ang bentahan</label>
+      <label style="font-size:12px;">Pool/buwan <input id="aiExtraPool" type="number" min="0" value="${es.monthlyPool}" style="width:90px;"></label>
+      <label style="font-size:12px;">Max/client <input id="aiExtraMax" type="number" min="0" value="${es.maxPerClient}" style="width:90px;"></label>
+      <button class="btn-primary" onclick="saveAiExtraSettings()">💾 Save</button>
+    </div>
+    <div class="meta" style="margin:6px 0;">0 = walang limit. Nabenta ngayong buwan: <b>${d.soldCredits}</b> credits (${avail}). Pinakamurang tier rate: ${d.cheapestTierRate ?? '—'} token/credit — panatilihing mas mataas dito ang presyo ng packs para hindi matalo ang tiers.</div>
+    ${d.packs.map(p => aiExtraPackRowHtml(p, false)).join('')}
+    <div class="meta" style="margin-top:8px;">Magdagdag ng pack:</div>
+    ${aiExtraPackRowHtml({ enabled: true, sortOrder: d.packs.length + 1 }, true)}`;
+}
+async function saveAiExtraSettings() {
+  const body = {
+    enabled: document.getElementById('aiExtraEnabled').checked,
+    monthlyPool: Number(document.getElementById('aiExtraPool').value),
+    maxPerClient: Number(document.getElementById('aiExtraMax').value)
+  };
+  const data = await aiApi('/relay/admin/api/ai-extra/settings', { method:'POST', body:JSON.stringify(body) });
+  if (data?.success) { toast('Extra credit settings saved.', 'success'); loadAiExtra(); } else toast(data?.message || 'Save failed.', 'error');
+}
+async function saveAiExtraPack(btn) {
+  const row = btn.closest('[data-extra-pack]');
+  const get = (f) => row.querySelector(`[data-f="${f}"]`);
+  const body = {
+    id: get('id').value.trim().toLowerCase(), name: get('name').value.trim(),
+    credits: Number(get('credits').value), dailyBonus: Number(get('dailyBonus').value || 0), priceTokens: Number(get('priceTokens').value),
+    sortOrder: Number(get('sortOrder').value || 0), enabled: get('enabled').checked
+  };
+  if (!body.id || !body.name || !Number.isInteger(body.credits) || body.credits < 1 || !Number.isInteger(body.priceTokens) || body.priceTokens < 1 || !Number.isInteger(body.dailyBonus) || body.dailyBonus < 0) {
+    toast('Invalid pack: kailangan ang ID, pangalan, credits ≥ 1, tokens ≥ 1, +/araw ≥ 0.', 'error'); return;
+  }
+  const data = await aiApi('/relay/admin/api/ai-extra/pack', { method:'POST', body:JSON.stringify(body) });
+  if (data?.success) { toast('Pack saved.', 'success'); loadAiExtra(); } else toast(data?.message || 'Save failed.', 'error');
+}
+async function deleteAiExtraPack(id) {
+  if (!confirm(`Burahin ang pack na "${id}"?`)) return;
+  const data = await aiApi(`/relay/admin/api/ai-extra/pack/${encodeURIComponent(id)}`, { method:'DELETE' });
+  if (data?.success) { toast('Pack deleted.', 'success'); loadAiExtra(); } else toast(data?.message || 'Delete failed.', 'error');
+}
+async function loadAiPlans(providerOnly) {
+  let data;
+  try { data = await aiApi('/relay/admin/api/ai-plans'); } catch (err) { return; }
+  if (!data?.success) { if (!providerOnly) toast(data?.message || 'Could not load AI plans.', 'error'); return; }
+  renderAiProviderBox(data.provider);
+  if (providerOnly) return;
+  renderAiCapacityBox(data.capacity);
+  loadAiExtra();
+  const list = document.getElementById('aiTierList');
+  if (list) list.innerHTML = data.tiers.length ? data.tiers.map(t => aiTierRowHtml(t, false)).join('') : '<div class="empty">Walang tier. Magdagdag sa ibaba.</div>';
+  const nw = document.getElementById('aiTierNew');
+  if (nw && !nw.innerHTML.trim()) nw.innerHTML = aiTierRowHtml({ enabled: true, sortOrder: (data.tiers.length + 1) }, true);
+}
+async function saveAiTier(btn) {
+  const row = btn.closest('[data-tier]');
+  const get = (f) => row.querySelector(`[data-f="${f}"]`);
+  const body = {
+    id: get('id').value.trim().toLowerCase(),
+    name: get('name').value.trim(),
+    priceTokens: Number(get('priceTokens').value),
+    monthlyCredits: Number(get('monthlyCredits').value),
+    dailyCap: Number(get('dailyCap').value),
+    sortOrder: Number(get('sortOrder').value || 0),
+    enabled: get('enabled').checked
+  };
+  if (!body.id || !body.name || !Number.isInteger(body.priceTokens) || body.priceTokens < 0 || !Number.isInteger(body.monthlyCredits) || body.monthlyCredits < 1 || !Number.isInteger(body.dailyCap) || body.dailyCap < 0) {
+    toast('Invalid tier values: kailangan ang ID, pangalan, presyo ≥ 0, monthly ≥ 1, daily ≥ 0.', 'error'); return;
+  }
+  try {
+    const data = await aiApi('/relay/admin/api/ai-plans/tier', { method:'POST', body:JSON.stringify(body) });
+    if (!data?.success) throw new Error(data?.message || 'Save failed');
+    toast(`Tier "${body.name}" saved.`, 'success');
+    const nw = document.getElementById('aiTierNew'); if (nw) nw.innerHTML = '';
+    loadAiPlans();
+  } catch (err) { toast(err.message || 'Could not save tier.', 'error'); }
+}
+async function deleteAiTier(id) {
+  const ok = await confirmAction({ title:'Delete AI tier?', message:`Buburahin ang tier "${id}". Ang mga client na nakabili na nito ngayong buwan ay mananatili sa nabili nilang limits hanggang katapusan ng buwan.`, confirmLabel:'Yes, delete', danger:true });
+  if (!ok) return;
+  try {
+    const data = await aiApi(`/relay/admin/api/ai-plans/tier/${encodeURIComponent(id)}`, { method:'DELETE' });
+    if (!data?.success) throw new Error(data?.message || 'Delete failed');
+    toast('Tier deleted.', 'success');
+    loadAiPlans();
+  } catch (err) { toast(err.message || 'Could not delete tier.', 'error'); }
+}
+async function aiProviderAction(action) {
+  try {
+    const data = await aiApi('/relay/admin/api/ai-provider', { method:'POST', body:JSON.stringify({ action }) });
+    if (!data?.success) throw new Error(data?.message || 'Failed');
+    toast(action === 'clear' ? 'Provider flag cleared.' : 'Provider locked hanggang 00:00 UTC.', 'success');
+    loadAiPlans(true);
+  } catch (err) { toast(err.message || 'Could not update provider status.', 'error'); }
+}
+
 async function boot() {
   if (!adminKey) return;
   try {
@@ -566,6 +983,9 @@ async function boot() {
     await loadReceiptCreditPricing();
     document.getElementById('loginWrap').classList.add('hidden');
     document.getElementById('app').classList.remove('hidden');
+    loadAiCreditSettings();
+    loadAiPlans();
+    startAiPoll();
   } catch (err) {
     if (err.message !== 'forbidden') toast(err.message, 'error');
   }

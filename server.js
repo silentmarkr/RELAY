@@ -8437,10 +8437,27 @@ app.post('/relay/admin/api/ai-credits/installation/reset', requireAdminKey, asyn
         if (!installationId || installationId === RELAY_AI_DEFAULT_SETTINGS_ID) {
             return res.status(400).json({ success: false, message: 'Valid installationId is required.' });
         }
+        // BAGO: dati, ang custom override row lang ang binubura. Ang binili ng client
+        // ngayong buwan (AI upgrade tier at extra credit packs) ay nasa hiwalay na
+        // table at patuloy na nagdadagdag sa cap kahit "reset" na — kaya hindi nawawala
+        // ang extra cap/tier. Ngayon, kasama na silang binubura (buwan na ito lang;
+        // walang token refund). Ipasa ang keepPurchases:true para override lang ang alisin.
+        const keepPurchases = req.body?.keepPurchases === true;
+        const monthKey = relayAiMonthKey();
         await pgPoolDevices.query(`DELETE FROM relay_ai_credit_settings WHERE installation_id = $1`, [installationId]);
-        const effective = await getRelayAiSettings(installationId);
-        console.log(`🤖 AI credit override reset for ${installationId}; default is active again.`);
-        return res.json({ success: true, installationId, settings: effective });
+        let removedTier = 0, removedExtraPacks = 0;
+        if (!keepPurchases) {
+            const t = await pgPoolDevices.query(`DELETE FROM relay_ai_tier_purchases WHERE installation_id = $1 AND month_key = $2`, [installationId, monthKey]);
+            removedTier = t.rowCount || 0;
+            const x = await pgPoolDevices.query(`DELETE FROM relay_ai_extra_purchases WHERE installation_id = $1 AND month_key = $2`, [installationId, monthKey]);
+            removedExtraPacks = x.rowCount || 0;
+            if (removedTier || removedExtraPacks) {
+                logActivity(installationId, 'ai_purchases_reset_by_admin', { month: monthKey, removedTier, removedExtraPacks });
+            }
+        }
+        const effective = await getRelayAiCreditStatus(installationId);
+        console.log(`🤖 AI credit override reset for ${installationId}; default is active again (tier removed: ${removedTier}, extra packs removed: ${removedExtraPacks}).`);
+        return res.json({ success: true, installationId, removedTier, removedExtraPacks, keptPurchases: keepPurchases, settings: effective });
     } catch (err) {
         console.error('AI credit installation reset error:', err.message);
         return res.status(503).json({ success: false, message: 'Unable to reset installation AI credit override.' });
