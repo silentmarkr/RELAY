@@ -375,6 +375,37 @@ async function ensureDeviceLicenseSchema() {
          ON CONFLICT (installation_id) DO NOTHING`,
         [defaultMonthly, defaultText, defaultFile, defaultImage]
     );
+    // Support tickets submitted from OMNIPOS installations (Help > Omni AI >
+    // Support Ticket). OMNIPOS still keeps its own local copy; this table is
+    // the developer-side inbox. UNIQUE (installation_id, local_ticket_id)
+    // makes OMNIPOS retries idempotent (no duplicate tickets).
+    await pgPoolDevices.query(`
+        CREATE TABLE IF NOT EXISTS relay_support_tickets (
+            id              BIGSERIAL PRIMARY KEY,
+            installation_id TEXT NOT NULL,
+            local_ticket_id TEXT NOT NULL,
+            store_name      TEXT,
+            username        TEXT,
+            subject         TEXT NOT NULL,
+            message         TEXT NOT NULL DEFAULT '',
+            transcript      JSONB NOT NULL DEFAULT '[]'::jsonb,
+            diagnostics     JSONB,
+            status          TEXT NOT NULL DEFAULT 'open',
+            admin_note      TEXT NOT NULL DEFAULT '',
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            received_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (installation_id, local_ticket_id)
+        );
+    `);
+    await pgPoolDevices.query(`
+        CREATE INDEX IF NOT EXISTS idx_relay_support_tickets_status
+        ON relay_support_tickets (status, received_at DESC);
+    `);
+    await pgPoolDevices.query(`
+        CREATE INDEX IF NOT EXISTS idx_relay_support_tickets_installation_updated
+        ON relay_support_tickets (installation_id, updated_at DESC);
+    `);
     console.log('✅ AI credit schema ready (usage + requests + editable settings) — RELAY ang authoritative source.');
 }
 // ===================================================================
@@ -713,8 +744,21 @@ async function callCloudflareWorkersAI(messages, vision) {
 // error, which made Omni AI look like it could never analyze pictures.
 // This helper detects that specific error, submits the acceptance once,
 // and lets the caller retry the original request a single time.
+// Single-flight + cooldown so concurrent image requests do not each submit
+// the license acceptance, and an unrelated error does not trigger repeated
+// "agree" calls.
+let cfVisionLicenseAttemptPromise = null;
+let cfVisionLicenseLastAttemptAt = 0;
+const CF_VISION_LICENSE_COOLDOWN_MS = 5 * 60 * 1000;
 async function acceptCfVisionModelLicenseIfNeeded(url, errMsg) {
-    if (!/agree/i.test(String(errMsg || ''))) return false;
+    if (!/model agreement|\bagree\b|license/i.test(String(errMsg || ''))) return false;
+    if (cfVisionLicenseAttemptPromise) return cfVisionLicenseAttemptPromise;
+    if (Date.now() - cfVisionLicenseLastAttemptAt < CF_VISION_LICENSE_COOLDOWN_MS) return true; // just submitted recently; the caller only needs to retry
+    cfVisionLicenseLastAttemptAt = Date.now();
+    cfVisionLicenseAttemptPromise = acceptCfVisionModelLicenseOnce(url).finally(() => { cfVisionLicenseAttemptPromise = null; });
+    return cfVisionLicenseAttemptPromise;
+}
+async function acceptCfVisionModelLicenseOnce(url) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
     try {
@@ -7063,6 +7107,277 @@ app.get('/relay/ai-assistant/usage', requireApiKey, requireAllowedDevice, rateLi
     }
 });
 // ===================================================================
+// SUPPORT TICKETS (OMNIPOS -> RELAY inbox)
+// ===================================================================
+// OMNIPOS posts each ticket here (idempotent by installationId +
+// localTicketId) and polls /status to show the developer's reply/status
+// back to the store admin. The developer manages the inbox from
+// /relay/admin/tickets.html via the admin endpoints further below.
+// ===================================================================
+// SUPPORT DESK SWITCH (RELAY-controlled)
+// ===================================================================
+// RELAY decides when support tickets are being handled. While the desk is
+// CLOSED (default), OMNIPOS keeps NEW tickets locally and sends none to RELAY,
+// so an unattended desk receives no ticket traffic. Replies the developer
+// already wrote are still delivered (only when they actually changed). OMNIPOS learns the
+// state for free: it is included in the /relay/pricing response that every
+// installation already fetches (on startup, every 30 minutes, and when the
+// store admin opens the ticket list). It also carries a per-installation
+// "updateSeq" that changes only when a ticket of that installation is
+// replied to / changed, so OMNIPOS pulls statuses only when there is
+// something new.
+let SUPPORT_DESK = { open: false, message: '' };
+const SUPPORT_DESK_PATH = path.join(__dirname, 'support-desk.json');
+async function loadSupportDesk() {
+    const normalize = (v) => ({
+        open: !!(v && v.open === true),
+        message: (v && typeof v.message === 'string') ? v.message.trim().slice(0, 300) : ''
+    });
+    const fromStore = await getPersistentJSON('support-desk', null);
+    if (fromStore && typeof fromStore === 'object') return normalize(fromStore);
+    try {
+        return normalize(JSON.parse(fs.readFileSync(SUPPORT_DESK_PATH, 'utf8')));
+    } catch (err) { /* first run: stay closed */ }
+    return { open: false, message: '' };
+}
+function saveSupportDesk(value) {
+    if (pgPoolDevices || pgPool || redisClient) {
+        setPersistentJSON('support-desk', value);
+        return;
+    }
+    try {
+        fs.writeFileSync(SUPPORT_DESK_PATH, JSON.stringify(value));
+    } catch (err) {
+        console.error('Could not save support-desk.json:', err);
+    }
+}
+// Per-installation change marker: epoch ms of the newest ticket update ('0'
+// when there are no tickets). It is cached in memory and invalidated whenever
+// a ticket of that installation is created, updated or deleted, so the
+// database is queried at most once per installation per RELAY process
+// (keeps the serverless Postgres asleep). Never throws.
+const supportSeqCache = new Map();
+function invalidateSupportSeq(installationId) {
+    if (installationId) supportSeqCache.delete(installationId);
+    else supportSeqCache.clear();
+}
+async function getSupportTicketUpdateSeq(installationId) {
+    if (!pgPoolDevices || !installationId) return '0';
+    if (supportSeqCache.has(installationId)) return supportSeqCache.get(installationId);
+    try {
+        const r = await queryWithRetry(pgPoolDevices,
+            `SELECT COALESCE(MAX(EXTRACT(EPOCH FROM updated_at) * 1000), 0)::bigint AS seq
+             FROM relay_support_tickets WHERE installation_id = $1`,
+            [installationId]);
+        const seq = String(r.rows[0] ? r.rows[0].seq : 0);
+        supportSeqCache.set(installationId, seq);
+        return seq;
+    } catch (err) {
+        return '0'; // not cached, so the next request retries
+    }
+}
+const SUPPORT_TICKET_STATUSES = ['open', 'in_progress', 'resolved', 'closed'];
+const SUPPORT_TICKET_MAX_PER_INSTALLATION = 500;
+function clampSupportText(value, max) {
+    return (typeof value === 'string' ? value : '').trim().slice(0, max);
+}
+function sanitizeSupportTranscript(raw) {
+    if (!Array.isArray(raw)) return [];
+    return raw.slice(-20).map((t) => ({
+        role: t && t.role === 'assistant' ? 'assistant' : 'user',
+        text: clampSupportText(t && t.text, 800)
+    })).filter((t) => t.text);
+}
+function sanitizeSupportDiagnostics(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const out = {};
+    let count = 0;
+    for (const [k, v] of Object.entries(raw)) {
+        if (count >= 20) break;
+        if (typeof v === 'string') out[String(k).slice(0, 60)] = v.slice(0, 300);
+        else if (typeof v === 'number' && Number.isFinite(v)) out[String(k).slice(0, 60)] = v;
+        else if (typeof v === 'boolean') out[String(k).slice(0, 60)] = v;
+        else continue;
+        count++;
+    }
+    return count ? out : null;
+}
+app.post('/relay/support-tickets', requireApiKey, requireAllowedDevice, rateLimit('support-ticket-submit', 30, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    if (!SUPPORT_DESK.open) {
+        return res.status(503).json({
+            success: false,
+            code: 'SUPPORT_DESK_CLOSED',
+            message: SUPPORT_DESK.message || 'The support team is currently unavailable. Your ticket is saved and will be sent when support reopens.'
+        });
+    }
+    if (!pgPoolDevices) return res.status(503).json({ success: false, message: 'Devices/License database is not configured.' });
+    const installationId = String(req.body?.installationId || '').trim();
+    const t = (req.body && typeof req.body.ticket === 'object' && req.body.ticket) || null;
+    if (!installationId || !t) return res.status(400).json({ success: false, message: 'Missing installationId or ticket.' });
+    const localTicketId = String(t.id === undefined || t.id === null ? '' : t.id).trim().slice(0, 80);
+    if (!localTicketId) return res.status(400).json({ success: false, message: 'Missing ticket id.' });
+    const subject = clampSupportText(t.subject, 150) || 'Omni AI support request';
+    const message = clampSupportText(t.message, 4000);
+    const transcript = sanitizeSupportTranscript(t.transcript);
+    if (!message && !transcript.length) return res.status(400).json({ success: false, message: 'Ticket has no message or conversation.' });
+    const username = clampSupportText(t.username, 120) || clampSupportText(req.body?.username, 120) || null;
+    const storeName = clampSupportText(req.body?.storeName, 160) || null;
+    const diagnostics = sanitizeSupportDiagnostics(t.diagnostics);
+    let createdAt = new Date(t.createdAt);
+    if (Number.isNaN(createdAt.getTime())) createdAt = new Date();
+    try {
+        const ins = await queryWithRetry(pgPoolDevices,
+            `INSERT INTO relay_support_tickets
+                (installation_id, local_ticket_id, store_name, username, subject, message, transcript, diagnostics, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9)
+             ON CONFLICT (installation_id, local_ticket_id) DO NOTHING
+             RETURNING id`,
+            [installationId, localTicketId, storeName, username, subject, message, JSON.stringify(transcript), diagnostics ? JSON.stringify(diagnostics) : null, createdAt.toISOString()]);
+        const created = ins.rows.length > 0;
+        if (created) {
+            invalidateSupportSeq(installationId);
+            // Keep only the newest tickets per installation so one store can't grow the table forever.
+            await queryWithRetry(pgPoolDevices,
+                `DELETE FROM relay_support_tickets
+                 WHERE installation_id = $1
+                   AND id NOT IN (SELECT id FROM relay_support_tickets WHERE installation_id = $1 ORDER BY received_at DESC, id DESC LIMIT $2)`,
+                [installationId, SUPPORT_TICKET_MAX_PER_INSTALLATION]);
+            try { logActivity(installationId, 'support_ticket_received', { subject }); } catch (_) {}
+            // Best-effort developer notification (Slack/Telegram, if configured).
+            const notifyText = `🎫 New OmniPOS support ticket\nStore: ${storeName || installationId}\nFrom: ${username || 'Unknown'}\nSubject: ${subject}`;
+            try { Promise.resolve(sendSlackNotification(notifyText)).catch(() => {}); } catch (_) {}
+            try { Promise.resolve(sendTelegramNotification(notifyText)).catch(() => {}); } catch (_) {}
+        }
+        const cur = await queryWithRetry(pgPoolDevices,
+            `SELECT status, admin_note, updated_at FROM relay_support_tickets WHERE installation_id = $1 AND local_ticket_id = $2`,
+            [installationId, localTicketId]);
+        const row = cur.rows[0] || { status: 'open', admin_note: '', updated_at: new Date() };
+        return res.json({ success: true, created, status: row.status, adminNote: row.admin_note || '', updatedAt: row.updated_at });
+    } catch (err) {
+        console.error('⚠️ RELAY support-ticket submit error:', err.message);
+        return res.status(503).json({ success: false, message: 'Support ticket service temporarily unavailable.' });
+    }
+});
+app.get('/relay/support-tickets/status', requireApiKey, requireAllowedDevice, rateLimit('support-ticket-status', 120, 60 * 60 * 1000, (req) => req.query?.installationId), async (req, res) => {
+    if (!pgPoolDevices) return res.status(503).json({ success: false, message: 'Devices/License database is not configured.' });
+    const installationId = String(req.query?.installationId || '').trim();
+    if (!installationId) return res.status(400).json({ success: false, message: 'Missing installationId.' });
+    try {
+        // Read the marker BEFORE the rows: if a ticket changes in between, the
+        // installation simply pulls once more instead of missing the update.
+        invalidateSupportSeq(installationId);
+        const updateSeq = await getSupportTicketUpdateSeq(installationId);
+        const r = await queryWithRetry(pgPoolDevices,
+            `SELECT local_ticket_id, status, admin_note, updated_at FROM relay_support_tickets
+             WHERE installation_id = $1 ORDER BY received_at DESC, id DESC LIMIT $2`,
+            [installationId, SUPPORT_TICKET_MAX_PER_INSTALLATION]);
+        return res.json({ success: true, updateSeq, tickets: r.rows.map((row) => ({
+            localTicketId: row.local_ticket_id,
+            status: row.status,
+            adminNote: row.admin_note || '',
+            updatedAt: row.updated_at
+        })) });
+    } catch (err) {
+        console.error('⚠️ RELAY support-ticket status error:', err.message);
+        return res.status(503).json({ success: false, message: 'Support ticket service temporarily unavailable.' });
+    }
+});
+app.get('/relay/admin/api/support-desk', requireAdminKey, (req, res) => {
+    res.json({ success: true, supportDesk: SUPPORT_DESK });
+});
+app.post('/relay/admin/api/support-desk', requireAdminKey, (req, res) => {
+    const { open, message } = req.body || {};
+    if (open !== undefined && typeof open !== 'boolean') {
+        return res.status(400).json({ success: false, message: 'open must be true or false.' });
+    }
+    if (message !== undefined && typeof message !== 'string') {
+        return res.status(400).json({ success: false, message: 'message must be text.' });
+    }
+    if (typeof open === 'boolean') SUPPORT_DESK.open = open;
+    if (typeof message === 'string') SUPPORT_DESK.message = message.trim().slice(0, 300);
+    saveSupportDesk(SUPPORT_DESK);
+    console.log(`Support desk updated via admin panel: open=${SUPPORT_DESK.open}.`);
+    res.json({ success: true, supportDesk: SUPPORT_DESK });
+});
+app.get('/relay/admin/api/support-tickets', requireAdminKey, async (req, res) => {
+    if (!pgPoolDevices) return res.status(503).json({ success: false, message: 'Devices/License database is not configured.' });
+    const status = String(req.query?.status || '').trim();
+    const limit = Math.min(500, Math.max(1, parseInt(req.query?.limit, 10) || 200));
+    const where = SUPPORT_TICKET_STATUSES.includes(status) ? 'WHERE status = $2' : '';
+    const params = where ? [limit, status] : [limit];
+    try {
+        const r = await queryWithRetry(pgPoolDevices,
+            `SELECT id, installation_id, local_ticket_id, store_name, username, subject, message, transcript, diagnostics,
+                    status, admin_note, created_at, received_at, updated_at
+             FROM relay_support_tickets ${where} ORDER BY received_at DESC, id DESC LIMIT $1`,
+            params);
+        const counts = await queryWithRetry(pgPoolDevices, `SELECT status, COUNT(*)::int AS n FROM relay_support_tickets GROUP BY status`);
+        const countMap = { open: 0, in_progress: 0, resolved: 0, closed: 0 };
+        counts.rows.forEach((row) => { if (row.status in countMap) countMap[row.status] = row.n; });
+        return res.json({ success: true, counts: countMap, tickets: r.rows.map((row) => ({
+            id: Number(row.id),
+            installationId: row.installation_id,
+            localTicketId: row.local_ticket_id,
+            storeName: row.store_name,
+            username: row.username,
+            subject: row.subject,
+            message: row.message,
+            transcript: Array.isArray(row.transcript) ? row.transcript : [],
+            diagnostics: row.diagnostics || null,
+            status: row.status,
+            adminNote: row.admin_note || '',
+            createdAt: row.created_at,
+            receivedAt: row.received_at,
+            updatedAt: row.updated_at
+        })) });
+    } catch (err) {
+        console.error('⚠️ RELAY admin support-tickets list error:', err.message);
+        return res.status(503).json({ success: false, message: 'Could not load support tickets.' });
+    }
+});
+app.post('/relay/admin/api/support-tickets/:id/update', requireAdminKey, async (req, res) => {
+    if (!pgPoolDevices) return res.status(503).json({ success: false, message: 'Devices/License database is not configured.' });
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ success: false, message: 'Invalid ticket id.' });
+    const hasStatus = typeof req.body?.status === 'string';
+    const hasNote = typeof req.body?.adminNote === 'string';
+    if (!hasStatus && !hasNote) return res.status(400).json({ success: false, message: 'Nothing to update.' });
+    if (hasStatus && !SUPPORT_TICKET_STATUSES.includes(req.body.status)) {
+        return res.status(400).json({ success: false, message: 'Invalid status.' });
+    }
+    try {
+        const r = await queryWithRetry(pgPoolDevices,
+            `UPDATE relay_support_tickets
+             SET status = CASE WHEN $2::boolean THEN $3 ELSE status END,
+                 admin_note = CASE WHEN $4::boolean THEN $5 ELSE admin_note END,
+                 updated_at = now()
+             WHERE id = $1
+             RETURNING id, installation_id, status, admin_note, updated_at`,
+            [id, hasStatus, hasStatus ? req.body.status : null, hasNote, hasNote ? clampSupportText(req.body.adminNote, 2000) : null]);
+        if (!r.rows.length) return res.status(404).json({ success: false, message: 'Ticket not found.' });
+        const row = r.rows[0];
+        invalidateSupportSeq(row.installation_id);
+        return res.json({ success: true, ticket: { id: Number(row.id), status: row.status, adminNote: row.admin_note || '', updatedAt: row.updated_at } });
+    } catch (err) {
+        console.error('⚠️ RELAY admin support-ticket update error:', err.message);
+        return res.status(503).json({ success: false, message: 'Could not update the ticket.' });
+    }
+});
+app.delete('/relay/admin/api/support-tickets/:id', requireAdminKey, async (req, res) => {
+    if (!pgPoolDevices) return res.status(503).json({ success: false, message: 'Devices/License database is not configured.' });
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ success: false, message: 'Invalid ticket id.' });
+    try {
+        const r = await queryWithRetry(pgPoolDevices, `DELETE FROM relay_support_tickets WHERE id = $1 RETURNING installation_id`, [id]);
+        if (!r.rowCount) return res.status(404).json({ success: false, message: 'Ticket not found.' });
+        invalidateSupportSeq(r.rows[0] && r.rows[0].installation_id);
+        return res.json({ success: true });
+    } catch (err) {
+        console.error('⚠️ RELAY admin support-ticket delete error:', err.message);
+        return res.status(503).json({ success: false, message: 'Could not delete the ticket.' });
+    }
+});
+// ===================================================================
 // ADMIN: RELAY AI CREDIT SETTINGS
 // ===================================================================
 // Ito ang editable source of truth. Ang customer/OMNIPOS .env ay hindi
@@ -7146,7 +7461,7 @@ app.post('/relay/admin/api/ai-credits/installation/reset', requireAdminKey, asyn
         return res.status(503).json({ success: false, message: 'Unable to reset installation AI credit override.' });
     }
 });
-app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 1000), (req, res) => {
+app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 1000), async (req, res) => {
     const featureCatalog = {};
     for (const [featureId, entry] of Object.entries(FEATURE_CATALOG)) {
         if (isSubscriptionOnlyFeature(featureId)) continue;
@@ -7206,6 +7521,17 @@ app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 100
         // permanently deleted in Xd" countdown sa Settings > Cloud Backup.
         cloudBackupDataRetentionDays: CLOUD_BACKUP_DATA_RETENTION_DAYS,
         activationFlags: ACTIVATION_FLAGS,
+        // Support desk signal (see SUPPORT DESK SWITCH). "updateSeq" is sent
+        // for known/allowed devices even while the desk is closed, so replies
+        // the developer already wrote still reach the store. It is served from
+        // an in-memory cache, so it normally costs no database query.
+        supportDesk: {
+            open: SUPPORT_DESK.open,
+            message: SUPPORT_DESK.message,
+            updateSeq: (installationId && allowedDevices.has(installationId))
+                ? await getSupportTicketUpdateSeq(installationId)
+                : '0'
+        },
         fetchedAt: new Date().toISOString()
     });
 });
@@ -13137,6 +13463,7 @@ async function bootstrapStores() {
         clientMaintenanceFeeConfig,
         clientMaintenanceFeePaidUntil,
         ACTIVATION_FLAGS,
+        SUPPORT_DESK,
         cloudBackupActualBills,
         costSafetyNetSimulatedTier,
         devicesCostReferenceTier
@@ -13169,6 +13496,7 @@ async function bootstrapStores() {
         loadClientMaintenanceFeeConfig(),
         loadClientMaintenanceFeePaidUntil(),
         loadActivationFlags(),
+        loadSupportDesk(),
         loadCloudBackupActualBills(),
         loadCostSafetyNetSimulatedTier(),
         loadDevicesCostReferenceTier()

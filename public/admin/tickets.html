@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Support Tickets — RELAY Admin</title>
+<style>
+  :root {
+    --bg: #05070d; --bg-raise: #101625; --card: rgba(11, 15, 26, 0.72); --card-hover: rgba(16, 22, 37, 0.85);
+    --border: #1f2a44; --border-soft: rgba(34, 229, 255, 0.28); --line: rgba(31, 42, 68, 0.7);
+    --text: #eafcff; --muted: #8ea3c9; --muted-dim: #7186ab; --accent: #22e5ff; --accent-soft: rgba(34, 229, 255, 0.16);
+    --accent-text: #031014; --green: #3ddc84; --green-bg: rgba(61, 220, 132, 0.12); --green-line: rgba(61, 220, 132, 0.32);
+    --red: #ff5c72; --red-bg: rgba(255, 92, 114, 0.12); --red-line: rgba(255, 92, 114, 0.32);
+    --amber: #ffb545; --amber-bg: rgba(255, 181, 69, 0.12); --amber-line: rgba(255, 181, 69, 0.32);
+    --font-ui: 'Rajdhani', 'Inter', 'Segoe UI', system-ui, -apple-system, Roboto, sans-serif;
+    --font-heading: 'Orbitron', 'Space Grotesk', sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --radius: 6px; --radius-lg: 8px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--font-ui); min-height: 100vh; }
+  .topbar { display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; border-bottom: 1.5px solid var(--border); background: var(--bg-raise); }
+  .topbar-title { font-family: var(--font-heading); font-size: 1.1rem; letter-spacing: .02em; }
+  .topbar-sub { color: var(--muted); font-size: .8rem; }
+  .icon-btn { background: transparent; border: 1.5px solid var(--border); color: var(--text); border-radius: var(--radius); padding: 8px 12px; cursor: pointer; font-family: var(--font-ui); font-size: .9rem; display: inline-flex; align-items: center; gap: 6px; }
+  .icon-btn:hover { border-color: var(--border-soft); background: var(--card-hover); }
+  #loginWrap { max-width: 360px; margin: 90px auto; text-align: center; }
+  #loginWrap input { width: 100%; padding: 10px 12px; margin-top: 14px; border-radius: var(--radius); border: 1.5px solid var(--border); background: var(--bg-raise); color: var(--text); font-family: var(--font-mono); }
+  #loginWrap button { margin-top: 12px; }
+  #loginError { color: var(--red); font-size: .85rem; margin-top: 8px; min-height: 1.2em; }
+  main { max-width: 1000px; margin: 0 auto; padding: 24px 20px 60px; }
+  .intro { color: var(--muted); font-size: .92rem; line-height: 1.5; margin-bottom: 18px; }
+  .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+  .tab-btn { background: transparent; border: 1.5px solid var(--border); color: var(--muted); border-radius: 999px; padding: 7px 16px; cursor: pointer; font-family: var(--font-ui); font-size: .85rem; }
+  .tab-btn:hover { border-color: var(--border-soft); color: var(--text); }
+  .tab-btn.active { background: var(--accent-soft); border-color: var(--border-soft); color: var(--accent); }
+  .ticket { background: var(--card); border: 1.5px solid var(--border); border-radius: var(--radius-lg); padding: 14px 16px; margin-bottom: 12px; }
+  .ticket-head { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; align-items: baseline; }
+  .ticket-subject { font-family: var(--font-heading); font-size: .92rem; color: var(--accent); word-break: break-word; }
+  .ticket-meta { color: var(--muted-dim); font-size: .78rem; margin-top: 2px; word-break: break-all; }
+  .ticket-msg { margin-top: 10px; white-space: pre-wrap; word-break: break-word; font-size: .92rem; }
+  .badge { display: inline-block; font-size: .68rem; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .badge.open { border-color: var(--amber-line); background: var(--amber-bg); color: var(--amber); }
+  .badge.in_progress { border-color: var(--border-soft); background: var(--accent-soft); color: var(--accent); }
+  .badge.resolved { border-color: var(--green-line); background: var(--green-bg); color: var(--green); }
+  .badge.closed { color: var(--muted-dim); }
+  details { margin-top: 10px; }
+  summary { cursor: pointer; color: var(--muted); font-size: .82rem; }
+  .transcript-line { margin-top: 6px; font-size: .84rem; white-space: pre-wrap; word-break: break-word; }
+  .transcript-line b { color: var(--accent); }
+  pre.diag { background: var(--bg-raise); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; overflow-x: auto; font-family: var(--font-mono); font-size: .75rem; margin: 8px 0 0; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; margin-top: 12px; }
+  select, textarea { background: var(--bg-raise); color: var(--text); border: 1.5px solid var(--border); border-radius: var(--radius); font-family: var(--font-ui); font-size: .9rem; padding: 8px 10px; }
+  textarea { flex: 1 1 260px; min-height: 60px; resize: vertical; }
+  select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  .btn { padding: 9px 14px; border-radius: var(--radius); border: 1.5px solid var(--border); background: transparent; color: var(--text); cursor: pointer; font-family: var(--font-ui); font-size: .88rem; }
+  .btn-save { background: var(--accent-soft); border-color: var(--border-soft); color: var(--accent); }
+  .btn-save:hover { background: var(--accent); color: var(--accent-text); }
+  .btn-del:hover { border-color: var(--red-line); color: var(--red); }
+  .desk-card { background: var(--card); border: 1.5px solid var(--border); border-radius: var(--radius-lg); padding: 12px 14px; margin-bottom: 16px; }
+  .desk-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .desk-row + .desk-row { margin-top: 10px; }
+  .desk-row input[type=text] { flex: 1 1 260px; background: var(--bg-raise); color: var(--text); border: 1.5px solid var(--border); border-radius: var(--radius); font-family: var(--font-ui); font-size: .9rem; padding: 8px 10px; }
+  .desk-row input[type=text]:focus { outline: none; border-color: var(--accent); }
+  .empty { color: var(--muted); text-align: center; padding: 40px 0; }
+  #toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: var(--bg-raise); border: 1.5px solid var(--border-soft); color: var(--text); padding: 10px 18px; border-radius: var(--radius); font-size: .88rem; opacity: 0; pointer-events: none; transition: opacity .2s ease; }
+  #toast.show { opacity: 1; }
+  #toast.error { border-color: var(--red-line); color: var(--red); }
+  .hidden { display: none !important; }
+  @media (max-width: 720px) {
+    .topbar { padding: 12px 14px; flex-wrap: wrap; gap: 10px; }
+    .topbar-actions { flex-wrap: wrap; width: 100%; gap: 8px; }
+    .topbar-actions .icon-btn { flex: 1 1 auto; justify-content: center; font-size: .82rem; padding: 9px 10px; }
+  }
+</style>
+</head>
+<body>
+<div id="loginWrap">
+  <div class="topbar-title" style="font-family:var(--font-heading);font-size:1.3rem;">Support Tickets</div>
+  <div class="topbar-sub">Enter the RELAY admin key to continue.</div>
+  <input type="password" id="adminKeyInput" placeholder="Admin key" autocomplete="off">
+  <button class="icon-btn" style="width:100%;justify-content:center;" onclick="login()">Log in</button>
+  <div id="loginError"></div>
+</div>
+<div id="app" class="hidden">
+  <div class="topbar">
+    <div>
+      <div class="topbar-title">🎫 Support Tickets</div>
+      <div class="topbar-sub">Tickets sent from OmniPOS installations (Help &rarr; Omni AI &rarr; Support Ticket)</div>
+    </div>
+    <div class="topbar-actions" style="display:flex;gap:8px;">
+      <button class="icon-btn" onclick="window.location.href='index.html'">← Devices</button>
+      <button class="icon-btn" onclick="loadTickets().catch(() => {})">↻ Refresh</button>
+      <button class="icon-btn" onclick="logout()">Log out</button>
+    </div>
+  </div>
+  <main>
+    <p class="intro">
+      Turn the support desk ON when someone is available to answer. While it is OFF (the default), OmniPOS installations keep
+      new tickets on the device and send nothing to RELAY. Installations learn the desk state the next time they refresh from RELAY
+      (at startup, about every 30 minutes, or when the store admin opens the ticket list). Replies you save here are fetched by an
+      installation only when something has changed for it, even if the desk is closed by then.
+    </p>
+    <div class="desk-card" id="deskCard">
+      <div class="desk-row">
+        <span class="badge" id="deskBadge">Loading…</span>
+        <button class="btn btn-save" id="deskToggleBtn">Open support desk</button>
+      </div>
+      <div class="desk-row">
+        <input type="text" id="deskMessage" maxlength="300" placeholder="Optional message shown to stores while the desk is closed (e.g. Support hours: Mon-Fri 9am-5pm)">
+        <button class="btn" id="deskSaveMsgBtn">Save message</button>
+      </div>
+    </div>
+    <div class="tabs" id="filterTabs"></div>
+    <input type="search" id="searchInput" placeholder="Search store, user, subject or message..." style="width:100%;margin-bottom:14px;padding:9px 12px;border-radius:var(--radius);border:1.5px solid var(--border);background:var(--bg-raise);color:var(--text);font-family:var(--font-ui);">
+    <div id="ticketList"></div>
+  </main>
+</div>
+<div id="toast"></div>
+<script>
+let adminKey = sessionStorage.getItem('relayAdminKey') || '';
+let currentFilter = '';
+let searchTerm = '';
+let lastData = null;
+const drafts = {}; // id -> { status, note } — unsaved edits survive refresh/re-render
+let loading = false;
+let reloadQueued = false;
+const STATUS_LABELS = { open: 'Open', in_progress: 'In progress', resolved: 'Resolved', closed: 'Closed' };
+function escapeHtml(str) {
+  return String(str === undefined || str === null ? '' : str)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function toast(msg, type) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = type === 'error' ? 'show error' : 'show';
+  setTimeout(() => { el.className = ''; }, 2600);
+}
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { 'Content-Type': 'application/json', 'x-relay-admin-key': adminKey, ...(opts.headers || {}) }
+  });
+  if (res.status === 403) {
+    document.getElementById('loginError').innerText = 'Incorrect admin key.';
+    logout();
+    throw new Error('forbidden');
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.success === false) throw new Error(data.message || `Request failed (${res.status})`);
+  return data;
+}
+function login() {
+  const val = document.getElementById('adminKeyInput').value.trim();
+  if (!val) return;
+  adminKey = val;
+  sessionStorage.setItem('relayAdminKey', adminKey);
+  boot();
+}
+function logout() {
+  adminKey = '';
+  sessionStorage.removeItem('relayAdminKey');
+  document.getElementById('app').classList.add('hidden');
+  document.getElementById('loginWrap').classList.remove('hidden');
+  document.getElementById('adminKeyInput').value = '';
+}
+function renderTabs(counts) {
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  const tabs = [['', `All (${total})`]].concat(Object.keys(STATUS_LABELS).map(k => [k, `${STATUS_LABELS[k]} (${counts[k] || 0})`]));
+  const box = document.getElementById('filterTabs');
+  box.innerHTML = tabs.map(([k, label]) => `<button class="tab-btn${k === currentFilter ? ' active' : ''}" data-status="${k}">${escapeHtml(label)}</button>`).join('');
+  box.querySelectorAll('.tab-btn').forEach(btn => btn.addEventListener('click', () => { currentFilter = btn.dataset.status; loadTickets().catch(() => {}); }));
+}
+function renderTicket(t) {
+  const d = drafts[t.id];
+  if (d) { t = { ...t, status: d.status, adminNote: d.note }; }
+  const created = t.createdAt ? new Date(t.createdAt).toLocaleString() : '';
+  const received = t.receivedAt ? new Date(t.receivedAt).toLocaleString() : '';
+  const store = t.storeName ? `${escapeHtml(t.storeName)} • ` : '';
+  const transcript = (t.transcript || []).map(l => `<div class="transcript-line"><b>${l.role === 'assistant' ? 'Omni AI' : 'User'}:</b> ${escapeHtml(l.text)}</div>`).join('');
+  const diag = t.diagnostics ? `<pre class="diag">${escapeHtml(JSON.stringify(t.diagnostics, null, 2))}</pre>` : '';
+  const options = Object.keys(STATUS_LABELS).map(k => `<option value="${k}"${t.status === k ? ' selected' : ''}>${STATUS_LABELS[k]}</option>`).join('');
+  return `<div class="ticket" data-id="${t.id}">
+    <div class="ticket-head">
+      <div class="ticket-subject">${escapeHtml(t.subject)}</div>
+      <span class="badge ${escapeHtml(t.status)}">${escapeHtml(STATUS_LABELS[t.status] || t.status)}</span>${d ? ' <span class="badge">unsaved</span>' : ''}
+    </div>
+    <div class="ticket-meta">${store}${escapeHtml(t.username || 'Unknown user')} • created ${escapeHtml(created)} • received ${escapeHtml(received)}<br>Installation: ${escapeHtml(t.installationId)}</div>
+    ${t.message ? `<div class="ticket-msg">${escapeHtml(t.message)}</div>` : ''}
+    ${transcript ? `<details><summary>AI conversation (${(t.transcript || []).length})</summary>${transcript}</details>` : ''}
+    ${diag ? `<details><summary>Diagnostics</summary>${diag}</details>` : ''}
+    <div class="controls">
+      <select class="js-status">${options}</select>
+      <textarea class="js-note" maxlength="2000" placeholder="Reply / note shown to the store admin">${escapeHtml(t.adminNote || '')}</textarea>
+      <button class="btn btn-save js-save">Save</button>
+      <button class="btn btn-del js-del">Delete</button>
+    </div>
+  </div>`;
+}
+function matchesSearch(t) {
+  if (!searchTerm) return true;
+  const hay = [t.storeName, t.username, t.subject, t.message, t.installationId].join(' ').toLowerCase();
+  return hay.includes(searchTerm);
+}
+function hasUnsavedEdits() { return Object.keys(drafts).length > 0; }
+function renderList() {
+  const data = lastData;
+  if (!data) return;
+  renderTabs(data.counts || {});
+  const list = document.getElementById('ticketList');
+  const rows = data.tickets.filter(matchesSearch);
+  if (!rows.length) { list.innerHTML = '<div class="empty">No tickets here.</div>'; return; }
+  list.innerHTML = rows.map(renderTicket).join('');
+  list.querySelectorAll('.ticket').forEach(card => {
+    const id = card.dataset.id;
+    const statusEl = card.querySelector('.js-status');
+    const noteEl = card.querySelector('.js-note');
+    const original = lastData.tickets.find(x => String(x.id) === String(id)) || {};
+    const markDirty = () => {
+      if (statusEl.value === original.status && noteEl.value === (original.adminNote || '')) delete drafts[id];
+      else drafts[id] = { status: statusEl.value, note: noteEl.value };
+    };
+    statusEl.addEventListener('change', markDirty);
+    noteEl.addEventListener('input', markDirty);
+    card.querySelector('.js-save').addEventListener('click', async () => {
+      try {
+        await api(`/relay/admin/api/support-tickets/${encodeURIComponent(id)}/update`, {
+          method: 'POST',
+          body: JSON.stringify({ status: statusEl.value, adminNote: noteEl.value })
+        });
+        delete drafts[id];
+        toast('Ticket updated.');
+        loadTickets().catch(() => {});
+      } catch (e) { if (e.message !== 'forbidden') toast(e.message || 'Failed to update ticket.', 'error'); }
+    });
+    card.querySelector('.js-del').addEventListener('click', async () => {
+      if (!confirm('Delete this ticket permanently from RELAY?')) return;
+      try {
+        await api(`/relay/admin/api/support-tickets/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        delete drafts[id];
+        toast('Ticket deleted.');
+        loadTickets().catch(() => {});
+      } catch (e) { if (e.message !== 'forbidden') toast(e.message || 'Failed to delete ticket.', 'error'); }
+    });
+  });
+}
+async function loadTickets() {
+  // If a load is already running, remember to load once more afterwards so a
+  // Save/Delete/filter change is never dropped.
+  if (loading) { reloadQueued = true; return; }
+  loading = true;
+  try {
+    const q = currentFilter ? `?status=${encodeURIComponent(currentFilter)}` : '';
+    lastData = await api(`/relay/admin/api/support-tickets${q}`);
+    renderList();
+  } catch (e) {
+    if (e.message === 'forbidden') throw e;
+    toast(e.message || 'Failed to load tickets.', 'error');
+    if (!lastData) document.getElementById('ticketList').innerHTML = `<div class="empty">${escapeHtml(e.message || 'Failed to load tickets.')}</div>`;
+  } finally {
+    loading = false;
+    if (reloadQueued) { reloadQueued = false; loadTickets().catch(() => {}); }
+  }
+}
+document.getElementById('searchInput').addEventListener('input', (e) => { searchTerm = e.target.value.trim().toLowerCase(); renderList(); });
+// Auto-refresh every 60s, but never while the admin is typing / has unsaved edits.
+setInterval(() => {
+  if (!adminKey || document.hidden || hasUnsavedEdits()) return;
+  const ae = document.activeElement;
+  if (ae && (ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT' || ae.tagName === 'INPUT')) return;
+  loadTickets().catch(() => {});
+}, 60000);
+let deskState = { open: false, message: '' };
+function renderDesk() {
+  const badge = document.getElementById('deskBadge');
+  badge.textContent = deskState.open ? 'Support desk: OPEN' : 'Support desk: CLOSED';
+  badge.className = 'badge ' + (deskState.open ? 'resolved' : 'open');
+  document.getElementById('deskToggleBtn').textContent = deskState.open ? 'Close support desk' : 'Open support desk';
+  const msg = document.getElementById('deskMessage');
+  if (document.activeElement !== msg) msg.value = deskState.message || '';
+}
+async function loadDesk() {
+  const data = await api('/relay/admin/api/support-desk');
+  deskState = data.supportDesk || deskState;
+  renderDesk();
+}
+async function saveDesk(patch, okText) {
+  try {
+    const data = await api('/relay/admin/api/support-desk', { method: 'POST', body: JSON.stringify(patch) });
+    deskState = data.supportDesk || deskState;
+    renderDesk();
+    toast(okText);
+  } catch (e) { if (e.message !== 'forbidden') toast(e.message || 'Failed to update the support desk.', 'error'); }
+}
+document.getElementById('deskToggleBtn').addEventListener('click', () => {
+  const next = !deskState.open;
+  if (!next && !confirm('Close the support desk? Installations will stop sending tickets and keep them queued locally.')) return;
+  saveDesk({ open: next }, next ? 'Support desk opened.' : 'Support desk closed.');
+});
+document.getElementById('deskSaveMsgBtn').addEventListener('click', () => {
+  saveDesk({ message: document.getElementById('deskMessage').value }, 'Message saved.');
+});
+async function boot() {
+  if (!adminKey) return;
+  try {
+    await loadDesk();
+  } catch (err) {
+    if (err.message === 'forbidden') return;
+    toast(err.message || 'Could not load the support desk.', 'error');
+  }
+  document.getElementById('loginWrap').classList.add('hidden');
+  document.getElementById('app').classList.remove('hidden');
+  try {
+    await loadTickets();
+  } catch (err) { /* forbidden: api() already returned to the login screen */ }
+}
+document.getElementById('adminKeyInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
+boot();
+</script>
+</body>
+</html>
