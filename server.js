@@ -712,7 +712,7 @@ async function callCloudflareWorkersAI(messages, vision) {
     const model = CF_AI_MODEL;
     const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/v1/chat/completions`;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20000);
+    const timeout = setTimeout(() => controller.abort(), 40000);
     try {
         const cfRes = await fetch(url, {
             method: 'POST',
@@ -7043,6 +7043,42 @@ async function reserveRelayAiCredits(installationId, requestId, body) {
         client.release();
     }
 }
+// BUGFIX: kapag naubos ang daily free quota ng Cloudflare Workers AI
+// (hal. "you have used up your daily free allocation of 10,000 neurons"),
+// palaging pumapalya ang bawat tanong — at dati, sinisingil pa rin ang
+// user ng AI credits sa bawat palyang iyon. Kinikilala na ngayon ang error
+// na ito para malinaw na maiulat sa client (hindi na basta "Try again").
+function isCfQuotaOrOutageError(message) {
+    return /daily free allocation|neurons|upgrade to cloudflare|workers paid|rate limit|quota|capacity|temporarily unavailable|service unavailable/i.test(String(message || ''));
+}
+// BUGFIX: ibalik ang na-reserve na credits kapag TALAGANG pumalya ang AI
+// (walang sagot na naibigay). Idempotent — isang beses lang naibabalik ang
+// bawat requestId dahil ang status na 'refunded' ay hindi na na-re-refund.
+async function refundRelayAiCredits(installationId, requestId) {
+    if (!pgPoolDevices || !requestId) return false;
+    const monthKey = relayAiMonthKey();
+    const client = await pgPoolDevices.connect();
+    try {
+        await client.query('BEGIN');
+        const upd = await client.query(
+            `UPDATE relay_ai_credit_requests SET status = 'refunded', updated_at = now()\n             WHERE installation_id = $1 AND month_key = $2 AND request_id = $3\n               AND status IN ('reserved', 'retrying', 'failed')\n             RETURNING credit_cost`,
+            [installationId, monthKey, requestId]
+        );
+        if (!upd.rows[0]) { await client.query('ROLLBACK'); return false; }
+        await client.query(
+            `UPDATE relay_ai_credit_usage SET used_credits = GREATEST(0, used_credits - $4), updated_at = now()\n             WHERE installation_id = $1 AND month_key = $2`,
+            [installationId, monthKey, Number(upd.rows[0].credit_cost) || 0]
+        );
+        await client.query('COMMIT');
+        return true;
+    } catch (err) {
+        try { await client.query('ROLLBACK'); } catch (_) {}
+        console.error('⚠️ RELAY AI credit refund error:', err.message);
+        return false;
+    } finally {
+        client.release();
+    }
+}
 async function markRelayAiRequestStatus(installationId, requestId, status) {
     if (!pgPoolDevices || !requestId) return;
     const monthKey = relayAiMonthKey();
@@ -7085,8 +7121,30 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
             // OMNIPOS may use the same requestId once for its vision->text
             // fallback without charging a second time. A later unrelated
             // request always receives a fresh requestId and is charged normally.
-            await markRelayAiRequestStatus(installationId, requestId, 'failed');
-            return res.status(502).json({ ...result, creditCost: reservation.cost, credits: reservation.status });
+            const providerUnavailable = isCfQuotaOrOutageError(result.message);
+            console.error(`⚠️ RELAY AI provider failed (${req.body?.vision ? 'vision' : 'text'}): ${result.message}`);
+            // BUGFIX: para sa text request (o sa fallback na gumamit ulit ng
+            // parehong requestId), walang sagot na naibigay kaya ibinabalik
+            // ang credits. Ang unang vision attempt lang ang hindi ibinabalik
+            // dito, dahil susubukan pa itong i-fallback ng OMNIPOS sa text
+            // gamit ang parehong requestId (na siya nang magre-refund kung
+            // pumalya rin).
+            let creditsNow = reservation.status;
+            if (!req.body?.vision) {
+                const refunded = await refundRelayAiCredits(installationId, requestId);
+                if (refunded) {
+                    try { creditsNow = await getRelayAiCreditStatus(installationId); } catch (_) {}
+                }
+            } else {
+                await markRelayAiRequestStatus(installationId, requestId, 'failed');
+            }
+            return res.status(providerUnavailable ? 503 : 502).json({
+                success: false,
+                providerUnavailable,
+                message: result.message,
+                creditCost: 0,
+                credits: creditsNow
+            });
         }
         await markRelayAiRequestStatus(installationId, requestId, 'completed');
         res.json({ ...result, creditCost: reservation.cost, credits: reservation.status });
