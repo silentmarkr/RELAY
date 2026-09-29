@@ -8671,11 +8671,12 @@ app.post('/relay/admin/api/ai-credits/installation/reset', requireAdminKey, asyn
         const dayKey = relayAiDayKey();
         // Kapareho ng purchase routes: serialize para hindi magkasalungat ang \"committed\" capacity.
         releaseGlobalLock = await acquireAiTierGlobalLock();
-        let removedTier = 0, removedExtraPacks = 0, usageCleared = false;
+        let removedTier = 0, removedExtraPacks = 0, usageCleared = false, removedOverride = 0, removedUsageRows = 0;
         const client = await pgPoolDevices.connect();
         try {
             await client.query('BEGIN');
-            await client.query(`DELETE FROM relay_ai_credit_settings WHERE installation_id = $1`, [installationId]);
+            const o = await client.query(`DELETE FROM relay_ai_credit_settings WHERE installation_id = $1`, [installationId]);
+            removedOverride = o.rowCount || 0;
             if (!keepPurchases) {
                 const t = await client.query(`DELETE FROM relay_ai_tier_purchases WHERE installation_id = $1 AND month_key = $2`, [installationId, monthKey]);
                 removedTier = t.rowCount || 0;
@@ -8683,8 +8684,9 @@ app.post('/relay/admin/api/ai-credits/installation/reset', requireAdminKey, asyn
                 removedExtraPacks = x.rowCount || 0;
             }
             if (!keepUsage) {
-                await client.query(`DELETE FROM relay_ai_credit_usage WHERE installation_id = $1 AND month_key = $2`, [installationId, monthKey]);
-                await client.query(`DELETE FROM relay_ai_daily_usage WHERE installation_id = $1 AND day_key = $2`, [installationId, dayKey]);
+                const u1 = await client.query(`DELETE FROM relay_ai_credit_usage WHERE installation_id = $1 AND month_key = $2`, [installationId, monthKey]);
+                const u2 = await client.query(`DELETE FROM relay_ai_daily_usage WHERE installation_id = $1 AND day_key = $2`, [installationId, dayKey]);
+                removedUsageRows = (u1.rowCount || 0) + (u2.rowCount || 0);
                 usageCleared = true;
             }
             await client.query('COMMIT');
@@ -8699,7 +8701,21 @@ app.post('/relay/admin/api/ai-credits/installation/reset', requireAdminKey, asyn
         }
         const effective = await getRelayAiCreditStatus(installationId);
         console.log(`🤖 AI credit override reset for ${installationId}; default is active again (tier removed: ${removedTier}, extra packs removed: ${removedExtraPacks}, usage cleared: ${usageCleared}).`);
-        return res.json({ success: true, installationId, removedTier, removedExtraPacks, keptPurchases: keepPurchases, usageCleared, settings: effective });
+        // Kung wala talagang nahanap na kahit ano para sa ID na ito, malamang mali/iba ang installation ID
+        // na tinype — huwag magsabing "done"; ipaalam sa admin.
+        const nothingToReset = !removedOverride && !removedTier && !removedExtraPacks && !removedUsageRows;
+        return res.json({
+            success: true, installationId, removedOverride: removedOverride > 0, removedTier, removedExtraPacks,
+            keptPurchases: keepPurchases, usageCleared, nothingToReset, settings: effective,
+            // Ang aktwal na epektibong limits PAGKATAPOS ng reset (galing mismo sa parehong kalkulasyon na ginagamit ng client).
+            effective: {
+                monthlyLimit: effective.limit, used: effective.used,
+                dailyCap: effective.daily ? effective.daily.cap : null, dailyUnlimited: !!(effective.daily && effective.daily.unlimited),
+                tier: effective.tier || null,
+                extraCredits: Number(effective.settings && effective.settings.extraCredits) || 0,
+                extraDailyBonus: Number(effective.settings && effective.settings.extraDailyBonus) || 0
+            }
+        });
     } catch (err) {
         console.error('AI credit installation reset error:', err.message);
         return res.status(503).json({ success: false, message: 'Unable to reset installation AI credit override.' });

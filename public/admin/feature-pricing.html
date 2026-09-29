@@ -795,7 +795,15 @@ async function resetAiInstallationSettings() {
   try {
     const data = await aiApi('/relay/admin/api/ai-credits/installation/reset', { method:'POST', body:JSON.stringify({ installationId:id}) });
     if (!data?.success) throw new Error(data?.message || 'Reset failed');
-    toast(`Reset done. Removed: ${data.removedTier ? 'AI plan, ' : ''}${data.removedExtraPacks || 0} extra pack(s)${data.usageCleared ? '; used credits & today\'s count cleared' : ''}. Default is active.`, 'success');
+    const eff = data.effective || {};
+    const nowTxt = eff.monthlyLimit !== undefined ? ` Now: ${eff.monthlyLimit} credits/mo · ${eff.dailyUnlimited ? '∞' : eff.dailyCap}/day.` : '';
+    if (data.nothingToReset) {
+      toast(`Nothing was found to reset for this ID (no override, plan, extra pack or usage). Check that the installation ID is exactly correct.${nowTxt}`, 'info');
+    } else if (eff.tier || eff.extraCredits > 0 || eff.extraDailyBonus > 0) {
+      toast(`Reset finished, but this customer STILL has ${eff.tier ? 'an AI plan (' + eff.tier.name + ')' : ''}${eff.tier && eff.extraCredits > 0 ? ' and ' : ''}${eff.extraCredits > 0 ? eff.extraCredits + ' extra credits' : ''}.${nowTxt}`, 'error');
+    } else {
+      toast(`Reset done. Removed: ${data.removedTier ? 'AI plan, ' : ''}${data.removedExtraPacks || 0} extra pack(s)${data.usageCleared ? '; used credits & today\'s count cleared' : ''}.${nowTxt}`, 'success');
+    }
     loadAiCreditSettings();
   } catch (err) { toast(err.message || 'Could not reset customer override.', 'error'); }
 }
