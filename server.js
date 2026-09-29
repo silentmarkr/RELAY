@@ -7566,6 +7566,60 @@ async function getRelayAiCapacityState(monthKey, clientOrPool = pgPoolDevices) {
         lockedAt: lock.rows[0]?.locked_at || null, lockReason: lock.rows[0]?.reason || null
     };
 }
+// Bilang ng clients per plan (Base / bawat tier) at ang kabuuang daily na hawak ng bawat isa.
+// Para lang sa admin Omni AI tab (display); hindi nito binabago ang lock/purchase logic.
+// Ang tier rows ay galing sa relay_ai_tier_purchases (kapareho ng "committed" sa capacity state);
+// ang Base ay ang mga client na may active Omni AI subscription pero walang tier na nabili ngayong buwan.
+async function getRelayAiPlanBreakdown(monthKey, tiers, capState) {
+    const capacity = Number(capState.capacity) || 0;
+    const defaults = await getRelayAiDefaultSettings();
+    const defaultDaily = Number(defaults.dailyCap) || 0;
+    const purchases = await pgPoolDevices.query(
+        `SELECT installation_id, tier_id, tier_name, daily_cap FROM relay_ai_tier_purchases WHERE month_key = $1`, [monthKey]);
+    const overrides = await pgPoolDevices.query(
+        `SELECT installation_id, daily_cap FROM relay_ai_credit_settings WHERE installation_id <> $1`, [RELAY_AI_DEFAULT_SETTINGS_ID]);
+    const extraBuyers = await pgPoolDevices.query(
+        `SELECT COUNT(DISTINCT installation_id)::int AS n FROM relay_ai_extra_purchases WHERE month_key = $1 AND daily_bonus > 0`, [monthKey]);
+    const overrideCap = new Map();
+    overrides.rows.forEach((r) => {
+        if (r.daily_cap !== null && r.daily_cap !== undefined) overrideCap.set(r.installation_id, Number(r.daily_cap) || 0);
+    });
+    const rows = new Map();
+    (tiers || []).forEach((t) => rows.set(t.id, {
+        id: t.id, name: t.name, enabled: !!t.enabled, removed: false, priceTokens: t.priceTokens,
+        dailyCap: Number(t.dailyCap) || 0, clients: 0, dailyTotal: 0, unlimitedClients: 0
+    }));
+    const purchasedIds = new Set();
+    purchases.rows.forEach((p) => {
+        purchasedIds.add(p.installation_id);
+        let row = rows.get(p.tier_id);
+        if (!row) { // tier na binura na pero may bumili pa ngayong buwan
+            row = { id: p.tier_id, name: p.tier_name, enabled: false, removed: true, priceTokens: null,
+                dailyCap: Number(p.daily_cap) || 0, clients: 0, dailyTotal: 0, unlimitedClients: 0 };
+            rows.set(p.tier_id, row);
+        }
+        const cap = Number(p.daily_cap) || 0;
+        row.clients += 1;
+        row.dailyTotal += relayAiEffectiveCap(cap, capacity);
+        if (cap === 0) row.unlimitedClients += 1;
+    });
+    let baseClients = 0, baseDaily = 0, baseUnlimited = 0;
+    for (const id of Object.keys(issuedUnlocks || {})) {
+        if (id === RELAY_AI_DEFAULT_SETTINGS_ID || purchasedIds.has(id) || !hasActiveRelayAiSubscription(id)) continue;
+        baseClients += 1;
+        const cap = overrideCap.has(id) ? overrideCap.get(id) : defaultDaily;
+        baseDaily += relayAiEffectiveCap(cap, capacity);
+        if (cap === 0) baseUnlimited += 1;
+    }
+    const tierRows = Array.from(rows.values());
+    return {
+        base: { clients: baseClients, dailyCapDefault: defaultDaily, dailyTotal: baseDaily, unlimitedClients: baseUnlimited },
+        tiers: tierRows,
+        tiersDailyTotal: tierRows.reduce((a, r) => a + r.dailyTotal, 0),
+        extraDaily: Number(capState.extraDaily) || 0,
+        extraClients: Number(extraBuyers.rows[0]?.n) || 0
+    };
+}
 async function lockRelayAiTiers(monthKey, state, reason) {
     await pgPoolDevices.query(
         `INSERT INTO relay_ai_tier_lock (month_key, locked_at, committed, capacity, reason) VALUES ($1, now(), $2, $3, $4)
@@ -7999,12 +8053,17 @@ app.get('/relay/admin/api/ai-plans', requireAdminKey, async (req, res) => {
         const byTier = {};
         stats.rows.forEach(r => { byTier[r.tier_id] = { buyers: r.buyers, tokens: r.tokens }; });
         const provider = getAiProviderExhaustion();
+        const capState = await getRelayAiCapacityState(monthKey);
+        let breakdown = null;
+        try { breakdown = await getRelayAiPlanBreakdown(monthKey, tiers, capState); }
+        catch (bErr) { console.error('AI plan breakdown error:', bErr.message); }
         return res.json({
             success: true, month: monthKey,
             tiers: tiers.map(t => ({ ...t, buyersThisMonth: (byTier[t.id] || {}).buyers || 0, tokensThisMonth: (byTier[t.id] || {}).tokens || 0 })),
             provider: { exhausted: provider.exhausted, retryAt: provider.retryAt, reason: provider.reason, source: provider.source, detectedAt: provider.detectedAt, model: CF_AI_MODEL, configured: isCfAiConfigured() },
             dayResetUtcOffsetHours: RELAY_AI_DAY_UTC_OFFSET_HOURS,
-            capacity: await getRelayAiCapacityState(monthKey)
+            capacity: capState,
+            breakdown
         });
     } catch (err) {
         console.error('AI plans GET error:', err.message);
@@ -8087,6 +8146,158 @@ app.post('/relay/admin/api/ai-provider', requireAdminKey, async (req, res) => {
     }
     const p = getAiProviderExhaustion();
     return res.json({ success: true, provider: { exhausted: p.exhausted, retryAt: p.retryAt, reason: p.reason, source: p.source, detectedAt: p.detectedAt } });
+});
+// ---- ADMIN: Workers AI neurons planner ----------------------------------
+// Ang free allocation ng Cloudflare Workers AI ay 10,000 neurons/araw (Free at Paid plan).
+// Sa Workers Paid, walang hard cap: ang sobra sa 10,000 ay sinisingil ($0.011 / 1,000 neurons),
+// kaya ang "daily budget" doon ay ang budget na itinakda ng admin.
+const CF_FREE_NEURONS_PER_DAY = 10000;
+const AI_NEURON_DEFAULTS = {
+    planOverride: 'auto',        // auto | free | paid
+    paidDailyNeurons: 50000,     // total neurons/araw na papayagan kapag Workers Paid
+    inputTokens: 1500,           // average input tokens kada tanong (estimate)
+    outputTokens: 400,           // average output tokens kada tanong (estimate)
+    inputNeuronsPerM: 26668,     // neurons kada 1M input tokens (Llama 3.3 70B fp8-fast)
+    outputNeuronsPerM: 204805    // neurons kada 1M output tokens (Llama 3.3 70B fp8-fast)
+};
+let aiNeuronSettingsCache = null;
+let cfPlanDetectCache = null;
+function normalizeAiNeuronSettings(src) {
+    const s = (src && typeof src === 'object') ? src : {};
+    const num = (v, fb, min, max) => { const n = Number(v); return (Number.isFinite(n) && n >= min && n <= max) ? Math.round(n) : fb; };
+    const ov = String(s.planOverride || AI_NEURON_DEFAULTS.planOverride).toLowerCase();
+    return {
+        planOverride: ['auto', 'free', 'paid'].includes(ov) ? ov : 'auto',
+        paidDailyNeurons: num(s.paidDailyNeurons, AI_NEURON_DEFAULTS.paidDailyNeurons, CF_FREE_NEURONS_PER_DAY, 1000000000),
+        inputTokens: num(s.inputTokens, AI_NEURON_DEFAULTS.inputTokens, 0, 1000000),
+        outputTokens: num(s.outputTokens, AI_NEURON_DEFAULTS.outputTokens, 0, 1000000),
+        inputNeuronsPerM: num(s.inputNeuronsPerM, AI_NEURON_DEFAULTS.inputNeuronsPerM, 0, 100000000),
+        outputNeuronsPerM: num(s.outputNeuronsPerM, AI_NEURON_DEFAULTS.outputNeuronsPerM, 0, 100000000)
+    };
+}
+async function getAiNeuronSettings() {
+    if (aiNeuronSettingsCache) return aiNeuronSettingsCache;
+    let stored = null;
+    try { stored = await getPersistentJSON('ai-neuron-settings', null); } catch (_) { stored = null; }
+    aiNeuronSettingsCache = normalizeAiNeuronSettings(stored);
+    return aiNeuronSettingsCache;
+}
+function aiNeuronsPerQuestion(s) {
+    return (s.inputTokens * s.inputNeuronsPerM + s.outputTokens * s.outputNeuronsPerM) / 1000000;
+}
+// Awtomatikong hinahanap kung may aktibong Workers Paid subscription ang Cloudflare account
+// (GET /accounts/{id}/subscriptions). Kung hindi mabasa ng token, babalik sa "unknown".
+async function detectCfWorkersPlan(force = false) {
+    const now = Date.now();
+    if (!force && cfPlanDetectCache) {
+        const ttl = cfPlanDetectCache.plan === 'unknown' ? 60 * 1000 : 10 * 60 * 1000;
+        if (now - cfPlanDetectCache.checkedAt < ttl) return cfPlanDetectCache;
+    }
+    let result;
+    if (!isCfAiConfigured()) {
+        result = { plan: 'unknown', source: 'none', detail: 'Walang CF_ACCOUNT_ID / CF_AI_API_TOKEN sa RELAY .env.' };
+    } else {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+        try {
+            const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/subscriptions`, {
+                headers: { 'Authorization': `Bearer ${CF_AI_API_TOKEN}` }, signal: controller.signal
+            });
+            const data = await r.json().catch(() => null);
+            if (r.ok && data && data.success && Array.isArray(data.result)) {
+                const hit = data.result.find((sub) => {
+                    const rp = (sub && sub.rate_plan) || {};
+                    if (!/workers/i.test(`${rp.id || ''} ${rp.public_name || ''}`)) return false;
+                    const st = String((sub && sub.state) || rp.state || '').toLowerCase();
+                    return !st || st === 'paid' || st === 'provisioned';
+                });
+                result = hit
+                    ? { plan: 'paid', source: 'cloudflare-api', detail: `Active subscription: ${String((hit.rate_plan && (hit.rate_plan.public_name || hit.rate_plan.id)) || 'Workers').slice(0, 60)}` }
+                    : { plan: 'free', source: 'cloudflare-api', detail: 'Walang active Workers Paid subscription sa account.' };
+            } else {
+                const msg = (data && data.errors && data.errors[0] && data.errors[0].message) || `HTTP ${r.status}`;
+                result = { plan: 'unknown', source: 'cloudflare-api-error', detail: `Hindi mabasa ang subscriptions (${String(msg).slice(0, 120)}). Posibleng kulang ang permission ng API token.` };
+            }
+        } catch (err) {
+            result = { plan: 'unknown', source: 'cloudflare-api-error', detail: err.name === 'AbortError' ? 'Timeout sa pag-check ng Cloudflare subscription.' : `Hindi ma-check ang Cloudflare subscription (${String(err.message || err).slice(0, 120)}).` };
+        } finally {
+            clearTimeout(timeout);
+        }
+    }
+    cfPlanDetectCache = { ...result, checkedAt: Date.now() };
+    return cfPlanDetectCache;
+}
+async function resolveCfPlanDetection(force = false) {
+    const det = await detectCfWorkersPlan(force);
+    // Kung hindi ma-detect pero kagagaling lang ng daily-quota error mula sa Cloudflare, sigurado nang Free.
+    if (det.plan === 'unknown') {
+        const p = getAiProviderExhaustion();
+        if (p.exhausted && p.source === 'auto') {
+            return { ...det, plan: 'free', source: 'quota-error', detail: 'Na-detect mula sa daily quota error ng Cloudflare (Free plan).' };
+        }
+    }
+    return det;
+}
+function buildAiNeuronPayload(settings, det) {
+    const effective = settings.planOverride !== 'auto' ? settings.planOverride : (det.plan === 'paid' ? 'paid' : 'free');
+    const neuronsPerDay = effective === 'paid' ? settings.paidDailyNeurons : CF_FREE_NEURONS_PER_DAY;
+    const perQuestion = aiNeuronsPerQuestion(settings);
+    return {
+        success: true,
+        model: CF_AI_MODEL,
+        freeNeurons: CF_FREE_NEURONS_PER_DAY,
+        usdPer1000Neurons: 0.011,
+        settings,
+        plan: { detected: det.plan, source: det.source, detail: det.detail, checkedAt: det.checkedAt, override: settings.planOverride, effective },
+        neuronsPerDay,
+        perQuestion,
+        capacityQuestions: perQuestion > 0 ? Math.floor(neuronsPerDay / perQuestion) : 0
+    };
+}
+app.get('/relay/admin/api/ai-neurons', requireAdminKey, async (req, res) => {
+    try {
+        const settings = await getAiNeuronSettings();
+        const det = await resolveCfPlanDetection(String(req.query.refresh || '') === '1');
+        return res.json(buildAiNeuronPayload(settings, det));
+    } catch (err) {
+        console.error('AI neurons GET error:', err.message);
+        return res.status(503).json({ success: false, message: 'Unable to load neurons planner.' });
+    }
+});
+app.post('/relay/admin/api/ai-neurons/settings', requireAdminKey, async (req, res) => {
+    try {
+        const cur = await getAiNeuronSettings();
+        const b = req.body || {};
+        const ranges = {
+            paidDailyNeurons: [CF_FREE_NEURONS_PER_DAY, 1000000000],
+            inputTokens: [0, 1000000], outputTokens: [0, 1000000],
+            inputNeuronsPerM: [0, 100000000], outputNeuronsPerM: [0, 100000000]
+        };
+        const next = { ...cur };
+        for (const [k, [min, max]] of Object.entries(ranges)) {
+            if (b[k] === undefined) continue;
+            const n = Number(b[k]);
+            if (!Number.isFinite(n) || n < min || n > max) {
+                return res.status(400).json({ success: false, message: `${k} must be a number between ${min} and ${max}.` });
+            }
+            next[k] = Math.round(n);
+        }
+        if (b.planOverride !== undefined) {
+            const ov = String(b.planOverride).toLowerCase();
+            if (!['auto', 'free', 'paid'].includes(ov)) return res.status(400).json({ success: false, message: 'planOverride must be auto, free or paid.' });
+            next.planOverride = ov;
+        }
+        if (!(aiNeuronsPerQuestion(next) > 0)) {
+            return res.status(400).json({ success: false, message: 'Ang neurons kada tanong ay dapat higit sa 0 (lagyan ng tokens at rate).' });
+        }
+        aiNeuronSettingsCache = next;
+        setPersistentJSON('ai-neuron-settings', next);
+        const det = await resolveCfPlanDetection(false);
+        return res.json(buildAiNeuronPayload(next, det));
+    } catch (err) {
+        console.error('AI neurons settings save error:', err.message);
+        return res.status(503).json({ success: false, message: 'Unable to save neurons settings.' });
+    }
 });
 // ===================================================================
 // SUPPORT TICKETS (OMNIPOS -> RELAY inbox)
