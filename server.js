@@ -375,6 +375,65 @@ async function ensureDeviceLicenseSchema() {
          ON CONFLICT (installation_id) DO NOTHING`,
         [defaultMonthly, defaultText, defaultFile, defaultImage]
     );
+    // BAGO: daily cap (bilang ng TANONG kada araw) per client + AI upgrade
+    // tiers. Lahat ay RELAY-controlled (admin page), hindi galing sa OMNIPOS.
+    // daily_cap: NULL = sundin ang default, 0 = walang limit.
+    await pgPoolDevices.query(`ALTER TABLE relay_ai_credit_settings ADD COLUMN IF NOT EXISTS daily_cap INTEGER CHECK (daily_cap IS NULL OR daily_cap >= 0)`);
+    await pgPoolDevices.query(`ALTER TABLE relay_ai_credit_requests ADD COLUMN IF NOT EXISTS day_key TEXT`);
+    await pgPoolDevices.query(
+        `UPDATE relay_ai_credit_settings SET daily_cap = $1 WHERE installation_id = '__default__' AND daily_cap IS NULL`,
+        [Math.max(0, Number.isFinite(parseInt(process.env.RELAY_AI_DAILY_CAP, 10)) ? parseInt(process.env.RELAY_AI_DAILY_CAP, 10) : 10)]
+    );
+    await pgPoolDevices.query(`
+        CREATE TABLE IF NOT EXISTS relay_ai_daily_usage (
+            installation_id TEXT NOT NULL,
+            day_key         TEXT NOT NULL,
+            used_count      INTEGER NOT NULL DEFAULT 0,
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (installation_id, day_key)
+        );
+    `);
+    await pgPoolDevices.query(`
+        CREATE TABLE IF NOT EXISTS relay_ai_tiers (
+            id              TEXT PRIMARY KEY,
+            name            TEXT NOT NULL,
+            price_tokens    INTEGER NOT NULL CHECK (price_tokens >= 0),
+            monthly_credits INTEGER NOT NULL CHECK (monthly_credits >= 1),
+            daily_cap       INTEGER NOT NULL DEFAULT 0 CHECK (daily_cap >= 0),
+            sort_order      INTEGER NOT NULL DEFAULT 0,
+            enabled         BOOLEAN NOT NULL DEFAULT TRUE,
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+    `);
+    await pgPoolDevices.query(`
+        CREATE TABLE IF NOT EXISTS relay_ai_tier_purchases (
+            installation_id TEXT NOT NULL,
+            month_key       TEXT NOT NULL,
+            tier_id         TEXT NOT NULL,
+            tier_name       TEXT NOT NULL,
+            monthly_credits INTEGER NOT NULL,
+            daily_cap       INTEGER NOT NULL DEFAULT 0,
+            price_tokens    INTEGER NOT NULL DEFAULT 0,
+            tokens_spent    INTEGER NOT NULL DEFAULT 0,
+            purchased_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (installation_id, month_key)
+        );
+    `);
+    // Unang seed lang (kapag walang laman ang tiers table). Pagkatapos nito,
+    // ang admin page na ang may kontrol sa pangalan, presyo (Omni Tokens,
+    // ~1 token = ₱1), monthly credits at daily cap ng bawat tier.
+    const tierCount = await pgPoolDevices.query(`SELECT COUNT(*)::int AS n FROM relay_ai_tiers`);
+    if (!tierCount.rows[0] || tierCount.rows[0].n === 0) {
+        const seed = [
+            ['basic', 'Basic', 99, 600, 20, 1],
+            ['plus', 'Plus', 249, 1500, 50, 2],
+            ['pro', 'Pro', 499, 3500, 120, 3]
+        ];
+        for (const t of seed) {
+            await pgPoolDevices.query(
+                `INSERT INTO relay_ai_tiers (id, name, price_tokens, monthly_credits, daily_cap, sort_order) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO NOTHING`, t);
+        }
+    }
     // Support tickets submitted from OMNIPOS installations (Help > Omni AI >
     // Support Ticket). OMNIPOS still keeps its own local copy; this table is
     // the developer-side inbox. UNIQUE (installation_id, local_ticket_id)
@@ -6861,6 +6920,80 @@ const RELAY_AI_DEFAULT_TEXT_CREDIT_COST = Math.max(1, parseInt(process.env.RELAY
 const RELAY_AI_DEFAULT_FILE_CREDIT_COST = Math.max(RELAY_AI_DEFAULT_TEXT_CREDIT_COST, parseInt(process.env.RELAY_AI_FILE_CREDIT_COST, 10) || 2);
 const RELAY_AI_DEFAULT_IMAGE_CREDIT_COST = Math.max(RELAY_AI_DEFAULT_FILE_CREDIT_COST, parseInt(process.env.RELAY_AI_IMAGE_CREDIT_COST, 10) || 3);
 const RELAY_AI_DEFAULT_SETTINGS_ID = '__default__';
+// BAGO: default na daily cap (tanong/araw kada client) kung wala pang laman ang DB;
+// 0 = walang limit. Ang totoong halaga ay galing sa admin page (DB).
+const RELAY_AI_DEFAULT_DAILY_CAP = Math.max(0, Number.isFinite(parseInt(process.env.RELAY_AI_DAILY_CAP, 10)) ? parseInt(process.env.RELAY_AI_DAILY_CAP, 10) : 10);
+// Ang "araw" ng client daily cap ay nagre-reset sa hatinggabi ng oras na ito
+// (default UTC+8 = Pilipinas). Hiwalay ito sa Cloudflare quota na 00:00 UTC.
+const RELAY_AI_DAY_UTC_OFFSET_HOURS = Number.isFinite(parseFloat(process.env.RELAY_AI_DAY_UTC_OFFSET_HOURS)) ? parseFloat(process.env.RELAY_AI_DAY_UTC_OFFSET_HOURS) : 8;
+function relayAiDayKey(now = Date.now()) {
+    return new Date(now + RELAY_AI_DAY_UTC_OFFSET_HOURS * 3600000).toISOString().slice(0, 10);
+}
+function relayAiNextDayResetMs(now = Date.now()) {
+    const d = new Date(now + RELAY_AI_DAY_UTC_OFFSET_HOURS * 3600000);
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1) - RELAY_AI_DAY_UTC_OFFSET_HOURS * 3600000;
+}
+function relayAiNextMonthResetMs(now = Date.now()) {
+    const d = new Date(now);
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
+}
+function relayAiNextUtcMidnightMs(now = Date.now()) {
+    const d = new Date(now);
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
+}
+// ---- "Provider exhausted" switch --------------------------------------
+// Kapag na-detect ang Cloudflare daily quota error, tinatanggihan na agad
+// ang susunod na AI requests hanggang 00:00 UTC (walang hintay, walang credit
+// hold). Naka-persist para hindi mawala sa restart. Puwedeng i-clear/i-set
+// ng admin (hal. pagkatapos mag-upgrade sa Workers Paid).
+let aiProviderState = { exhaustedUntil: 0, reason: '', detectedAt: 0, source: '' };
+async function loadAiProviderState() {
+    try {
+        const v = await getPersistentJSON('ai-provider-state', null);
+        if (v && typeof v === 'object') {
+            aiProviderState = {
+                exhaustedUntil: Number(v.exhaustedUntil) || 0,
+                reason: String(v.reason || '').slice(0, 300),
+                detectedAt: Number(v.detectedAt) || 0,
+                source: String(v.source || '')
+            };
+        }
+    } catch (err) { /* stay open */ }
+}
+function saveAiProviderState() {
+    try { setPersistentJSON('ai-provider-state', aiProviderState); } catch (_) {}
+}
+function getAiProviderExhaustion() {
+    if (aiProviderState.exhaustedUntil && aiProviderState.exhaustedUntil > Date.now()) {
+        return { exhausted: true, retryAt: aiProviderState.exhaustedUntil, reason: aiProviderState.reason, source: aiProviderState.source, detectedAt: aiProviderState.detectedAt };
+    }
+    if (aiProviderState.exhaustedUntil) { // expired na — linisin
+        aiProviderState = { exhaustedUntil: 0, reason: '', detectedAt: 0, source: '' };
+        saveAiProviderState();
+    }
+    return { exhausted: false, retryAt: null, reason: '', source: '', detectedAt: 0 };
+}
+function markAiProviderExhausted(message, source = 'auto') {
+    const cur = getAiProviderExhaustion();
+    if (cur.exhausted && source === 'auto') return; // naka-lock na
+    aiProviderState = {
+        exhaustedUntil: relayAiNextUtcMidnightMs(),
+        reason: String(message || 'Cloudflare AI daily quota exhausted.').slice(0, 300),
+        detectedAt: Date.now(),
+        source
+    };
+    saveAiProviderState();
+    console.warn(`🚫 AI provider marked EXHAUSTED until ${new Date(aiProviderState.exhaustedUntil).toISOString()} (${source}): ${aiProviderState.reason}`);
+}
+function clearAiProviderExhausted() {
+    aiProviderState = { exhaustedUntil: 0, reason: '', detectedAt: 0, source: '' };
+    saveAiProviderState();
+}
+// Mas mahigpit kaysa isCfQuotaOrOutageError: ito lang ang mga error na
+// nangangahulugang UBOS NA ang daily quota (hindi lang pansamantalang rate limit).
+function isCfDailyQuotaError(message) {
+    return /daily free allocation|used up your daily|10,?000 neurons|upgrade to cloudflare|workers paid|neurons? (limit|quota)/i.test(String(message || ''));
+}
 
 function relayAiMonthKey() {
     const d = new Date();
@@ -6889,12 +7022,20 @@ function normalizeRelayAiSettings(body, base = {}) {
     const textCost = normalizeRelayAiSettingNumber(body?.textCost, base.textCost || RELAY_AI_DEFAULT_TEXT_CREDIT_COST, 1);
     const fileCost = normalizeRelayAiSettingNumber(body?.fileCost, base.fileCost || RELAY_AI_DEFAULT_FILE_CREDIT_COST, textCost);
     const imageCost = normalizeRelayAiSettingNumber(body?.imageCost, base.imageCost || RELAY_AI_DEFAULT_IMAGE_CREDIT_COST, fileCost);
-    return { monthlyCredits, textCost, fileCost, imageCost };
+    // dailyCap: 0 = walang limit. null (para sa installation override) = sundin ang default.
+    let dailyCap;
+    if (body && (body.dailyCap === null || body.dailyCap === '' || body.inheritDailyCap === true) && base.__allowInheritDaily) {
+        dailyCap = null;
+    } else {
+        const fallbackDaily = (base.dailyCap === null || base.dailyCap === undefined) ? (base.__allowInheritDaily ? null : RELAY_AI_DEFAULT_DAILY_CAP) : base.dailyCap;
+        dailyCap = (body && body.dailyCap !== undefined) ? normalizeRelayAiSettingNumber(body.dailyCap, fallbackDaily, 0, 1000000) : fallbackDaily;
+    }
+    return { monthlyCredits, textCost, fileCost, imageCost, dailyCap };
 }
 async function getRelayAiDefaultSettings(clientOrPool = pgPoolDevices) {
     if (!clientOrPool) throw new Error('AI credit database is not configured on the RELAY.');
     const result = await clientOrPool.query(
-        `SELECT monthly_credits, text_cost, file_cost, image_cost, updated_at\n         FROM relay_ai_credit_settings WHERE installation_id = $1`,
+        `SELECT monthly_credits, text_cost, file_cost, image_cost, daily_cap, updated_at\n         FROM relay_ai_credit_settings WHERE installation_id = $1`,
         [RELAY_AI_DEFAULT_SETTINGS_ID]
     );
     if (!result.rows[0]) {
@@ -6903,6 +7044,7 @@ async function getRelayAiDefaultSettings(clientOrPool = pgPoolDevices) {
             textCost: RELAY_AI_DEFAULT_TEXT_CREDIT_COST,
             fileCost: RELAY_AI_DEFAULT_FILE_CREDIT_COST,
             imageCost: RELAY_AI_DEFAULT_IMAGE_CREDIT_COST,
+            dailyCap: RELAY_AI_DEFAULT_DAILY_CAP,
             updatedAt: null,
             source: 'env-default'
         };
@@ -6913,6 +7055,7 @@ async function getRelayAiDefaultSettings(clientOrPool = pgPoolDevices) {
         textCost: Number(row.text_cost),
         fileCost: Number(row.file_cost),
         imageCost: Number(row.image_cost),
+        dailyCap: (row.daily_cap === null || row.daily_cap === undefined) ? RELAY_AI_DEFAULT_DAILY_CAP : Number(row.daily_cap),
         updatedAt: row.updated_at,
         source: 'relay-default'
     };
@@ -6922,7 +7065,7 @@ async function getRelayAiSettings(installationId, clientOrPool = pgPoolDevices) 
     const defaults = await getRelayAiDefaultSettings(clientOrPool);
     if (!installationId || installationId === RELAY_AI_DEFAULT_SETTINGS_ID) return defaults;
     const result = await clientOrPool.query(
-        `SELECT monthly_credits, text_cost, file_cost, image_cost, updated_at\n         FROM relay_ai_credit_settings WHERE installation_id = $1`,
+        `SELECT monthly_credits, text_cost, file_cost, image_cost, daily_cap, updated_at\n         FROM relay_ai_credit_settings WHERE installation_id = $1`,
         [installationId]
     );
     if (!result.rows[0]) return { ...defaults, source: 'relay-default', override: false };
@@ -6932,25 +7075,87 @@ async function getRelayAiSettings(installationId, clientOrPool = pgPoolDevices) 
         textCost: Number(row.text_cost),
         fileCost: Number(row.file_cost),
         imageCost: Number(row.image_cost),
+        dailyCap: (row.daily_cap === null || row.daily_cap === undefined) ? defaults.dailyCap : Number(row.daily_cap),
+        dailyCapInherited: (row.daily_cap === null || row.daily_cap === undefined),
         updatedAt: row.updated_at,
         source: 'installation-override',
         override: true
     };
 }
+// ---- AI upgrade tiers (RELAY-controlled) ------------------------------
+function mapRelayAiTierRow(r) {
+    return {
+        id: r.id,
+        name: r.name,
+        priceTokens: Number(r.price_tokens),
+        monthlyCredits: Number(r.monthly_credits),
+        dailyCap: Number(r.daily_cap),
+        sortOrder: Number(r.sort_order) || 0,
+        enabled: !!r.enabled
+    };
+}
+async function getRelayAiActiveTier(installationId, monthKey, clientOrPool = pgPoolDevices) {
+    if (!installationId || installationId === RELAY_AI_DEFAULT_SETTINGS_ID) return null;
+    const r = await clientOrPool.query(
+        `SELECT tier_id, tier_name, monthly_credits, daily_cap, price_tokens, tokens_spent, purchased_at
+         FROM relay_ai_tier_purchases WHERE installation_id = $1 AND month_key = $2`,
+        [installationId, monthKey]
+    );
+    if (!r.rows[0]) return null;
+    const row = r.rows[0];
+    return {
+        id: row.tier_id, name: row.tier_name,
+        monthlyCredits: Number(row.monthly_credits), dailyCap: Number(row.daily_cap),
+        priceTokens: Number(row.price_tokens), tokensSpent: Number(row.tokens_spent),
+        purchasedAt: row.purchased_at
+    };
+}
+// Ang tier ay TAAS lang ang puwedeng idulot (max ng base override at tier),
+// hindi nito ibinababa ang admin-set na limit ng isang client.
+function applyRelayAiTier(settings, tier) {
+    if (!tier) return { ...settings, tier: null };
+    const baseDaily = Number(settings.dailyCap);
+    const dailyCap = (baseDaily === 0 || tier.dailyCap === 0) ? 0 : Math.max(baseDaily || 0, tier.dailyCap);
+    return { ...settings, monthlyCredits: Math.max(settings.monthlyCredits, tier.monthlyCredits), dailyCap, tier: { id: tier.id, name: tier.name } };
+}
+async function getRelayAiDailyStatus(installationId, dailyCap, clientOrPool = pgPoolDevices) {
+    const dayKey = relayAiDayKey();
+    const r = await clientOrPool.query(
+        `SELECT used_count FROM relay_ai_daily_usage WHERE installation_id = $1 AND day_key = $2`,
+        [installationId, dayKey]
+    );
+    const used = r.rows[0] ? Number(r.rows[0].used_count) || 0 : 0;
+    const cap = Number(dailyCap) || 0;
+    return {
+        day: dayKey, used, cap,
+        unlimited: cap === 0,
+        remaining: cap === 0 ? null : Math.max(0, cap - used),
+        resetsAt: relayAiNextDayResetMs()
+    };
+}
 async function getRelayAiCreditStatus(installationId, clientOrPool = pgPoolDevices) {
     if (!clientOrPool) throw new Error('AI credit database is not configured on the RELAY.');
     const monthKey = relayAiMonthKey();
-    const settings = await getRelayAiSettings(installationId, clientOrPool);
+    const baseSettings = await getRelayAiSettings(installationId, clientOrPool);
+    const tier = await getRelayAiActiveTier(installationId, monthKey, clientOrPool);
+    const settings = applyRelayAiTier(baseSettings, tier);
     const result = await clientOrPool.query(
         `SELECT used_credits FROM relay_ai_credit_usage WHERE installation_id = $1 AND month_key = $2`,
         [installationId, monthKey]
     );
     const used = result.rows[0] ? Number(result.rows[0].used_credits) || 0 : 0;
+    const daily = await getRelayAiDailyStatus(installationId, settings.dailyCap, clientOrPool);
+    const provider = getAiProviderExhaustion();
     return {
         month: monthKey,
         used,
         limit: settings.monthlyCredits,
         remaining: Math.max(0, settings.monthlyCredits - used),
+        monthResetsAt: relayAiNextMonthResetMs(),
+        daily,
+        tier: settings.tier,
+        providerExhausted: provider.exhausted,
+        providerRetryAt: provider.retryAt,
         settings
     };
 }
@@ -6963,23 +7168,30 @@ async function reserveRelayAiCredits(installationId, requestId, body) {
         // Lock the effective settings for this transaction so an admin change
         // cannot create a half-old/half-new credit reservation.
         const settingsRows = await client.query(
-            `SELECT installation_id, monthly_credits, text_cost, file_cost, image_cost\n             FROM relay_ai_credit_settings\n             WHERE installation_id IN ($1, $2)\n             ORDER BY CASE WHEN installation_id = $1 THEN 0 ELSE 1 END\n             FOR UPDATE`,
+            `SELECT installation_id, monthly_credits, text_cost, file_cost, image_cost, daily_cap\n             FROM relay_ai_credit_settings\n             WHERE installation_id IN ($1, $2)\n             ORDER BY CASE WHEN installation_id = $1 THEN 0 ELSE 1 END\n             FOR UPDATE`,
             [installationId, RELAY_AI_DEFAULT_SETTINGS_ID]
         );
         const defaultRow = settingsRows.rows.find(r => r.installation_id === RELAY_AI_DEFAULT_SETTINGS_ID);
         const overrideRow = settingsRows.rows.find(r => r.installation_id === installationId);
-        const settings = overrideRow ? {
+        const defaultDailyCap = (defaultRow && defaultRow.daily_cap !== null && defaultRow.daily_cap !== undefined) ? Number(defaultRow.daily_cap) : RELAY_AI_DEFAULT_DAILY_CAP;
+        const baseSettings = overrideRow ? {
             monthlyCredits: Number(overrideRow.monthly_credits), textCost: Number(overrideRow.text_cost),
             fileCost: Number(overrideRow.file_cost), imageCost: Number(overrideRow.image_cost),
+            dailyCap: (overrideRow.daily_cap === null || overrideRow.daily_cap === undefined) ? defaultDailyCap : Number(overrideRow.daily_cap),
             updatedAt: null, source: 'installation-override', override: true
         } : {
             monthlyCredits: Number(defaultRow?.monthly_credits || RELAY_AI_DEFAULT_MONTHLY_CREDITS),
             textCost: Number(defaultRow?.text_cost || RELAY_AI_DEFAULT_TEXT_CREDIT_COST),
             fileCost: Number(defaultRow?.file_cost || RELAY_AI_DEFAULT_FILE_CREDIT_COST),
             imageCost: Number(defaultRow?.image_cost || RELAY_AI_DEFAULT_IMAGE_CREDIT_COST),
+            dailyCap: defaultDailyCap,
             updatedAt: null, source: 'relay-default', override: false
         };
+        // Kung may binili siyang AI tier ngayong buwan, idagdag ang mas mataas na limits.
+        const activeTier = await getRelayAiActiveTier(installationId, monthKey, client);
+        const settings = applyRelayAiTier(baseSettings, activeTier);
         const cost = getRelayAiCost(body, settings);
+        const dayKey = relayAiDayKey();
         const existing = await client.query(
             `SELECT credit_cost, status FROM relay_ai_credit_requests\n             WHERE installation_id = $1 AND month_key = $2 AND request_id = $3 FOR UPDATE`,
             [installationId, monthKey, requestId]
@@ -7010,6 +7222,38 @@ async function reserveRelayAiCredits(installationId, requestId, body) {
             await client.query('ROLLBACK');
             return { ok: false, reason: 'request_reuse' };
         }
+        // DAILY CAP (bilang ng tanong kada araw, per client). Atomic sa loob ng
+        // parehong transaction: kapag pumalya ang monthly reservation sa ibaba,
+        // ROLLBACK din ang pagbilang na ito.
+        const dailyUp = await client.query(
+            `INSERT INTO relay_ai_daily_usage (installation_id, day_key, used_count)
+             VALUES ($1, $2, 1)
+             ON CONFLICT (installation_id, day_key) DO UPDATE
+             SET used_count = relay_ai_daily_usage.used_count + 1, updated_at = now()
+             WHERE $3 = 0 OR relay_ai_daily_usage.used_count < $3
+             RETURNING used_count`,
+            [installationId, dayKey, settings.dailyCap]
+        );
+        if (!dailyUp.rows[0]) {
+            const usage = await client.query(
+                `SELECT used_credits FROM relay_ai_credit_usage WHERE installation_id = $1 AND month_key = $2`,
+                [installationId, monthKey]
+            );
+            const used = usage.rows[0] ? Number(usage.rows[0].used_credits) || 0 : 0;
+            await client.query('ROLLBACK');
+            return { ok: false, reason: 'daily_cap', cost, status: {
+                month: monthKey, used, limit: settings.monthlyCredits,
+                remaining: Math.max(0, settings.monthlyCredits - used), settings,
+                tier: settings.tier,
+                daily: { day: dayKey, used: settings.dailyCap, cap: settings.dailyCap, unlimited: false, remaining: 0, resetsAt: relayAiNextDayResetMs() }
+            } };
+        }
+        const dailyUsed = Number(dailyUp.rows[0].used_count) || 0;
+        const dailyInfo = {
+            day: dayKey, used: dailyUsed, cap: settings.dailyCap, unlimited: settings.dailyCap === 0,
+            remaining: settings.dailyCap === 0 ? null : Math.max(0, settings.dailyCap - dailyUsed),
+            resetsAt: relayAiNextDayResetMs()
+        };
         const upsert = await client.query(
             `INSERT INTO relay_ai_credit_usage (installation_id, month_key, used_credits)\n             VALUES ($1, $2, $3)\n             ON CONFLICT (installation_id, month_key) DO UPDATE\n             SET used_credits = relay_ai_credit_usage.used_credits + EXCLUDED.used_credits, updated_at = now()\n             WHERE relay_ai_credit_usage.used_credits + EXCLUDED.used_credits <= $4\n             RETURNING used_credits`,
             [installationId, monthKey, cost, settings.monthlyCredits]
@@ -7023,18 +7267,20 @@ async function reserveRelayAiCredits(installationId, requestId, body) {
             await client.query('ROLLBACK');
             return { ok: false, reason: 'exhausted', status: {
                 month: monthKey, used, limit: settings.monthlyCredits,
-                remaining: Math.max(0, settings.monthlyCredits - used), settings
+                remaining: Math.max(0, settings.monthlyCredits - used), settings,
+                tier: settings.tier, monthResetsAt: relayAiNextMonthResetMs()
             }, cost };
         }
         await client.query(
-            `INSERT INTO relay_ai_credit_requests (installation_id, month_key, request_id, credit_cost, status)\n             VALUES ($1, $2, $3, $4, 'reserved')`,
-            [installationId, monthKey, requestId, cost]
+            `INSERT INTO relay_ai_credit_requests (installation_id, month_key, request_id, credit_cost, status, day_key)\n             VALUES ($1, $2, $3, $4, 'reserved', $5)`,
+            [installationId, monthKey, requestId, cost, dayKey]
         );
         const used = Number(upsert.rows[0].used_credits) || 0;
         await client.query('COMMIT');
         return { ok: true, reused: false, cost, status: {
             month: monthKey, used, limit: settings.monthlyCredits,
-            remaining: Math.max(0, settings.monthlyCredits - used), settings
+            remaining: Math.max(0, settings.monthlyCredits - used), settings,
+            tier: settings.tier, daily: dailyInfo, monthResetsAt: relayAiNextMonthResetMs()
         } };
     } catch (err) {
         try { await client.query('ROLLBACK'); } catch (_) {}
@@ -7061,14 +7307,22 @@ async function refundRelayAiCredits(installationId, requestId) {
     try {
         await client.query('BEGIN');
         const upd = await client.query(
-            `UPDATE relay_ai_credit_requests SET status = 'refunded', updated_at = now()\n             WHERE installation_id = $1 AND month_key = $2 AND request_id = $3\n               AND status IN ('reserved', 'retrying', 'failed')\n             RETURNING credit_cost`,
+            `UPDATE relay_ai_credit_requests SET status = 'refunded', updated_at = now()\n             WHERE installation_id = $1 AND month_key = $2 AND request_id = $3\n               AND status IN ('reserved', 'retrying', 'failed')\n             RETURNING credit_cost, day_key`,
             [installationId, monthKey, requestId]
         );
         if (!upd.rows[0]) { await client.query('ROLLBACK'); return false; }
         await client.query(
-            `UPDATE relay_ai_credit_usage SET used_credits = GREATEST(0, used_credits - $4), updated_at = now()\n             WHERE installation_id = $1 AND month_key = $2`,
+            `UPDATE relay_ai_credit_usage SET used_credits = GREATEST(0, used_credits - $3), updated_at = now()\n             WHERE installation_id = $1 AND month_key = $2`,
             [installationId, monthKey, Number(upd.rows[0].credit_cost) || 0]
         );
+        // Ibalik din ang bilang sa daily cap (palyang tanong ay hindi dapat bilangin).
+        if (upd.rows[0].day_key) {
+            await client.query(
+                `UPDATE relay_ai_daily_usage SET used_count = GREATEST(0, used_count - 1), updated_at = now()
+                 WHERE installation_id = $1 AND day_key = $2`,
+                [installationId, upd.rows[0].day_key]
+            );
+        }
         await client.query('COMMIT');
         return true;
     } catch (err) {
@@ -7100,9 +7354,29 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
     }
     const messages = Array.isArray(req.body?.messages) ? req.body.messages : null;
     if (!messages || !messages.length) return res.status(400).json({ success: false, message: 'Missing messages.' });
+    // "PROVIDER EXHAUSTED" SWITCH: kapag ubos na ang Cloudflare daily quota,
+    // tanggihan agad — walang tawag sa Cloudflare, walang reservation ng credits.
+    const providerNow = getAiProviderExhaustion();
+    if (providerNow.exhausted) {
+        return res.status(503).json({
+            success: false,
+            providerUnavailable: true,
+            providerExhausted: true,
+            retryAt: providerNow.retryAt,
+            creditCost: 0,
+            message: 'Naubos na ang daily AI capacity ng system ngayon. Subukan muli mamaya (mag-re-reset ito sa 8:00 AM PH time). Hindi ka nasingil ng credits.'
+        });
+    }
     try {
         const reservation = await reserveRelayAiCredits(installationId, requestId, req.body);
         if (!reservation.ok) {
+            if (reservation.reason === 'daily_cap') {
+                const cap = reservation.status.daily.cap;
+                return res.status(402).json({
+                    success: false, dailyLimitReached: true, creditsExhausted: false, creditCost: 0, ...reservation.status,
+                    message: `Naabot mo na ang daily limit ng Omni AI (${cap} tanong kada araw). Mare-reset ito bukas ng hatinggabi, o mag-upgrade ng plan para sa mas mataas na daily limit.`
+                });
+            }
             if (reservation.reason === 'exhausted') {
                 return res.status(402).json({ success: false, creditsExhausted: true, creditCost: reservation.cost, ...reservation.status, message: `Naubos na ang buwanang AI credits (${reservation.status.used}/${reservation.status.limit}). Mare-reset ito sa susunod na buwan.` });
             }
@@ -7123,6 +7397,9 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
             // request always receives a fresh requestId and is charged normally.
             const providerUnavailable = isCfQuotaOrOutageError(result.message);
             console.error(`⚠️ RELAY AI provider failed (${req.body?.vision ? 'vision' : 'text'}): ${result.message}`);
+            // Kung daily-quota error, i-lock ang provider hanggang 00:00 UTC para
+            // ang susunod na requests ay agad na tatanggihan (walang hintay).
+            if (isCfDailyQuotaError(result.message)) markAiProviderExhausted(result.message, 'auto');
             // BUGFIX: para sa text request (o sa fallback na gumamit ulit ng
             // parehong requestId), walang sagot na naibigay kaya ibinabalik
             // ang credits. Ang unang vision attempt lang ang hindi ibinabalik
@@ -7138,9 +7415,12 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
             } else {
                 await markRelayAiRequestStatus(installationId, requestId, 'failed');
             }
+            const exhaustedNow = getAiProviderExhaustion();
             return res.status(providerUnavailable ? 503 : 502).json({
                 success: false,
                 providerUnavailable,
+                providerExhausted: exhaustedNow.exhausted,
+                retryAt: exhaustedNow.retryAt,
                 message: result.message,
                 creditCost: 0,
                 credits: creditsNow
@@ -7163,6 +7443,239 @@ app.get('/relay/ai-assistant/usage', requireApiKey, requireAllowedDevice, rateLi
     } catch (err) {
         return res.status(503).json({ success: false, message: err.message || 'AI credit service unavailable.' });
     }
+});
+// ===================================================================
+// AI UPGRADE TIERS (Basic / Plus / Pro — RELAY-controlled)
+// ===================================================================
+// Ang pangalan, presyo (Omni Tokens), monthly credits at daily cap ng bawat
+// tier ay hawak ng admin page ng RELAY (relay_ai_tiers). Ang OMNIPOS ay
+// nagpapakita lang nito. Ang tier ay valid hanggang katapusan ng kasalukuyang
+// buwan (kasabay ng monthly credit reset). Kung may tier na, ang pag-upgrade
+// sa mas mataas ay sisingilin lang ang DIFFERENCE.
+const aiTierPurchaseDedupe = new Map(); // `${installationId}:${clientRequestId}` -> { status, body, expiresAt }
+// Isang pagbili lang kada installation ang sabay na puwedeng tumakbo. Kung wala ito,
+// dalawang sabay na request (double-tap/retry) ay parehong makakalusot sa "may tier na ba?"
+// check bago mag-deduct, at masisingil nang dalawang beses. (Ang clientRequestId dedupe
+// ay hindi sapat dahil bagong UUID ang ipinapadala ng OMNIPOS sa bawat request.)
+const aiTierPurchaseInFlight = new Set();
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of aiTierPurchaseDedupe) if (now > entry.expiresAt) aiTierPurchaseDedupe.delete(key);
+}, 5 * 60 * 1000).unref();
+async function listRelayAiTiers(onlyEnabled = true) {
+    const r = await pgPoolDevices.query(
+        `SELECT id, name, price_tokens, monthly_credits, daily_cap, sort_order, enabled FROM relay_ai_tiers
+         ${onlyEnabled ? 'WHERE enabled = TRUE' : ''} ORDER BY sort_order ASC, price_tokens ASC`
+    );
+    return r.rows.map(mapRelayAiTierRow);
+}
+app.get('/relay/ai-assistant/plans', requireApiKey, requireAllowedDevice, rateLimit('ai-assistant-plans', 60, 10 * 60 * 1000, (req) => req.query?.installationId), async (req, res) => {
+    const installationId = String(req.query?.installationId || '').trim();
+    if (!installationId) return res.status(400).json({ success: false, message: 'Missing installationId.' });
+    if (!hasActiveRelayAiSubscription(installationId)) return res.status(403).json({ success: false, subscriptionRequired: true, message: 'Walang active OmniPOS AI Assistant subscription para sa device na ito.' });
+    if (!pgPoolDevices) return res.status(503).json({ success: false, message: 'AI credit database is not configured on the RELAY.' });
+    try {
+        const tiers = await listRelayAiTiers(true);
+        const status = await getRelayAiCreditStatus(installationId);
+        const current = await getRelayAiActiveTier(installationId, status.month);
+        const plans = tiers.map((t) => {
+            const isCurrent = !!current && current.id === t.id;
+            const canPurchase = !current || t.priceTokens > current.priceTokens;
+            const costTokens = canPurchase ? Math.max(0, t.priceTokens - (current ? current.tokensSpent : 0)) : 0;
+            return { ...t, isCurrent, canPurchase, costTokens };
+        });
+        return res.json({
+            success: true,
+            month: status.month,
+            validUntil: relayAiNextMonthResetMs(),
+            currentTier: current ? { id: current.id, name: current.name, monthlyCredits: current.monthlyCredits, dailyCap: current.dailyCap } : null,
+            credits: status,
+            plans
+        });
+    } catch (err) {
+        console.error('⚠️ RELAY AI plans error:', err.message);
+        return res.status(503).json({ success: false, message: 'AI plans temporarily unavailable.' });
+    }
+});
+app.post('/relay/ai-assistant/plans/purchase', requireApiKey, requireAllowedDevice, rateLimit('ai-assistant-plan-purchase', 20, 10 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    if (!ACTIVATION_FLAGS.omniTokenActivationEnabled) {
+        return res.status(503).json({ success: false, message: '"Activate via Omni Tokens" is temporarily disabled (maintenance/upgrade). Please try again later.' });
+    }
+    const installationId = String(req.body?.installationId || '').trim();
+    const tierId = String(req.body?.tierId || '').trim();
+    const clientRequestId = String(req.body?.clientRequestId || '').trim().slice(0, 120);
+    if (!installationId || !tierId) return res.status(400).json({ success: false, message: 'Missing installationId or tierId.' });
+    if (!hasActiveRelayAiSubscription(installationId)) return res.status(403).json({ success: false, subscriptionRequired: true, message: 'Walang active OmniPOS AI Assistant subscription para sa device na ito.' });
+    if (!pgPool || !pgPoolDevices) return res.status(503).json({ success: false, message: 'Postgres is not configured — the Omni Token wallet needs it.' });
+    const dedupeKey = clientRequestId ? `${installationId}:${clientRequestId}` : null;
+    if (dedupeKey && aiTierPurchaseDedupe.has(dedupeKey)) {
+        const cached = aiTierPurchaseDedupe.get(dedupeKey);
+        return res.status(cached.status).json(cached.body);
+    }
+    if (aiTierPurchaseInFlight.has(installationId)) {
+        return res.status(429).json({ success: false, message: 'May kasalukuyang pagbili ng AI plan para sa device na ito. Hintayin munang matapos.' });
+    }
+    aiTierPurchaseInFlight.add(installationId);
+    let tokensDeducted = 0;
+    let balanceAfter = null;
+    try {
+        const tierRes = await pgPoolDevices.query(
+            `SELECT id, name, price_tokens, monthly_credits, daily_cap, sort_order, enabled FROM relay_ai_tiers WHERE id = $1`, [tierId]);
+        const tier = tierRes.rows[0] ? mapRelayAiTierRow(tierRes.rows[0]) : null;
+        if (!tier || !tier.enabled) return res.status(404).json({ success: false, message: 'Hindi available ang plan na ito.' });
+        const monthKey = relayAiMonthKey();
+        const current = await getRelayAiActiveTier(installationId, monthKey);
+        if (current && tier.priceTokens <= current.priceTokens) {
+            return res.status(409).json({ success: false, message: `Mayroon ka nang ${current.name} plan ngayong buwan — mas mataas na plan lang ang puwedeng i-upgrade.` });
+        }
+        const costTokens = Math.max(0, tier.priceTokens - (current ? current.tokensSpent : 0));
+        await getOrCreateCloudTokenWallet(installationId);
+        if (costTokens > 0) {
+            const safetyNet = await getCostSafetyNetFloor(installationId);
+            const effectiveFloor = safetyNet.floor;
+            const deduct = await queryWithRetry(
+                pgPool,
+                `UPDATE cloud_token_wallets SET balance_tokens = balance_tokens - $2, updated_at = now()
+                 WHERE installation_id = $1 AND balance_tokens - $2 >= $3 RETURNING balance_tokens`,
+                [installationId, costTokens, effectiveFloor]
+            );
+            if (!deduct.rows[0]) {
+                const cur = await queryWithRetry(pgPool, 'SELECT balance_tokens FROM cloud_token_wallets WHERE installation_id = $1', [installationId]);
+                const currentBalance = cur.rows[0] ? Number(cur.rows[0].balance_tokens) : 0;
+                const reserveProtected = currentBalance >= costTokens && effectiveFloor > 0;
+                return res.status(402).json({
+                    success: false, insufficient: true, reserveProtected,
+                    costSafetyNetMode: safetyNet.mode, reserveFloorTokens: effectiveFloor,
+                    balanceTokens: currentBalance, requiredTokens: costTokens,
+                    message: reserveProtected
+                        ? `This purchase is blocked by this account's cost safety net. Completing it would leave the balance below the ${effectiveFloor} token buffer set aside for storage/sync costs. Buy more Omni Tokens first, then try again.`
+                        : `Insufficient Omni Tokens. ${costTokens} token(s) are needed for the ${tier.name} AI plan. Please buy more Omni Tokens first, then try again.`
+                });
+            }
+            tokensDeducted = costTokens;
+            balanceAfter = Number(deduct.rows[0].balance_tokens);
+            invalidateWalletCache(installationId);
+            await queryWithRetry(
+                pgPool,
+                `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note, category) VALUES ($1, 'consume', $2, $3, $4, 'ADDON_PURCHASE')`,
+                [installationId, -costTokens, balanceAfter, `Omni AI plan: ${tier.name} (${monthKey}${current ? `, upgrade from ${current.name}` : ''})`]
+            );
+        } else {
+            const w = await queryWithRetry(pgPool, 'SELECT balance_tokens FROM cloud_token_wallets WHERE installation_id = $1', [installationId]);
+            balanceAfter = w.rows[0] ? Number(w.rows[0].balance_tokens) : 0;
+        }
+        try {
+            await queryWithRetry(pgPoolDevices,
+                `INSERT INTO relay_ai_tier_purchases (installation_id, month_key, tier_id, tier_name, monthly_credits, daily_cap, price_tokens, tokens_spent, purchased_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+                 ON CONFLICT (installation_id, month_key) DO UPDATE SET
+                   tier_id = EXCLUDED.tier_id, tier_name = EXCLUDED.tier_name, monthly_credits = EXCLUDED.monthly_credits,
+                   daily_cap = EXCLUDED.daily_cap, price_tokens = EXCLUDED.price_tokens,
+                   tokens_spent = relay_ai_tier_purchases.tokens_spent + EXCLUDED.tokens_spent, purchased_at = now()`,
+                [installationId, monthKey, tier.id, tier.name, tier.monthlyCredits, tier.dailyCap, tier.priceTokens, costTokens]);
+        } catch (insErr) {
+            // Ibalik ang tokens kung hindi na-record ang plan.
+            if (tokensDeducted > 0) {
+                try {
+                    const back = await queryWithRetry(pgPool, `UPDATE cloud_token_wallets SET balance_tokens = balance_tokens + $2, updated_at = now() WHERE installation_id = $1 RETURNING balance_tokens`, [installationId, tokensDeducted]);
+                    invalidateWalletCache(installationId);
+                    await queryWithRetry(pgPool, `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note, category) VALUES ($1, 'consume', $2, $3, $4, 'ADDON_PURCHASE')`,
+                        [installationId, tokensDeducted, Number(back.rows[0].balance_tokens), `Reversal: Omni AI plan ${tier.name} could not be activated`]);
+                } catch (revErr) { console.error('⚠️ AI plan reversal failed:', revErr.message); }
+            }
+            throw insErr;
+        }
+        logActivity(installationId, 'ai_plan_purchased', { tierId: tier.id, tierName: tier.name, tokensSpent: costTokens, upgradeFrom: current ? current.id : null });
+        const credits = await getRelayAiCreditStatus(installationId);
+        const body = {
+            success: true,
+            message: `${tier.name} plan activated (${tier.monthlyCredits} credits/month, ${tier.dailyCap === 0 ? 'unlimited' : tier.dailyCap} questions/day) hanggang katapusan ng buwan.`,
+            tier: { id: tier.id, name: tier.name, monthlyCredits: tier.monthlyCredits, dailyCap: tier.dailyCap },
+            tokensSpent: costTokens,
+            balanceTokens: balanceAfter,
+            credits
+        };
+        if (dedupeKey) aiTierPurchaseDedupe.set(dedupeKey, { status: 200, body, expiresAt: Date.now() + 15 * 60 * 1000 });
+        return res.json(body);
+    } catch (err) {
+        console.error('⚠️ RELAY AI plan purchase error:', err.message);
+        return res.status(500).json({ success: false, message: 'Hindi ma-activate ang AI plan. Walang nasingil (o naibalik na). Subukan muli.' });
+    } finally {
+        aiTierPurchaseInFlight.delete(installationId);
+    }
+});
+// ---- ADMIN: AI tiers + provider switch ---------------------------------
+app.get('/relay/admin/api/ai-plans', requireAdminKey, async (req, res) => {
+    if (!pgPoolDevices) return res.status(503).json({ success: false, message: 'Devices/License database is not configured.' });
+    try {
+        const tiers = await listRelayAiTiers(false);
+        const monthKey = relayAiMonthKey();
+        const stats = await pgPoolDevices.query(
+            `SELECT tier_id, COUNT(*)::int AS buyers, COALESCE(SUM(tokens_spent),0)::int AS tokens FROM relay_ai_tier_purchases WHERE month_key = $1 GROUP BY tier_id`, [monthKey]);
+        const byTier = {};
+        stats.rows.forEach(r => { byTier[r.tier_id] = { buyers: r.buyers, tokens: r.tokens }; });
+        const provider = getAiProviderExhaustion();
+        return res.json({
+            success: true, month: monthKey,
+            tiers: tiers.map(t => ({ ...t, buyersThisMonth: (byTier[t.id] || {}).buyers || 0, tokensThisMonth: (byTier[t.id] || {}).tokens || 0 })),
+            provider: { exhausted: provider.exhausted, retryAt: provider.retryAt, reason: provider.reason, source: provider.source, detectedAt: provider.detectedAt, model: CF_AI_MODEL, configured: isCfAiConfigured() },
+            dayResetUtcOffsetHours: RELAY_AI_DAY_UTC_OFFSET_HOURS
+        });
+    } catch (err) {
+        console.error('AI plans GET error:', err.message);
+        return res.status(503).json({ success: false, message: 'Unable to load AI plans.' });
+    }
+});
+app.post('/relay/admin/api/ai-plans/tier', requireAdminKey, async (req, res) => {
+    if (!pgPoolDevices) return res.status(503).json({ success: false, message: 'Devices/License database is not configured.' });
+    const id = String(req.body?.id || '').trim().toLowerCase();
+    if (!/^[a-z0-9_-]{1,30}$/.test(id)) return res.status(400).json({ success: false, message: 'Tier id: 1-30 chars (a-z, 0-9, _ or -).' });
+    const name = String(req.body?.name || '').trim().slice(0, 40);
+    if (!name) return res.status(400).json({ success: false, message: 'Tier name is required.' });
+    const priceTokens = normalizeRelayAiSettingNumber(req.body?.priceTokens, NaN, 0, 10000000);
+    const monthlyCredits = normalizeRelayAiSettingNumber(req.body?.monthlyCredits, NaN, 1, 1000000000);
+    const dailyCap = normalizeRelayAiSettingNumber(req.body?.dailyCap, NaN, 0, 1000000);
+    const sortOrder = normalizeRelayAiSettingNumber(req.body?.sortOrder, 0, -1000, 1000);
+    if ([priceTokens, monthlyCredits, dailyCap].some(v => !Number.isFinite(v))) {
+        return res.status(400).json({ success: false, message: 'priceTokens (>=0), monthlyCredits (>=1) and dailyCap (>=0, 0 = unlimited) must be whole numbers.' });
+    }
+    const enabled = req.body?.enabled !== false;
+    try {
+        await pgPoolDevices.query(
+            `INSERT INTO relay_ai_tiers (id, name, price_tokens, monthly_credits, daily_cap, sort_order, enabled, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7, now())
+             ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, price_tokens = EXCLUDED.price_tokens,
+               monthly_credits = EXCLUDED.monthly_credits, daily_cap = EXCLUDED.daily_cap,
+               sort_order = EXCLUDED.sort_order, enabled = EXCLUDED.enabled, updated_at = now()`,
+            [id, name, priceTokens, monthlyCredits, dailyCap, sortOrder, enabled]);
+        console.log(`🤖 AI tier saved via admin: ${id} (${name}) ${priceTokens} tokens / ${monthlyCredits} credits / ${dailyCap} per day / ${enabled ? 'enabled' : 'disabled'}`);
+        return res.json({ success: true, tiers: await listRelayAiTiers(false) });
+    } catch (err) {
+        console.error('AI tier save error:', err.message);
+        return res.status(503).json({ success: false, message: 'Unable to save AI tier.' });
+    }
+});
+app.delete('/relay/admin/api/ai-plans/tier/:id', requireAdminKey, async (req, res) => {
+    if (!pgPoolDevices) return res.status(503).json({ success: false, message: 'Devices/License database is not configured.' });
+    try {
+        await pgPoolDevices.query(`DELETE FROM relay_ai_tiers WHERE id = $1`, [String(req.params.id || '').trim().toLowerCase()]);
+        return res.json({ success: true, tiers: await listRelayAiTiers(false) });
+    } catch (err) {
+        return res.status(503).json({ success: false, message: 'Unable to delete AI tier.' });
+    }
+});
+app.post('/relay/admin/api/ai-provider', requireAdminKey, async (req, res) => {
+    const action = String(req.body?.action || '').trim();
+    if (action === 'clear') {
+        clearAiProviderExhausted();
+        console.log('🤖 AI provider exhausted flag CLEARED via admin.');
+    } else if (action === 'exhaust') {
+        markAiProviderExhausted(String(req.body?.reason || 'Manually locked by admin.'), 'admin');
+    } else {
+        return res.status(400).json({ success: false, message: 'action must be "clear" or "exhaust".' });
+    }
+    const p = getAiProviderExhaustion();
+    return res.json({ success: true, provider: { exhausted: p.exhausted, retryAt: p.retryAt, reason: p.reason, source: p.source, detectedAt: p.detectedAt } });
 });
 // ===================================================================
 // SUPPORT TICKETS (OMNIPOS -> RELAY inbox)
@@ -7446,7 +7959,7 @@ app.get('/relay/admin/api/ai-credits/settings', requireAdminKey, async (req, res
         const defaults = await getRelayAiDefaultSettings();
         const monthKey = relayAiMonthKey();
         const rows = await pgPoolDevices.query(
-            `SELECT s.installation_id, s.monthly_credits, s.text_cost, s.file_cost, s.image_cost, s.updated_at,\n                    COALESCE(u.used_credits, 0) AS used_credits\n             FROM relay_ai_credit_settings s\n             LEFT JOIN relay_ai_credit_usage u\n               ON u.installation_id = s.installation_id AND u.month_key = $1\n             WHERE s.installation_id <> $2\n             ORDER BY s.updated_at DESC`,
+            `SELECT s.installation_id, s.monthly_credits, s.text_cost, s.file_cost, s.image_cost, s.daily_cap, s.updated_at,\n                    COALESCE(u.used_credits, 0) AS used_credits\n             FROM relay_ai_credit_settings s\n             LEFT JOIN relay_ai_credit_usage u\n               ON u.installation_id = s.installation_id AND u.month_key = $1\n             WHERE s.installation_id <> $2\n             ORDER BY s.updated_at DESC`,
             [monthKey, RELAY_AI_DEFAULT_SETTINGS_ID]
         );
         const overrides = rows.rows.map(r => ({
@@ -7455,6 +7968,7 @@ app.get('/relay/admin/api/ai-credits/settings', requireAdminKey, async (req, res
             textCost: Number(r.text_cost),
             fileCost: Number(r.file_cost),
             imageCost: Number(r.image_cost),
+            dailyCap: (r.daily_cap === null || r.daily_cap === undefined) ? null : Number(r.daily_cap),
             used: Number(r.used_credits) || 0,
             remaining: Math.max(0, Number(r.monthly_credits) - (Number(r.used_credits) || 0)),
             updatedAt: r.updated_at
@@ -7470,9 +7984,10 @@ app.post('/relay/admin/api/ai-credits/default', requireAdminKey, async (req, res
         if (!pgPoolDevices) return res.status(503).json({ success: false, message: 'Devices/License database is not configured.' });
         const current = await getRelayAiDefaultSettings();
         const settings = normalizeRelayAiSettings(req.body, current);
+        if (settings.dailyCap === null || settings.dailyCap === undefined) settings.dailyCap = current.dailyCap;
         await pgPoolDevices.query(
-            `INSERT INTO relay_ai_credit_settings (installation_id, monthly_credits, text_cost, file_cost, image_cost, updated_at)\n             VALUES ($1, $2, $3, $4, $5, now())\n             ON CONFLICT (installation_id) DO UPDATE SET\n               monthly_credits = EXCLUDED.monthly_credits, text_cost = EXCLUDED.text_cost,\n               file_cost = EXCLUDED.file_cost, image_cost = EXCLUDED.image_cost, updated_at = now()`,
-            [RELAY_AI_DEFAULT_SETTINGS_ID, settings.monthlyCredits, settings.textCost, settings.fileCost, settings.imageCost]
+            `INSERT INTO relay_ai_credit_settings (installation_id, monthly_credits, text_cost, file_cost, image_cost, daily_cap, updated_at)\n             VALUES ($1, $2, $3, $4, $5, $6, now())\n             ON CONFLICT (installation_id) DO UPDATE SET\n               monthly_credits = EXCLUDED.monthly_credits, text_cost = EXCLUDED.text_cost,\n               file_cost = EXCLUDED.file_cost, image_cost = EXCLUDED.image_cost, daily_cap = EXCLUDED.daily_cap, updated_at = now()`,
+            [RELAY_AI_DEFAULT_SETTINGS_ID, settings.monthlyCredits, settings.textCost, settings.fileCost, settings.imageCost, settings.dailyCap]
         );
         const saved = await getRelayAiDefaultSettings();
         console.log(`🤖 AI credit defaults updated via admin: ${saved.monthlyCredits} monthly / text ${saved.textCost} / file ${saved.fileCost} / image ${saved.imageCost}`);
@@ -7490,10 +8005,11 @@ app.post('/relay/admin/api/ai-credits/installation', requireAdminKey, async (req
             return res.status(400).json({ success: false, message: 'Valid installationId is required.' });
         }
         const current = await getRelayAiSettings(installationId);
-        const settings = normalizeRelayAiSettings(req.body, current);
+        // null dailyCap = sundin ang default (inherit); kaya payagan ang inherit dito.
+        const settings = normalizeRelayAiSettings(req.body, { ...current, dailyCap: current.dailyCapInherited ? null : current.dailyCap, __allowInheritDaily: true });
         await pgPoolDevices.query(
-            `INSERT INTO relay_ai_credit_settings (installation_id, monthly_credits, text_cost, file_cost, image_cost, updated_at)\n             VALUES ($1, $2, $3, $4, $5, now())\n             ON CONFLICT (installation_id) DO UPDATE SET\n               monthly_credits = EXCLUDED.monthly_credits, text_cost = EXCLUDED.text_cost,\n               file_cost = EXCLUDED.file_cost, image_cost = EXCLUDED.image_cost, updated_at = now()`,
-            [installationId, settings.monthlyCredits, settings.textCost, settings.fileCost, settings.imageCost]
+            `INSERT INTO relay_ai_credit_settings (installation_id, monthly_credits, text_cost, file_cost, image_cost, daily_cap, updated_at)\n             VALUES ($1, $2, $3, $4, $5, $6, now())\n             ON CONFLICT (installation_id) DO UPDATE SET\n               monthly_credits = EXCLUDED.monthly_credits, text_cost = EXCLUDED.text_cost,\n               file_cost = EXCLUDED.file_cost, image_cost = EXCLUDED.image_cost, daily_cap = EXCLUDED.daily_cap, updated_at = now()`,
+            [installationId, settings.monthlyCredits, settings.textCost, settings.fileCost, settings.imageCost, settings.dailyCap]
         );
         const saved = await getRelayAiSettings(installationId);
         console.log(`🤖 AI credit override updated for ${installationId}: ${saved.monthlyCredits} monthly`);
@@ -13555,6 +14071,7 @@ async function bootstrapStores() {
         loadClientMaintenanceFeePaidUntil(),
         loadActivationFlags(),
         loadSupportDesk(),
+        loadAiProviderState(),
         loadCloudBackupActualBills(),
         loadCostSafetyNetSimulatedTier(),
         loadDevicesCostReferenceTier()
