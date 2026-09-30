@@ -5197,10 +5197,23 @@ function requireAdminKey(req, res, next) {
     next();
 }
 app.use('/relay/admin', express.static(path.join(__dirname, 'public', 'admin')));
-app.post('/relay/admin/api/pending-otps/approve', requireAdminKey, (req, res) => {
+app.post('/relay/admin/api/pending-otps/approve', requireAdminKey, async (req, res) => {
     const { key, durationDays } = req.body;
     const pending = pendingOtps.get(key);
     if (!pending) {
+        return res.status(404).json({ success: false, message: "Wala nang aktibong request na iyan (baka na-expire na o na-claim na)." });
+    }
+    // Puno na ang daily AI allowance: hindi pwedeng i-approve ang BAGONG Omni AI subscription (renewal ay pinapayagan).
+    if (pending.featureId === 'ai_assistant') {
+        let baseVerdict;
+        try { baseVerdict = await getRelayAiBaseSubscriptionBlock(pending.installationId); }
+        catch (err) { console.error('admin approve capacity check error:', err); return res.status(500).json({ success: false, message: 'Hindi ma-verify ang AI capacity. Subukan ulit.' }); }
+        if (baseVerdict.blocked) {
+            logActivity(pending.installationId, 'ai_base_subscription_blocked', { via: 'admin_approve', reason: baseVerdict.reason, committed: baseVerdict.committed, capacity: baseVerdict.capacity });
+            return res.status(409).json({ success: false, aiCapacityLocked: true, message: relayAiBaseBlockMessage(baseVerdict, true) });
+        }
+    }
+    if (!pendingOtps.has(key) || pendingOtps.get(key) !== pending) {
         return res.status(404).json({ success: false, message: "Wala nang aktibong request na iyan (baka na-expire na o na-claim na)." });
     }
     pending.approved = true;
@@ -6513,7 +6526,7 @@ app.post('/relay/admin/api/devices/:installationId/clear-history', requireAdminK
     logActivity(installationId, 'device_history_cleared', { clearedCount });
     res.json({ success: true, clearedCount });
 });
-app.post('/relay/admin/api/devices/:installationId/activate', requireAdminKey, (req, res) => {
+app.post('/relay/admin/api/devices/:installationId/activate', requireAdminKey, async (req, res) => {
     const { installationId } = req.params;
     const { featureId, featureIds, tierId, note, durationDays, tier, billingCycle } = req.body;
     let idsToActivate = [];
@@ -6567,6 +6580,18 @@ app.post('/relay/admin/api/devices/:installationId/activate', requireAdminKey, (
     const moduleSubscriptionDurationDays = includesModuleSubscription
         ? ((typeof durationDays === 'number' && durationDays > 0) ? resolvedDurationDays : MODULE_SUBSCRIPTION_BILLING_DAYS[billingCycle])
         : null;
+    // Puno na ang daily AI allowance: kahit developer, hindi makakapag-manual activate ng BAGONG Omni AI subscription.
+    // (Renewal ng kasalukuyang subscriber ay pinapayagan pa rin.)
+    let aiGuard = null;
+    if (idsToActivate.includes('ai_assistant')) {
+        try { aiGuard = await acquireRelayAiBaseGuard(installationId); }
+        catch (err) { console.error('admin activate guard error:', err); return res.status(500).json({ success: false, message: 'Hindi ma-verify ang AI capacity. Subukan ulit.' }); }
+        if (aiGuard.verdict.blocked) {
+            logActivity(installationId, 'ai_base_subscription_blocked', { via: 'admin_activate', reason: aiGuard.verdict.reason, committed: aiGuard.verdict.committed, capacity: aiGuard.verdict.capacity });
+            return res.status(409).json({ success: false, aiCapacityLocked: true, message: relayAiBaseBlockMessage(aiGuard.verdict, true) });
+        }
+    }
+    try {
     const tokens = {};
     let perFeaturePrice = {};
     if (tierId) {
@@ -6629,6 +6654,12 @@ app.post('/relay/admin/api/devices/:installationId/activate', requireAdminKey, (
         });
     }
     res.json({ success: true, message: `Na-activate ang ${idsToActivate.length} feature(s).`, tokens });
+    } catch (err) {
+        console.error('admin activate error:', err);
+        if (!res.headersSent) res.status(500).json({ success: false, message: err.message || 'Hindi na-activate dahil sa internal error.' });
+    } finally {
+        if (aiGuard) aiGuard.release();
+    }
 });
 app.post('/relay/admin/api/devices/:installationId/deactivate', requireAdminKey, (req, res) => {
     const { installationId } = req.params;
@@ -7734,6 +7765,69 @@ const RELAY_AI_TIER_LOCK_MESSAGE = 'Naka-lock muna ang Plus/Pro AI upgrade ngayo
 const RELAY_AI_PROVIDER_EXHAUSTED_BUY_MESSAGE = 'Hindi muna available ang pagbili ng AI plan at extra credits dahil naubos na ang daily AI capacity ng system ngayon. Subukan muli pagkatapos mag-reset (8:00 AM PH time).';
 function relayAiTierBlockMessage(verdict) {
     return verdict && verdict.reason === 'provider_exhausted' ? RELAY_AI_PROVIDER_EXHAUSTED_BUY_MESSAGE : RELAY_AI_TIER_LOCK_MESSAGE;
+}
+// ---- AUTO-LOCK NG BASE SUBSCRIPTION (Omni AI) -----------------------------
+// Kapag ang kabuuang daily allowance ay nabili/na-commit na ng ibang clients (base + tiers + extra),
+// hindi na muna tatanggap ng BAGONG Omni AI subscription ang client-initiated na pagbili
+// (Omni Tokens at "Send Request"). Hindi ito tumatama sa:
+//   - RENEWAL ng kasalukuyang subscriber (aktibo pa, o nasa grace period) — nakabilang na siya sa committed.
+// Sakop nito PATI ang manual activation ng developer/admin (Activate button, pag-Approve ng OTP request,
+// at ang pag-confirm ng OTP): kapag puno na ang daily allowance, walang bagong client na maa-activate ninuman.
+// Kusang nagbubukas ulit kapag may nabakante (nag-expire/na-reset ang ibang client) — walang manual unlock.
+// Ang bagong client ay nadadagdagan ng DEFAULT daily cap (o override niya kung meron), kapareho ng bilang sa base state.
+async function getRelayAiBaseSubscriptionBlock(installationId) {
+    try {
+        if (!installationId || !pgPoolDevices) return { blocked: false };
+        if (hasActiveRelayAiSubscription(installationId)) return { blocked: false }; // renewal
+        const entry = (issuedUnlocks[installationId] || {}).ai_assistant;
+        const expiresAt = entry ? Number(entry.expiresAt || (entry.payload && entry.payload.expiresAt) || 0) : 0;
+        if (expiresAt && (Date.now() - expiresAt) <= MODULE_SUBSCRIPTION_GRACE_PERIOD_MS) return { blocked: false }; // grace-period renewal
+        if (getAiProviderExhaustion().exhausted) return { blocked: true, reason: 'provider_exhausted' };
+        const state = await getRelayAiCapacityState(relayAiMonthKey());
+        if (!state.enabled) return { blocked: false };
+        const defaults = await getRelayAiDefaultSettings();
+        const ov = await pgPoolDevices.query(`SELECT daily_cap FROM relay_ai_credit_settings WHERE installation_id = $1`, [installationId]);
+        const raw = (ov.rows[0] && ov.rows[0].daily_cap !== null && ov.rows[0].daily_cap !== undefined) ? Number(ov.rows[0].daily_cap) || 0 : (Number(defaults.dailyCap) || 0);
+        const newDaily = relayAiEffectiveCap(raw, state.capacity);
+        if (state.committed + newDaily > state.capacity) return { blocked: true, reason: 'would_exceed', committed: state.committed, capacity: state.capacity };
+        return { blocked: false };
+    } catch (err) {
+        // Kapag pumalya ang pag-check, HUWAG harangan ang bumibili (mas mabuti kaysa maling pag-lock).
+        console.error('⚠️ AI base subscription capacity check failed:', err.message);
+        return { blocked: false };
+    }
+}
+const RELAY_AI_BASE_LOCK_MESSAGE = 'Naka-lock muna ang bagong Omni AI subscription dahil puno na ang kabuuang daily AI capacity ng system. Awtomatiko itong magbubukas kapag may nabakante — subukan ulit mamaya o sa susunod na buwan.';
+function relayAiBaseBlockMessage(verdict, forAdmin = false) {
+    if (verdict && verdict.reason === 'provider_exhausted') return RELAY_AI_PROVIDER_EXHAUSTED_BUY_MESSAGE;
+    if (!forAdmin) return RELAY_AI_BASE_LOCK_MESSAGE;
+    const usage = (verdict && Number.isFinite(verdict.committed) && Number.isFinite(verdict.capacity)) ? ` (${verdict.committed}/${verdict.capacity} na ang nakalaan)` : '';
+    return `Hindi ma-activate ang bagong Omni AI subscription: puno na ang kabuuang daily AI allowance${usage}. Walang bagong client na maa-activate (pati manual ng developer) hangga't walang nabakante. ` +
+           `Magbubukas ito kapag may nag-expire/na-reset na client, o kapag itinaas ang capacity sa AI Plans.`;
+}
+// Serialize ang capacity check + ang aktwal na pag-issue ng token, para hindi sabay na makalusot ang dalawang
+// BAGONG client sa huling natitirang allowance (parehong global lock ng Plus/Pro tier purchase).
+// Ibinabalik ang { verdict, release }. Kapag blocked, nailabas na ang lock. Kapag hindi, ang caller ang tatawag ng
+// release() pagkatapos ma-issue ang token (may 60s na safety timeout para hindi ma-stuck ang lock).
+async function acquireRelayAiBaseGuard(installationId) {
+    const releaseLock = await acquireAiTierGlobalLock();
+    let released = false;
+    let timer = null;
+    const release = () => {
+        if (released) return;
+        released = true;
+        if (timer) clearTimeout(timer);
+        releaseLock();
+    };
+    timer = setTimeout(release, 60 * 1000);
+    try {
+        const verdict = await getRelayAiBaseSubscriptionBlock(installationId);
+        if (verdict.blocked) release();
+        return { verdict, release };
+    } catch (err) {
+        release();
+        throw err;
+    }
 }
 // ---- Extra credit packs ---------------------------------------------------
 // Ang binili ay idinadagdag sa monthly limit ng client ngayong buwan lang.
@@ -11009,6 +11103,19 @@ app.post('/relay/cloud-tokens/activate-purchase', requireApiKey, requireAllowedD
     if (!pgPool) {
         return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured — the Omni Token wallet needs it.' });
     }
+    // Auto-lock: walang bagong Omni AI subscription kapag puno na ang daily AI capacity (renewal ay pinapayagan).
+    if (isModuleSubscriptionPurchase && moduleSubIds[0] === 'ai_assistant') {
+        let aiGuard;
+        try { aiGuard = await acquireRelayAiBaseGuard(installationId); }
+        catch (err) { console.error('omni-token AI guard error:', err); return res.status(500).json({ success: false, message: 'Could not verify AI capacity. Please try again.' }); }
+        const baseVerdict = aiGuard.verdict;
+        if (baseVerdict.blocked) {
+            logActivity(installationId, 'ai_base_subscription_blocked', { via: 'omni_tokens', reason: baseVerdict.reason, committed: baseVerdict.committed, capacity: baseVerdict.capacity });
+            return res.status(409).json({ success: false, aiCapacityLocked: true, message: relayAiBaseBlockMessage(baseVerdict) });
+        }
+        // Hawak ang lock hanggang matapos ang request (naka-issue na ang token o nag-error), para hindi makasingit ang ibang bagong client.
+        res.once('close', aiGuard.release);
+    }
     let requiredTokens;
     let durationMs = null;
     if (isModuleSubscriptionPurchase) {
@@ -12574,6 +12681,13 @@ app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit
     }
     const isCloudBackup = featureId === 'cloud_backup';
     const isModuleSubscription = isModuleSubscriptionFeature(featureId);
+    if (featureId === 'ai_assistant') {
+        const baseVerdict = await getRelayAiBaseSubscriptionBlock(installationId);
+        if (baseVerdict.blocked) {
+            logActivity(installationId, 'ai_base_subscription_blocked', { via: 'request_unlock', reason: baseVerdict.reason, committed: baseVerdict.committed, capacity: baseVerdict.capacity });
+            return res.status(409).json({ success: false, aiCapacityLocked: true, message: relayAiBaseBlockMessage(baseVerdict) });
+        }
+    }
     let groundTruthPrice = null;
     if (isCloudBackup) {
         groundTruthPrice = getCloudBackupPlanPrice(tier, billingCycle);
@@ -12644,7 +12758,7 @@ function checkApprovalGate(pending) {
     }
     return true;
 }
-app.post('/relay/confirm-unlock', requireApiKey, requireAllowedDevice, rateLimit('confirm-unlock', 120, 10 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
+app.post('/relay/confirm-unlock', requireApiKey, requireAllowedDevice, rateLimit('confirm-unlock', 120, 10 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
     const { installationId, featureId, otp } = req.body;
     if (!installationId || !featureId || !otp) {
         return res.status(400).json({ success: false, message: 'Kulang ang installationId, featureId, o otp.' });
@@ -12668,6 +12782,22 @@ app.post('/relay/confirm-unlock', requireApiKey, requireAllowedDevice, rateLimit
             message: `Tama ang code para sa ${pending.featureName}! Naghihintay na lang ng approval mula sa may-ari. Pakisubukan ulit paglipas ng ilang segundo.`
         });
     }
+    // Kahit naaprubahan na ng developer: kapag puno na ang daily AI allowance ngayon, hindi ia-issue ang BAGONG Omni AI subscription.
+    // (Nananatili ang OTP/approval hanggang mag-expire, kaya pwedeng ulitin kapag may nabakante.)
+    let aiGuard = null;
+    if (featureId === 'ai_assistant') {
+        try { aiGuard = await acquireRelayAiBaseGuard(installationId); }
+        catch (err) { console.error('confirm-unlock guard error:', err); return res.status(500).json({ success: false, message: 'Hindi ma-verify ang AI capacity. Subukan ulit.' }); }
+        if (aiGuard.verdict.blocked) {
+            logActivity(installationId, 'ai_base_subscription_blocked', { via: 'otp_confirm', reason: aiGuard.verdict.reason, committed: aiGuard.verdict.committed, capacity: aiGuard.verdict.capacity });
+            return res.status(409).json({ success: false, aiCapacityLocked: true, message: relayAiBaseBlockMessage(aiGuard.verdict) });
+        }
+        if (pendingOtps.get(key) !== pending) { // may sumabay na request na nakagamit na nito habang naghihintay sa lock
+            aiGuard.release();
+            return res.status(400).json({ success: false, message: 'Walang aktibong unlock request para dito. Humingi muna ng OTP.' });
+        }
+    }
+    try {
     const durationMs = typeof pending.durationDays === 'number' && pending.durationDays > 0
         ? pending.durationDays * 24 * 60 * 60 * 1000
         : null;
@@ -12696,6 +12826,12 @@ app.post('/relay/confirm-unlock', requireApiKey, requireAllowedDevice, rateLimit
         tier: pending.tier || undefined,
         billingCycle: pending.billingCycle || undefined
     });
+    } catch (err) {
+        console.error('confirm-unlock error:', err);
+        if (!res.headersSent) res.status(500).json({ success: false, message: err.message || 'Hindi na-unlock dahil sa internal error.' });
+    } finally {
+        if (aiGuard) aiGuard.release();
+    }
 });
 const DEMO_FEATURE_ID = '__demo__';
 const DEMO_DURATION_MS = (Number(process.env.RELAY_DEMO_DURATION_HOURS) || 24) * 60 * 60 * 1000;
