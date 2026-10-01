@@ -841,6 +841,18 @@ const CF_AI_VISION_MODEL = process.env.CF_AI_VISION_MODEL || '@cf/meta/llama-3.2
 function isCfAiConfigured() {
     return !!(CF_ACCOUNT_ID && CF_AI_API_TOKEN);
 }
+// Kinukuha ang totoong token usage na ibinabalik ng Cloudflare sa bawat sagot
+// (OpenAI-style: prompt_tokens/completion_tokens). null kung wala/hindi valid.
+function extractCfUsage(u) {
+    if (!u || typeof u !== 'object') return null;
+    const p = Number(u.prompt_tokens !== undefined ? u.prompt_tokens : u.input_tokens);
+    const c = Number(u.completion_tokens !== undefined ? u.completion_tokens : u.output_tokens);
+    if (!Number.isFinite(p) && !Number.isFinite(c)) return null;
+    return {
+        promptTokens: Number.isFinite(p) && p > 0 ? p : 0,
+        completionTokens: Number.isFinite(c) && c > 0 ? c : 0
+    };
+}
 async function callCloudflareWorkersAI(messages, vision) {
     if (vision) return callCloudflareVisionAI(messages);
     const model = CF_AI_MODEL;
@@ -865,7 +877,7 @@ async function callCloudflareWorkersAI(messages, vision) {
         if (!answer || !answer.trim()) {
             return { success: false, message: 'Empty response from AI provider.' };
         }
-        return { success: true, answer: answer.trim() };
+        return { success: true, answer: answer.trim(), cfUsage: extractCfUsage(data.usage) };
     } catch (err) {
         return { success: false, message: err.name === 'AbortError' ? 'AI request timed out.' : (err.message || 'AI request failed.') };
     } finally {
@@ -987,7 +999,7 @@ async function callCloudflareVisionAI(messages, licenseRetried = false) {
         if (!answer || !answer.trim()) {
             return { success: false, message: 'Empty response from vision AI provider.' };
         }
-        return { success: true, answer: answer.trim() };
+        return { success: true, answer: answer.trim(), cfUsage: extractCfUsage(data.result && data.result.usage) };
     } catch (err) {
         return { success: false, message: err.name === 'AbortError' ? 'AI image analysis timed out.' : (err.message || 'AI image analysis failed.') };
     } finally {
@@ -7469,6 +7481,7 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
     // tanggihan agad — walang tawag sa Cloudflare, walang reservation ng credits.
     const providerNow = getAiProviderExhaustion();
     if (providerNow.exhausted) {
+        recordAiBlockedByExhaustion();
         return res.status(503).json({
             success: false,
             providerUnavailable: true,
@@ -7510,7 +7523,11 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
             console.error(`⚠️ RELAY AI provider failed (${req.body?.vision ? 'vision' : 'text'}): ${result.message}`);
             // Kung daily-quota error, i-lock ang provider hanggang 00:00 UTC para
             // ang susunod na requests ay agad na tatanggihan (walang hintay).
-            if (isCfDailyQuotaError(result.message)) markAiProviderExhausted(result.message, 'auto');
+            recordAiProviderFailure();
+            if (isCfDailyQuotaError(result.message)) {
+                markAiProviderExhausted(result.message, 'auto');
+                syncAiUsageToCloudflareExhausted();
+            }
             // BUGFIX: para sa text request (o sa fallback na gumamit ulit ng
             // parehong requestId), walang sagot na naibigay kaya ibinabalik
             // ang credits. Ang unang vision attempt lang ang hindi ibinabalik
@@ -7537,8 +7554,11 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
                 credits: creditsNow
             });
         }
+        // NEURONS DETECTOR: bilangin ang matagumpay na sagot at ang totoong neurons na nagamit nito.
+        recordAiQuestionUsage(installationId, result.cfUsage, !!req.body?.vision);
         await markRelayAiRequestStatus(installationId, requestId, 'completed');
-        res.json({ ...result, creditCost: reservation.cost, credits: reservation.status });
+        const { cfUsage: _cfUsage, ...clientResult } = result;
+        res.json({ ...clientResult, creditCost: reservation.cost, credits: reservation.status });
     } catch (err) {
         console.error('⚠️ RELAY AI credit/request error:', err.message);
         return res.status(503).json({ success: false, message: 'AI credit service temporarily unavailable.' });
@@ -8509,6 +8529,223 @@ app.post('/relay/admin/api/ai-neurons/settings', requireAdminKey, async (req, re
     } catch (err) {
         console.error('AI neurons settings save error:', err.message);
         return res.status(503).json({ success: false, message: 'Unable to save neurons settings.' });
+    }
+});
+// ---- ADMIN: Neurons detector (live na gamit ngayong araw) ----------------
+// Binibilang ang TOTOONG token usage na ibinabalik ng Cloudflare sa bawat sagot
+// (prompt_tokens / completion_tokens) at ginagawang neurons gamit ang rates sa
+// Neurons Planner. Ang "araw" dito ay UTC (kapareho ng reset ng Cloudflare quota,
+// 00:00 UTC = 8:00 AM PH). Ang gamit na hindi dumaan sa RELAY (hal. Cloudflare
+// playground o ibang app sa parehong account) ay hindi nakikita ng bilang na ito —
+// i-sync ang numero mula sa Cloudflare dashboard (calibrate endpoint sa ibaba).
+const CF_VISION_IN_NEURONS_PER_M = Number.isFinite(parseFloat(process.env.CF_AI_VISION_IN_NEURONS_PER_M)) ? parseFloat(process.env.CF_AI_VISION_IN_NEURONS_PER_M) : 4410;
+const CF_VISION_OUT_NEURONS_PER_M = Number.isFinite(parseFloat(process.env.CF_AI_VISION_OUT_NEURONS_PER_M)) ? parseFloat(process.env.CF_AI_VISION_OUT_NEURONS_PER_M) : 61493;
+const AI_USAGE_MAX_CLIENT_ROWS = 2000;
+const AI_USAGE_HISTORY_DAYS = 7;
+const AI_USAGE_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+function relayAiUtcDayKey(now = Date.now()) {
+    return new Date(now).toISOString().slice(0, 10);
+}
+function newAiUsageDay(day) {
+    return {
+        day, neurons: 0, trackedNeurons: 0, inputTokens: 0, outputTokens: 0,
+        questions: 0, textQuestions: 0, imageQuestions: 0, estimatedQuestions: 0,
+        failed: 0, blocked: 0, calibratedAt: 0, lastQuestionAt: 0,
+        byInstallation: Object.create(null)
+    };
+}
+let aiUsageStats = newAiUsageDay(relayAiUtcDayKey());
+let aiUsageHistory = [];
+let aiUsageSaveTimer = null;
+function scheduleAiUsageSave() {
+    if (aiUsageSaveTimer) return;
+    aiUsageSaveTimer = setTimeout(() => {
+        aiUsageSaveTimer = null;
+        try { setPersistentJSON('ai-usage-stats', { stats: aiUsageStats, history: aiUsageHistory }); } catch (_) {}
+    }, 3000);
+    if (typeof aiUsageSaveTimer.unref === 'function') aiUsageSaveTimer.unref();
+}
+function ensureAiUsageDay() {
+    const today = relayAiUtcDayKey();
+    if (aiUsageStats.day === today) return;
+    if (AI_USAGE_DAY_RE.test(aiUsageStats.day) && (aiUsageStats.questions > 0 || aiUsageStats.neurons > 0 || aiUsageStats.failed > 0)) {
+        aiUsageHistory.push({
+            day: aiUsageStats.day, neurons: Math.round(aiUsageStats.neurons),
+            questions: aiUsageStats.questions, failed: aiUsageStats.failed
+        });
+        aiUsageHistory = aiUsageHistory.slice(-AI_USAGE_HISTORY_DAYS);
+    }
+    aiUsageStats = newAiUsageDay(today);
+    scheduleAiUsageSave();
+}
+async function loadAiUsageStats() {
+    try {
+        const v = await getPersistentJSON('ai-usage-stats', null);
+        // Kung may nauna nang request na nabilang bago natapos ang load na ito, huwag nang i-overwrite.
+        if (v && typeof v === 'object' && v.stats && typeof v.stats === 'object' && aiUsageStats.questions === 0 && aiUsageStats.failed === 0 && aiUsageStats.neurons === 0) {
+            const st = v.stats;
+            if (AI_USAGE_DAY_RE.test(String(st.day || ''))) {
+                const num = (x) => (Number.isFinite(Number(x)) && Number(x) >= 0) ? Number(x) : 0;
+                const base = newAiUsageDay(String(st.day));
+                base.neurons = num(st.neurons); base.trackedNeurons = num(st.trackedNeurons);
+                base.inputTokens = num(st.inputTokens); base.outputTokens = num(st.outputTokens);
+                base.questions = Math.floor(num(st.questions)); base.textQuestions = Math.floor(num(st.textQuestions));
+                base.imageQuestions = Math.floor(num(st.imageQuestions)); base.estimatedQuestions = Math.floor(num(st.estimatedQuestions));
+                base.failed = Math.floor(num(st.failed)); base.blocked = Math.floor(num(st.blocked));
+                base.calibratedAt = num(st.calibratedAt); base.lastQuestionAt = num(st.lastQuestionAt);
+                if (st.byInstallation && typeof st.byInstallation === 'object') {
+                    let count = 0;
+                    for (const [id, row] of Object.entries(st.byInstallation)) {
+                        if (count >= AI_USAGE_MAX_CLIENT_ROWS) break;
+                        if (!row || typeof row !== 'object') continue;
+                        base.byInstallation[String(id).slice(0, 120)] = { q: Math.floor(num(row.q)), n: num(row.n) };
+                        count += 1;
+                    }
+                }
+                aiUsageStats = base;
+            }
+            if (Array.isArray(v.history)) {
+                aiUsageHistory = v.history
+                    .filter((h) => h && typeof h === 'object' && AI_USAGE_DAY_RE.test(String(h.day || '')))
+                    .map((h) => ({ day: String(h.day), neurons: Math.round(Number(h.neurons) || 0), questions: Math.floor(Number(h.questions) || 0), failed: Math.floor(Number(h.failed) || 0) }))
+                    .slice(-AI_USAGE_HISTORY_DAYS);
+            }
+        }
+    } catch (err) {
+        console.error('⚠️ Hindi ma-load ang AI usage stats:', err.message);
+    }
+    ensureAiUsageDay();
+}
+// Neurons ng isang matagumpay na sagot: totoong tokens (kung ibinigay ng Cloudflare) × rate;
+// kung walang usage data, tantiya mula sa Neurons Planner (estimated = true).
+function computeAiCallNeurons(cfUsage, vision) {
+    const settings = aiNeuronSettingsCache || normalizeAiNeuronSettings(null);
+    const inTok = cfUsage ? cfUsage.promptTokens : 0;
+    const outTok = cfUsage ? cfUsage.completionTokens : 0;
+    if (cfUsage && (inTok + outTok) > 0) {
+        const inRate = vision ? CF_VISION_IN_NEURONS_PER_M : settings.inputNeuronsPerM;
+        const outRate = vision ? CF_VISION_OUT_NEURONS_PER_M : settings.outputNeuronsPerM;
+        return { neurons: (inTok * inRate + outTok * outRate) / 1000000, inputTokens: inTok, outputTokens: outTok, estimated: false };
+    }
+    return { neurons: aiNeuronsPerQuestion(settings), inputTokens: 0, outputTokens: 0, estimated: true };
+}
+function recordAiQuestionUsage(installationId, cfUsage, vision) {
+    try {
+        ensureAiUsageDay();
+        const c = computeAiCallNeurons(cfUsage, !!vision);
+        const s = aiUsageStats;
+        s.neurons += c.neurons;
+        s.trackedNeurons += c.neurons;
+        s.inputTokens += c.inputTokens;
+        s.outputTokens += c.outputTokens;
+        s.questions += 1;
+        if (vision) s.imageQuestions += 1; else s.textQuestions += 1;
+        if (c.estimated) s.estimatedQuestions += 1;
+        s.lastQuestionAt = Date.now();
+        const id = String(installationId || '').slice(0, 120);
+        if (id) {
+            let row = s.byInstallation[id];
+            if (!row && Object.keys(s.byInstallation).length < AI_USAGE_MAX_CLIENT_ROWS) {
+                row = s.byInstallation[id] = { q: 0, n: 0 };
+            }
+            if (row) { row.q += 1; row.n += c.neurons; }
+        }
+        scheduleAiUsageSave();
+    } catch (err) {
+        console.error('⚠️ AI usage tracking error:', err.message);
+    }
+}
+function recordAiProviderFailure() {
+    try { ensureAiUsageDay(); aiUsageStats.failed += 1; scheduleAiUsageSave(); } catch (_) {}
+}
+function recordAiBlockedByExhaustion() {
+    try { ensureAiUsageDay(); aiUsageStats.blocked += 1; scheduleAiUsageSave(); } catch (_) {}
+}
+// Kapag sinabi na ng Cloudflare na ubos na ang libreng daily allocation, sigurado nang
+// hindi bababa sa 10,000 neurons na ang nagamit ngayong araw (kahit kulang ang bilang natin).
+function syncAiUsageToCloudflareExhausted() {
+    try {
+        ensureAiUsageDay();
+        if (aiUsageStats.neurons < CF_FREE_NEURONS_PER_DAY) {
+            aiUsageStats.neurons = CF_FREE_NEURONS_PER_DAY;
+            scheduleAiUsageSave();
+        }
+    } catch (_) {}
+}
+async function buildAiUsagePayload() {
+    ensureAiUsageDay();
+    const settings = await getAiNeuronSettings();
+    const det = await resolveCfPlanDetection(false);
+    const effective = settings.planOverride !== 'auto' ? settings.planOverride : (det.plan === 'paid' ? 'paid' : 'free');
+    const limit = effective === 'paid' ? settings.paidDailyNeurons : CF_FREE_NEURONS_PER_DAY;
+    const s = aiUsageStats;
+    const prov = getAiProviderExhaustion();
+    const used = s.neurons;
+    const estPerQuestion = aiNeuronsPerQuestion(settings);
+    const observedPerQuestion = s.questions > 0 ? s.trackedNeurons / s.questions : null;
+    const useObserved = s.questions >= 3 && observedPerQuestion !== null && observedPerQuestion > 0;
+    const perQuestion = useObserved ? observedPerQuestion : estPerQuestion;
+    const remainingNeurons = prov.exhausted ? 0 : Math.max(0, limit - used);
+    const remainingQuestions = perQuestion > 0 ? Math.floor(remainingNeurons / perQuestion) : 0;
+    const capacityQuestions = perQuestion > 0 ? Math.floor(limit / perQuestion) : 0;
+    const percentUsed = limit > 0 ? Math.min(100, (used / limit) * 100) : 0;
+    const level = prov.exhausted || used >= limit ? 'exhausted' : (percentUsed >= 95 ? 'critical' : (percentUsed >= 80 ? 'warning' : 'ok'));
+    const clients = Object.entries(s.byInstallation)
+        .map(([installationId, row]) => ({ installationId, questions: row.q, neurons: Math.round(row.n * 10) / 10 }))
+        .sort((a, b) => (b.questions - a.questions) || (b.neurons - a.neurons));
+    return {
+        success: true,
+        day: s.day,
+        resetsAt: relayAiNextUtcMidnightMs(),
+        plan: { effective, detected: det.plan, override: settings.planOverride },
+        limitNeurons: limit,
+        usedNeurons: Math.round(used * 10) / 10,
+        remainingNeurons: Math.round(remainingNeurons * 10) / 10,
+        percentUsed: Math.round(percentUsed * 10) / 10,
+        level,
+        providerExhausted: prov.exhausted,
+        questions: s.questions, textQuestions: s.textQuestions, imageQuestions: s.imageQuestions,
+        estimatedQuestions: s.estimatedQuestions, failed: s.failed, blocked: s.blocked,
+        inputTokens: s.inputTokens, outputTokens: s.outputTokens,
+        perQuestionNeurons: Math.round(perQuestion * 10) / 10,
+        perQuestionBasis: useObserved ? 'observed' : 'estimate',
+        remainingQuestions, capacityQuestions,
+        calibratedAt: s.calibratedAt || null,
+        lastQuestionAt: s.lastQuestionAt || null,
+        clientCount: clients.length,
+        clients: clients.slice(0, 15),
+        history: aiUsageHistory.slice()
+    };
+}
+app.get('/relay/admin/api/ai-usage', requireAdminKey, async (req, res) => {
+    try {
+        return res.json(await buildAiUsagePayload());
+    } catch (err) {
+        console.error('AI usage GET error:', err.message);
+        return res.status(503).json({ success: false, message: 'Unable to load AI usage detector.' });
+    }
+});
+// I-sync ang "neurons used" sa numerong nakikita sa Cloudflare dashboard, o i-reset ang bilang ng araw.
+app.post('/relay/admin/api/ai-usage/calibrate', requireAdminKey, async (req, res) => {
+    try {
+        ensureAiUsageDay();
+        if (String(req.body?.action || '') === 'reset') {
+            aiUsageStats = newAiUsageDay(relayAiUtcDayKey());
+        } else {
+            const raw = req.body?.neurons;
+            const valid = (typeof raw === 'number') || (typeof raw === 'string' && raw.trim() !== '');
+            const n = valid ? Number(raw) : NaN;
+            if (!Number.isFinite(n) || n < 0 || n > 1000000000) {
+                return res.status(400).json({ success: false, message: 'neurons must be a number between 0 and 1000000000.' });
+            }
+            aiUsageStats.neurons = n;
+            aiUsageStats.calibratedAt = Date.now();
+        }
+        scheduleAiUsageSave();
+        return res.json(await buildAiUsagePayload());
+    } catch (err) {
+        console.error('AI usage calibrate error:', err.message);
+        return res.status(503).json({ success: false, message: 'Unable to update AI usage detector.' });
     }
 });
 // ===================================================================
@@ -15008,10 +15245,13 @@ async function bootstrapStores() {
         loadClientMaintenanceFeePaidUntil(),
         loadActivationFlags(),
         loadSupportDesk(),
-        loadAiProviderState(),
         loadCloudBackupActualBills(),
         loadCostSafetyNetSimulatedTier(),
-        loadDevicesCostReferenceTier()
+        loadDevicesCostReferenceTier(),
+        // Walang destructured variable ang mga ito (sila ay nagse-set ng sarili nilang state),
+        // kaya DAPAT nasa DULO ng listahan — kapag nasa gitna, nalilipat ang resulta ng mga sumusunod.
+        loadAiProviderState(),
+        loadAiUsageStats()
     ]);
     recomputeFeatureCatalog();
     if (Object.keys(featureCatalogOverrides).length > 0) {

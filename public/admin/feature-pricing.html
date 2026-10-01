@@ -321,6 +321,14 @@
           <button class="btn-ghost" onclick="aiProviderAction('exhaust')">🚫 Lock hanggang 00:00 UTC</button>
           <button class="btn-ghost" onclick="loadAiPlans()">🔄 Refresh</button>
         </div>
+        <div style="font-size:12px; font-weight:700; margin:14px 0 6px;">Neurons Detector — live na gamit ngayong araw (UTC)</div>
+        <div id="aiUsageBox" style="padding:10px; border:1px solid var(--line); border-radius:10px;">Loading...</div>
+        <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+          <input type="number" id="aiUsageCalibrateInput" min="0" step="1" placeholder="Neurons used ayon sa Cloudflare dashboard" style="flex:1; min-width:200px;">
+          <button class="btn-primary" onclick="aiUsageCalibrate()">🎯 I-sync</button>
+          <button class="btn-ghost" onclick="aiUsageReset()">♻️ I-reset ang bilang</button>
+          <button class="btn-ghost" onclick="loadAiUsage()">🔄 Refresh</button>
+        </div>
         <hr style="border:0; border-top:1px solid var(--line); margin:14px 0;">
         <div style="font-size:12px; font-weight:700; margin-bottom:6px;">Clients per Plan &amp; Formula ng Extra Credit</div>
         <div id="aiBreakdownBox" style="padding:10px; border:1px solid var(--line); border-radius:10px; margin-bottom:12px;">Loading...</div>
@@ -848,6 +856,90 @@ function renderAiProviderBox(p) {
       <div class="meta" style="margin-top:4px;">Model: ${escapeHtml(p.model || '—')} · Cloudflare ${p.configured ? 'configured' : 'HINDI configured'}</div>`;
   }
 }
+let aiUsageState = null;     // sagot ng /ai-usage (neurons detector)
+function aiUsageN(n, d) { return Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: d || 0 }); }
+function renderAiUsageBox(u) {
+  const box = document.getElementById('aiUsageBox');
+  if (!box) return;
+  if (!u || !u.success) { box.innerHTML = '<div class="meta">Hindi ma-load ang neurons detector. I-press ang Refresh.</div>'; return; }
+  const n = aiUsageN;
+  const colors = { ok: 'var(--success,#69db7c)', warning: '#ffa94d', critical: 'var(--danger,#ff6b6b)', exhausted: 'var(--danger,#ff6b6b)' };
+  const labels = { ok: '✅ OK', warning: '⚠️ Malapit nang maubos (80%+)', critical: '🔴 Halos ubos na (95%+)', exhausted: '🚫 UBOS NA ang daily neurons' };
+  const color = colors[u.level] || colors.ok;
+  const pct = Math.max(0, Math.min(100, Number(u.percentUsed) || 0));
+  const fmt = (ms) => ms ? new Date(ms).toLocaleString() : '—';
+  const planTxt = u.plan && u.plan.effective === 'paid' ? '💳 Workers Paid (budget ng admin)' : '🆓 Workers Free';
+  const basisTxt = u.perQuestionBasis === 'observed' ? 'average ng mga totoong sagot ngayong araw' : 'tantiya mula sa Neurons Planner (kulang pa ang sagot ngayong araw)';
+  const stat = (label, value, sub) => `<div style="padding:8px; border:1px solid var(--line); border-radius:8px; min-width:120px; flex:1;">
+      <div class="meta" style="font-size:11px;">${label}</div><div style="font-size:18px; font-weight:700;">${value}</div>${sub ? `<div class="meta" style="font-size:11px;">${sub}</div>` : ''}</div>`;
+  let clientsHtml = '';
+  const clients = Array.isArray(u.clients) ? u.clients : [];
+  if (clients.length) {
+    const tdL = 'padding:5px 8px; border-bottom:1px solid var(--line); text-align:left; word-break:break-all;';
+    const tdR = 'padding:5px 8px; border-bottom:1px solid var(--line); text-align:right; white-space:nowrap;';
+    clientsHtml = `<div style="font-size:12px; font-weight:700; margin:10px 0 4px;">Mga client ngayong araw (${n(u.clientCount)} ang nagtanong${u.clientCount > clients.length ? `, ipinapakita ang top ${n(clients.length)}` : ''})</div>
+      <div style="overflow-x:auto;"><table style="border-collapse:collapse; width:100%; font-size:12px;">
+        <thead><tr><th style="${tdL} color:var(--muted);">Installation</th><th style="${tdR} color:var(--muted);">Tanong</th><th style="${tdR} color:var(--muted);">Neurons</th></tr></thead>
+        <tbody>${clients.map((c) => `<tr><td style="${tdL}">${escapeHtml(c.installationId)}</td><td style="${tdR}">${n(c.questions)}</td><td style="${tdR}">${n(c.neurons, 1)}</td></tr>`).join('')}</tbody>
+      </table></div>`;
+  }
+  const hist = Array.isArray(u.history) ? u.history.slice(-7).reverse() : [];
+  const histHtml = hist.length
+    ? `<div class="meta" style="margin-top:8px;">Nakaraang araw (UTC): ${hist.map((h) => `${escapeHtml(h.day)} — ${n(h.questions)} tanong / ${n(h.neurons)} neurons`).join(' · ')}</div>`
+    : '';
+  const notes = [];
+  if (u.estimatedQuestions > 0) notes.push(`${n(u.estimatedQuestions)} tanong ay tinantiya lang ang neurons (walang usage data mula sa Cloudflare).`);
+  if (u.calibratedAt) notes.push(`Huling na-sync sa Cloudflare dashboard: ${escapeHtml(fmt(u.calibratedAt))}.`);
+  box.innerHTML = `<div style="color:${color}; font-weight:700;">${labels[u.level] || labels.ok} · ${planTxt}</div>
+    <div style="margin:8px 0 4px; height:12px; border-radius:6px; background:var(--line); overflow:hidden;">
+      <div style="width:${pct}%; height:100%; background:${color};"></div>
+    </div>
+    <div class="meta">Nagamit: <b>${n(u.usedNeurons, 1)}</b> / ${n(u.limitNeurons)} neurons (${n(u.percentUsed, 1)}%) · Natitira: <b>${n(u.remainingNeurons, 1)}</b></div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;">
+      ${stat('Tanong na nasagot ngayong araw', n(u.questions), `text ${n(u.textQuestions)} · larawan ${n(u.imageQuestions)}`)}
+      ${stat('Natitirang kayang sagutin', n(u.remainingQuestions), `sa buong araw (≈ ${n(u.perQuestionNeurons, 1)} neurons/tanong)`)}
+      ${stat('Palyang tawag', n(u.failed), `tinanggihan dahil ubos na: ${n(u.blocked)}`)}
+    </div>
+    <div class="meta" style="margin-top:8px;">Ang natitirang tanong ay base sa ${basisTxt}. Buong araw (kung 100%): ≈ ${n(u.capacityQuestions)} tanong.</div>
+    <div class="meta">Tokens ngayong araw: ${n(u.inputTokens)} input · ${n(u.outputTokens)} output. Mag-re-reset sa <b>${escapeHtml(fmt(u.resetsAt))}</b> (00:00 UTC = 8:00 AM PH).</div>
+    ${notes.length ? `<div class="meta" style="margin-top:4px;">${notes.join(' ')}</div>` : ''}
+    ${clientsHtml}${histHtml}
+    <div class="meta" style="margin-top:8px;">Binibilang ang totoong token usage na ibinabalik ng Cloudflare sa bawat sagot na dumaan sa RELAY. Hindi nakikita ang gamit sa labas ng RELAY (hal. Cloudflare playground) — ilagay sa kahon sa ibaba ang numero mula sa Cloudflare dashboard at i-press ang I-sync para tumama.</div>`;
+}
+async function loadAiUsage() {
+  let d;
+  try { d = await aiApi('/relay/admin/api/ai-usage'); } catch (e) { d = null; }
+  if (!d || !d.success) {
+    const box = document.getElementById('aiUsageBox');
+    if (box && !aiUsageState) box.innerHTML = `<div class="meta">${escapeHtml((d && d.message) || 'Could not load neurons detector.')}</div>`;
+    return;
+  }
+  aiUsageState = d;
+  renderAiUsageBox(d);
+}
+async function aiUsageCalibrate() {
+  const inp = document.getElementById('aiUsageCalibrateInput');
+  const raw = String(inp ? inp.value : '').trim();
+  const num = Number(raw);
+  if (!raw || !Number.isFinite(num) || num < 0) { toast('Maglagay ng valid na bilang ng neurons (0 pataas).', 'error'); return; }
+  const data = await aiApi('/relay/admin/api/ai-usage/calibrate', { method: 'POST', body: JSON.stringify({ neurons: num }) });
+  if (data?.success) {
+    toast('Na-sync ang neurons used.', 'success');
+    if (inp) inp.value = '';
+    aiUsageState = data;
+    renderAiUsageBox(data);
+  } else toast(data?.message || 'Sync failed.', 'error');
+}
+async function aiUsageReset() {
+  const ok = await confirmAction({ title: 'I-reset ang bilang ngayong araw?', message: 'Mababalik sa 0 ang neurons, tanong, at listahan ng client para sa araw na ito (UTC). Hindi nito binabago ang aktwal na quota ng Cloudflare.' });
+  if (!ok) return;
+  const data = await aiApi('/relay/admin/api/ai-usage/calibrate', { method: 'POST', body: JSON.stringify({ action: 'reset' }) });
+  if (data?.success) {
+    toast('Na-reset ang bilang ngayong araw.', 'success');
+    aiUsageState = data;
+    renderAiUsageBox(data);
+  } else toast(data?.message || 'Reset failed.', 'error');
+}
 function renderAiBreakdownBox(b, c) {
   const box = document.getElementById('aiBreakdownBox');
   if (!box) return;
@@ -1297,6 +1389,7 @@ async function loadAiPlans(providerOnly) {
   try { data = await aiApi('/relay/admin/api/ai-plans'); } catch (err) { return; }
   if (!data?.success) { if (!providerOnly) toast(data?.message || 'Could not load AI plans.', 'error'); return; }
   renderAiProviderBox(data.provider);
+  loadAiUsage();
   if (providerOnly) return;
   renderAiBreakdownBox(data.breakdown ? { ...data.breakdown, month: data.month } : null, data.capacity);
   aiBreakdownCache = data.breakdown ? { ...data.breakdown, month: data.month } : null;
