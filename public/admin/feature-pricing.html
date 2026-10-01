@@ -887,6 +887,19 @@ function renderAiUsageBox(u) {
   const histHtml = hist.length
     ? `<div class="meta" style="margin-top:8px;">Nakaraang araw (UTC): ${hist.map((h) => `${escapeHtml(h.day)} — ${n(h.questions)} tanong / ${n(h.neurons)} neurons`).join(' · ')}</div>`
     : '';
+  let lastErrHtml = '';
+  if (u.lastError && u.lastError.message) {
+    const le = u.lastError;
+    const kindTxt = le.kind === 'vision' ? 'larawan' : 'text';
+    const tag = le.quota
+      ? '<b style="color:var(--danger,#ff6b6b);">UBOS NA ANG DAILY ALLOCATION ng Cloudflare</b>'
+      : '<b style="color:#ffa94d;">Pansamantalang error (hindi quota)</b>';
+    lastErrHtml = `<div style="margin-top:10px; padding:8px; border:1px solid var(--line); border-radius:8px;">
+      <div style="font-size:12px; font-weight:700;">Huling error mula sa Cloudflare</div>
+      <div class="meta" style="margin-top:2px;">${escapeHtml(fmt(le.at))} · ${kindTxt} · ${tag}</div>
+      <div style="font-size:12px; margin-top:4px; word-break:break-word;">${escapeHtml(le.message)}</div>
+    </div>`;
+  }
   const notes = [];
   if (u.estimatedQuestions > 0) notes.push(`${n(u.estimatedQuestions)} tanong ay tinantiya lang ang neurons (walang usage data mula sa Cloudflare).`);
   if (u.calibratedAt) notes.push(`Huling na-sync sa Cloudflare dashboard: ${escapeHtml(fmt(u.calibratedAt))}.`);
@@ -903,6 +916,7 @@ function renderAiUsageBox(u) {
     <div class="meta" style="margin-top:8px;">Ang natitirang tanong ay base sa ${basisTxt}. Buong araw (kung 100%): ≈ ${n(u.capacityQuestions)} tanong.</div>
     <div class="meta">Tokens ngayong araw: ${n(u.inputTokens)} input · ${n(u.outputTokens)} output. Mag-re-reset sa <b>${escapeHtml(fmt(u.resetsAt))}</b> (00:00 UTC = 8:00 AM PH).</div>
     ${notes.length ? `<div class="meta" style="margin-top:4px;">${notes.join(' ')}</div>` : ''}
+    ${lastErrHtml}
     ${clientsHtml}${histHtml}
     <div class="meta" style="margin-top:8px;">Binibilang ang totoong token usage na ibinabalik ng Cloudflare sa bawat sagot na dumaan sa RELAY. Hindi nakikita ang gamit sa labas ng RELAY (hal. Cloudflare playground) — ilagay sa kahon sa ibaba ang numero mula sa Cloudflare dashboard at i-press ang I-sync para tumama.</div>`;
 }

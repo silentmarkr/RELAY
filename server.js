@@ -7523,7 +7523,7 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
             console.error(`⚠️ RELAY AI provider failed (${req.body?.vision ? 'vision' : 'text'}): ${result.message}`);
             // Kung daily-quota error, i-lock ang provider hanggang 00:00 UTC para
             // ang susunod na requests ay agad na tatanggihan (walang hintay).
-            recordAiProviderFailure();
+            recordAiProviderFailure(result.message, !!req.body?.vision, isCfDailyQuotaError(result.message));
             if (isCfDailyQuotaError(result.message)) {
                 markAiProviderExhausted(result.message, 'auto');
                 syncAiUsageToCloudflareExhausted();
@@ -8556,12 +8556,14 @@ function newAiUsageDay(day) {
 }
 let aiUsageStats = newAiUsageDay(relayAiUtcDayKey());
 let aiUsageHistory = [];
+// Huling error na ibinalik ng Cloudflare (hindi nare-reset kada araw, para makita pa rin kinabukasan kung bakit pumalya).
+let aiLastProviderError = null; // { message, at, kind: 'text'|'vision', quota: boolean }
 let aiUsageSaveTimer = null;
 function scheduleAiUsageSave() {
     if (aiUsageSaveTimer) return;
     aiUsageSaveTimer = setTimeout(() => {
         aiUsageSaveTimer = null;
-        try { setPersistentJSON('ai-usage-stats', { stats: aiUsageStats, history: aiUsageHistory }); } catch (_) {}
+        try { setPersistentJSON('ai-usage-stats', { stats: aiUsageStats, history: aiUsageHistory, lastError: aiLastProviderError }); } catch (_) {}
     }, 3000);
     if (typeof aiUsageSaveTimer.unref === 'function') aiUsageSaveTimer.unref();
 }
@@ -8603,6 +8605,15 @@ async function loadAiUsageStats() {
                     }
                 }
                 aiUsageStats = base;
+            }
+            if (v.lastError && typeof v.lastError === 'object' && v.lastError.message) {
+                const at = Number(v.lastError.at);
+                aiLastProviderError = {
+                    message: String(v.lastError.message).slice(0, 300),
+                    at: Number.isFinite(at) && at > 0 ? at : 0,
+                    kind: v.lastError.kind === 'vision' ? 'vision' : 'text',
+                    quota: v.lastError.quota === true
+                };
             }
             if (Array.isArray(v.history)) {
                 aiUsageHistory = v.history
@@ -8655,8 +8666,18 @@ function recordAiQuestionUsage(installationId, cfUsage, vision) {
         console.error('⚠️ AI usage tracking error:', err.message);
     }
 }
-function recordAiProviderFailure() {
-    try { ensureAiUsageDay(); aiUsageStats.failed += 1; scheduleAiUsageSave(); } catch (_) {}
+function recordAiProviderFailure(message, vision, quota) {
+    try {
+        ensureAiUsageDay();
+        aiUsageStats.failed += 1;
+        aiLastProviderError = {
+            message: String(message || 'Unknown Cloudflare AI error.').slice(0, 300),
+            at: Date.now(),
+            kind: vision ? 'vision' : 'text',
+            quota: quota === true
+        };
+        scheduleAiUsageSave();
+    } catch (_) {}
 }
 function recordAiBlockedByExhaustion() {
     try { ensureAiUsageDay(); aiUsageStats.blocked += 1; scheduleAiUsageSave(); } catch (_) {}
@@ -8714,6 +8735,7 @@ async function buildAiUsagePayload() {
         lastQuestionAt: s.lastQuestionAt || null,
         clientCount: clients.length,
         clients: clients.slice(0, 15),
+        lastError: aiLastProviderError ? { ...aiLastProviderError } : null,
         history: aiUsageHistory.slice()
     };
 }
