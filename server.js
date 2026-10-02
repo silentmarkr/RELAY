@@ -375,15 +375,13 @@ async function ensureDeviceLicenseSchema() {
          ON CONFLICT (installation_id) DO NOTHING`,
         [defaultMonthly, defaultText, defaultFile, defaultImage]
     );
-    // BAGO: daily cap (bilang ng TANONG kada araw) per client + AI upgrade
+    // BAGO: daily cap (NEURONS kada araw) per client + AI upgrade
     // tiers. Lahat ay RELAY-controlled (admin page), hindi galing sa OMNIPOS.
     // daily_cap: NULL = sundin ang default, 0 = walang limit.
+    // (Dati ay bilang ng TANONG ang unit nito — kusang kino-convert sa neurons
+    // ng one-time migration na 'daily_neurons_v1' sa ibaba.)
     await pgPoolDevices.query(`ALTER TABLE relay_ai_credit_settings ADD COLUMN IF NOT EXISTS daily_cap INTEGER CHECK (daily_cap IS NULL OR daily_cap >= 0)`);
     await pgPoolDevices.query(`ALTER TABLE relay_ai_credit_requests ADD COLUMN IF NOT EXISTS day_key TEXT`);
-    await pgPoolDevices.query(
-        `UPDATE relay_ai_credit_settings SET daily_cap = $1 WHERE installation_id = '__default__' AND daily_cap IS NULL`,
-        [Math.max(0, Number.isFinite(parseInt(process.env.RELAY_AI_DAILY_CAP, 10)) ? parseInt(process.env.RELAY_AI_DAILY_CAP, 10) : 10)]
-    );
     await pgPoolDevices.query(`
         CREATE TABLE IF NOT EXISTS relay_ai_daily_usage (
             installation_id TEXT NOT NULL,
@@ -393,6 +391,9 @@ async function ensureDeviceLicenseSchema() {
             PRIMARY KEY (installation_id, day_key)
         );
     `);
+    // used_count = bilang ng tanong (info lang); used_neurons = ang TOTOONG neurons na nagamit ng client
+    // ngayong araw — ito na ang binabantayan ng daily cap.
+    await pgPoolDevices.query(`ALTER TABLE relay_ai_daily_usage ADD COLUMN IF NOT EXISTS used_neurons DOUBLE PRECISION NOT NULL DEFAULT 0`);
     await pgPoolDevices.query(`
         CREATE TABLE IF NOT EXISTS relay_ai_tiers (
             id              TEXT PRIMARY KEY,
@@ -431,8 +432,15 @@ async function ensureDeviceLicenseSchema() {
         );
     `);
     // AUTO capacity: kapag TRUE (default), ang Total daily capacity ay awtomatikong kinukuha sa Neurons Planner
-    // (neurons/araw ÷ neurons kada tanong). Ang daily_capacity column ay nagiging manual value na lang kapag FALSE.
+    // (Free = 10,000 neurons/araw; Paid = budget ng admin). Ang daily_capacity column (neurons) ay nagiging manual value na lang kapag FALSE.
     await pgPoolDevices.query(`ALTER TABLE relay_ai_capacity ADD COLUMN IF NOT EXISTS auto_capacity BOOLEAN NOT NULL DEFAULT TRUE`);
+    // DIVIDER: max_clients = ilang client lang ang puwedeng gumamit ng Omni AI (0 = walang limit).
+    // base_auto = TRUE -> ang Base neurons kada client ay awtomatikong Total daily capacity ÷ max_clients.
+    await pgPoolDevices.query(`ALTER TABLE relay_ai_capacity ADD COLUMN IF NOT EXISTS max_clients INTEGER NOT NULL DEFAULT ${Math.max(0, Number.isFinite(parseInt(process.env.RELAY_AI_MAX_CLIENTS, 10)) ? parseInt(process.env.RELAY_AI_MAX_CLIENTS, 10) : 5)} CHECK (max_clients >= 0)`);
+    await pgPoolDevices.query(`ALTER TABLE relay_ai_capacity ADD COLUMN IF NOT EXISTS base_auto BOOLEAN NOT NULL DEFAULT TRUE`);
+    // reserve_slots = OPTIONAL: kapag TRUE, ang Base share ng mga bakanteng slot ay hindi ibebenta bilang extra neurons.
+    // Default FALSE (dating ugali). Mababago sa admin page — walang kailangang baguhin sa code.
+    await pgPoolDevices.query(`ALTER TABLE relay_ai_capacity ADD COLUMN IF NOT EXISTS reserve_slots BOOLEAN NOT NULL DEFAULT FALSE`);
     await pgPoolDevices.query(`
         CREATE TABLE IF NOT EXISTS relay_ai_tier_lock (
             month_key    TEXT PRIMARY KEY,
@@ -480,14 +488,53 @@ async function ensureDeviceLicenseSchema() {
     await pgPoolDevices.query(`CREATE INDEX IF NOT EXISTS relay_ai_extra_purchases_month ON relay_ai_extra_purchases (month_key)`);
     await pgPoolDevices.query(`ALTER TABLE relay_ai_extra_packs ADD COLUMN IF NOT EXISTS daily_bonus INTEGER NOT NULL DEFAULT 0 CHECK (daily_bonus >= 0)`);
     await pgPoolDevices.query(`ALTER TABLE relay_ai_extra_purchases ADD COLUMN IF NOT EXISTS daily_bonus INTEGER NOT NULL DEFAULT 0`);
+    // ---- ONE-TIME MIGRATION 'daily_neurons_v1': daily cap / extra daily / capacity: TANONG -> NEURONS ----
+    // Ang marker ay kinukuha sa loob ng parehong transaction ng conversion, kaya isang beses lang ito
+    // tumatakbo (kahit sabay ang dalawang instance) at kung pumalya, ROLLBACK ang lahat at uulitin sa susunod na boot.
+    // Rule ng conversion: 1 dating tanong = 100 neurons (0 = walang limit ay nananatiling 0).
+    // Tatlong tier na lang: Base (libre, default ng lahat) + Plus + Pro — inalis ang dating "Basic" tier.
+    await pgPoolDevices.query(`CREATE TABLE IF NOT EXISTS relay_ai_migrations (id TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+    {
+        const K = 100;
+        const mc = await pgPoolDevices.connect();
+        try {
+            await mc.query('BEGIN');
+            const claim = await mc.query(`INSERT INTO relay_ai_migrations (id) VALUES ('daily_neurons_v1') ON CONFLICT (id) DO NOTHING RETURNING id`);
+            if (claim.rows[0]) {
+                await mc.query(`UPDATE relay_ai_credit_settings SET daily_cap = daily_cap * $1 WHERE daily_cap IS NOT NULL AND daily_cap > 0`, [K]);
+                await mc.query(`UPDATE relay_ai_tiers SET daily_cap = daily_cap * $1 WHERE daily_cap > 0`, [K]);
+                await mc.query(`UPDATE relay_ai_tier_purchases SET daily_cap = daily_cap * $1 WHERE daily_cap > 0`, [K]);
+                await mc.query(`UPDATE relay_ai_extra_packs SET daily_bonus = daily_bonus * $1 WHERE daily_bonus > 0`, [K]);
+                await mc.query(`UPDATE relay_ai_extra_purchases SET daily_bonus = daily_bonus * $1 WHERE daily_bonus > 0`, [K]);
+                await mc.query(`UPDATE relay_ai_capacity SET daily_capacity = daily_capacity * $1 WHERE daily_capacity > 0`, [K]);
+                await mc.query(`DELETE FROM relay_ai_tiers WHERE id = 'basic'`);
+                await mc.query(`UPDATE relay_ai_tiers SET daily_cap = 4000, sort_order = 1 WHERE id = 'plus'`);
+                await mc.query(`UPDATE relay_ai_tiers SET daily_cap = 8000, sort_order = 2 WHERE id = 'pro'`);
+                // Ang plus/pro na nabili na ngayong buwan ay sumusunod sa bagong neurons ng tier.
+                await mc.query(`UPDATE relay_ai_tier_purchases p SET daily_cap = t.daily_cap FROM relay_ai_tiers t WHERE p.tier_id = t.id AND t.id IN ('plus','pro')`);
+                console.log('🔁 AI migration daily_neurons_v1 applied: daily caps are now in NEURONS; tiers are Base + Plus + Pro.');
+            }
+            await mc.query('COMMIT');
+        } catch (migErr) {
+            try { await mc.query('ROLLBACK'); } catch (_) {}
+            throw migErr;
+        } finally {
+            mc.release();
+        }
+    }
+    // Default (Base) daily neurons kada client — fallback value kapag naka-OFF ang Base auto (divider).
+    await pgPoolDevices.query(
+        `UPDATE relay_ai_credit_settings SET daily_cap = $1 WHERE installation_id = '__default__' AND daily_cap IS NULL`,
+        [Math.max(0, Number.isFinite(parseInt(process.env.RELAY_AI_DAILY_CAP, 10)) ? parseInt(process.env.RELAY_AI_DAILY_CAP, 10) : 2000)]
+    );
     const extraPackCount = await pgPoolDevices.query(`SELECT COUNT(*)::int AS n FROM relay_ai_extra_packs`);
     if (!extraPackCount.rows[0] || extraPackCount.rows[0].n === 0) {
-        // Seed: ~0.18-0.20 token/credit — bahagyang mas mahal sa tier rate (Basic/Plus ~0.165,
+        // Seed: ~0.18-0.20 token/credit — bahagyang mas mahal sa tier rate (Plus ~0.165,
         // Pro ~0.143) para hindi natatalo ang tiers, pero hindi rin sobrang mahal. Editable sa admin.
         const extraSeed = [
-            ['extra100', '+100 Credits', 100, 20, 1, 5],
-            ['extra300', '+300 Credits', 300, 57, 2, 15],
-            ['extra1000', '+1000 Credits', 1000, 180, 3, 50]
+            ['extra100', '+100 Credits', 100, 20, 1, 500],
+            ['extra300', '+300 Credits', 300, 57, 2, 1500],
+            ['extra1000', '+1000 Credits', 1000, 180, 3, 5000]
         ];
         for (const t of extraSeed) {
             await pgPoolDevices.query(
@@ -496,13 +543,14 @@ async function ensureDeviceLicenseSchema() {
     }
     // Unang seed lang (kapag walang laman ang tiers table). Pagkatapos nito,
     // ang admin page na ang may kontrol sa pangalan, presyo (Omni Tokens,
-    // ~1 token = ₱1), monthly credits at daily cap ng bawat tier.
+    // ~1 token = ₱1), monthly credits at daily neurons ng bawat tier.
     const tierCount = await pgPoolDevices.query(`SELECT COUNT(*)::int AS n FROM relay_ai_tiers`);
     if (!tierCount.rows[0] || tierCount.rows[0].n === 0) {
+        // Base (libre) ay hindi nandito — ito ang default ng lahat (Total daily capacity ÷ divider).
+        // daily_cap ay NEURONS kada araw.
         const seed = [
-            ['basic', 'Basic', 99, 600, 20, 1],
-            ['plus', 'Plus', 249, 1500, 50, 2],
-            ['pro', 'Pro', 499, 3500, 120, 3]
+            ['plus', 'Plus', 249, 1500, 4000, 1],
+            ['pro', 'Pro', 499, 3500, 8000, 2]
         ];
         for (const t of seed) {
             await pgPoolDevices.query(
@@ -7043,9 +7091,12 @@ const RELAY_AI_DEFAULT_TEXT_CREDIT_COST = Math.max(1, parseInt(process.env.RELAY
 const RELAY_AI_DEFAULT_FILE_CREDIT_COST = Math.max(RELAY_AI_DEFAULT_TEXT_CREDIT_COST, parseInt(process.env.RELAY_AI_FILE_CREDIT_COST, 10) || 2);
 const RELAY_AI_DEFAULT_IMAGE_CREDIT_COST = Math.max(RELAY_AI_DEFAULT_FILE_CREDIT_COST, parseInt(process.env.RELAY_AI_IMAGE_CREDIT_COST, 10) || 3);
 const RELAY_AI_DEFAULT_SETTINGS_ID = '__default__';
-// BAGO: default na daily cap (tanong/araw kada client) kung wala pang laman ang DB;
-// 0 = walang limit. Ang totoong halaga ay galing sa admin page (DB).
-const RELAY_AI_DEFAULT_DAILY_CAP = Math.max(0, Number.isFinite(parseInt(process.env.RELAY_AI_DAILY_CAP, 10)) ? parseInt(process.env.RELAY_AI_DAILY_CAP, 10) : 10);
+// BAGO: default na daily cap kung wala pang laman ang DB; 0 = walang limit. Ang totoong halaga ay galing sa admin page (DB).
+// Daily cap ay NEURONS kada araw (hindi na bilang ng tanong). Ito ang manual/fallback na Base neurons kada
+// client kapag naka-OFF ang Base auto (divider). 0 = walang limit.
+const RELAY_AI_DEFAULT_DAILY_CAP = Math.max(0, Number.isFinite(parseInt(process.env.RELAY_AI_DAILY_CAP, 10)) ? parseInt(process.env.RELAY_AI_DAILY_CAP, 10) : 2000);
+// DIVIDER: ilang client lang ang puwedeng gumamit ng Omni AI (0 = walang limit).
+const RELAY_AI_DEFAULT_MAX_CLIENTS = Math.max(0, Number.isFinite(parseInt(process.env.RELAY_AI_MAX_CLIENTS, 10)) ? parseInt(process.env.RELAY_AI_MAX_CLIENTS, 10) : 5);
 // Ang "araw" ng client daily cap ay nagre-reset sa hatinggabi ng oras na ito
 // (default UTC+8 = Pilipinas). Hiwalay ito sa Cloudflare quota na 00:00 UTC.
 const RELAY_AI_DAY_UTC_OFFSET_HOURS = Number.isFinite(parseFloat(process.env.RELAY_AI_DAY_UTC_OFFSET_HOURS)) ? parseFloat(process.env.RELAY_AI_DAY_UTC_OFFSET_HOURS) : 8;
@@ -7151,34 +7202,84 @@ function normalizeRelayAiSettings(body, base = {}) {
         dailyCap = null;
     } else {
         const fallbackDaily = (base.dailyCap === null || base.dailyCap === undefined) ? (base.__allowInheritDaily ? null : RELAY_AI_DEFAULT_DAILY_CAP) : base.dailyCap;
-        dailyCap = (body && body.dailyCap !== undefined) ? normalizeRelayAiSettingNumber(body.dailyCap, fallbackDaily, 0, 1000000) : fallbackDaily;
+        dailyCap = (body && body.dailyCap !== undefined) ? normalizeRelayAiSettingNumber(body.dailyCap, fallbackDaily, 0, 1000000000) : fallbackDaily;
     }
     return { monthlyCredits, textCost, fileCost, imageCost, dailyCap };
+}
+// ---- Capacity config (Total daily capacity + DIVIDER) -------------------
+// Lahat ng daily cap/capacity ay NEURONS kada araw.
+async function getRelayAiCapacityConfig(clientOrPool = pgPoolDevices) {
+    const cfg = await clientOrPool.query(`SELECT daily_capacity, locked_tier_ids, auto_capacity, max_clients, base_auto, reserve_slots FROM relay_ai_capacity WHERE id = 'global'`);
+    const row = cfg.rows[0];
+    const mc = row ? Number(row.max_clients) : NaN;
+    return {
+        manualCapacity: row ? Number(row.daily_capacity) || 0 : 0,
+        // Walang saved row pa = auto (default).
+        capacityAuto: row ? row.auto_capacity !== false : true,
+        lockedTierIds: String(row?.locked_tier_ids || 'plus,pro').split(',').map(x => x.trim().toLowerCase()).filter(Boolean),
+        maxClients: Number.isFinite(mc) && mc >= 0 ? mc : RELAY_AI_DEFAULT_MAX_CLIENTS,
+        baseAuto: row ? row.base_auto !== false : true,
+        reserveSlots: row ? row.reserve_slots === true : false
+    };
+}
+// Total daily capacity (neurons/araw): AUTO = galing sa Neurons Planner; MANUAL = itinakda ng admin.
+// Kung pumalya ang auto compute, huwag mag-lock/mag-block nang mali: gamitin ang huling manual value.
+async function resolveRelayAiCapacity(capCfg) {
+    let autoInfo = null;
+    if (capCfg.capacityAuto) {
+        try { autoInfo = await getRelayAiAutoCapacity(); }
+        catch (autoErr) { console.error('⚠️ Auto capacity compute failed:', autoErr.message); }
+    }
+    return { capacity: capCfg.capacityAuto ? (autoInfo ? autoInfo.capacity : capCfg.manualCapacity) : capCfg.manualCapacity, autoInfo };
+}
+function relayAiBaseAutoActive(capCfg, capacity) {
+    return !!(capCfg.baseAuto && capCfg.maxClients > 0 && capacity > 0);
+}
+// Base neurons kada client = Total daily capacity ÷ divider (hindi kailanman 0, dahil 0 = walang limit).
+function relayAiResolveBaseDaily(storedDaily, capCfg, capacity) {
+    if (relayAiBaseAutoActive(capCfg, capacity)) return Math.max(1, Math.floor(capacity / capCfg.maxClients));
+    return Number(storedDaily) || 0;
+}
+// Bilang ng clients na may active Omni AI subscription (Base + may tier) — ito ang binibilang ng divider.
+function getRelayAiLiveClientCount() {
+    let n = 0;
+    for (const id of Object.keys(issuedUnlocks || {})) if (isRelayAiInstallationLive(id)) n += 1;
+    return n;
 }
 async function getRelayAiDefaultSettings(clientOrPool = pgPoolDevices) {
     if (!clientOrPool) throw new Error('AI credit database is not configured on the RELAY.');
     const result = await clientOrPool.query(
-        `SELECT monthly_credits, text_cost, file_cost, image_cost, daily_cap, updated_at\n         FROM relay_ai_credit_settings WHERE installation_id = $1`,
+        `SELECT monthly_credits, text_cost, file_cost, image_cost, daily_cap, updated_at FROM relay_ai_credit_settings WHERE installation_id = $1`,
         [RELAY_AI_DEFAULT_SETTINGS_ID]
     );
-    if (!result.rows[0]) {
+    const capCfg = await getRelayAiCapacityConfig(clientOrPool);
+    const { capacity } = await resolveRelayAiCapacity(capCfg);
+    const row = result.rows[0];
+    const storedDaily = (!row || row.daily_cap === null || row.daily_cap === undefined) ? RELAY_AI_DEFAULT_DAILY_CAP : Number(row.daily_cap);
+    const baseFields = {
+        // dailyCap = ang EPEKTIBONG Base neurons/client (auto divider kung naka-ON); dailyCapManual = naka-save na manual value.
+        dailyCap: relayAiResolveBaseDaily(storedDaily, capCfg, capacity),
+        dailyCapManual: storedDaily,
+        dailyCapAuto: relayAiBaseAutoActive(capCfg, capacity),
+        maxClients: capCfg.maxClients
+    };
+    if (!row) {
         return {
             monthlyCredits: RELAY_AI_DEFAULT_MONTHLY_CREDITS,
             textCost: RELAY_AI_DEFAULT_TEXT_CREDIT_COST,
             fileCost: RELAY_AI_DEFAULT_FILE_CREDIT_COST,
             imageCost: RELAY_AI_DEFAULT_IMAGE_CREDIT_COST,
-            dailyCap: RELAY_AI_DEFAULT_DAILY_CAP,
+            ...baseFields,
             updatedAt: null,
             source: 'env-default'
         };
     }
-    const row = result.rows[0];
     return {
         monthlyCredits: Number(row.monthly_credits),
         textCost: Number(row.text_cost),
         fileCost: Number(row.file_cost),
         imageCost: Number(row.image_cost),
-        dailyCap: (row.daily_cap === null || row.daily_cap === undefined) ? RELAY_AI_DEFAULT_DAILY_CAP : Number(row.daily_cap),
+        ...baseFields,
         updatedAt: row.updated_at,
         source: 'relay-default'
     };
@@ -7241,18 +7342,21 @@ function applyRelayAiTier(settings, tier) {
     const dailyCap = (baseDaily === 0 || tier.dailyCap === 0) ? 0 : Math.max(baseDaily || 0, tier.dailyCap);
     return { ...settings, monthlyCredits: Math.max(settings.monthlyCredits, tier.monthlyCredits), dailyCap, tier: { id: tier.id, name: tier.name } };
 }
+// Ang daily cap ay NEURONS. used = totoong neurons na nagamit ng client ngayong araw (ibinababa sa buong numero
+// para tugma sa gate: pinapayagan hangga't used < cap); questions = bilang ng tanong ngayong araw (info lang).
 async function getRelayAiDailyStatus(installationId, dailyCap, clientOrPool = pgPoolDevices) {
     const dayKey = relayAiDayKey();
     const r = await clientOrPool.query(
-        `SELECT used_count FROM relay_ai_daily_usage WHERE installation_id = $1 AND day_key = $2`,
+        `SELECT used_count, used_neurons FROM relay_ai_daily_usage WHERE installation_id = $1 AND day_key = $2`,
         [installationId, dayKey]
     );
-    const used = r.rows[0] ? Number(r.rows[0].used_count) || 0 : 0;
+    const usedExact = r.rows[0] ? Number(r.rows[0].used_neurons) || 0 : 0;
+    const questions = r.rows[0] ? Number(r.rows[0].used_count) || 0 : 0;
     const cap = Number(dailyCap) || 0;
     return {
-        day: dayKey, used, cap,
+        day: dayKey, unit: 'neurons', used: Math.floor(usedExact), questions, cap,
         unlimited: cap === 0,
-        remaining: cap === 0 ? null : Math.max(0, cap - used),
+        remaining: cap === 0 ? null : Math.max(0, Math.ceil(cap - usedExact)),
         resetsAt: relayAiNextDayResetMs()
     };
 }
@@ -7285,6 +7389,8 @@ async function getRelayAiCreditStatus(installationId, clientOrPool = pgPoolDevic
 async function reserveRelayAiCredits(installationId, requestId, body) {
     if (!pgPoolDevices) return { ok: false, reason: 'AI credit database is not configured on the RELAY.' };
     const monthKey = relayAiMonthKey();
+    // Epektibong Base neurons/client (auto divider o manual) — kinukuha bago pa kumuha ng transaction connection.
+    const resolvedDefault = await getRelayAiDefaultSettings();
     const client = await pgPoolDevices.connect();
     try {
         await client.query('BEGIN');
@@ -7296,7 +7402,7 @@ async function reserveRelayAiCredits(installationId, requestId, body) {
         );
         const defaultRow = settingsRows.rows.find(r => r.installation_id === RELAY_AI_DEFAULT_SETTINGS_ID);
         const overrideRow = settingsRows.rows.find(r => r.installation_id === installationId);
-        const defaultDailyCap = (defaultRow && defaultRow.daily_cap !== null && defaultRow.daily_cap !== undefined) ? Number(defaultRow.daily_cap) : RELAY_AI_DEFAULT_DAILY_CAP;
+        const defaultDailyCap = Number(resolvedDefault.dailyCap) || 0;
         const baseSettings = overrideRow ? {
             monthlyCredits: Number(overrideRow.monthly_credits), textCost: Number(overrideRow.text_cost),
             fileCost: Number(overrideRow.file_cost), imageCost: Number(overrideRow.image_cost),
@@ -7345,16 +7451,17 @@ async function reserveRelayAiCredits(installationId, requestId, body) {
             await client.query('ROLLBACK');
             return { ok: false, reason: 'request_reuse' };
         }
-        // DAILY CAP (bilang ng tanong kada araw, per client). Atomic sa loob ng
-        // parehong transaction: kapag pumalya ang monthly reservation sa ibaba,
-        // ROLLBACK din ang pagbilang na ito.
+        // DAILY CAP (NEURONS kada araw, per client). Atomic sa loob ng parehong transaction: kapag pumalya
+        // ang monthly reservation sa ibaba, ROLLBACK din ang pagbilang na ito. Pinapayagan ang tanong hangga't
+        // ang nagamit na neurons ngayong araw ay mas mababa pa sa cap; ang TOTOONG neurons ng sagot ay idinadagdag
+        // pagkatapos ng matagumpay na sagot (addRelayAiDailyNeurons), kaya ang huling sagot ay puwedeng bahagyang lumampas.
         const dailyUp = await client.query(
-            `INSERT INTO relay_ai_daily_usage (installation_id, day_key, used_count)
-             VALUES ($1, $2, 1)
+            `INSERT INTO relay_ai_daily_usage (installation_id, day_key, used_count, used_neurons)
+             VALUES ($1, $2, 1, 0)
              ON CONFLICT (installation_id, day_key) DO UPDATE
              SET used_count = relay_ai_daily_usage.used_count + 1, updated_at = now()
-             WHERE $3 = 0 OR relay_ai_daily_usage.used_count < $3
-             RETURNING used_count`,
+             WHERE $3::double precision = 0 OR relay_ai_daily_usage.used_neurons < $3::double precision
+             RETURNING used_count, used_neurons`,
             [installationId, dayKey, settings.dailyCap]
         );
         if (!dailyUp.rows[0]) {
@@ -7363,18 +7470,25 @@ async function reserveRelayAiCredits(installationId, requestId, body) {
                 [installationId, monthKey]
             );
             const used = usage.rows[0] ? Number(usage.rows[0].used_credits) || 0 : 0;
+            const dUsage = await client.query(
+                `SELECT used_count, used_neurons FROM relay_ai_daily_usage WHERE installation_id = $1 AND day_key = $2`,
+                [installationId, dayKey]
+            );
+            const dNeurons = dUsage.rows[0] ? Number(dUsage.rows[0].used_neurons) || 0 : 0;
+            const dQuestions = dUsage.rows[0] ? Number(dUsage.rows[0].used_count) || 0 : 0;
             await client.query('ROLLBACK');
             return { ok: false, reason: 'daily_cap', cost, status: {
                 month: monthKey, used, limit: settings.monthlyCredits,
                 remaining: Math.max(0, settings.monthlyCredits - used), settings,
                 tier: settings.tier,
-                daily: { day: dayKey, used: settings.dailyCap, cap: settings.dailyCap, unlimited: false, remaining: 0, resetsAt: relayAiNextDayResetMs() }
+                daily: { day: dayKey, unit: 'neurons', used: Math.floor(dNeurons), questions: dQuestions, cap: settings.dailyCap, unlimited: false, remaining: 0, resetsAt: relayAiNextDayResetMs() }
             } };
         }
-        const dailyUsed = Number(dailyUp.rows[0].used_count) || 0;
+        const dailyNeuronsUsed = Number(dailyUp.rows[0].used_neurons) || 0;
         const dailyInfo = {
-            day: dayKey, used: dailyUsed, cap: settings.dailyCap, unlimited: settings.dailyCap === 0,
-            remaining: settings.dailyCap === 0 ? null : Math.max(0, settings.dailyCap - dailyUsed),
+            day: dayKey, unit: 'neurons', used: Math.floor(dailyNeuronsUsed), questions: Number(dailyUp.rows[0].used_count) || 0,
+            cap: settings.dailyCap, unlimited: settings.dailyCap === 0,
+            remaining: settings.dailyCap === 0 ? null : Math.max(0, Math.ceil(settings.dailyCap - dailyNeuronsUsed)),
             resetsAt: relayAiNextDayResetMs()
         };
         const upsert = await client.query(
@@ -7456,6 +7570,22 @@ async function refundRelayAiCredits(installationId, requestId) {
         client.release();
     }
 }
+// Idagdag ang TOTOONG neurons ng isang matagumpay na sagot sa daily usage ng client (ito ang binabantayan ng daily cap).
+// Best-effort: kung pumalya, hindi nito sinisira ang sagot na naibigay na.
+async function addRelayAiDailyNeurons(installationId, neurons) {
+    const n = Number(neurons);
+    if (!pgPoolDevices || !installationId || !Number.isFinite(n) || n <= 0) return;
+    try {
+        await queryWithRetry(pgPoolDevices,
+            `INSERT INTO relay_ai_daily_usage (installation_id, day_key, used_count, used_neurons)
+             VALUES ($1, $2, 0, $3)
+             ON CONFLICT (installation_id, day_key) DO UPDATE
+             SET used_neurons = relay_ai_daily_usage.used_neurons + EXCLUDED.used_neurons, updated_at = now()`,
+            [installationId, relayAiDayKey(), n]);
+    } catch (err) {
+        console.error('⚠️ RELAY AI daily neurons update error:', err.message);
+    }
+}
 async function markRelayAiRequestStatus(installationId, requestId, status) {
     if (!pgPoolDevices || !requestId) return;
     const monthKey = relayAiMonthKey();
@@ -7498,7 +7628,7 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
                 const cap = reservation.status.daily.cap;
                 return res.status(402).json({
                     success: false, dailyLimitReached: true, creditsExhausted: false, creditCost: 0, ...reservation.status,
-                    message: `Naabot mo na ang daily limit ng Omni AI (${cap} tanong kada araw). Mare-reset ito bukas ng hatinggabi, o mag-upgrade ng plan para sa mas mataas na daily limit.`
+                    message: `Naabot mo na ang daily limit ng Omni AI (${Number(cap).toLocaleString('en-US')} neurons kada araw). Mare-reset ito bukas ng hatinggabi, o mag-upgrade ng plan para sa mas mataas na daily neurons.`
                 });
             }
             if (reservation.reason === 'exhausted') {
@@ -7556,9 +7686,14 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
         }
         // NEURONS DETECTOR: bilangin ang matagumpay na sagot at ang totoong neurons na nagamit nito.
         recordAiQuestionUsage(installationId, result.cfUsage, !!req.body?.vision);
+        // Idagdag ang TOTOONG neurons ng sagot na ito sa daily usage ng client (daily cap = neurons).
+        await addRelayAiDailyNeurons(installationId, computeAiCallNeurons(result.cfUsage, !!req.body?.vision).neurons);
         await markRelayAiRequestStatus(installationId, requestId, 'completed');
+        // Sariwang status (kasama ang bagong daily neurons) para tama agad ang credit pill ng client.
+        let creditsOut = reservation.status;
+        try { creditsOut = await getRelayAiCreditStatus(installationId); } catch (_) {}
         const { cfUsage: _cfUsage, ...clientResult } = result;
-        res.json({ ...clientResult, creditCost: reservation.cost, credits: reservation.status });
+        res.json({ ...clientResult, creditCost: reservation.cost, credits: creditsOut });
     } catch (err) {
         console.error('⚠️ RELAY AI credit/request error:', err.message);
         return res.status(503).json({ success: false, message: 'AI credit service temporarily unavailable.' });
@@ -7641,12 +7776,20 @@ function relayAiEffectiveCap(dailyCap, capacity) {
     const c = Number(dailyCap) || 0;
     return c === 0 ? capacity : c;
 }
+// Naka-save na (manual) Base neurons/client sa default row. Ang EPEKTIBONG halaga (auto divider) ay galing sa
+// relayAiResolveBaseDaily().
+async function getRelayAiStoredDefaultDaily(clientOrPool = pgPoolDevices) {
+    const r = await clientOrPool.query(`SELECT daily_cap FROM relay_ai_credit_settings WHERE installation_id = $1`, [RELAY_AI_DEFAULT_SETTINGS_ID]);
+    const v = r.rows[0] ? r.rows[0].daily_cap : null;
+    return (v === null || v === undefined) ? RELAY_AI_DEFAULT_DAILY_CAP : Number(v);
+}
 // Base clients = mga client na may active AI subscription pero WALANG tier na nabili ngayong buwan.
 // Kasama sila sa committed capacity (daily cap nila: override o default; unlimited = buong capacity).
 // purchasedIds = lahat ng installation na may tier purchase ngayong buwan (para hindi madoble ang bilang).
-async function getRelayAiBaseState(capacity, purchasedIds, clientOrPool = pgPoolDevices) {
-    const defaults = await getRelayAiDefaultSettings(clientOrPool);
-    const defaultDaily = Number(defaults.dailyCap) || 0;
+async function getRelayAiBaseState(capacity, purchasedIds, clientOrPool = pgPoolDevices, defaultDailyOverride) {
+    const defaultDaily = (defaultDailyOverride === undefined || defaultDailyOverride === null)
+        ? (Number((await getRelayAiDefaultSettings(clientOrPool)).dailyCap) || 0)
+        : (Number(defaultDailyOverride) || 0);
     const overrides = await clientOrPool.query(
         `SELECT installation_id, daily_cap FROM relay_ai_credit_settings WHERE installation_id <> $1`, [RELAY_AI_DEFAULT_SETTINGS_ID]);
     const overrideCap = new Map();
@@ -7664,14 +7807,13 @@ async function getRelayAiBaseState(capacity, purchasedIds, clientOrPool = pgPool
     return { clients, dailyTotal, unlimitedClients, dailyCapDefault: defaultDaily };
 }
 // Daily cap na kasalukuyang nakabilang para sa isang Base client (walang tier). 0 kung hindi siya Base.
-async function getRelayAiBaseCapForClient(installationId, capacity, clientOrPool = pgPoolDevices) {
+async function getRelayAiBaseCapForClient(installationId, capState, clientOrPool = pgPoolDevices) {
     if (!isRelayAiInstallationLive(installationId)) return 0;
-    const defaults = await getRelayAiDefaultSettings(clientOrPool);
     const o = await clientOrPool.query(`SELECT daily_cap FROM relay_ai_credit_settings WHERE installation_id = $1`, [installationId]);
-    const raw = (o.rows[0] && o.rows[0].daily_cap !== null && o.rows[0].daily_cap !== undefined) ? Number(o.rows[0].daily_cap) || 0 : (Number(defaults.dailyCap) || 0);
-    return relayAiEffectiveCap(raw, capacity);
+    const raw = (o.rows[0] && o.rows[0].daily_cap !== null && o.rows[0].daily_cap !== undefined) ? Number(o.rows[0].daily_cap) || 0 : (Number(capState.baseDailyEffective) || 0);
+    return relayAiEffectiveCap(raw, capState.capacity);
 }
-// Awtomatikong Total daily capacity mula sa Neurons Planner (kapareho ng "capacityQuestions" ng /ai-neurons).
+// Awtomatikong Total daily capacity (NEURONS kada araw) mula sa Neurons Planner (Free = 10,000; Paid = budget ng admin).
 // Hindi naghihintay sa network: gamit ang huling nakuhang Cloudflare plan detection (unknown = Free, kapareho ng planner);
 // kapag luma na ang detection, tahimik itong nire-refresh sa background.
 let relayAiPlanRefreshInFlight = false;
@@ -7686,21 +7828,12 @@ async function getRelayAiAutoCapacity() {
     const plan = settings.planOverride !== 'auto' ? settings.planOverride : (det && det.plan === 'paid' ? 'paid' : 'free');
     const neuronsPerDay = plan === 'paid' ? settings.paidDailyNeurons : CF_FREE_NEURONS_PER_DAY;
     const perQuestion = aiNeuronsPerQuestion(settings);
-    return { capacity: perQuestion > 0 ? Math.floor(neuronsPerDay / perQuestion) : 0, plan, neuronsPerDay, perQuestion };
+    return { capacity: Math.max(0, Math.floor(neuronsPerDay)), plan, neuronsPerDay, perQuestion };
 }
 async function getRelayAiCapacityState(monthKey, clientOrPool = pgPoolDevices) {
-    const cfg = await clientOrPool.query(`SELECT daily_capacity, locked_tier_ids, auto_capacity FROM relay_ai_capacity WHERE id = 'global'`);
-    const manualCapacity = cfg.rows[0] ? Number(cfg.rows[0].daily_capacity) || 0 : 0;
-    // Walang saved row pa = auto (default).
-    const capacityAuto = cfg.rows[0] ? cfg.rows[0].auto_capacity !== false : true;
-    let autoInfo = null;
-    if (capacityAuto) {
-        try { autoInfo = await getRelayAiAutoCapacity(); }
-        catch (autoErr) { console.error('⚠️ Auto capacity compute failed:', autoErr.message); }
-    }
-    // Kung pumalya ang auto compute, huwag mag-lock/mag-block nang mali: gamitin ang huling manual value.
-    const capacity = capacityAuto ? (autoInfo ? autoInfo.capacity : manualCapacity) : manualCapacity;
-    const lockedTierIds = String(cfg.rows[0]?.locked_tier_ids || 'plus,pro').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
+    const capCfg = await getRelayAiCapacityConfig(clientOrPool);
+    const { capacity, autoInfo } = await resolveRelayAiCapacity(capCfg);
+    const { manualCapacity, capacityAuto, lockedTierIds, maxClients, baseAuto } = capCfg;
     // Ang bilang ay kinukuha LANG sa mga installation na aktwal pang umiiral/aktibo sa client data
     // (issuedUnlocks + active AI subscription — parehong batayan ng Base clients). Kaya kapag na-reset/
     // na-purge/na-deactivate ang isang client, agad na nawawala ang tier at extra daily niya sa total.
@@ -7709,16 +7842,30 @@ async function getRelayAiCapacityState(monthKey, clientOrPool = pgPoolDevices) {
     const extraRes = await clientOrPool.query(`SELECT installation_id, daily_bonus FROM relay_ai_extra_purchases WHERE month_key = $1 AND daily_bonus > 0`, [monthKey]);
     const extraDaily = extraRes.rows.reduce((a, r) => a + (isRelayAiInstallationLive(r.installation_id) ? (Number(r.daily_bonus) || 0) : 0), 0);
     const tiersDaily = sum.rows.reduce((a, r) => a + (isRelayAiInstallationLive(r.installation_id) ? relayAiEffectiveCap(r.daily_cap, capacity) : 0), 0);
-    const base = await getRelayAiBaseState(capacity, new Set(sum.rows.map((r) => r.installation_id)), clientOrPool);
+    const storedBaseDaily = await getRelayAiStoredDefaultDaily(clientOrPool);
+    const baseDailyEffective = relayAiResolveBaseDaily(storedBaseDaily, capCfg, capacity);
+    const base = await getRelayAiBaseState(capacity, new Set(sum.rows.map((r) => r.installation_id)), clientOrPool, baseDailyEffective);
     const committed = tiersDaily + base.dailyTotal + extraDaily;
     const lock = await clientOrPool.query(`SELECT locked_at, reason FROM relay_ai_tier_lock WHERE month_key = $1`, [monthKey]);
+    const liveClients = getRelayAiLiveClientCount();
+    // RESERBA: kapag naka-ON ang divider, ang Base share ng mga BAKANTENG slot (slotsLeft × Base neurons) ay hindi
+    // puwedeng ibenta bilang extra credits. Hindi ito ibinabawas sa 'committed' (para bukas pa rin ang Plus/Pro upgrade).
+    const reservedForSlots = (capCfg.reserveSlots && relayAiBaseAutoActive(capCfg, capacity) && maxClients > 0)
+        ? Math.max(0, maxClients - liveClients) * baseDailyEffective : 0;
     return {
         enabled: capacity > 0, capacity, capacityAuto, manualCapacity,
         autoPlan: autoInfo ? autoInfo.plan : null, autoNeuronsPerDay: autoInfo ? autoInfo.neuronsPerDay : null,
         autoPerQuestion: autoInfo ? autoInfo.perQuestion : null,
+        // DIVIDER: maxClients = ilang client lang ang puwedeng gumamit ng Omni AI (0 = walang limit);
+        // baseAuto = Base neurons/client = capacity ÷ maxClients.
+        maxClients, baseAuto, baseAutoActive: relayAiBaseAutoActive(capCfg, capacity),
+        baseDailyEffective, storedBaseDaily, liveClients,
+        slotsLeft: maxClients > 0 ? Math.max(0, maxClients - liveClients) : null,
         committed, extraDaily, tiersDaily, baseDaily: base.dailyTotal, baseClients: base.clients,
         overCapacity: capacity > 0 ? Math.max(0, committed - capacity) : 0,
         leftover: capacity > 0 ? Math.max(0, capacity - committed) : null, lockedTierIds,
+        reserveSlots: capCfg.reserveSlots, reservedForSlots,
+        extraAvailable: capacity > 0 ? Math.max(0, capacity - committed - reservedForSlots) : null,
         locked: capacity > 0 && !!lock.rows[0],
         lockedAt: lock.rows[0]?.locked_at || null, lockReason: lock.rows[0]?.reason || null
     };
@@ -7753,7 +7900,7 @@ async function getRelayAiPlanBreakdown(monthKey, tiers, capState) {
         row.dailyTotal += relayAiEffectiveCap(cap, capacity);
         if (cap === 0) row.unlimitedClients += 1;
     });
-    const baseState = await getRelayAiBaseState(capacity, purchasedIds);
+    const baseState = await getRelayAiBaseState(capacity, purchasedIds, pgPoolDevices, capState.baseDailyEffective);
     const tierRows = Array.from(rows.values());
     return {
         base: { clients: baseState.clients, dailyCapDefault: baseState.dailyCapDefault, dailyTotal: baseState.dailyTotal, unlimitedClients: baseState.unlimitedClients },
@@ -7804,6 +7951,10 @@ async function getRelayAiBaseSubscriptionBlock(installationId) {
         if (expiresAt && (Date.now() - expiresAt) <= MODULE_SUBSCRIPTION_GRACE_PERIOD_MS) return { blocked: false }; // grace-period renewal
         if (getAiProviderExhaustion().exhausted) return { blocked: true, reason: 'provider_exhausted' };
         const state = await getRelayAiCapacityState(relayAiMonthKey());
+        // DIVIDER: limitado ang bilang ng client na puwedeng gumamit ng Omni AI (renewals ay hindi sakop nito).
+        if (state.maxClients > 0 && state.liveClients >= state.maxClients) {
+            return { blocked: true, reason: 'slots_full', liveClients: state.liveClients, maxClients: state.maxClients };
+        }
         if (!state.enabled) return { blocked: false };
         const defaults = await getRelayAiDefaultSettings();
         const ov = await pgPoolDevices.query(`SELECT daily_cap FROM relay_ai_credit_settings WHERE installation_id = $1`, [installationId]);
@@ -7820,8 +7971,13 @@ async function getRelayAiBaseSubscriptionBlock(installationId) {
 const RELAY_AI_BASE_LOCK_MESSAGE = 'Naka-lock muna ang bagong Omni AI subscription dahil puno na ang kabuuang daily AI capacity ng system. Awtomatiko itong magbubukas kapag may nabakante — subukan ulit mamaya o sa susunod na buwan.';
 function relayAiBaseBlockMessage(verdict, forAdmin = false) {
     if (verdict && verdict.reason === 'provider_exhausted') return RELAY_AI_PROVIDER_EXHAUSTED_BUY_MESSAGE;
+    if (verdict && verdict.reason === 'slots_full') {
+        if (!forAdmin) return 'Puno na ang bilang ng client na puwedeng gumamit ng Omni AI. Awtomatiko itong magbubukas kapag may nabakante — subukan ulit mamaya.';
+        return `Hindi ma-activate ang bagong Omni AI subscription: puno na ang limit ng clients (${verdict.liveClients}/${verdict.maxClients}). ` +
+               `Walang bagong client na maa-activate (pati manual ng developer) hangga't walang nabakante. Magbubukas ito kapag may nag-expire/na-reset na client, o kapag itinaas ang Max clients (divider) sa AI Plans.`;
+    }
     if (!forAdmin) return RELAY_AI_BASE_LOCK_MESSAGE;
-    const usage = (verdict && Number.isFinite(verdict.committed) && Number.isFinite(verdict.capacity)) ? ` (${verdict.committed}/${verdict.capacity} na ang nakalaan)` : '';
+    const usage = (verdict && Number.isFinite(verdict.committed) && Number.isFinite(verdict.capacity)) ? ` (${verdict.committed}/${verdict.capacity} neurons/araw na ang nakalaan)` : '';
     return `Hindi ma-activate ang bagong Omni AI subscription: puno na ang kabuuang daily AI allowance${usage}. Walang bagong client na maa-activate (pati manual ng developer) hangga't walang nabakante. ` +
            `Magbubukas ito kapag may nag-expire/na-reset na client, o kapag itinaas ang capacity sa AI Plans.`;
 }
@@ -7903,8 +8059,8 @@ function relayAiExtraPackVerdict(pack, es, sold, clientBought, capState) {
     if (es.maxPerClient > 0 && clientBought + pack.credits > es.maxPerClient) return { ok: false, reason: `Umabot ka na sa limit na ${es.maxPerClient} extra credits ngayong buwan.` };
     // Ang extra daily cap ay kinukuha sa natitirang (hindi pa nagagamit) na kabuuang daily capacity.
     // Kapag naka-lock na ang capacity ngayong buwan, walang extra daily cap na maibebenta kahit may natitira pa.
-    if (capState && capState.enabled && pack.dailyBonus > 0 && (capState.locked || pack.dailyBonus > capState.leftover)) {
-        return { ok: false, reason: 'Puno na ang kabuuang daily AI capacity ngayong buwan, walang extra cap na maibibigay.' };
+    if (capState && capState.enabled && pack.dailyBonus > 0 && (capState.locked || pack.dailyBonus > capState.extraAvailable)) {
+        return { ok: false, reason: 'Puno na ang kabuuang daily AI capacity ngayong buwan (kasama ang nakareserba para sa mga bakanteng client slot), walang extra neurons na maibibigay.' };
     }
     return { ok: true };
 }
@@ -7922,7 +8078,7 @@ async function buildRelayAiExtraOffer(installationId, monthKey, dailyUnlimited =
     return {
         enabled: es.enabled,
         available: es.monthlyPool > 0 ? Math.max(0, es.monthlyPool - sold) : null,
-        availableDaily: capState.enabled ? capState.leftover : null,
+        availableDaily: capState.enabled ? capState.extraAvailable : null,
         purchasedCredits: bought, maxPerClient: es.maxPerClient, packs
     };
 }
@@ -7943,7 +8099,7 @@ app.get('/relay/ai-assistant/plans', requireApiKey, requireAllowedDevice, rateLi
         const status = await getRelayAiCreditStatus(installationId);
         const current = await getRelayAiActiveTier(installationId, status.month);
         const capState = await getRelayAiCapacityState(status.month);
-        const baseCap = current ? 0 : await getRelayAiBaseCapForClient(installationId, capState.capacity);
+        const baseCap = current ? 0 : await getRelayAiBaseCapForClient(installationId, capState);
         const plans = tiers.map((t) => {
             const isCurrent = !!current && current.id === t.id;
             const verdict = relayAiTierCapacityVerdict(capState, t, current, baseCap);
@@ -7952,10 +8108,17 @@ app.get('/relay/ai-assistant/plans', requireApiKey, requireAllowedDevice, rateLi
             const costTokens = canPurchase ? Math.max(0, t.priceTokens - (current ? current.tokensSpent : 0)) : 0;
             return { ...t, isCurrent, canPurchase, costTokens, locked: upgradeable && !isCurrent && verdict.blocked, lockedReason: (upgradeable && !isCurrent && verdict.blocked) ? relayAiTierBlockMessage(verdict) : null };
         });
+        // BASE = pinakamababang tier (libre, default ng lahat) — ipinapakita lang, hindi mabibili.
+        const baseSettings = await getRelayAiSettings(installationId);
+        const baseTier = {
+            id: 'base', name: 'Base', priceTokens: 0, monthlyCredits: Number(baseSettings.monthlyCredits) || 0, dailyCap: Number(baseSettings.dailyCap) || 0,
+            isBase: true, isCurrent: !current, canPurchase: false, costTokens: 0, locked: false, lockedReason: null
+        };
         return res.json({
             success: true,
             month: status.month,
             validUntil: relayAiNextMonthResetMs(),
+            baseTier,
             currentTier: current ? { id: current.id, name: current.name, monthlyCredits: current.monthlyCredits, dailyCap: current.dailyCap } : null,
             credits: status,
             plans,
@@ -7999,7 +8162,7 @@ app.post('/relay/ai-assistant/plans/purchase', requireApiKey, requireAllowedDevi
             return res.status(409).json({ success: false, message: `Mayroon ka nang ${current.name} plan ngayong buwan — mas mataas na plan lang ang puwedeng i-upgrade.` });
         }
         const capState = await getRelayAiCapacityState(monthKey);
-        const baseCapForClient = current ? 0 : await getRelayAiBaseCapForClient(installationId, capState.capacity);
+        const baseCapForClient = current ? 0 : await getRelayAiBaseCapForClient(installationId, capState);
         const capVerdict = relayAiTierCapacityVerdict(capState, tier, current, baseCapForClient);
         if (capVerdict.blocked) {
             // Ang provider-exhausted ay pansamantala lang (nagre-reset araw-araw) — huwag i-lock ang buong buwan.
@@ -8074,7 +8237,7 @@ app.post('/relay/ai-assistant/plans/purchase', requireApiKey, requireAllowedDevi
         const credits = await getRelayAiCreditStatus(installationId);
         const body = {
             success: true,
-            message: `${tier.name} plan activated (${tier.monthlyCredits} credits/month, ${tier.dailyCap === 0 ? 'unlimited' : tier.dailyCap} questions/day) hanggang katapusan ng buwan.`,
+            message: `${tier.name} plan activated (${tier.monthlyCredits} credits/month, ${tier.dailyCap === 0 ? 'unlimited' : tier.dailyCap.toLocaleString('en-US') + ' neurons/day'}) hanggang katapusan ng buwan.`,
             tier: { id: tier.id, name: tier.name, monthlyCredits: tier.monthlyCredits, dailyCap: tier.dailyCap },
             tokensSpent: costTokens,
             balanceTokens: balanceAfter,
@@ -8176,7 +8339,7 @@ app.post('/relay/ai-assistant/extra-credits/purchase', requireApiKey, requireAll
         const credits = await getRelayAiCreditStatus(installationId);
         const body = {
             success: true,
-            message: `+${pack.credits} extra AI credits${appliedDailyBonus > 0 ? ` at +${appliedDailyBonus} tanong/araw` : ''} added (valid hanggang katapusan ng buwan).`,
+            message: `+${pack.credits} extra AI credits${appliedDailyBonus > 0 ? ` at +${appliedDailyBonus.toLocaleString('en-US')} neurons/araw` : ''} added (valid hanggang katapusan ng buwan).`,
             pack: { id: pack.id, name: pack.name, credits: pack.credits, dailyBonus: appliedDailyBonus },
             tokensSpent: costTokens, balanceTokens: balanceAfter, credits
         };
@@ -8239,7 +8402,7 @@ app.post('/relay/admin/api/ai-extra/pack', requireAdminKey, async (req, res) => 
     if (!name) return res.status(400).json({ success: false, message: 'Pack name is required.' });
     const credits = normalizeRelayAiSettingNumber(req.body?.credits, NaN, 1, 1000000000);
     const priceTokens = normalizeRelayAiSettingNumber(req.body?.priceTokens, NaN, 1, 10000000);
-    const dailyBonus = normalizeRelayAiSettingNumber(req.body?.dailyBonus, 0, 0, 1000000);
+    const dailyBonus = normalizeRelayAiSettingNumber(req.body?.dailyBonus, 0, 0, 1000000000);
     const sortOrder = normalizeRelayAiSettingNumber(req.body?.sortOrder, 0, -1000, 1000);
     if (!Number.isFinite(credits) || !Number.isFinite(priceTokens) || !Number.isFinite(dailyBonus)) return res.status(400).json({ success: false, message: 'credits (>=1), priceTokens (>=1) and dailyBonus (>=0) must be whole numbers.' });
     try {
@@ -8292,24 +8455,33 @@ app.get('/relay/admin/api/ai-plans', requireAdminKey, async (req, res) => {
 });
 app.post('/relay/admin/api/ai-plans/capacity', requireAdminKey, async (req, res) => {
     if (!pgPoolDevices) return res.status(503).json({ success: false, message: 'Devices/License database is not configured.' });
-    let dailyCapacity = normalizeRelayAiSettingNumber(req.body?.dailyCapacity, NaN, 0, 100000000);
+    // Lahat ay NEURONS kada araw. dailyCapacity = manual Total daily capacity; maxClients = DIVIDER (ilang client lang
+    // ang puwedeng gumamit ng Omni AI, 0 = walang limit); baseAuto = Base neurons/client = capacity ÷ maxClients.
+    let curCfg;
+    try { curCfg = await getRelayAiCapacityConfig(); }
+    catch (_) { curCfg = { manualCapacity: 0, capacityAuto: true, maxClients: RELAY_AI_DEFAULT_MAX_CLIENTS, baseAuto: true, reserveSlots: false }; }
+    let dailyCapacity = normalizeRelayAiSettingNumber(req.body?.dailyCapacity, NaN, 0, 1000000000);
     // Kung walang "auto" na ipinadala (lumang admin page) at may dailyCapacity = manual; kung wala ring number = auto.
     const autoCapacity = typeof req.body?.auto === 'boolean' ? req.body.auto : !Number.isFinite(dailyCapacity);
     if (!autoCapacity && !Number.isFinite(dailyCapacity)) return res.status(400).json({ success: false, message: 'dailyCapacity must be a whole number >= 0 (0 = off).' });
-    if (autoCapacity && !Number.isFinite(dailyCapacity)) {
-        // Auto: hindi kailangan ang manual value; panatilihin ang dating naka-save.
-        try {
-            const cur = await pgPoolDevices.query(`SELECT daily_capacity FROM relay_ai_capacity WHERE id = 'global'`);
-            dailyCapacity = cur.rows[0] ? Number(cur.rows[0].daily_capacity) || 0 : 0;
-        } catch (_) { dailyCapacity = 0; }
+    // Auto: hindi kailangan ang manual value; panatilihin ang dating naka-save.
+    if (autoCapacity && !Number.isFinite(dailyCapacity)) dailyCapacity = curCfg.manualCapacity;
+    let maxClients = curCfg.maxClients;
+    if (req.body?.maxClients !== undefined) {
+        const m = normalizeRelayAiSettingNumber(req.body.maxClients, NaN, 0, 100000);
+        if (!Number.isFinite(m)) return res.status(400).json({ success: false, message: 'maxClients must be a whole number >= 0 (0 = walang limit).' });
+        maxClients = m;
     }
+    const baseAuto = typeof req.body?.baseAuto === 'boolean' ? req.body.baseAuto : curCfg.baseAuto;
+    const reserveSlots = typeof req.body?.reserveSlots === 'boolean' ? req.body.reserveSlots : curCfg.reserveSlots;
     const ids = (Array.isArray(req.body?.lockedTierIds) ? req.body.lockedTierIds : String(req.body?.lockedTierIds || 'plus,pro').split(','))
         .map(x => String(x).trim().toLowerCase()).filter(x => /^[a-z0-9_-]{1,30}$/.test(x));
     try {
         await pgPoolDevices.query(
-            `INSERT INTO relay_ai_capacity (id, daily_capacity, locked_tier_ids, auto_capacity, updated_at) VALUES ('global', $1, $2, $3, now())
-             ON CONFLICT (id) DO UPDATE SET daily_capacity = EXCLUDED.daily_capacity, locked_tier_ids = EXCLUDED.locked_tier_ids, auto_capacity = EXCLUDED.auto_capacity, updated_at = now()`,
-            [dailyCapacity, ids.join(',') || 'plus,pro', autoCapacity]);
+            `INSERT INTO relay_ai_capacity (id, daily_capacity, locked_tier_ids, auto_capacity, max_clients, base_auto, reserve_slots, updated_at) VALUES ('global', $1, $2, $3, $4, $5, $6, now())
+             ON CONFLICT (id) DO UPDATE SET daily_capacity = EXCLUDED.daily_capacity, locked_tier_ids = EXCLUDED.locked_tier_ids, auto_capacity = EXCLUDED.auto_capacity,
+               max_clients = EXCLUDED.max_clients, base_auto = EXCLUDED.base_auto, reserve_slots = EXCLUDED.reserve_slots, updated_at = now()`,
+            [dailyCapacity, ids.join(',') || 'plus,pro', autoCapacity, maxClients, baseAuto, reserveSlots]);
         await releaseRelayAiLockIfFreed(relayAiMonthKey(), true);
         return res.json({ success: true, capacity: await getRelayAiCapacityState(relayAiMonthKey()) });
     } catch (err) {
@@ -8334,10 +8506,10 @@ app.post('/relay/admin/api/ai-plans/tier', requireAdminKey, async (req, res) => 
     if (!name) return res.status(400).json({ success: false, message: 'Tier name is required.' });
     const priceTokens = normalizeRelayAiSettingNumber(req.body?.priceTokens, NaN, 0, 10000000);
     const monthlyCredits = normalizeRelayAiSettingNumber(req.body?.monthlyCredits, NaN, 1, 1000000000);
-    const dailyCap = normalizeRelayAiSettingNumber(req.body?.dailyCap, NaN, 0, 1000000);
+    const dailyCap = normalizeRelayAiSettingNumber(req.body?.dailyCap, NaN, 0, 1000000000);
     const sortOrder = normalizeRelayAiSettingNumber(req.body?.sortOrder, 0, -1000, 1000);
     if ([priceTokens, monthlyCredits, dailyCap].some(v => !Number.isFinite(v))) {
-        return res.status(400).json({ success: false, message: 'priceTokens (>=0), monthlyCredits (>=1) and dailyCap (>=0, 0 = unlimited) must be whole numbers.' });
+        return res.status(400).json({ success: false, message: 'priceTokens (>=0), monthlyCredits (>=1) and dailyCap (neurons/day, >=0, 0 = unlimited) must be whole numbers.' });
     }
     const enabled = req.body?.enabled !== false;
     try {
@@ -8348,7 +8520,7 @@ app.post('/relay/admin/api/ai-plans/tier', requireAdminKey, async (req, res) => 
                monthly_credits = EXCLUDED.monthly_credits, daily_cap = EXCLUDED.daily_cap,
                sort_order = EXCLUDED.sort_order, enabled = EXCLUDED.enabled, updated_at = now()`,
             [id, name, priceTokens, monthlyCredits, dailyCap, sortOrder, enabled]);
-        console.log(`🤖 AI tier saved via admin: ${id} (${name}) ${priceTokens} tokens / ${monthlyCredits} credits / ${dailyCap} per day / ${enabled ? 'enabled' : 'disabled'}`);
+        console.log(`🤖 AI tier saved via admin: ${id} (${name}) ${priceTokens} tokens / ${monthlyCredits} credits / ${dailyCap} neurons per day / ${enabled ? 'enabled' : 'disabled'}`);
         return res.json({ success: true, tiers: await listRelayAiTiers(false) });
     } catch (err) {
         console.error('AI tier save error:', err.message);
@@ -9076,8 +9248,9 @@ app.post('/relay/admin/api/ai-credits/default', requireAdminKey, async (req, res
     try {
         if (!pgPoolDevices) return res.status(503).json({ success: false, message: 'Devices/License database is not configured.' });
         const current = await getRelayAiDefaultSettings();
-        const settings = normalizeRelayAiSettings(req.body, current);
-        if (settings.dailyCap === null || settings.dailyCap === undefined) settings.dailyCap = current.dailyCap;
+        // Ang naka-save na MANUAL na Base neurons ang pinagbabatayan (hindi ang epektibong auto divider value).
+        const settings = normalizeRelayAiSettings(req.body, { ...current, dailyCap: current.dailyCapManual });
+        if (settings.dailyCap === null || settings.dailyCap === undefined) settings.dailyCap = current.dailyCapManual;
         await pgPoolDevices.query(
             `INSERT INTO relay_ai_credit_settings (installation_id, monthly_credits, text_cost, file_cost, image_cost, daily_cap, updated_at)\n             VALUES ($1, $2, $3, $4, $5, $6, now())\n             ON CONFLICT (installation_id) DO UPDATE SET\n               monthly_credits = EXCLUDED.monthly_credits, text_cost = EXCLUDED.text_cost,\n               file_cost = EXCLUDED.file_cost, image_cost = EXCLUDED.image_cost, daily_cap = EXCLUDED.daily_cap, updated_at = now()`,
             [RELAY_AI_DEFAULT_SETTINGS_ID, settings.monthlyCredits, settings.textCost, settings.fileCost, settings.imageCost, settings.dailyCap]

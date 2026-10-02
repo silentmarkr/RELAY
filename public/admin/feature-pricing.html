@@ -285,7 +285,7 @@
           <label style="font-size:12px; color:var(--muted);">Text cost<input type="number" min="1" step="1" id="aiDefaultText" style="width:100%; margin-top:4px;"></label>
           <label style="font-size:12px; color:var(--muted);">File cost<input type="number" min="1" step="1" id="aiDefaultFile" style="width:100%; margin-top:4px;"></label>
           <label style="font-size:12px; color:var(--muted);">Image cost<input type="number" min="1" step="1" id="aiDefaultImage" style="width:100%; margin-top:4px;"></label>
-          <label style="font-size:12px; color:var(--muted);">Daily cap (tanong/araw, 0 = walang limit)<input type="number" min="0" step="1" id="aiDefaultDaily" style="width:100%; margin-top:4px;"></label>
+          <label style="font-size:12px; color:var(--muted);">Base daily neurons / client — manual (0 = walang limit). Ginagamit lang kapag naka-OFF ang Base auto (divider)<input type="number" min="0" step="1" id="aiDefaultDaily" style="width:100%; margin-top:4px;"></label>
         </div>
         <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
           <button class="btn-primary" onclick="saveAiDefaultSettings()">💾 Save Default AI Credits</button>
@@ -299,7 +299,7 @@
           <label style="font-size:12px; color:var(--muted);">Text cost<input type="number" min="1" step="1" id="aiOverrideText" style="width:100%; margin-top:4px;"></label>
           <label style="font-size:12px; color:var(--muted);">File cost<input type="number" min="1" step="1" id="aiOverrideFile" style="width:100%; margin-top:4px;"></label>
           <label style="font-size:12px; color:var(--muted);">Image cost<input type="number" min="1" step="1" id="aiOverrideImage" style="width:100%; margin-top:4px;"></label>
-          <label style="font-size:12px; color:var(--muted);">Daily cap (blangko = sundin ang Default, 0 = walang limit)<input type="number" min="0" step="1" id="aiOverrideDaily" placeholder="Default" style="width:100%; margin-top:4px;"></label>
+          <label style="font-size:12px; color:var(--muted);">Daily neurons (blangko = sundin ang Base, 0 = walang limit)<input type="number" min="0" step="1" id="aiOverrideDaily" placeholder="Base" style="width:100%; margin-top:4px;"></label>
         </div>
         <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
           <button class="btn-primary" onclick="saveAiInstallationSettings()">💾 Save Customer Override</button>
@@ -313,7 +313,7 @@
       <div class="card" id="cardAiPlans" style="border:1px solid var(--accent-dim);">
         <h2>⚡ Omni AI — Provider Status &amp; Upgrade Tiers</h2>
         <div class="backup-note">
-          Ang <b>Provider status</b> ay awtomatikong nagla-lock kapag naubos ang Cloudflare daily quota (10k neurons) — agad na tatanggihan ang AI requests hanggang 00:00 UTC (8:00 AM PH), walang hintay at walang nasisingil na credits. I-<b>Clear</b> ito pagkatapos mag-upgrade sa Workers Paid. Ang <b>Tiers</b> ang lalabas sa Help page ng client kapag naabot niya ang daily/monthly limit; binibili gamit ang Omni Tokens (≈ ₱1 bawat token) at valid hanggang katapusan ng buwan. Ang daily cap ay <b>0 = walang limit</b>.
+          Ang <b>Provider status</b> ay awtomatikong nagla-lock kapag naubos ang Cloudflare daily quota (10k neurons) — agad na tatanggihan ang AI requests hanggang 00:00 UTC (8:00 AM PH), walang hintay at walang nasisingil na credits. I-<b>Clear</b> ito pagkatapos mag-upgrade sa Workers Paid. Ang daily limit ay <b>NEURONS kada araw</b> (hindi na bilang ng tanong). Tatlo ang tier: <b>Base</b> (libre, hati ng Total daily capacity sa <b>Max clients / divider</b>), <b>Plus</b> at <b>Pro</b> (binibili gamit ang Omni Tokens, ≈ ₱1 bawat token, valid hanggang katapusan ng buwan). Lalabas ang upgrade sa Help page ng client kapag naabot niya ang daily/monthly limit. Ang daily neurons ay <b>0 = walang limit</b>.
         </div>
         <div id="aiProviderBox" style="margin-top:12px; padding:10px; border:1px solid var(--line); border-radius:10px;">Loading...</div>
         <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
@@ -334,7 +334,7 @@
         <div id="aiBreakdownBox" style="padding:10px; border:1px solid var(--line); border-radius:10px; margin-bottom:12px;">Loading...</div>
         <div style="font-size:12px; font-weight:700; margin-bottom:6px;">Neurons Planner — hatian ng daily limit</div>
         <div id="aiNeuronBox" style="padding:10px; border:1px solid var(--line); border-radius:10px; margin-bottom:12px;">Loading...</div>
-        <div style="font-size:12px; font-weight:700; margin-bottom:6px;">Auto-lock ng Plus/Pro (Total Daily Capacity)</div>
+        <div style="font-size:12px; font-weight:700; margin-bottom:6px;">Total Daily Capacity (neurons), Divider at Auto-lock ng Plus/Pro</div>
         <div id="aiCapacityBox" style="padding:10px; border:1px solid var(--line); border-radius:10px; margin-bottom:12px;">Loading...</div>
         <div style="font-size:12px; font-weight:700; margin-bottom:6px;">Extra Credits (top-up gamit ang Omni Tokens)</div>
         <div id="aiExtraBox" style="padding:10px; border:1px solid var(--line); border-radius:10px; margin-bottom:12px;">Loading...</div>
@@ -710,7 +710,9 @@ function stopAiPoll() {
 let relayAiCreditSettingsCache = null;
 function fillAiSettingInputs(prefix, settings) {
   if (!settings) return;
-  const map = { monthly: settings.monthlyCredits, text: settings.textCost, file: settings.fileCost, image: settings.imageCost, daily: settings.dailyCap };
+  // Default: ang MANUAL na naka-save na Base neurons ang ipinapakita (ang epektibong auto divider value ay nasa meta sa ibaba).
+  const dailyShown = (prefix === 'Default' && settings.dailyCapManual !== undefined) ? settings.dailyCapManual : settings.dailyCap;
+  const map = { monthly: settings.monthlyCredits, text: settings.textCost, file: settings.fileCost, image: settings.imageCost, daily: dailyShown };
   Object.entries(map).forEach(([key, value]) => {
     const el = document.getElementById(`ai${prefix}${key[0].toUpperCase()}${key.slice(1)}`);
     if (el) el.value = (value === null || value === undefined) ? '' : value;
@@ -747,9 +749,16 @@ async function loadAiCreditSettings() {
   // gumagana" ang buong feature. I-prefill ang Override fields ng Default
   // values bilang sensible starting point (mao-overwrite pa rin ito ng
   // selectAiOverride() kapag umiiral na ang override na pinili).
-  fillAiSettingInputs('Override', data.defaults);
+  // Blangko ang daily ng Override (= sundin ang Base); hindi ito dapat ma-freeze sa kasalukuyang Base value.
+  fillAiSettingInputs('Override', { ...data.defaults, dailyCap: null, dailyCapManual: null });
   const meta = document.getElementById('aiDefaultMeta');
-  if (meta) meta.innerText = `Current month: ${data.month} · Default ${data.defaults.source || 'Relay'}`;
+  if (meta) {
+    const d = data.defaults;
+    const baseTxt = d.dailyCapAuto
+      ? `Base ngayon: ${Number(d.dailyCap).toLocaleString()} neurons/araw bawat client (AUTO: Total capacity ÷ ${Number(d.maxClients).toLocaleString()} clients)`
+      : `Base ngayon: ${Number(d.dailyCap) === 0 ? 'walang limit' : Number(d.dailyCap).toLocaleString() + ' neurons/araw bawat client'} (manual)`;
+    meta.innerText = `Current month: ${data.month} · Default ${d.source || 'Relay'} · ${baseTxt}`;
+  }
   const list = document.getElementById('aiOverrideList');
   if (!list) return;
   if (!data.overrides?.length) { list.innerHTML = '<div class="empty">No customer overrides. Everyone uses the Default.</div>'; return; }
@@ -758,7 +767,7 @@ async function loadAiCreditSettings() {
       <code style="flex:1 1 240px;">${escapeHtml(o.installationId)}</code>
       <span>${o.monthlyCredits}/mo</span><span>used ${o.used}</span><span>left ${o.remaining}</span>
       <span class="meta">T${o.textCost} · F${o.fileCost} · I${o.imageCost}</span>
-      <span class="meta">${o.dailyCap === null || o.dailyCap === undefined ? 'daily: default' : (o.dailyCap === 0 ? 'daily: ∞' : 'daily: ' + o.dailyCap)}</span>
+      <span class="meta">${o.dailyCap === null || o.dailyCap === undefined ? 'daily: Base' : (o.dailyCap === 0 ? 'daily: ∞' : 'daily: ' + Number(o.dailyCap).toLocaleString() + ' neurons')}</span>
     </div>`).join('');
 }
 function escapeHtml(str) {
@@ -799,19 +808,19 @@ async function saveAiInstallationSettings() {
 async function resetAiInstallationSettings() {
   const id = document.getElementById('aiOverrideInstallation')?.value.trim();
   if (!id) { toast('Enter an installation ID first.', 'error'); return; }
-  const ok = await confirmAction({ title:'Use Default AI Credits?', message:`This removes the custom AI credit override for ${id} AND any AI plan (Plus/Pro) and extra credit packs they bought this month, and resets their used credits this month and today's question count to 0. They will immediately use the RELAY Default settings. Tokens are NOT refunded.`, confirmLabel:'Yes, use Default', danger:false });
+  const ok = await confirmAction({ title:'Use Default AI Credits?', message:`This removes the custom AI credit override for ${id} AND any AI plan (Plus/Pro) and extra credit packs they bought this month, and resets their used credits this month and today's neurons/question count to 0. They will immediately use the RELAY Default settings. Tokens are NOT refunded.`, confirmLabel:'Yes, use Default', danger:false });
   if (!ok) return;
   try {
     const data = await aiApi('/relay/admin/api/ai-credits/installation/reset', { method:'POST', body:JSON.stringify({ installationId:id}) });
     if (!data?.success) throw new Error(data?.message || 'Reset failed');
     const eff = data.effective || {};
-    const nowTxt = eff.monthlyLimit !== undefined ? ` Now: ${eff.monthlyLimit} credits/mo · ${eff.dailyUnlimited ? '∞' : eff.dailyCap}/day.` : '';
+    const nowTxt = eff.monthlyLimit !== undefined ? ` Now: ${eff.monthlyLimit} credits/mo · ${eff.dailyUnlimited ? '∞' : Number(eff.dailyCap).toLocaleString() + ' neurons'}/day.` : '';
     if (data.nothingToReset) {
       toast(`Nothing was found to reset for this ID (no override, plan, extra pack or usage). Check that the installation ID is exactly correct.${nowTxt}`, 'info');
     } else if (eff.tier || eff.extraCredits > 0 || eff.extraDailyBonus > 0) {
       toast(`Reset finished, but this customer STILL has ${eff.tier ? 'an AI plan (' + eff.tier.name + ')' : ''}${eff.tier && eff.extraCredits > 0 ? ' and ' : ''}${eff.extraCredits > 0 ? eff.extraCredits + ' extra credits' : ''}.${nowTxt}`, 'error');
     } else {
-      toast(`Reset done. Removed: ${data.removedTier ? 'AI plan, ' : ''}${data.removedExtraPacks || 0} extra pack(s)${data.usageCleared ? '; used credits & today\'s count cleared' : ''}.${nowTxt}`, 'success');
+      toast(`Reset done. Removed: ${data.removedTier ? 'AI plan, ' : ''}${data.removedExtraPacks || 0} extra pack(s)${data.usageCleared ? '; used credits & today\'s neurons cleared' : ''}.${nowTxt}`, 'success');
     }
     loadAiCreditSettings();
     loadAiPlans(); // i-refresh agad ang Clients/Extra daily/Capacity breakdown para tugma sa bagong estado
@@ -832,7 +841,7 @@ function aiTierRowHtml(t, isNew) {
         <label style="font-size:11px;color:var(--muted);">Pangalan<input type="text" data-f="name" maxlength="40" value="${v(t.name)}" style="width:100%;"></label>
         <label style="font-size:11px;color:var(--muted);">Presyo (Omni Tokens)<input type="number" min="0" step="1" data-f="priceTokens" value="${v(t.priceTokens)}" style="width:100%;"></label>
         <label style="font-size:11px;color:var(--muted);">Monthly credits<input type="number" min="1" step="1" data-f="monthlyCredits" value="${v(t.monthlyCredits)}" style="width:100%;"></label>
-        <label style="font-size:11px;color:var(--muted);">Daily cap (0 = ∞)<input type="number" min="0" step="1" data-f="dailyCap" value="${v(t.dailyCap)}" style="width:100%;"></label>
+        <label style="font-size:11px;color:var(--muted);">Daily neurons (0 = ∞)<input type="number" min="0" step="1" data-f="dailyCap" value="${v(t.dailyCap)}" style="width:100%;"></label>
         <label style="font-size:11px;color:var(--muted);">Order<input type="number" step="1" data-f="sortOrder" value="${v(t.sortOrder === undefined ? 0 : t.sortOrder)}" style="width:100%;"></label>
         <label style="font-size:12px;"><input type="checkbox" data-f="enabled" ${t.enabled === false ? '' : 'checked'}> Enabled</label>
       </div>
@@ -983,18 +992,20 @@ function renderAiBreakdownBox(b, c) {
   const extraDaily = Number(b.extraDaily) || 0;
   let formula;
   if (!c.enabled) {
-    formula = `<div class="meta">⚪ OFF — i-set ang <b>Total daily capacity</b> sa ibaba (0 = off) para gumana ang formula ng extra credit.</div>`;
+    formula = `<div class="meta">⚪ OFF — i-set ang <b>Total daily capacity</b> (neurons) sa ibaba (0 = off) para gumana ang formula ng extra credit.</div>`;
   } else {
     const baseDaily = Number(base.dailyTotal) || 0;
-    const rawLeft = Number(c.capacity) - tiersTotal - baseDaily - extraDaily;
+    const reserved = Number(c.reservedForSlots) || 0;
+    const rawLeft = Number(c.capacity) - tiersTotal - baseDaily - extraDaily - reserved;
     const left = Math.max(0, rawLeft); // hindi kailanman nagne-negative
     const over = Math.max(0, -rawLeft);
-    formula = `<div style="font-size:12px; font-weight:700; margin:0 0 4px;">Formula ng Extra Credit (tanong/araw)</div>
+    formula = `<div style="font-size:12px; font-weight:700; margin:0 0 4px;">Formula ng Extra Credit (neurons/araw)</div>
       <div style="display:grid; grid-template-columns:1fr auto; gap:2px 12px; font-size:12px; max-width:460px;">
-        <span>Cloudflare daily limit (Total daily capacity)</span><b style="text-align:right;">${n(c.capacity)}</b>
+        <span>Cloudflare daily limit (Total daily capacity, neurons)</span><b style="text-align:right;">${n(c.capacity)}</b>
         <span>− Total ng client tier plans (${tiers.map(t => escapeHtml(t.name || t.id)).join(' + ') || 'walang tier'})</span><b style="text-align:right;">${n(tiersTotal)}</b>
         <span>− Base clients (${n(base.clients)} client(s), may active AI)</span><b style="text-align:right;">${n(baseDaily)}</b>
         <span>− Extra daily na naibenta na</span><b style="text-align:right;">${n(extraDaily)}</b>
+        ${c.reserveSlots ? `<span>− Nakareserba sa bakanteng slots (${n(c.slotsLeft || 0)} × ${n(c.baseDailyEffective)})</span><b style="text-align:right;">${n(reserved)}</b>` : ''}
         <span style="border-top:1px solid var(--line); padding-top:3px; font-weight:700;">= Extra credit na puwede pang bilhin (daily)</span>
         <b style="text-align:right; border-top:1px solid var(--line); padding-top:3px; color:${left > 0 ? 'var(--success,#69db7c)' : 'var(--danger,#ff6b6b)'};">${n(left)}</b>
       </div>`;
@@ -1002,12 +1013,13 @@ function renderAiBreakdownBox(b, c) {
       formula += `<div class="meta" style="margin-top:6px;">Paalala: lampas na ng <b style="color:var(--danger,#ff6b6b);">${n(over)}</b> ang kabuuang daily na hawak ng lahat ng client sa Total daily capacity, kaya <b>0</b> na ang puwedeng ibenta.</div>`;
     }
   }
-  box.innerHTML = `<div class="meta" style="margin-bottom:6px;">Buwan: ${escapeHtml(b.month || '')} · Kabuuang tier clients: <b>${n(tierClients)}</b> · Base: <b>${n(base.clients)}</b>. Ang ∞ (unlimited) na tier ay binibilang na katumbas ng buong capacity.</div>
+  const slotsTxt = Number(c.maxClients) > 0 ? `${n(c.liveClients)} / ${n(c.maxClients)}` : `${n(c.liveClients)} (walang limit)`;
+  box.innerHTML = `<div class="meta" style="margin-bottom:6px;">Buwan: ${escapeHtml(b.month || '')} · Clients na may Omni AI: <b>${slotsTxt}</b> · Tier clients (Plus/Pro): <b>${n(tierClients)}</b> · Base: <b>${n(base.clients)}</b>. Ang ∞ (unlimited) na tier ay binibilang na katumbas ng buong capacity.</div>
     <div style="overflow-x:auto; margin-bottom:10px;">
       <table style="border-collapse:collapse; width:100%; font-size:12px;">
         <thead><tr>
           <th style="${tdL} color:var(--muted);">Plan</th><th style="${tdR} color:var(--muted);">Clients</th>
-          <th style="${tdR} color:var(--muted);">Daily/client</th><th style="${tdR} color:var(--muted);">Total daily</th>
+          <th style="${tdR} color:var(--muted);">Neurons/client</th><th style="${tdR} color:var(--muted);">Total neurons</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
@@ -1018,7 +1030,7 @@ function renderAiBreakdownBox(b, c) {
 let aiNeuronState = null;     // sagot ng /ai-neurons
 let aiBreakdownCache = null;  // galing sa /ai-plans (actual clients per plan)
 let aiSimCounts = {};         // key -> bilang ng customers na tinype ng admin
-let aiSimExtra = null;        // extra daily (tanong/araw) na tinype ng admin
+let aiSimExtra = null;        // extra daily (neurons/araw) na tinype ng admin
 let aiSimRows = [];
 let aiNeuDraft = null;        // hindi pa naka-save na settings (para hindi mawala kapag nag-refresh)
 function aiNeuFmt(x, d) {
@@ -1027,36 +1039,36 @@ function aiNeuFmt(x, d) {
 function aiNeuBuildRows() {
   const b = aiBreakdownCache;
   if (!b) return [];
-  const rows = [{ key: 'base', label: 'Base (libre)', cap: Number(b.base && b.base.dailyCapDefault) || 0, actual: Number(b.base && b.base.clients) || 0 }];
+  const rows = [{ key: 'base', label: 'Base', cap: Number(b.base && b.base.dailyCapDefault) || 0, actual: Number(b.base && b.base.clients) || 0 }];
   (b.tiers || []).filter((t) => t.enabled && !t.removed).forEach((t) => {
     rows.push({ key: 'tier:' + t.id, label: t.name || t.id, cap: Number(t.dailyCap) || 0, actual: Number(t.clients) || 0 });
   });
   return rows;
 }
-// Pure computation (walang DOM) para madaling i-test.
-function aiNeuronCompute(cfg, rows, counts, extraQ) {
+// Pure computation (walang DOM) para madaling i-test. Lahat ng daily limit ay NEURONS; ang "tanong" ay tantiya lang
+// (neurons ÷ neurons kada tanong) para madaling ma-visualize.
+function aiNeuronCompute(cfg, rows, counts, extraN) {
   const perQ = (cfg.inputTokens * cfg.inputRate + cfg.outputTokens * cfg.outputRate) / 1000000;
   const budget = cfg.effective === 'paid' ? cfg.paidBudget : cfg.freeNeurons;
   const capQ = perQ > 0 ? Math.floor(budget / perQ) : 0;
-  let totalQ = 0, totalN = 0, totalClients = 0, hasUnlimited = false;
+  let totalN = 0, totalClients = 0, hasUnlimited = false;
   const lines = rows.map((r, i) => {
     const c = counts[i] || 0;
     const unlimited = r.cap === 0;
-    const q = unlimited ? capQ : r.cap;
+    const n = unlimited ? budget : r.cap;          // neurons/araw bawat client (∞ = buong budget)
     if (unlimited && c > 0) hasUnlimited = true;
-    const tq = c * q, tn = tq * perQ;
-    totalQ += tq; totalN += tn; totalClients += c;
-    return { clients: c, q, unlimited, perClientN: q * perQ, totalQ: tq, totalN: tn, share: budget > 0 ? (tn / budget) * 100 : 0 };
+    const tn = c * n;
+    totalN += tn; totalClients += c;
+    return { clients: c, n, unlimited, q: perQ > 0 ? n / perQ : 0, totalN: tn, share: budget > 0 ? (tn / budget) * 100 : 0 };
   });
-  const extraN = extraQ * perQ;
-  totalQ += extraQ; totalN += extraN;
+  totalN += extraN;
   const remainingN = budget - totalN;
   const pct = budget > 0 ? (totalN / budget) * 100 : 0;
   let status = 'empty';
   if (totalN > 0) status = pct > 100 ? 'over' : (pct > 80 ? 'tight' : 'ok');
   return {
-    perQ, budget, capQ, lines, totalQ, totalN, totalClients, hasUnlimited, pct, status,
-    extra: { q: extraQ, n: extraN, share: budget > 0 ? (extraN / budget) * 100 : 0 },
+    perQ, budget, capQ, lines, totalN, totalClients, hasUnlimited, pct, status,
+    extra: { n: extraN, share: budget > 0 ? (extraN / budget) * 100 : 0 },
     remainingN, remainingQ: perQ > 0 ? Math.floor(Math.max(0, remainingN) / perQ) : 0,
     shortN: Math.max(0, -remainingN), shortQ: perQ > 0 ? Math.ceil(Math.max(0, -remainingN) / perQ) : 0,
     costDay: cfg.effective === 'paid' ? (Math.max(0, totalN - cfg.freeNeurons) / 1000) * 0.011 : 0
@@ -1103,7 +1115,7 @@ function renderAiNeuronBox() {
   const rowsHtml = aiSimRows.map((r, i) => `<tr data-sim-row data-idx="${i}">
       <td style="${tdL}">${escapeHtml(r.label)} <span class="meta">(actual: ${aiNeuFmt(r.actual)})</span></td>
       <td style="${tdR}"><input class="aiSimCount" type="number" min="0" step="1" value="${aiSimCounts[r.key]}" oninput="recomputeAiSim(true)" style="width:70px;"></td>
-      <td style="${tdR}" data-c="q"></td><td style="${tdR}" data-c="pc"></td><td style="${tdR}" data-c="tq"></td><td style="${tdR}" data-c="tn"></td><td style="${tdR}" data-c="sh"></td>
+      <td style="${tdR}" data-c="n"></td><td style="${tdR}" data-c="q"></td><td style="${tdR}" data-c="tn"></td><td style="${tdR}" data-c="sh"></td>
     </tr>`).join('');
   const hd = (t) => `<th style="${tdR} color:var(--muted);">${t}</th>`;
   box.innerHTML = `
@@ -1126,16 +1138,16 @@ function renderAiNeuronBox() {
     <div style="overflow-x:auto; margin-bottom:8px;">
       <table style="border-collapse:collapse; width:100%; font-size:12px;">
         <thead><tr>
-          <th style="${tdL} color:var(--muted);">Plan</th>${hd('Customers')}${hd('Tanong/araw bawat isa')}${hd('Neurons bawat isa')}${hd('Total tanong')}${hd('Total neurons')}${hd('% ng budget')}
+          <th style="${tdL} color:var(--muted);">Plan</th>${hd('Customers')}${hd('Neurons/araw bawat isa')}${hd('≈ Tanong bawat isa')}${hd('Total neurons')}${hd('% ng budget')}
         </tr></thead>
         <tbody>${rowsHtml}
           <tr data-sim-extra>
-            <td style="${tdL}">Extra daily (add-on) <span class="meta">(tanong/araw total)</span></td>
-            <td style="${tdR}"><input id="aiSimExtra" type="number" min="0" step="1" value="${aiSimExtra}" oninput="recomputeAiSim(true)" style="width:70px;"></td>
-            <td style="${tdR}">—</td><td style="${tdR}">—</td><td style="${tdR}" data-c="tq"></td><td style="${tdR}" data-c="tn"></td><td style="${tdR}" data-c="sh"></td>
+            <td style="${tdL}">Extra daily (add-on) <span class="meta">(neurons/araw total)</span></td>
+            <td style="${tdR}"><input id="aiSimExtra" type="number" min="0" step="1" value="${aiSimExtra}" oninput="recomputeAiSim(true)" style="width:90px;"></td>
+            <td style="${tdR}">—</td><td style="${tdR}" data-c="q"></td><td style="${tdR}" data-c="tn"></td><td style="${tdR}" data-c="sh"></td>
           </tr>
           <tr data-sim-total style="font-weight:700;">
-            <td style="${tdL}">TOTAL</td><td style="${tdR}" data-c="cl"></td><td style="${tdR}">—</td><td style="${tdR}">—</td><td style="${tdR}" data-c="tq"></td><td style="${tdR}" data-c="tn"></td><td style="${tdR}" data-c="sh"></td>
+            <td style="${tdL}">TOTAL</td><td style="${tdR}" data-c="cl"></td><td style="${tdR}">—</td><td style="${tdR}" data-c="q"></td><td style="${tdR}" data-c="tn"></td><td style="${tdR}" data-c="sh"></td>
           </tr>
         </tbody>
       </table>
@@ -1166,12 +1178,12 @@ function recomputeAiSim(fromInput) {
   });
   const exEl = document.getElementById('aiSimExtra');
   const ev = exEl ? Math.floor(Number(exEl.value)) : 0;
-  const extraQ = Number.isFinite(ev) && ev > 0 ? Math.min(ev, 1000000000) : 0;
-  aiSimExtra = extraQ;
+  const extraN = Number.isFinite(ev) && ev > 0 ? Math.min(ev, 1000000000) : 0;
+  aiSimExtra = extraN;
   if (fromInput) {
     aiNeuDraft = { override: cfg.override, paid: cfg.paidBudget, inTok: cfg.inputTokens, outTok: cfg.outputTokens, inRate: cfg.inputRate, outRate: cfg.outputRate };
   }
-  const R = aiNeuronCompute(cfg, aiSimRows, counts, extraQ);
+  const R = aiNeuronCompute(cfg, aiSimRows, counts, extraN);
   const F = aiNeuFmt;
   const planLine = document.getElementById('aiNeuPlanLine');
   if (planLine) {
@@ -1183,26 +1195,25 @@ function recomputeAiSim(fromInput) {
   const perQEl = document.getElementById('aiNeuPerQ');
   if (perQEl) {
     perQEl.innerHTML = R.perQ > 0
-      ? `≈ <b>${F(R.perQ, 1)}</b> neurons kada tanong → buong budget ay katumbas ng ≈ <b>${F(R.capQ)}</b> tanong/araw (ito ang daily capacity kung 100% ang gagamitin).`
+      ? `≈ <b>${F(R.perQ, 1)}</b> neurons kada tanong → ang buong budget ay katumbas ng ≈ <b>${F(R.capQ)}</b> tanong/araw. Ang daily limit ng bawat client ay <b>neurons</b> na (ang tanong ay tantiya lang).`
       : '<span style="color:var(--danger,#ff6b6b);">Lagyan ng tokens at rate para makuha ang neurons kada tanong.</span>';
   }
   const setCell = (row, c, txt) => { const el = row && row.querySelector('[data-c="' + c + '"]'); if (el) el.textContent = txt; };
   box.querySelectorAll('tr[data-sim-row]').forEach((tr) => {
     const l = R.lines[Number(tr.getAttribute('data-idx'))];
     if (!l) return;
-    setCell(tr, 'q', F(l.q) + (l.unlimited ? ' (∞)' : ''));
-    setCell(tr, 'pc', F(l.perClientN, 1));
-    setCell(tr, 'tq', F(l.totalQ));
+    setCell(tr, 'n', F(l.n) + (l.unlimited ? ' (∞)' : ''));
+    setCell(tr, 'q', '≈ ' + F(l.q));
     setCell(tr, 'tn', F(l.totalN, 1));
     setCell(tr, 'sh', F(l.share, 1) + '%');
   });
   const exRow = box.querySelector('tr[data-sim-extra]');
-  setCell(exRow, 'tq', F(R.extra.q));
+  setCell(exRow, 'q', R.perQ > 0 ? '≈ ' + F(R.extra.n / R.perQ) : '—');
   setCell(exRow, 'tn', F(R.extra.n, 1));
   setCell(exRow, 'sh', F(R.extra.share, 1) + '%');
   const totRow = box.querySelector('tr[data-sim-total]');
   setCell(totRow, 'cl', F(R.totalClients));
-  setCell(totRow, 'tq', F(R.totalQ));
+  setCell(totRow, 'q', R.perQ > 0 ? '≈ ' + F(R.totalN / R.perQ) : '—');
   setCell(totRow, 'tn', F(R.totalN, 1));
   setCell(totRow, 'sh', F(R.pct, 1) + '%');
   const stEl = document.getElementById('aiSimStatus');
@@ -1214,7 +1225,7 @@ function recomputeAiSim(fromInput) {
   const color = R.status === 'over' ? 'var(--danger,#ff6b6b)' : (R.status === 'tight' ? 'var(--warning,#ffa94d)' : 'var(--success,#69db7c)');
   const title = R.status === 'over' ? '❌ HINDI KASYA' : (R.status === 'tight' ? '⚠️ KASYA PERO HALOS PUNO' : '✅ KASYA');
   let html = `<div style="color:${color}; font-weight:700;">${title}</div>
-    <div style="font-size:12px; margin-top:4px;">Kung lahat ng ${F(R.totalClients)} customer ay maubos ang daily limit nila: <b>${F(R.totalQ)}</b> tanong = <b>${F(R.totalN, 1)}</b> neurons / ${F(R.budget)} neurons (<b>${F(R.pct, 1)}%</b>).</div>`;
+    <div style="font-size:12px; margin-top:4px;">Kung lahat ng ${F(R.totalClients)} customer ay maubos ang daily neurons nila: <b>${F(R.totalN, 1)}</b> neurons / ${F(R.budget)} neurons (<b>${F(R.pct, 1)}%</b>).</div>`;
   if (R.status === 'over') {
     html += `<div style="font-size:12px; margin-top:4px;">Lampas ng <b>${F(R.shortN, 1)}</b> neurons (≈ ${F(R.shortQ)} tanong/araw). ${cfg.effective === 'paid'
       ? 'Lampas ito sa paid budget na itinakda mo.'
@@ -1226,7 +1237,7 @@ function recomputeAiSim(fromInput) {
     html += `<div style="font-size:12px; margin-top:4px;">Tantiyang gastos sa sobra sa ${F(cfg.freeNeurons)} libre: ≈ <b>$${R.costDay.toFixed(3)}</b>/araw (≈ $${(R.costDay * 30).toFixed(2)}/30 araw).</div>`;
   }
   if (R.hasUnlimited) {
-    html += `<div class="meta" style="margin-top:4px;">Ang tier na ∞ (daily cap 0) ay binilang na katumbas ng buong capacity (${F(R.capQ)} tanong/araw).</div>`;
+    html += `<div class="meta" style="margin-top:4px;">Ang tier na ∞ (daily neurons 0) ay binilang na katumbas ng buong budget (${F(R.budget)} neurons).</div>`;
   }
   stEl.innerHTML = html;
 }
@@ -1280,8 +1291,8 @@ async function aiSimApplyCapacity() {
   if (!aiNeuronState) return;
   const cfg = aiNeuronReadConfig();
   const R = aiNeuronCompute(cfg, [], [], 0);
-  if (!(R.capQ > 0)) { toast('Lagyan muna ng tokens at rate para makuha ang capacity.', 'error'); return; }
-  const ok = await confirmAction({ title: 'Gawing AUTO ang Total daily capacity?', message: `Sasave ang Neurons Planner settings at ise-set ang Total daily capacity sa AUTO: ${aiNeuFmt(R.capQ)} tanong/araw (${aiNeuFmt(R.budget)} neurons ÷ ${aiNeuFmt(R.perQ, 1)} neurons kada tanong). Kusa na itong susunod sa Neurons Planner. Ito ang gagamitin ng auto-lock ng Plus/Pro at ng extra credit.` });
+  if (!(R.perQ > 0)) { toast('Lagyan muna ng tokens at rate para makuha ang capacity.', 'error'); return; }
+  const ok = await confirmAction({ title: 'Gawing AUTO ang Total daily capacity?', message: `Sasave ang Neurons Planner settings at ise-set ang Total daily capacity sa AUTO: ${aiNeuFmt(R.budget)} neurons/araw (Free = 10,000; Paid = budget na itinakda mo). Kusa na itong susunod sa Neurons Planner. Ito ang gagamitin ng Base divider, ng auto-lock ng Plus/Pro at ng extra credit.` });
   if (!ok) return;
   const saved = await saveAiNeuronSettings();
   if (!saved) return;
@@ -1291,22 +1302,43 @@ async function aiSimApplyCapacity() {
 function renderAiCapacityBox(c) {
   const box = document.getElementById('aiCapacityBox');
   if (!box || !c) return;
+  const n = (x) => Number(x || 0).toLocaleString();
   const status = !c.enabled ? '⚪ OFF (capacity = 0)'
     : (c.locked ? `🔒 LOCKED hanggang katapusan ng buwan — ${escapeHtml(c.lockReason || '')}`
       : (Number(c.committed) >= Number(c.capacity) ? '🟠 Puno na ang capacity (walang matitira)' : '🟢 Bukas pa'));
   const auto = c.capacityAuto !== false;
+  const baseAuto = c.baseAuto !== false;
   const autoTxt = auto
-    ? `<div class="meta" style="margin:0 0 6px;">⚙️ AUTO — kinukuha sa Neurons Planner: ${Number(c.autoNeuronsPerDay || 0).toLocaleString()} neurons/araw (${escapeHtml(c.autoPlan === 'paid' ? 'Paid' : 'Free')}) ÷ ${Number(c.autoPerQuestion || 0).toFixed(1)} neurons kada tanong = <b>${c.capacity}</b> tanong/araw. Kusang nagbabago kapag binago ang Neurons Planner.</div>`
+    ? `<div class="meta" style="margin:0 0 6px;">⚙️ AUTO — kinukuha sa Neurons Planner: <b>${n(c.autoNeuronsPerDay)}</b> neurons/araw (${escapeHtml(c.autoPlan === 'paid' ? 'Paid' : 'Free')}) = Total daily capacity. Kusang nagbabago kapag binago ang Neurons Planner.</div>`
     : `<div class="meta" style="margin:0 0 6px;">✍️ MANUAL — mano-manong itinakda. Lagyan ng tsek ang Auto para sundin ang Neurons Planner.</div>`;
+  const maxClients = Number(c.maxClients) || 0;
+  const slotsTxt = maxClients > 0
+    ? `Clients na may Omni AI: <b>${n(c.liveClients)} / ${n(maxClients)}</b> (natitirang slot: <b>${n(c.slotsLeft)}</b>)${Number(c.slotsLeft) === 0 ? ' — 🔒 puno na, walang bagong client na maa-activate' : ''}`
+    : `Clients na may Omni AI: <b>${n(c.liveClients)}</b> (walang limit — 0 ang Max clients)`;
+  const baseTxt = c.baseAutoActive
+    ? `Base = ${n(c.capacity)} ÷ ${n(maxClients)} = <b>${n(c.baseDailyEffective)}</b> neurons/araw bawat client`
+    : `Base = <b>${Number(c.baseDailyEffective) === 0 ? 'walang limit' : n(c.baseDailyEffective) + ' neurons/araw bawat client'}</b> (manual na value sa Default sa itaas${baseAuto ? '; para umandar ang auto divider, kailangang higit sa 0 ang Max clients at ang capacity' : '; naka-OFF ang auto divider'})`;
   box.innerHTML = `<div style="font-weight:700;">${status}</div>
-    <div class="meta" style="margin:4px 0 8px;">Committed: <b>${c.committed}</b> / ${c.capacity} tanong kada araw (tier: ${c.tiersDaily || 0} + base: ${c.baseDaily || 0} + extra: ${c.extraDaily || 0}; natitira: ${c.leftover ?? '—'}${c.overCapacity > 0 ? `, lampas ng ${c.overCapacity}` : ''}). Naka-lock na tier: ${escapeHtml((c.lockedTierIds||[]).join(', '))}</div>
+    <div class="meta" style="margin:4px 0 8px;">Committed: <b>${n(c.committed)}</b> / ${n(c.capacity)} neurons kada araw (tier: ${n(c.tiersDaily)} + base: ${n(c.baseDaily)} + extra: ${n(c.extraDaily)}; ${c.reserveSlots ? 'nakareserba sa bakanteng slots (extra credits lang): ' + n(c.reservedForSlots) + ';' : 'reserve sa bakanteng slots: OFF;'} natitira: ${c.leftover === null || c.leftover === undefined ? '—' : n(c.leftover)}${c.overCapacity > 0 ? `, lampas ng ${n(c.overCapacity)}` : ''}). Naka-lock na tier: ${escapeHtml((c.lockedTierIds||[]).join(', '))}</div>
     ${autoTxt}
     <label style="display:flex; gap:6px; align-items:center; font-size:12px; margin-bottom:8px;">
       <input id="aiCapacityAuto" type="checkbox" ${auto ? 'checked' : ''} onchange="aiCapacityAutoToggle(${Number(c.manualCapacity) || 0}, ${Number(c.capacity) || 0})"> Auto (galing sa Neurons Planner)
     </label>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:10px;">
+      <label style="font-size:11px; color:var(--muted);">Total daily capacity (neurons)<br><input id="aiCapacityInput" type="number" min="0" value="${auto ? c.capacity : (Number(c.manualCapacity) || 0)}" ${auto ? 'disabled' : ''} style="width:150px;" placeholder="Total daily capacity"></label>
+      <label style="font-size:11px; color:var(--muted);">Naka-lock na tier (comma)<br><input id="aiCapacityTiers" type="text" value="${escapeHtml((c.lockedTierIds||[]).join(','))}" style="width:130px;" placeholder="plus,pro"></label>
+    </div>
+    <div style="padding:8px; border:1px solid var(--line); border-radius:8px; margin-bottom:10px;">
+      <div style="font-size:12px; font-weight:700; margin-bottom:4px;">➗ Divider — ilang client lang ang puwedeng gumamit ng Omni AI</div>
+      <div class="meta" style="margin-bottom:6px;">${slotsTxt}<br>${baseTxt}</div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+        <label style="font-size:11px; color:var(--muted);">Max clients (divider, 0 = walang limit)<br><input id="aiCapacityMaxClients" type="number" min="0" step="1" value="${maxClients}" style="width:150px;"></label>
+        <label style="display:flex; gap:6px; align-items:center; font-size:12px;"><input id="aiCapacityBaseAuto" type="checkbox" ${baseAuto ? 'checked' : ''}> Base neurons = Total daily capacity ÷ Max clients</label>
+      </div>
+      <label style="display:flex; gap:6px; align-items:flex-start; font-size:12px; margin-top:8px;"><input id="aiCapacityReserve" type="checkbox" ${c.reserveSlots ? 'checked' : ''} style="margin-top:2px;"> <span><b>I-reserve ang Base share ng mga bakanteng slot</b> (hindi ito maibebenta bilang extra neurons). Naka-OFF = dating ugali. Tandaan: kapag auto divider, halos walang matitira para sa extra packs na may +neurons/araw.</span></label>
+      <div class="meta" style="margin-top:6px;">Hindi nito pinapatalsik ang kasalukuyang clients; ang renewal ay laging pinapayagan. Kapag puno na ang slots, walang bagong client na maa-activate hangga't walang nabakante.</div>
+    </div>
     <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-      <input id="aiCapacityInput" type="number" min="0" value="${auto ? c.capacity : (Number(c.manualCapacity) || 0)}" ${auto ? 'disabled' : ''} style="width:130px;" placeholder="Total daily capacity">
-      <input id="aiCapacityTiers" type="text" value="${escapeHtml((c.lockedTierIds||[]).join(','))}" style="width:130px;" placeholder="plus,pro">
       <button class="btn-primary" onclick="saveAiCapacity()">💾 Save</button>
       <button class="btn-ghost" onclick="unlockAiTiers()">🔓 Unlock ngayong buwan</button>
     </div>`;
@@ -1321,14 +1353,18 @@ function aiCapacityAutoToggle(manual, current) {
 async function saveAiCapacity() {
   const auto = !!document.getElementById('aiCapacityAuto')?.checked;
   const lockedTierIds = document.getElementById('aiCapacityTiers').value;
-  const body = { auto, lockedTierIds };
+  const maxClients = Number(document.getElementById('aiCapacityMaxClients')?.value);
+  if (!Number.isInteger(maxClients) || maxClients < 0) { toast('Max clients must be a whole number >= 0 (0 = walang limit).', 'error'); return false; }
+  const baseAuto = !!document.getElementById('aiCapacityBaseAuto')?.checked;
+  const reserveSlots = !!document.getElementById('aiCapacityReserve')?.checked;
+  const body = { auto, lockedTierIds, maxClients, baseAuto, reserveSlots };
   if (!auto) {
     const dailyCapacity = Number(document.getElementById('aiCapacityInput').value);
     if (!Number.isInteger(dailyCapacity) || dailyCapacity < 0) { toast('Capacity must be a whole number >= 0 (0 = off).', 'error'); return false; }
     body.dailyCapacity = dailyCapacity;
   }
   const data = await aiApi('/relay/admin/api/ai-plans/capacity', { method:'POST', body:JSON.stringify(body) });
-  if (data?.success) { toast(auto ? 'Capacity: AUTO (sinusundan ang Neurons Planner).' : 'Capacity saved (manual).', 'success'); loadAiPlans(); return true; }
+  if (data?.success) { toast(auto ? 'Capacity: AUTO (sinusundan ang Neurons Planner). Divider saved.' : 'Capacity saved (manual). Divider saved.', 'success'); loadAiPlans(); loadAiCreditSettings(); return true; }
   toast(data?.message || 'Save failed.', 'error');
   return false;
 }
@@ -1342,13 +1378,13 @@ function aiExtraPackRowHtml(p, isNew) {
     <input data-f="id" value="${v(p.id)}" ${isNew ? '' : 'readonly'} placeholder="id" style="width:90px;">
     <input data-f="name" value="${v(p.name)}" placeholder="Pangalan" style="width:120px;">
     <input data-f="credits" type="number" min="1" value="${v(p.credits)}" placeholder="credits" style="width:80px;">
-    <input data-f="dailyBonus" type="number" min="0" value="${v(p.dailyBonus || 0)}" placeholder="+/araw" title="Extra daily cap (tanong/araw) na kinukuha sa natitirang capacity" style="width:70px;">
+    <input data-f="dailyBonus" type="number" min="0" value="${v(p.dailyBonus || 0)}" placeholder="+neurons/araw" title="Extra daily neurons na kinukuha sa natitirang capacity" style="width:105px;">
     <input data-f="priceTokens" type="number" min="1" value="${v(p.priceTokens)}" placeholder="tokens" style="width:80px;">
     <input data-f="sortOrder" type="number" value="${v(p.sortOrder || 0)}" style="width:55px;" title="sort">
     <label style="font-size:12px;"><input data-f="enabled" type="checkbox" ${p.enabled === false ? '' : 'checked'}> on</label>
     <button class="btn-primary" onclick="saveAiExtraPack(this)">💾</button>
     ${isNew ? '' : `<button class="btn-ghost" onclick="deleteAiExtraPack('${v(p.id)}')">🗑</button>`}
-    ${isNew ? '' : `<span class="meta">${v(p.pricePerCredit)} token/credit · +${v(p.dailyBonus || 0)}/araw · ${v(p.salesThisMonth)} benta ngayong buwan</span>`}
+    ${isNew ? '' : `<span class="meta">${v(p.pricePerCredit)} token/credit · +${v(p.dailyBonus || 0)} neurons/araw · ${v(p.salesThisMonth)} benta ngayong buwan</span>`}
   </div>`;
 }
 async function loadAiExtra() {
@@ -1388,7 +1424,7 @@ async function saveAiExtraPack(btn) {
     sortOrder: Number(get('sortOrder').value || 0), enabled: get('enabled').checked
   };
   if (!body.id || !body.name || !Number.isInteger(body.credits) || body.credits < 1 || !Number.isInteger(body.priceTokens) || body.priceTokens < 1 || !Number.isInteger(body.dailyBonus) || body.dailyBonus < 0) {
-    toast('Invalid pack: kailangan ang ID, pangalan, credits ≥ 1, tokens ≥ 1, +/araw ≥ 0.', 'error'); return;
+    toast('Invalid pack: kailangan ang ID, pangalan, credits ≥ 1, tokens ≥ 1, +neurons/araw ≥ 0.', 'error'); return;
   }
   const data = await aiApi('/relay/admin/api/ai-extra/pack', { method:'POST', body:JSON.stringify(body) });
   if (data?.success) { toast('Pack saved.', 'success'); loadAiExtra(); } else toast(data?.message || 'Save failed.', 'error');
@@ -1428,7 +1464,7 @@ async function saveAiTier(btn) {
     enabled: get('enabled').checked
   };
   if (!body.id || !body.name || !Number.isInteger(body.priceTokens) || body.priceTokens < 0 || !Number.isInteger(body.monthlyCredits) || body.monthlyCredits < 1 || !Number.isInteger(body.dailyCap) || body.dailyCap < 0) {
-    toast('Invalid tier values: kailangan ang ID, pangalan, presyo ≥ 0, monthly ≥ 1, daily ≥ 0.', 'error'); return;
+    toast('Invalid tier values: kailangan ang ID, pangalan, presyo ≥ 0, monthly ≥ 1, daily neurons ≥ 0.', 'error'); return;
   }
   try {
     const data = await aiApi('/relay/admin/api/ai-plans/tier', { method:'POST', body:JSON.stringify(body) });
