@@ -1566,9 +1566,10 @@ function renderAiProviderCfg(d) {
       <div class="meta" style="margin-top:6px;">Ang "Neurons / 1M tokens" ang conversion para magamit ang parehong daily neurons ng Base/Plus/Pro sa Google. Default = katumbas ng presyo ($0.011 / 1,000 neurons). Baguhin kapag nagbago ang presyo ng Google.</div>
       ${usageHtml}
     </div>
+    <div id="aiPvTestResult" class="meta" style="display:none; margin-top:8px; font-weight:700; word-break:break-word;"></div>
     <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
       <button class="btn-primary" onclick="saveAiProviderCfg()">💾 I-save ang AI Provider</button>
-      ${keyOk ? `<button class="btn-ghost" onclick="aiGoogleResetUsage()">♻️ I-reset ang bilang ng Google</button>` : ''}
+      ${keyOk ? `<button class="btn-ghost" onclick="aiGoogleTest()">🧪 Subukan ang Google</button><button class="btn-ghost" onclick="aiGoogleResetUsage()">♻️ I-reset ang bilang ng Google</button>` : ''}
       <button class="btn-ghost" onclick="loadAiProviderCfg()">🔄 Refresh</button>
     </div>`;
   const planEl = document.getElementById('aiPvGPlan');
@@ -1601,6 +1602,20 @@ async function saveAiProviderCfg() {
   if (!data?.success) { toast(data?.message || 'Could not save AI provider settings.', 'error'); return; }
   toast('AI provider settings saved.', 'success');
   await loadAiProviderCfg();
+  loadAiPlans(true);
+}
+async function aiGoogleTest() {
+  const el = document.getElementById('aiPvTestResult');
+  const setMsg = (t, ok) => { if (el) { el.style.display = ''; el.style.color = ok ? '#16a34a' : 'var(--danger,#ff6b6b)'; el.textContent = t; } };
+  setMsg('Sinusubukan ang Google...', true);
+  const data = await aiApi('/relay/admin/api/ai-providers/test', { method: 'POST', body: JSON.stringify({ model: document.getElementById('aiPvGDefaultModel')?.value || 'flashLite' }) });
+  if (!data) { setMsg('Walang sagot mula sa RELAY.', false); return; }
+  if (data.success) {
+    const note = data.usable ? '' : ' (Gumagana ang key, pero HINDI pa naka-ON/na-save ang "Google AI enabled" — i-save ang AI Provider.)';
+    setMsg(`✅ Gumagana ang Google (${data.model}, ${data.tookMs} ms). Sagot: ${data.answer}${note}`, !!data.usable);
+  } else {
+    setMsg(`❌ ${data.message || 'Pumalya ang Google.'}${data.model ? ' [' + data.model + ']' : ''}`, false);
+  }
   loadAiPlans(true);
 }
 async function aiGoogleResetUsage() {

@@ -893,18 +893,51 @@ function isCfAiConfigured() {
 // Naka-ON/OFF at napipili sa Feature Pricing > Omni AI > "AI Provider". Walang epekto kung walang
 // GOOGLE_AI_API_KEY sa RELAY/.env o kung naka-OFF sa admin. Gumagamit ng OpenAI-compatible endpoint ng
 // Gemini kaya iisa ang format ng messages (kasama ang larawan) at ng token usage sa Cloudflare path.
-const GOOGLE_AI_API_KEY = process.env.GOOGLE_AI_API_KEY || null;
-const GOOGLE_AI_MODEL_FLASH = process.env.GOOGLE_AI_MODEL_FLASH || 'gemini-2.5-flash';
-const GOOGLE_AI_MODEL_FLASH_LITE = process.env.GOOGLE_AI_MODEL_FLASH_LITE || 'gemini-2.5-flash-lite';
+// Linisin ang halaga: tanggalin ang spaces/newline at ang nakabalot na quotes (karaniwang pagkakamali kapag nag-paste sa Render).
+// Ang trailing newline sa key ay nagiging "Invalid header value" kaya hindi umaabot sa Google ang request.
+const cleanEnvValue = (v) => { const t = String(v == null ? '' : v).trim().replace(/^['\"]+|['\"]+$/g, '').trim(); return t || null; };
+const GOOGLE_AI_API_KEY = cleanEnvValue(process.env.GOOGLE_AI_API_KEY);
+const GOOGLE_AI_MODEL_FLASH = cleanEnvValue(process.env.GOOGLE_AI_MODEL_FLASH) || 'gemini-2.5-flash';
+const GOOGLE_AI_MODEL_FLASH_LITE = cleanEnvValue(process.env.GOOGLE_AI_MODEL_FLASH_LITE) || 'gemini-2.5-flash-lite';
 function isGoogleAiConfigured() {
     return !!GOOGLE_AI_API_KEY;
+}
+// Inihahanda ang messages para sa Gemini (OpenAI-compatible endpoint): ang OMNIPOS ay nagpapadala ng maraming 'system' message
+// (prompt, FAQ, store data, atbp.) at history na may magkakasunod na parehong role. Mas mahigpit ang Gemini kaysa Cloudflare dito,
+// kaya pinagsasama ang lahat ng system message sa isa sa unahan at pinagsasama ang magkakasunod na parehong role.
+function prepareGeminiMessages(messages) {
+    const textOf = (c) => {
+        if (typeof c === 'string') return c;
+        if (Array.isArray(c)) return c.map((x) => (x && x.type === 'text' ? String(x.text || '') : '')).filter(Boolean).join('\n');
+        return c == null ? '' : String(c);
+    };
+    const systems = [];
+    const rest = [];
+    (Array.isArray(messages) ? messages : []).forEach((m) => {
+        if (!m || typeof m !== 'object') return;
+        const role = m.role === 'system' ? 'system' : (m.role === 'assistant' ? 'assistant' : 'user');
+        if (role === 'system') { const t = textOf(m.content).trim(); if (t) systems.push(t); return; }
+        const hasImage = Array.isArray(m.content) && m.content.some((x) => x && x.type === 'image_url');
+        const content = hasImage ? m.content : textOf(m.content);
+        if (!hasImage && !String(content).trim()) return;
+        const prev = rest[rest.length - 1];
+        if (prev && prev.role === role && typeof prev.content === 'string' && typeof content === 'string') {
+            prev.content += '\n\n' + content;
+        } else {
+            rest.push({ role, content });
+        }
+    });
+    while (rest.length && rest[0].role === 'assistant') rest.shift();
+    const out = [];
+    if (systems.length) out.push({ role: 'system', content: systems.join('\n\n') });
+    return out.concat(rest);
 }
 async function callGoogleGeminiAI(messages, vision, modelId, retriedWithoutReasoning = false) {
     const url = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), vision ? 45000 : 40000);
     try {
-        const body = { model: modelId, messages, max_tokens: 650, temperature: 0.3 };
+        const body = { model: modelId, messages: prepareGeminiMessages(messages), max_tokens: 650, temperature: 0.3 };
         // Patayin ang "thinking" ng Gemini 2.5 Flash/Flash-Lite: mas mabilis, mas mura, at hindi nauubos ang max_tokens bago pa ang sagot.
         if (!retriedWithoutReasoning && /gemini-2\.5-flash/i.test(String(modelId))) body.reasoning_effort = 'none';
         const gRes = await fetch(url, {
@@ -922,6 +955,10 @@ async function callGoogleGeminiAI(messages, vision, modelId, retriedWithoutReaso
             if (!retriedWithoutReasoning && body.reasoning_effort && gRes.status === 400 && /reasoning|thinking/i.test(errMsg + ' ' + raw.slice(0, 400))) {
                 return callGoogleGeminiAI(messages, vision, modelId, true);
             }
+            if (gRes.status === 400 && /api key|API_KEY_INVALID/i.test(errMsg + ' ' + raw.slice(0, 300))) errMsg = `Google AI: hindi tanggap ang GOOGLE_AI_API_KEY (HTTP 400). ${errMsg}`;
+            if ((gRes.status === 401 || gRes.status === 403) && !/api key|permission|key/i.test(errMsg)) errMsg = `Google AI: tinanggihan ang API key (HTTP ${gRes.status}). ${errMsg}`;
+            if (gRes.status === 404) errMsg = `Google AI: hindi nahanap ang model "${modelId}" (HTTP 404). Palitan ang Model ID sa admin. ${errMsg}`;
+            console.error(`⚠️ Google AI HTTP ${gRes.status} (${modelId}): ${raw.slice(0, 300)}`);
             if (gRes.status === 429 && !/quota|rate/i.test(errMsg)) errMsg = `Google AI rate limit/quota (HTTP 429): ${errMsg}`;
             if (gRes.status === 503 && !/unavailable/i.test(errMsg)) errMsg = `Google AI temporarily unavailable (HTTP 503): ${errMsg}`;
             return {
@@ -937,7 +974,8 @@ async function callGoogleGeminiAI(messages, vision, modelId, retriedWithoutReaso
         }
         return { success: true, answer: String(answer).trim(), cfUsage: extractCfUsage(data.usage) };
     } catch (err) {
-        return { success: false, message: err.name === 'AbortError' ? 'AI request timed out.' : (err.message || 'AI request failed.'), fallbackOk: true };
+        console.error(`⚠️ Google AI request error (${modelId}): ${err && err.message}${err && err.cause ? ' / ' + (err.cause.code || err.cause.message) : ''}`);
+        return { success: false, message: err.name === 'AbortError' ? 'AI request timed out.' : `Google AI: ${err.message || 'request failed.'}${err && err.cause && (err.cause.code || err.cause.message) ? ' (' + (err.cause.code || err.cause.message) + ')' : ''}`, fallbackOk: true };
     } finally {
         clearTimeout(timeout);
     }
@@ -9004,6 +9042,25 @@ app.post('/relay/admin/api/ai-providers/settings', requireAdminKey, async (req, 
     } catch (err) {
         console.error('AI providers settings error:', err.message);
         return res.status(503).json({ success: false, message: 'Unable to save AI provider settings.' });
+    }
+});
+// Totoong test na tawag sa Google (hindi nagbabawas ng credits ng kahit sinong client, hindi binibilang sa usage).
+app.post('/relay/admin/api/ai-providers/test', requireAdminKey, async (req, res) => {
+    try {
+        if (!isGoogleAiConfigured()) return res.json({ success: false, message: 'Walang GOOGLE_AI_API_KEY sa RELAY environment. Idagdag sa Render > Environment, saka mag-redeploy.' });
+        const cfg = await getAiProviderConfig();
+        const key = AI_GOOGLE_MODEL_KEYS.includes(String(req.body?.model || '')) ? String(req.body.model) : googleDefaultModelKey(cfg) || 'flashLite';
+        const modelId = googleModelId(cfg, key);
+        const t0 = Date.now();
+        const r = await callGoogleGeminiAI([{ role: 'system', content: 'You are a connectivity test.' }, { role: 'user', content: 'Reply with the single word: OK' }], false, modelId);
+        if (!r.success) {
+            lastGoogleError = { message: String(r.message || 'Unknown Google AI error.').slice(0, 300), at: Date.now() };
+            return res.json({ success: false, model: modelId, message: r.message, tookMs: Date.now() - t0 });
+        }
+        return res.json({ success: true, model: modelId, answer: String(r.answer || '').slice(0, 80), tookMs: Date.now() - t0, usage: r.cfUsage || null, enabledInAdmin: !!cfg.google.enabled, usable: googleUsable(cfg) });
+    } catch (err) {
+        console.error('AI providers test error:', err.message);
+        return res.status(503).json({ success: false, message: 'Hindi naisagawa ang test: ' + err.message });
     }
 });
 // ---- ADMIN: Workers AI neurons planner ----------------------------------
