@@ -932,14 +932,33 @@ function prepareGeminiMessages(messages) {
     if (systems.length) out.push({ role: 'system', content: systems.join('\n\n') });
     return out.concat(rest);
 }
-async function callGoogleGeminiAI(messages, vision, modelId, retriedWithoutReasoning = false) {
+// Hagdan ng reasoning_effort para PATAYIN (o pababain hanggang kaya) ang "thinking" ayon sa henerasyon ng model.
+// 2.5 Flash/Flash-Lite: "none". 3.x Flash/Flash-Lite: subukan ang "none", kapag tinanggihan ng Google ay "low", saka wala.
+// 3.x Pro: hindi napapatay ang thinking kaya "low" lang. Ang ibang model ay walang ipinapadalang reasoning_effort.
+// Ang unang hakbang na tinanggap ng Google ay naaalala kada model para hindi na masayang ang susunod na request.
+function googleReasoningLadder(modelId) {
+    const id = String(modelId || '').toLowerCase();
+    if (/gemini-2\.5-flash/.test(id)) return ['none', null];
+    const m = id.match(/^gemini-(\d+)(?:\.\d+)?-/);
+    if (m && Number(m[1]) >= 3) {
+        if (/-pro/.test(id)) return ['low', null];
+        return ['none', 'low', null];
+    }
+    return [null];
+}
+const googleReasoningStep = {};
+async function callGoogleGeminiAI(messages, vision, modelId, stepIdx) {
     const url = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
+    const ladder = googleReasoningLadder(modelId);
+    let step = Number.isInteger(stepIdx) ? stepIdx : (googleReasoningStep[modelId] || 0);
+    if (step < 0) step = 0;
+    if (step > ladder.length - 1) step = ladder.length - 1;
+    const effort = ladder[step];
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), vision ? 45000 : 40000);
     try {
         const body = { model: modelId, messages: prepareGeminiMessages(messages), max_tokens: 650, temperature: 0.3 };
-        // Patayin ang "thinking" ng Gemini 2.5 Flash/Flash-Lite: mas mabilis, mas mura, at hindi nauubos ang max_tokens bago pa ang sagot.
-        if (!retriedWithoutReasoning && /gemini-2\.5-flash/i.test(String(modelId))) body.reasoning_effort = 'none';
+        if (effort) body.reasoning_effort = effort;
         const gRes = await fetch(url, {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${GOOGLE_AI_API_KEY}`, 'Content-Type': 'application/json' },
@@ -952,8 +971,8 @@ async function callGoogleGeminiAI(messages, vision, modelId, retriedWithoutReaso
         if (!gRes.ok || !data) {
             const eo = Array.isArray(data) ? data[0] : data;
             let errMsg = (eo && eo.error && eo.error.message) || `Google AI request failed (HTTP ${gRes.status}).`;
-            if (!retriedWithoutReasoning && body.reasoning_effort && gRes.status === 400 && /reasoning|thinking/i.test(errMsg + ' ' + raw.slice(0, 400))) {
-                return callGoogleGeminiAI(messages, vision, modelId, true);
+            if (effort && step < ladder.length - 1 && gRes.status === 400 && /reasoning|thinking/i.test(errMsg + ' ' + raw.slice(0, 400))) {
+                return callGoogleGeminiAI(messages, vision, modelId, step + 1);
             }
             if (gRes.status === 400 && /api key|API_KEY_INVALID/i.test(errMsg + ' ' + raw.slice(0, 300))) errMsg = `Google AI: hindi tanggap ang GOOGLE_AI_API_KEY (HTTP 400). ${errMsg}`;
             if ((gRes.status === 401 || gRes.status === 403) && !/api key|permission|key/i.test(errMsg)) errMsg = `Google AI: tinanggihan ang API key (HTTP ${gRes.status}). ${errMsg}`;
@@ -961,18 +980,28 @@ async function callGoogleGeminiAI(messages, vision, modelId, retriedWithoutReaso
             console.error(`⚠️ Google AI HTTP ${gRes.status} (${modelId}): ${raw.slice(0, 300)}`);
             if (gRes.status === 429 && !/quota|rate/i.test(errMsg)) errMsg = `Google AI rate limit/quota (HTTP 429): ${errMsg}`;
             if (gRes.status === 503 && !/unavailable/i.test(errMsg)) errMsg = `Google AI temporarily unavailable (HTTP 503): ${errMsg}`;
+            // 429: alamin kung per-minute o per-day ang naabot, i-lock ANG MODELONG IYON lang, at kunin ang halaga ng limit kung kasama sa sagot.
+            let quota = null;
+            if (gRes.status === 429) {
+                try { quota = handleGoogleQuotaError(modelId, raw, data, errMsg); } catch (qe) { console.error('⚠️ Google quota parse error:', qe && qe.message); }
+            }
             return {
                 success: false,
                 message: String(errMsg).slice(0, 400),
-                googleQuota: gRes.status === 429 ? (/PerDay|per day|daily/i.test(raw) ? 'daily' : 'rate') : null,
+                googleQuota: gRes.status === 429 ? (quota ? quota.kind : (/PerDay|per day|daily/i.test(raw) ? 'daily' : 'rate')) : null,
+                retryDelayMs: quota ? quota.retryDelayMs : 0,
                 fallbackOk: gRes.status === 429 || gRes.status >= 500 || gRes.status === 401 || gRes.status === 403 || gRes.status === 404
             };
         }
         const answer = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+        const usage = extractCfUsage(data.usage);
+        // Tinanggap ng Google ang request na ito: bilangin para sa per-model RPM/RPD/TPM at tandaan ang gumaganang reasoning step.
+        googleReasoningStep[modelId] = step;
+        noteGoogleModelCall(modelId, usage);
         if (!answer || !String(answer).trim()) {
             return { success: false, message: 'Empty response from AI provider.', fallbackOk: true };
         }
-        return { success: true, answer: String(answer).trim(), cfUsage: extractCfUsage(data.usage) };
+        return { success: true, answer: String(answer).trim(), cfUsage: usage, reasoningEffort: effort || 'default' };
     } catch (err) {
         console.error(`⚠️ Google AI request error (${modelId}): ${err && err.message}${err && err.cause ? ' / ' + (err.cause.code || err.cause.message) : ''}`);
         return { success: false, message: err.name === 'AbortError' ? 'AI request timed out.' : `Google AI: ${err.message || 'request failed.'}${err && err.cause && (err.cause.code || err.cause.message) ? ' (' + (err.cause.code || err.cause.message) + ')' : ''}`, fallbackOk: true };
@@ -7274,8 +7303,9 @@ const AI_PROVIDER_CFG_DEFAULTS = {
         paidDailyNeurons: 0,
         defaultModel: 'flashLite',
         models: {
-            flashLite: { enabled: true, modelId: '', requiredTier: '', inputNeuronsPerM: 9091, outputNeuronsPerM: 36364 },
-            flash: { enabled: true, modelId: '', requiredTier: '', inputNeuronsPerM: 27273, outputNeuronsPerM: 227273 }
+            // rpm/rpd/tpm = limit ng modelong ito sa Google AI Studio (0 = walang itinakda; gagamitin ang natutunan mula sa 429 kung meron).
+            flashLite: { enabled: true, modelId: '', requiredTier: '', inputNeuronsPerM: 9091, outputNeuronsPerM: 36364, rpm: 0, rpd: 0, tpm: 0 },
+            flash: { enabled: true, modelId: '', requiredTier: '', inputNeuronsPerM: 27273, outputNeuronsPerM: 227273, rpm: 0, rpd: 0, tpm: 0 }
         }
     }
 };
@@ -7295,7 +7325,10 @@ function normalizeAiProviderConfig(src) {
             modelId: typeof m.modelId === 'string' ? m.modelId.trim().slice(0, 80).replace(/[^A-Za-z0-9._\-\/]/g, '') : dm.modelId,
             requiredTier: typeof m.requiredTier === 'string' ? m.requiredTier.trim().slice(0, 40).replace(/[^A-Za-z0-9_\-]/g, '') : dm.requiredTier,
             inputNeuronsPerM: num(m.inputNeuronsPerM, dm.inputNeuronsPerM, 0, 100000000),
-            outputNeuronsPerM: num(m.outputNeuronsPerM, dm.outputNeuronsPerM, 0, 100000000)
+            outputNeuronsPerM: num(m.outputNeuronsPerM, dm.outputNeuronsPerM, 0, 100000000),
+            rpm: num(m.rpm, dm.rpm, 0, 100000000),
+            rpd: num(m.rpd, dm.rpd, 0, 100000000),
+            tpm: num(m.tpm, dm.tpm, 0, 100000000)
         };
     });
     const defaultProvider = pick(s.defaultProvider, AI_PROVIDER_IDS, D.defaultProvider);
@@ -7386,6 +7419,14 @@ async function buildAiAttemptPlan(cfg, installationId, modelChoice) {
 }
 // ---- Google estado ng pagkaubos + paggamit (araw ng Google = hatinggabi ng Pacific Time) ----
 let googleProviderState = { exhaustedUntil: 0, reason: '', detectedAt: 0, source: '' };
+// PER-MODEL na estado (per model ang quota ng Google, hindi per provider):
+//  googleModelBlocks   = { [modelId]: { until, kind: 'daily'|'minute', reason, at } }  — na-lock dahil sa 429 ng modelong iyon
+//  googleLearnedLimits = { [modelId]: { rpm, rpd, tpm, at } }                         — mga limit na nakuha mula sa 429 ng Google
+//  googleMinuteLog     = { [modelId]: [{ t, tok }] }                                  — mga tagumpay na tawag sa huling 60 segundo
+let googleModelBlocks = {};
+let googleLearnedLimits = {};
+let googleMinuteLog = {};
+const GOOGLE_LEARNED_LIMIT_TTL_MS = 30 * 24 * 3600 * 1000;
 let googleUsageStats = null;
 let lastGoogleError = null;
 let googleUsageSaveTimer = null;
@@ -7403,7 +7444,7 @@ function googleDayInfo(now = Date.now()) {
 function ensureGoogleUsageDay() {
     const di = googleDayInfo();
     if (!googleUsageStats || googleUsageStats.day !== di.day) {
-        googleUsageStats = { day: di.day, requests: 0, neurons: 0, inputTokens: 0, outputTokens: 0, failed: 0, byModel: {} };
+        googleUsageStats = { day: di.day, requests: 0, neurons: 0, inputTokens: 0, outputTokens: 0, failed: 0, byModel: {}, byId: {} };
     }
     return googleUsageStats;
 }
@@ -7429,8 +7470,30 @@ async function loadAiGoogleState() {
             googleUsageStats = {
                 day: String(u.day), requests: Number(u.requests) || 0, neurons: Number(u.neurons) || 0,
                 inputTokens: Number(u.inputTokens) || 0, outputTokens: Number(u.outputTokens) || 0, failed: Number(u.failed) || 0,
-                byModel: (u.byModel && typeof u.byModel === 'object') ? u.byModel : {}
+                byModel: (u.byModel && typeof u.byModel === 'object') ? u.byModel : {},
+                byId: (u.byId && typeof u.byId === 'object') ? u.byId : {}
             };
+        }
+    } catch (_) {}
+    try {
+        const b = await getPersistentJSON('ai-google-model-blocks', null);
+        if (b && typeof b === 'object') {
+            const now = Date.now();
+            Object.keys(b).forEach((id) => {
+                const e = b[id];
+                if (e && typeof e === 'object' && Number(e.until) > now) {
+                    googleModelBlocks[id] = { until: Number(e.until), kind: e.kind === 'minute' ? 'minute' : 'daily', reason: String(e.reason || '').slice(0, 300), at: Number(e.at) || 0 };
+                }
+            });
+        }
+    } catch (_) {}
+    try {
+        const l = await getPersistentJSON('ai-google-learned-limits', null);
+        if (l && typeof l === 'object') {
+            Object.keys(l).forEach((id) => {
+                const e = l[id];
+                if (e && typeof e === 'object') googleLearnedLimits[id] = { rpm: Number(e.rpm) || 0, rpd: Number(e.rpd) || 0, tpm: Number(e.tpm) || 0, at: Number(e.at) || 0 };
+            });
         }
     } catch (_) {}
 }
@@ -7460,6 +7523,15 @@ function getGoogleProviderExhaustion(cfg) {
     if (lim.neurons > 0 && u.neurons >= lim.neurons) {
         return { exhausted: true, retryAt: resetAt, reason: `Naabot na ang itinakdang Google daily neurons-equivalent (${Math.round(u.neurons)}/${lim.neurons}).`, source: 'limit', detectedAt: 0 };
     }
+    // Per-model: UBOS na ang provider kapag LAHAT ng naka-enable na Gemini model ay naabot na ang daily limit (RPD o daily 429).
+    const enabledKeys = AI_GOOGLE_MODEL_KEYS.filter((k) => c.google.models[k].enabled);
+    if (enabledKeys.length) {
+        const avs = enabledKeys.map((k) => googleModelAvailability(c, k));
+        if (avs.every((a) => a.blocked && a.kind === 'daily')) {
+            const retryAt = Math.min(...avs.map((a) => a.retryAt || resetAt));
+            return { exhausted: true, retryAt, reason: avs[0].reason, source: 'model-limit', detectedAt: 0 };
+        }
+    }
     return { exhausted: false, retryAt: null, reason: '', source: '', detectedAt: 0 };
 }
 function markGoogleProviderExhausted(message, source = 'auto') {
@@ -7472,6 +7544,180 @@ function markGoogleProviderExhausted(message, source = 'auto') {
 function clearGoogleProviderExhausted() {
     googleProviderState = { exhaustedUntil: 0, reason: '', detectedAt: 0, source: '' };
     saveGoogleProviderState();
+    googleModelBlocks = {};
+    saveGoogleModelBlocks();
+}
+function saveGoogleModelBlocks() {
+    try { setPersistentJSON('ai-google-model-blocks', googleModelBlocks); } catch (_) {}
+}
+function saveGoogleLearnedLimits() {
+    try { setPersistentJSON('ai-google-learned-limits', googleLearnedLimits); } catch (_) {}
+}
+// ---- Per-model limit detector (RPM / RPD / TPM) ----------------------------------------------
+function googleMinuteWindow(modelId, now = Date.now()) {
+    const log = googleMinuteLog[modelId];
+    if (!log || !log.length) return { count: 0, tokens: 0, oldest: 0 };
+    while (log.length && now - log[0].t >= 60000) log.shift();
+    let tokens = 0;
+    log.forEach((e) => { tokens += e.tok; });
+    return { count: log.length, tokens, oldest: log.length ? log[0].t : 0 };
+}
+// Itala ang isang TAGUMPAY na tawag sa Google (kasama ang test ng admin — totoong quota ang nauubos nito).
+function noteGoogleModelCall(modelId, usage) {
+    try {
+        const id = String(modelId || '').trim();
+        if (!id) return;
+        const now = Date.now();
+        const log = googleMinuteLog[id] || (googleMinuteLog[id] = []);
+        log.push({ t: now, tok: usage && usage.promptTokens > 0 ? usage.promptTokens : 0 });
+        googleMinuteWindow(id, now);
+        const s = ensureGoogleUsageDay();
+        if (!s.byId) s.byId = {};
+        const row = s.byId[id] || (s.byId[id] = { q: 0 });
+        row.q += 1;
+        scheduleGoogleUsageSave();
+    } catch (_) {}
+}
+// Epektibong limit ng isang model slot: manual (mula sa admin) muna; kung 0, ang natutunan mula sa 429 (hanggang 30 araw).
+function googleEffectiveLimits(cfg, key) {
+    const m = cfg.google.models[key];
+    const id = googleModelId(cfg, key);
+    const L = googleLearnedLimits[id];
+    const fresh = !!(L && (Date.now() - (Number(L.at) || 0)) < GOOGLE_LEARNED_LIMIT_TTL_MS);
+    const pick = (manual, learned) => (manual > 0 ? manual : (fresh && learned > 0 ? learned : 0));
+    return {
+        rpm: pick(m.rpm, L && L.rpm),
+        rpd: pick(m.rpd, L && L.rpd),
+        tpm: pick(m.tpm, L && L.tpm),
+        learned: fresh ? { rpm: Number(L.rpm) || 0, rpd: Number(L.rpd) || 0, tpm: Number(L.tpm) || 0, at: Number(L.at) || 0 } : null
+    };
+}
+// Puwede pa bang gamitin ang modelong ito ngayon? kind: 'daily' (hanggang reset ng Google) | 'minute' (sandali lang).
+function googleModelAvailability(cfg, key) {
+    const modelId = googleModelId(cfg, key);
+    const now = Date.now();
+    const blk = googleModelBlocks[modelId];
+    if (blk) {
+        if (blk.until > now) return { blocked: true, kind: blk.kind, retryAt: blk.until, reason: blk.reason };
+        delete googleModelBlocks[modelId];
+        saveGoogleModelBlocks();
+    }
+    const eff = googleEffectiveLimits(cfg, key);
+    const u = ensureGoogleUsageDay();
+    const usedToday = (u.byId && u.byId[modelId] && u.byId[modelId].q) || 0;
+    if (eff.rpd > 0 && usedToday >= eff.rpd) {
+        return { blocked: true, kind: 'daily', retryAt: googleDayInfo(now).nextResetMs, reason: `Naabot na ang daily requests (RPD) ng ${modelId} (${usedToday}/${eff.rpd}).` };
+    }
+    const w = googleMinuteWindow(modelId, now);
+    if (eff.rpm > 0 && w.count >= eff.rpm) {
+        return { blocked: true, kind: 'minute', retryAt: w.oldest + 60000 + 500, reason: `Naabot ang requests kada minuto (RPM) ng ${modelId} (${w.count}/${eff.rpm}).` };
+    }
+    if (eff.tpm > 0 && w.tokens >= eff.tpm) {
+        return { blocked: true, kind: 'minute', retryAt: w.oldest + 60000 + 500, reason: `Naabot ang input tokens kada minuto (TPM) ng ${modelId} (${w.tokens}/${eff.tpm}).` };
+    }
+    return { blocked: false, kind: '', retryAt: 0, reason: '' };
+}
+function googleModelStatus(cfg, key) {
+    const modelId = googleModelId(cfg, key);
+    const m = cfg.google.models[key];
+    const eff = googleEffectiveLimits(cfg, key);
+    const u = ensureGoogleUsageDay();
+    const w = googleMinuteWindow(modelId);
+    const av = googleModelAvailability(cfg, key);
+    return {
+        key, modelId, label: AI_GOOGLE_MODEL_LABELS[key], enabled: m.enabled,
+        manual: { rpm: m.rpm, rpd: m.rpd, tpm: m.tpm },
+        learned: eff.learned,
+        effective: { rpm: eff.rpm, rpd: eff.rpd, tpm: eff.tpm },
+        used: { rpd: (u.byId && u.byId[modelId] && u.byId[modelId].q) || 0, rpm: w.count, tpm: w.tokens },
+        blocked: av.blocked, blockKind: av.kind, blockUntil: av.retryAt, blockReason: av.reason
+    };
+}
+// Basahin ang 429 ng Google (QuotaFailure.violations[].quotaId / quotaValue + RetryInfo.retryDelay).
+// quotaId na may "PerDay" = daily; "PerMinute" = per-minute. Kung hindi nabasa ang istruktura, regex sa teksto ang gagamitin.
+function parseGoogleQuotaError(raw, data) {
+    const text = String(raw || '');
+    const eo = Array.isArray(data) ? data[0] : data;
+    const details = (eo && eo.error && Array.isArray(eo.error.details)) ? eo.error.details : [];
+    const out = { daily: false, minute: false, zero: false, limits: {}, retryDelayMs: 0, structured: false };
+    const qv = (v) => {
+        if (!v || v.quotaValue === undefined || v.quotaValue === null || String(v.quotaValue).trim() === '') return null;
+        const n = Number(v.quotaValue);
+        return Number.isFinite(n) && n >= 0 ? n : null;
+    };
+    details.forEach((d) => {
+        if (!d || typeof d !== 'object') return;
+        const type = String(d['@type'] || '');
+        if (/QuotaFailure$/.test(type) && Array.isArray(d.violations)) {
+            d.violations.forEach((v) => {
+                const id = String((v && v.quotaId) || '');
+                const val = qv(v);
+                out.structured = true;
+                if (/PerDay/i.test(id)) {
+                    out.daily = true;
+                    if (val === 0) out.zero = true;
+                    else if (val && /Requests/i.test(id)) out.limits.rpd = val;
+                } else if (/PerMinute/i.test(id)) {
+                    out.minute = true;
+                    if (val && /Tokens/i.test(id)) out.limits.tpm = val;
+                    else if (val && /Requests/i.test(id)) out.limits.rpm = val;
+                }
+            });
+        }
+        if (/RetryInfo$/.test(type) && d.retryDelay) {
+            const m = String(d.retryDelay).match(/([\d.]+)\s*s/i);
+            if (m) out.retryDelayMs = Math.round(Number(m[1]) * 1000);
+        }
+    });
+    if (!out.retryDelayMs) {
+        const rm = text.match(/retry in ([\d.]+)\s*s/i);
+        if (rm) out.retryDelayMs = Math.round(Number(rm[1]) * 1000);
+    }
+    if (!out.daily && /limit:\s*0\b/i.test(text)) out.zero = true;
+    if (!out.structured && !out.zero && /PerDay|per day|daily/i.test(text)) out.daily = true;
+    return out;
+}
+function learnGoogleLimits(modelId, limits) {
+    const id = String(modelId || '').trim();
+    if (!id || !limits) return;
+    const L = googleLearnedLimits[id] || { rpm: 0, rpd: 0, tpm: 0, at: 0 };
+    let changed = false;
+    ['rpm', 'rpd', 'tpm'].forEach((k) => {
+        const v = Number(limits[k]);
+        if (Number.isFinite(v) && v > 0 && L[k] !== v) { L[k] = v; changed = true; }
+    });
+    if (changed) {
+        L.at = Date.now();
+        googleLearnedLimits[id] = L;
+        saveGoogleLearnedLimits();
+        console.log(`📏 Google limit natutunan para sa ${id}: RPM ${L.rpm || '—'} · RPD ${L.rpd || '—'} · TPM ${L.tpm || '—'}`);
+    }
+}
+function markGoogleModelBlocked(modelId, kind, reason, until) {
+    const id = String(modelId || '').trim();
+    if (!id) return;
+    const cur = googleModelBlocks[id];
+    if (cur && cur.until > Date.now() && cur.kind === 'daily' && kind !== 'daily') return;
+    googleModelBlocks[id] = { until, kind: kind === 'minute' ? 'minute' : 'daily', reason: String(reason || '').slice(0, 300), at: Date.now() };
+    saveGoogleModelBlocks();
+    console.warn(`🚫 Google model ${id} naka-lock (${kind}) hanggang ${new Date(until).toISOString()}: ${googleModelBlocks[id].reason}`);
+}
+function handleGoogleQuotaError(modelId, raw, data, errMsg) {
+    const q = parseGoogleQuotaError(raw, data);
+    const now = Date.now();
+    let kind = 'rate';
+    if (q.daily || q.zero) {
+        kind = 'daily';
+        const why = q.zero
+            ? `Walang quota ang ${modelId} sa Google plan/proyekto mo (limit 0) — pumili ng ibang model o mag-upgrade.`
+            : `Naabot ang daily quota ng ${modelId} (Google 429).`;
+        markGoogleModelBlocked(modelId, 'daily', why, googleDayInfo(now).nextResetMs);
+    } else {
+        const wait = Math.min(Math.max(q.retryDelayMs || 60000, 5000), 10 * 60000) + 1000;
+        markGoogleModelBlocked(modelId, 'minute', `Rate limit kada minuto ng ${modelId} (Google 429).`, now + wait);
+    }
+    if (!q.zero) learnGoogleLimits(modelId, q.limits);
+    return { kind, retryDelayMs: q.retryDelayMs, limits: q.limits, zero: q.zero };
 }
 function computeGoogleCallNeurons(usage, modelKey, cfg) {
     const m = (cfg && cfg.google.models[modelKey]) || AI_PROVIDER_CFG_DEFAULTS.google.models[modelKey] || AI_PROVIDER_CFG_DEFAULTS.google.models.flashLite;
@@ -7966,25 +8212,45 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
     // PROVIDER PLAN: pinili ng client na Gemini model (kung pinapayagan ng tier) + default/fallback ng admin.
     const providerCfg = await getAiProviderConfig();
     const attemptPlan = await buildAiAttemptPlan(providerCfg, installationId, normalizeAiModelChoice(req.body?.modelChoice));
-    const usableAttempts = attemptPlan.filter((a) => !(a.provider === 'google' ? getGoogleProviderExhaustion(providerCfg) : getCfProviderExhaustion()).exhausted);
+    // Per-attempt na estado: ang Google ay per-MODEL (RPM/RPD/TPM + 429 ng modelong iyon), ang Cloudflare ay per-provider.
+    const attemptStatus = (a) => {
+        if (a.provider === 'google') {
+            const px = getGoogleProviderExhaustion(providerCfg);
+            if (px.exhausted) return { blocked: true, daily: true, retryAt: px.retryAt || null };
+            const av = googleModelAvailability(providerCfg, a.modelKey);
+            return { blocked: av.blocked, daily: av.kind === 'daily', retryAt: av.retryAt || null };
+        }
+        const cx = getCfProviderExhaustion();
+        return { blocked: !!cx.exhausted, daily: true, retryAt: cx.retryAt || null };
+    };
+    const attemptStates = attemptPlan.map((a) => ({ a, st: attemptStatus(a) }));
+    const usableAttempts = attemptStates.filter((x) => !x.st.blocked).map((x) => x.a);
     if (!attemptPlan.length) {
         return res.status(503).json({ success: false, message: 'AI Assistant has no usable provider on the relay server. Contact the developer.' });
     }
-    // "PROVIDER EXHAUSTED" SWITCH: kapag ubos na ang daily quota ng LAHAT ng provider sa hanay,
-    // tanggihan agad — walang tawag sa provider, walang reservation ng credits.
-    const providerNow = usableAttempts.length ? { exhausted: false } : getAiProviderExhaustion();
+    // Kapag walang magamit na provider/model: tanggihan agad — walang tawag sa provider, walang reservation ng credits.
     if (!usableAttempts.length) {
-        const retryCandidates = attemptPlan.map((a) => (a.provider === 'google' ? getGoogleProviderExhaustion(providerCfg) : getCfProviderExhaustion()).retryAt).filter((x) => x);
-        providerNow.exhausted = true;
-        providerNow.retryAt = retryCandidates.length ? Math.min(...retryCandidates) : getAiProviderExhaustion().retryAt;
-    }
-    if (providerNow.exhausted) {
+        const transient = attemptStates.filter((x) => !x.st.daily);
+        if (transient.length) {
+            // Per-minute lang ang naabot (RPM/TPM) — sandali lang, hindi "ubos na ang araw".
+            const retryAt = Math.min(...transient.map((x) => x.st.retryAt || (Date.now() + 60000)));
+            const secs = Math.max(1, Math.ceil((retryAt - Date.now()) / 1000));
+            return res.status(503).json({
+                success: false,
+                providerUnavailable: true,
+                providerExhausted: false,
+                retryAt,
+                creditCost: 0,
+                message: `Sandaling abala ang AI provider (limit kada minuto). Subukan muli sa loob ng ~${secs} segundo. Hindi ka nasingil ng credits.`
+            });
+        }
+        const retryCandidates = attemptStates.map((x) => x.st.retryAt).filter((x) => x);
         recordAiBlockedByExhaustion();
         return res.status(503).json({
             success: false,
             providerUnavailable: true,
             providerExhausted: true,
-            retryAt: providerNow.retryAt,
+            retryAt: retryCandidates.length ? Math.min(...retryCandidates) : getAiProviderExhaustion().retryAt,
             creditCost: 0,
             message: 'Naubos na ang daily AI capacity ng system ngayon. Subukan muli mamaya (mag-re-reset ito sa 8:00 AM PH time). Hindi ka nasingil ng credits.'
         });
@@ -8022,8 +8288,8 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
             if (attResult.success) { result = attResult; usedAttempt = att; break; }
             result = attResult;
             if (att.provider === 'google') {
-                recordGoogleFailure(attResult.message);
-                if (attResult.googleQuota === 'daily') markGoogleProviderExhausted(attResult.message, 'auto');
+                // Ang pag-lock sa modelong naubusan (daily/minute) ay nagawa na sa loob ng callGoogleGeminiAI (per-model).
+                recordGoogleFailure(`${att.modelId}: ${attResult.message}`);
             } else {
                 recordAiProviderFailure(attResult.message, !!req.body?.vision, isCfDailyQuotaError(attResult.message));
                 if (isCfDailyQuotaError(attResult.message)) {
@@ -8498,7 +8764,8 @@ async function buildRelayAiModelOffer(current) {
         if (!m.enabled) return;
         const req = m.requiredTier ? allTiers.find((t) => t.id === m.requiredTier) : null;
         const locked = !!(req && (!current || current.priceTokens < req.priceTokens));
-        options.push({ key: k, name: AI_GOOGLE_MODEL_LABELS[k], requiredTierId: req ? req.id : null, requiredTierName: req ? req.name : null, locked, unavailable: gx.exhausted });
+        const av = googleModelAvailability(cfg, k);
+        options.push({ key: k, name: AI_GOOGLE_MODEL_LABELS[k], requiredTierId: req ? req.id : null, requiredTierName: req ? req.name : null, locked, unavailable: gx.exhausted || (av.blocked && av.kind === 'daily') });
     });
     if (!options.length) return null;
     return { enabled: true, options };
@@ -8966,8 +9233,12 @@ app.post('/relay/admin/api/ai-provider', requireAdminKey, async (req, res) => {
         if (target !== 'cloudflare') markGoogleProviderExhausted(reason, 'admin');
     } else if (action === 'google-reset-usage') {
         googleUsageStats = null; ensureGoogleUsageDay(); scheduleGoogleUsageSave();
+        googleMinuteLog = {};
+    } else if (action === 'google-clear-learned') {
+        googleLearnedLimits = {};
+        saveGoogleLearnedLimits();
     } else {
-        return res.status(400).json({ success: false, message: 'action must be "clear", "exhaust" or "google-reset-usage".' });
+        return res.status(400).json({ success: false, message: 'action must be "clear", "exhaust", "google-reset-usage" or "google-clear-learned".' });
     }
     const p = getAiProviderExhaustion();
     return res.json({ success: true, provider: { exhausted: p.exhausted, retryAt: p.retryAt, reason: p.reason, source: p.source, detectedAt: p.detectedAt } });
@@ -8980,7 +9251,7 @@ async function buildAiProvidersStatus() {
     const gu = ensureGoogleUsageDay();
     const lim = googleActiveLimits(cfg);
     const models = {};
-    AI_GOOGLE_MODEL_KEYS.forEach((k) => { models[k] = { enabled: cfg.google.models[k].enabled, modelId: googleModelId(cfg, k), label: AI_GOOGLE_MODEL_LABELS[k] }; });
+    AI_GOOGLE_MODEL_KEYS.forEach((k) => { models[k] = googleModelStatus(cfg, k); });
     return {
         cloudflare: { configured: isCfAiConfigured(), model: CF_AI_MODEL, exhausted: cf.exhausted, retryAt: cf.retryAt, reason: cf.reason, source: cf.source },
         google: {
@@ -9035,6 +9306,11 @@ app.post('/relay/admin/api/ai-providers/settings', requireAdminKey, async (req, 
         if ((next.defaultProvider === 'google' || next.fallbackProvider === 'google') && !next.google.enabled) {
             return res.status(400).json({ success: false, message: 'I-ON muna ang "Google AI enabled" bago gawing default o fallback ang Google.' });
         }
+        // Nagbago ang Google plan (Free <-> Paid): iba na ang quota, kaya burahin ang mga natutunang limit at lock ng mga model.
+        if (next.google.plan !== cur.google.plan) {
+            googleLearnedLimits = {}; saveGoogleLearnedLimits();
+            googleModelBlocks = {}; saveGoogleModelBlocks();
+        }
         aiProviderConfigCache = next;
         setPersistentJSON('ai-provider-config', next);
         console.log(`🤖 AI provider config saved: default=${next.defaultProvider}, fallback=${next.fallbackProvider}, google=${next.google.enabled ? 'ON' : 'OFF'}/${next.google.plan}`);
@@ -9044,20 +9320,107 @@ app.post('/relay/admin/api/ai-providers/settings', requireAdminKey, async (req, 
         return res.status(503).json({ success: false, message: 'Unable to save AI provider settings.' });
     }
 });
+// ---- ADMIN: listahan ng Gemini model mula sa Google (GET /v1beta/models, parehong GOOGLE_AI_API_KEY) ----
+// Presyo (USD / 1M tokens, input/output) para sa default na neurons rate. TANTYA lang ito — nagbabago ang presyo ng Google,
+// kaya puwedeng baguhin ng admin ang mga numero. Ang neurons/1M = presyo * 1000 / 0.011 (parehong cost-parity sa Cloudflare).
+const GOOGLE_MODEL_PRICE_TABLE = [
+    [/^gemini-3\.6-flash(?!-lite)/, 1.50, 7.50],
+    [/^gemini-3\.5-flash-lite/, 0.30, 2.50],
+    [/^gemini-3\.5-flash/, 1.50, 9.00],
+    [/^gemini-3\.1-flash-lite/, 0.25, 1.50],
+    [/^gemini-3-flash/, 0.50, 3.00],
+    [/^gemini-2\.5-flash-lite/, 0.10, 0.40],
+    [/^gemini-2\.5-flash/, 0.30, 2.50],
+    [/^gemini-2\.0-flash-lite/, 0.075, 0.30],
+    [/^gemini-2\.0-flash/, 0.10, 0.40]
+];
+function suggestGoogleRates(modelId) {
+    const id = String(modelId || '').toLowerCase().replace(/^models\//, '');
+    for (const row of GOOGLE_MODEL_PRICE_TABLE) {
+        if (row[0].test(id)) {
+            return { inputNeuronsPerM: Math.round(row[1] * 1000 / 0.011), outputNeuronsPerM: Math.round(row[2] * 1000 / 0.011), priceInUsd: row[1], priceOutUsd: row[2], estimated: true };
+        }
+    }
+    return null;
+}
+let googleModelListCache = { at: 0, models: null };
+// Chat/text models lang: dapat may generateContent; itinatago ang TTS, Live, Image, Embedding, audio, robotics, computer-use, atbp.
+function isGoogleChatModel(m) {
+    const id = String((m && m.name) || '').replace(/^models\//, '').toLowerCase();
+    if (!/^gemini-/.test(id)) return false;
+    if (!Array.isArray(m.supportedGenerationMethods) || !m.supportedGenerationMethods.includes('generateContent')) return false;
+    if (/tts|live|image|embedding|native-audio|audio|robotics|computer-use|imagen|veo|aqa|dialog|customtools/.test(id)) return false;
+    return true;
+}
+async function fetchGoogleModelList(force) {
+    if (!force && googleModelListCache.models && Date.now() - googleModelListCache.at < 10 * 60 * 1000) return googleModelListCache.models;
+    const out = [];
+    let pageToken = '';
+    for (let page = 0; page < 5; page++) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 20000);
+        try {
+            const url = 'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000' + (pageToken ? '&pageToken=' + encodeURIComponent(pageToken) : '');
+            const r = await fetch(url, { headers: { 'x-goog-api-key': GOOGLE_AI_API_KEY }, signal: controller.signal });
+            const raw = await r.text();
+            let data = null;
+            try { data = JSON.parse(raw); } catch (_) { data = null; }
+            if (!r.ok || !data) {
+                const msg = (data && data.error && data.error.message) || `Google models list failed (HTTP ${r.status}).`;
+                throw new Error(String(msg).slice(0, 300));
+            }
+            (Array.isArray(data.models) ? data.models : []).forEach((m) => { if (isGoogleChatModel(m)) out.push(m); });
+            pageToken = data.nextPageToken || '';
+        } finally {
+            clearTimeout(timeout);
+        }
+        if (!pageToken) break;
+    }
+    const seen = new Set();
+    const models = [];
+    out.forEach((m) => {
+        const id = String(m.name).replace(/^models\//, '');
+        if (seen.has(id)) return;
+        seen.add(id);
+        models.push({
+            id,
+            displayName: String(m.displayName || id).slice(0, 80),
+            inputTokenLimit: Number(m.inputTokenLimit) || 0,
+            outputTokenLimit: Number(m.outputTokenLimit) || 0,
+            thinking: m.thinking === true,
+            suggested: suggestGoogleRates(id)
+        });
+    });
+    models.sort((a, b) => a.id.localeCompare(b.id));
+    googleModelListCache = { at: Date.now(), models };
+    return models;
+}
+app.get('/relay/admin/api/ai-providers/models', requireAdminKey, async (req, res) => {
+    try {
+        if (!isGoogleAiConfigured()) return res.json({ success: false, message: 'Walang GOOGLE_AI_API_KEY sa RELAY environment.' });
+        const models = await fetchGoogleModelList(req.query?.refresh === '1');
+        return res.json({ success: true, models, cachedAt: googleModelListCache.at });
+    } catch (err) {
+        console.error('AI providers models error:', err.message);
+        return res.json({ success: false, message: 'Hindi makuha ang listahan ng model: ' + err.message });
+    }
+});
 // Totoong test na tawag sa Google (hindi nagbabawas ng credits ng kahit sinong client, hindi binibilang sa usage).
 app.post('/relay/admin/api/ai-providers/test', requireAdminKey, async (req, res) => {
     try {
         if (!isGoogleAiConfigured()) return res.json({ success: false, message: 'Walang GOOGLE_AI_API_KEY sa RELAY environment. Idagdag sa Render > Environment, saka mag-redeploy.' });
         const cfg = await getAiProviderConfig();
         const key = AI_GOOGLE_MODEL_KEYS.includes(String(req.body?.model || '')) ? String(req.body.model) : googleDefaultModelKey(cfg) || 'flashLite';
-        const modelId = googleModelId(cfg, key);
+        // Puwedeng ipasa ang eksaktong modelId (ang nasa input box, kahit hindi pa na-save).
+        const typedId = typeof req.body?.modelId === 'string' ? req.body.modelId.trim().slice(0, 80).replace(/[^A-Za-z0-9._\-\/]/g, '') : '';
+        const modelId = typedId || googleModelId(cfg, key);
         const t0 = Date.now();
         const r = await callGoogleGeminiAI([{ role: 'system', content: 'You are a connectivity test.' }, { role: 'user', content: 'Reply with the single word: OK' }], false, modelId);
         if (!r.success) {
-            lastGoogleError = { message: String(r.message || 'Unknown Google AI error.').slice(0, 300), at: Date.now() };
-            return res.json({ success: false, model: modelId, message: r.message, tookMs: Date.now() - t0 });
+            lastGoogleError = { message: `${modelId}: ${String(r.message || 'Unknown Google AI error.')}`.slice(0, 300), at: Date.now() };
+            return res.json({ success: false, model: modelId, message: r.message, quota: r.googleQuota || null, tookMs: Date.now() - t0 });
         }
-        return res.json({ success: true, model: modelId, answer: String(r.answer || '').slice(0, 80), tookMs: Date.now() - t0, usage: r.cfUsage || null, enabledInAdmin: !!cfg.google.enabled, usable: googleUsable(cfg) });
+        return res.json({ success: true, model: modelId, answer: String(r.answer || '').slice(0, 80), tookMs: Date.now() - t0, usage: r.cfUsage || null, reasoningEffort: r.reasoningEffort || 'default', enabledInAdmin: !!cfg.google.enabled, usable: googleUsable(cfg) });
     } catch (err) {
         console.error('AI providers test error:', err.message);
         return res.status(503).json({ success: false, message: 'Hindi naisagawa ang test: ' + err.message });

@@ -1514,6 +1514,67 @@ async function loadAiProviderCfg() {
   if (!data?.success) { box.textContent = data?.message || 'Could not load AI provider settings.'; return; }
   aiProviderCfgState = data;
   renderAiProviderCfg(data);
+  if (!aiGoogleModelList && !aiGoogleModelListLoading && data.status && data.status.google && data.status.google.configured) aiFetchGoogleModels(false);
+}
+let aiGoogleModelList = null;
+let aiGoogleModelListLoading = false;
+// Ang re-render ng AI Provider box ay nagbubura ng mga hindi pa na-save na input; kunin at ibalik ang mga ito.
+function aiSnapCfgForm() {
+  const o = {};
+  document.querySelectorAll('#aiProviderCfgBox input[id^="aiPv"], #aiProviderCfgBox select[id^="aiPv"]').forEach((e) => { o[e.id] = e.type === 'checkbox' ? e.checked : e.value; });
+  return o;
+}
+function aiRestoreCfgForm(o) {
+  Object.keys(o || {}).forEach((id) => {
+    const e = document.getElementById(id);
+    if (!e) return;
+    if (e.type === 'checkbox') e.checked = !!o[id]; else e.value = o[id];
+  });
+  const pl = document.getElementById('aiPvGPlan');
+  const w = document.getElementById('aiPvPrivacy');
+  if (pl && w) w.style.display = pl.value === 'free' ? '' : 'none';
+}
+async function aiFetchGoogleModels(force) {
+  if (aiGoogleModelListLoading) return;
+  aiGoogleModelListLoading = true;
+  const el = document.getElementById('aiPvTestResult');
+  if (force && el) { el.style.display = ''; el.style.color = 'var(--muted)'; el.textContent = 'Kinukuha ang listahan ng model mula sa Google...'; }
+  try {
+    const data = await aiApi('/relay/admin/api/ai-providers/models' + (force ? '?refresh=1' : ''));
+    if (data && data.success && Array.isArray(data.models)) {
+      aiGoogleModelList = data.models;
+      const snap = aiSnapCfgForm();
+      if (aiProviderCfgState) renderAiProviderCfg(aiProviderCfgState);
+      aiRestoreCfgForm(snap);
+      const el2 = document.getElementById('aiPvTestResult');
+      if (force && el2) { el2.style.display = ''; el2.style.color = '#16a34a'; el2.textContent = `✅ ${data.models.length} chat model ang nakuha mula sa Google.`; }
+    } else if (force && el) {
+      el.style.display = ''; el.style.color = 'var(--danger,#ff6b6b)'; el.textContent = '❌ ' + ((data && data.message) || 'Hindi makuha ang listahan.');
+    }
+  } finally { aiGoogleModelListLoading = false; }
+}
+function aiPickGoogleModel(key) {
+  const sel = document.getElementById(`aiPv_${key}_pick`);
+  if (!sel || !sel.value) return;
+  const info = (aiGoogleModelList || []).find((x) => x.id === sel.value);
+  const idEl = document.getElementById(`aiPv_${key}_modelId`);
+  if (idEl) idEl.value = sel.value;
+  const note = document.getElementById(`aiPv_${key}_rateNote`);
+  if (info && info.suggested) {
+    const inEl = document.getElementById(`aiPv_${key}_in`), outEl = document.getElementById(`aiPv_${key}_out`);
+    if (inEl) inEl.value = info.suggested.inputNeuronsPerM;
+    if (outEl) outEl.value = info.suggested.outputNeuronsPerM;
+    if (note) { note.style.display = ''; note.textContent = `Na-fill ang tantiyang rate mula sa presyo ($${info.suggested.priceInUsd} in / $${info.suggested.priceOutUsd} out kada 1M tokens). Kumpirmahin sa pricing page ng Google bago i-save.`; }
+  } else if (note) {
+    note.style.display = '';
+    note.textContent = 'Walang kilalang presyo para sa model na ito — ilagay ang Neurons / 1M tokens nang mano-mano.';
+  }
+}
+async function aiGoogleClearLearned() {
+  const data = await aiApi('/relay/admin/api/ai-provider', { method: 'POST', body: JSON.stringify({ action: 'google-clear-learned' }) });
+  if (!data?.success) { toast(data?.message || 'Could not clear learned limits.', 'error'); return; }
+  toast('Nabura ang mga natutunang limit.', 'success');
+  loadAiProviderCfg();
 }
 function renderAiProviderCfg(d) {
   const box = document.getElementById('aiProviderCfgBox');
@@ -1525,17 +1586,41 @@ function renderAiProviderCfg(d) {
   const sel = (id, val, opts) => `<select id="${id}" style="width:100%; margin-top:4px;">${opts.map((o) => `<option value="${escapeHtml(o[0])}" ${String(o[0]) === String(val) ? 'selected' : ''} ${o[2] ? 'disabled' : ''}>${escapeHtml(o[1])}</option>`).join('')}</select>`;
   const gOpt = (label) => ['google', label + (keyOk ? '' : ' (walang GOOGLE_AI_API_KEY)'), !keyOk];
   const tierOpts = [['', 'Lahat ng client (Base pataas)']].concat((d.tiers || []).map((t) => [t.id, `${t.name} pataas (${t.priceTokens} tokens)`]));
+  const ml = aiGoogleModelList;
+  const mst = (gs.models || {});
   const modelRow = (key, label) => {
     const m = g.models[key];
+    const st = mst[key] || {};
+    const used = st.used || {}, eff = st.effective || {}, lrn = st.learned;
     const envDefault = (d.envDefaults || {})[key] || '';
+    const curId = m.modelId || envDefault;
+    const listOpts = ml ? [['', '— pumili mula sa listahan ng Google —']].concat(ml.map((x) => [x.id, `${x.displayName} (${x.id})`])) : null;
+    const pickHtml = listOpts
+      ? `<label style="font-size:11px; color:var(--muted);">Available na model mula sa Google (${ml.length})<select id="aiPv_${key}_pick" onchange="aiPickGoogleModel('${key}')" style="width:100%; margin-top:4px;">${listOpts.map((o) => `<option value="${escapeHtml(o[0])}" ${o[0] && o[0] === curId ? 'selected' : ''}>${escapeHtml(o[1])}</option>`).join('')}</select></label>`
+      : '';
+    const lim = (k, name) => {
+      const learnedTxt = lrn && lrn[k] ? ` · natutunan: ${n(lrn[k])}` : '';
+      return `<label style="font-size:11px; color:var(--muted);">${name} (0 = ${lrn && lrn[k] ? 'gamitin ang natutunan' : 'walang limit'})<input type="number" min="0" step="1" id="aiPv_${key}_${k}" value="${m[k] || 0}" style="width:100%; margin-top:4px;"><span style="display:block; margin-top:2px;">ngayon: ${n((used[k]) || 0)}${eff[k] ? ' / ' + n(eff[k]) : ''}${learnedTxt}</span></label>`;
+    };
+    const blockHtml = st.blocked ? `<div class="meta" style="margin-top:6px; color:var(--danger,#ff6b6b); font-weight:700;">🚫 ${st.blockKind === 'daily' ? 'Ubos ang daily limit' : 'Naabot ang limit kada minuto'} hanggang ${escapeHtml(fmt(st.blockUntil))} — ${escapeHtml(st.blockReason || '')}</div>` : '';
     return `<div style="border:1px solid var(--line); border-radius:8px; padding:8px; margin-top:8px;">
       <label style="font-size:12px; font-weight:700;"><input type="checkbox" id="aiPv_${key}_enabled" ${m.enabled ? 'checked' : ''}> ${label} — available sa OmniAI (client)</label>
       <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; margin-top:6px;">
+        ${pickHtml}
         <label style="font-size:11px; color:var(--muted);">Model ID (blangko = ${escapeHtml(envDefault)})<input type="text" id="aiPv_${key}_modelId" value="${escapeHtml(m.modelId || '')}" placeholder="${escapeHtml(envDefault)}" style="width:100%; margin-top:4px;"></label>
         <label style="font-size:11px; color:var(--muted);">Kailangang plan ng client${sel('aiPv_' + key + '_tier', m.requiredTier || '', tierOpts)}</label>
         <label style="font-size:11px; color:var(--muted);">Neurons / 1M input tokens<input type="number" min="0" step="1" id="aiPv_${key}_in" value="${m.inputNeuronsPerM}" style="width:100%; margin-top:4px;"></label>
         <label style="font-size:11px; color:var(--muted);">Neurons / 1M output tokens<input type="number" min="0" step="1" id="aiPv_${key}_out" value="${m.outputNeuronsPerM}" style="width:100%; margin-top:4px;"></label>
       </div>
+      <div id="aiPv_${key}_rateNote" class="meta" style="margin-top:4px; display:none;"></div>
+      <div style="font-size:11px; color:var(--muted); margin:8px 0 2px;">Limit ng modelong ito (kunin sa AI Studio &gt; Rate limit). Kapag 0, awtomatikong kukunin ng RELAY ang halaga mula sa 429 ng Google kung kasama ito sa sagot.</div>
+      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:8px;">
+        ${lim('rpm', 'RPM (requests/minuto)')}
+        ${lim('rpd', 'RPD (requests/araw)')}
+        ${lim('tpm', 'TPM (input tokens/minuto)')}
+      </div>
+      ${blockHtml}
+      ${keyOk ? `<div style="margin-top:8px;"><button class="btn-ghost" onclick="aiGoogleTest('${key}')">🧪 Subukan ang model na ito</button></div>` : ''}
     </div>`;
   };
   const u = gs.usage || {};
@@ -1569,7 +1654,7 @@ function renderAiProviderCfg(d) {
     <div id="aiPvTestResult" class="meta" style="display:none; margin-top:8px; font-weight:700; word-break:break-word;"></div>
     <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
       <button class="btn-primary" onclick="saveAiProviderCfg()">💾 I-save ang AI Provider</button>
-      ${keyOk ? `<button class="btn-ghost" onclick="aiGoogleTest()">🧪 Subukan ang Google</button><button class="btn-ghost" onclick="aiGoogleResetUsage()">♻️ I-reset ang bilang ng Google</button>` : ''}
+      ${keyOk ? `<button class="btn-ghost" onclick="aiFetchGoogleModels(true)">📥 Kunin ang listahan ng model sa Google</button><button class="btn-ghost" onclick="aiGoogleTest()">🧪 Subukan ang Google</button><button class="btn-ghost" onclick="aiGoogleResetUsage()">♻️ I-reset ang bilang ng Google</button><button class="btn-ghost" onclick="aiGoogleClearLearned()">🧹 Burahin ang natutunang limit</button>` : ''}
       <button class="btn-ghost" onclick="loadAiProviderCfg()">🔄 Refresh</button>
     </div>`;
   const planEl = document.getElementById('aiPvGPlan');
@@ -1582,7 +1667,10 @@ async function saveAiProviderCfg() {
     modelId: v(`aiPv_${key}_modelId`)?.value || '',
     requiredTier: v(`aiPv_${key}_tier`)?.value || '',
     inputNeuronsPerM: v(`aiPv_${key}_in`)?.value,
-    outputNeuronsPerM: v(`aiPv_${key}_out`)?.value
+    outputNeuronsPerM: v(`aiPv_${key}_out`)?.value,
+    rpm: v(`aiPv_${key}_rpm`)?.value,
+    rpd: v(`aiPv_${key}_rpd`)?.value,
+    tpm: v(`aiPv_${key}_tpm`)?.value
   });
   const body = {
     defaultProvider: v('aiPvDefault')?.value,
@@ -1604,19 +1692,29 @@ async function saveAiProviderCfg() {
   await loadAiProviderCfg();
   loadAiPlans(true);
 }
-async function aiGoogleTest() {
+async function aiGoogleTest(key) {
   const el = document.getElementById('aiPvTestResult');
   const setMsg = (t, ok) => { if (el) { el.style.display = ''; el.style.color = ok ? '#16a34a' : 'var(--danger,#ff6b6b)'; el.textContent = t; } };
+  const k = key || document.getElementById('aiPvGDefaultModel')?.value || 'flashLite';
+  const typed = (document.getElementById(`aiPv_${k}_modelId`)?.value || '').trim();
   setMsg('Sinusubukan ang Google...', true);
-  const data = await aiApi('/relay/admin/api/ai-providers/test', { method: 'POST', body: JSON.stringify({ model: document.getElementById('aiPvGDefaultModel')?.value || 'flashLite' }) });
+  const data = await aiApi('/relay/admin/api/ai-providers/test', { method: 'POST', body: JSON.stringify({ model: k, modelId: typed }) });
   if (!data) { setMsg('Walang sagot mula sa RELAY.', false); return; }
   if (data.success) {
     const note = data.usable ? '' : ' (Gumagana ang key, pero HINDI pa naka-ON/na-save ang "Google AI enabled" — i-save ang AI Provider.)';
-    setMsg(`✅ Gumagana ang Google (${data.model}, ${data.tookMs} ms). Sagot: ${data.answer}${note}`, !!data.usable);
+    setMsg(`✅ Gumagana ang Google (${data.model}, ${data.tookMs} ms, thinking: ${data.reasoningEffort || 'default'}). Sagot: ${data.answer}${note}`, !!data.usable);
   } else {
-    setMsg(`❌ ${data.message || 'Pumalya ang Google.'}${data.model ? ' [' + data.model + ']' : ''}`, false);
+    const q = data.quota === 'daily' ? ' — ubos na ang daily limit ng modelong ito.' : (data.quota === 'rate' ? ' — naabot ang limit kada minuto.' : '');
+    setMsg(`❌ ${data.message || 'Pumalya ang Google.'}${data.model ? ' [' + data.model + ']' : ''}${q}`, false);
   }
   loadAiPlans(true);
+  // I-refresh ang mga bilang (RPM/RPD/TPM) nang hindi nawawala ang mga hindi pa na-save na input at ang mensahe ng test.
+  const snap = aiSnapCfgForm();
+  const msgText = el ? el.textContent : '', msgColor = el ? el.style.color : '';
+  await loadAiProviderCfg();
+  aiRestoreCfgForm(snap);
+  const el3 = document.getElementById('aiPvTestResult');
+  if (el3 && msgText) { el3.style.display = ''; el3.style.color = msgColor; el3.textContent = msgText; }
 }
 async function aiGoogleResetUsage() {
   const data = await aiApi('/relay/admin/api/ai-provider', { method: 'POST', body: JSON.stringify({ action: 'google-reset-usage' }) });
