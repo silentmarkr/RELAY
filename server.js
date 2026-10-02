@@ -889,6 +889,59 @@ const CF_AI_VISION_MODEL = process.env.CF_AI_VISION_MODEL || '@cf/meta/llama-3.2
 function isCfAiConfigured() {
     return !!(CF_ACCOUNT_ID && CF_AI_API_TOKEN);
 }
+// ---- GOOGLE AI (Gemini) — OPTIONAL na provider -----------------------------------------------
+// Naka-ON/OFF at napipili sa Feature Pricing > Omni AI > "AI Provider". Walang epekto kung walang
+// GOOGLE_AI_API_KEY sa RELAY/.env o kung naka-OFF sa admin. Gumagamit ng OpenAI-compatible endpoint ng
+// Gemini kaya iisa ang format ng messages (kasama ang larawan) at ng token usage sa Cloudflare path.
+const GOOGLE_AI_API_KEY = process.env.GOOGLE_AI_API_KEY || null;
+const GOOGLE_AI_MODEL_FLASH = process.env.GOOGLE_AI_MODEL_FLASH || 'gemini-2.5-flash';
+const GOOGLE_AI_MODEL_FLASH_LITE = process.env.GOOGLE_AI_MODEL_FLASH_LITE || 'gemini-2.5-flash-lite';
+function isGoogleAiConfigured() {
+    return !!GOOGLE_AI_API_KEY;
+}
+async function callGoogleGeminiAI(messages, vision, modelId, retriedWithoutReasoning = false) {
+    const url = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), vision ? 45000 : 40000);
+    try {
+        const body = { model: modelId, messages, max_tokens: 650, temperature: 0.3 };
+        // Patayin ang "thinking" ng Gemini 2.5 Flash/Flash-Lite: mas mabilis, mas mura, at hindi nauubos ang max_tokens bago pa ang sagot.
+        if (!retriedWithoutReasoning && /gemini-2\.5-flash/i.test(String(modelId))) body.reasoning_effort = 'none';
+        const gRes = await fetch(url, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${GOOGLE_AI_API_KEY}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            signal: controller.signal
+        });
+        const raw = await gRes.text();
+        let data;
+        try { data = JSON.parse(raw); } catch (e) { data = null; }
+        if (!gRes.ok || !data) {
+            const eo = Array.isArray(data) ? data[0] : data;
+            let errMsg = (eo && eo.error && eo.error.message) || `Google AI request failed (HTTP ${gRes.status}).`;
+            if (!retriedWithoutReasoning && body.reasoning_effort && gRes.status === 400 && /reasoning|thinking/i.test(errMsg + ' ' + raw.slice(0, 400))) {
+                return callGoogleGeminiAI(messages, vision, modelId, true);
+            }
+            if (gRes.status === 429 && !/quota|rate/i.test(errMsg)) errMsg = `Google AI rate limit/quota (HTTP 429): ${errMsg}`;
+            if (gRes.status === 503 && !/unavailable/i.test(errMsg)) errMsg = `Google AI temporarily unavailable (HTTP 503): ${errMsg}`;
+            return {
+                success: false,
+                message: String(errMsg).slice(0, 400),
+                googleQuota: gRes.status === 429 ? (/PerDay|per day|daily/i.test(raw) ? 'daily' : 'rate') : null,
+                fallbackOk: gRes.status === 429 || gRes.status >= 500 || gRes.status === 401 || gRes.status === 403 || gRes.status === 404
+            };
+        }
+        const answer = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+        if (!answer || !String(answer).trim()) {
+            return { success: false, message: 'Empty response from AI provider.', fallbackOk: true };
+        }
+        return { success: true, answer: String(answer).trim(), cfUsage: extractCfUsage(data.usage) };
+    } catch (err) {
+        return { success: false, message: err.name === 'AbortError' ? 'AI request timed out.' : (err.message || 'AI request failed.'), fallbackOk: true };
+    } finally {
+        clearTimeout(timeout);
+    }
+}
 // Kinukuha ang totoong token usage na ibinabalik ng Cloudflare sa bawat sagot
 // (OpenAI-style: prompt_tokens/completion_tokens). null kung wala/hindi valid.
 function extractCfUsage(u) {
@@ -7133,11 +7186,13 @@ async function loadAiProviderState() {
             };
         }
     } catch (err) { /* stay open */ }
+    await loadAiGoogleState();
 }
 function saveAiProviderState() {
     try { setPersistentJSON('ai-provider-state', aiProviderState); } catch (_) {}
 }
-function getAiProviderExhaustion() {
+// Cloudflare lang ang tinutukoy nito. Ang getAiProviderExhaustion() (sa ibaba) ang pangkalahatang estado ng lahat ng provider.
+function getCfProviderExhaustion() {
     if (aiProviderState.exhaustedUntil && aiProviderState.exhaustedUntil > Date.now()) {
         return { exhausted: true, retryAt: aiProviderState.exhaustedUntil, reason: aiProviderState.reason, source: aiProviderState.source, detectedAt: aiProviderState.detectedAt };
     }
@@ -7148,7 +7203,7 @@ function getAiProviderExhaustion() {
     return { exhausted: false, retryAt: null, reason: '', source: '', detectedAt: 0 };
 }
 function markAiProviderExhausted(message, source = 'auto') {
-    const cur = getAiProviderExhaustion();
+    const cur = getCfProviderExhaustion();
     if (cur.exhausted && source === 'auto') return; // naka-lock na
     aiProviderState = {
         exhaustedUntil: relayAiNextUtcMidnightMs(),
@@ -7162,6 +7217,265 @@ function markAiProviderExhausted(message, source = 'auto') {
 function clearAiProviderExhausted() {
     aiProviderState = { exhaustedUntil: 0, reason: '', detectedAt: 0, source: '' };
     saveAiProviderState();
+}
+// ===== PROVIDER CONFIG (Cloudflare / Google) + GOOGLE STATE ===================================
+const AI_PROVIDER_IDS = ['cloudflare', 'google'];
+const AI_GOOGLE_MODEL_KEYS = ['flashLite', 'flash'];
+const AI_GOOGLE_MODEL_LABELS = { flash: 'Gemini Flash', flashLite: 'Gemini Flash-Lite' };
+// Ang neurons-per-1M-token ng Google ay "cost-parity" sa Cloudflare ($0.011 / 1,000 neurons) base sa public na presyo
+// (Flash: $0.30 in / $2.50 out; Flash-Lite: $0.10 in / $0.40 out per 1M). Puwedeng baguhin ng admin kapag nagbago ang presyo.
+const AI_PROVIDER_CFG_DEFAULTS = {
+    defaultProvider: 'cloudflare',   // cloudflare | google
+    fallbackProvider: 'none',        // none | cloudflare | google
+    google: {
+        enabled: false,
+        plan: 'free',                // free | paid
+        freeDailyRequests: 200,      // 0 = walang limit (verify sa Google rate-limits docs)
+        paidDailyRequests: 0,
+        freeDailyNeurons: 0,         // 0 = walang limit (neurons-equivalent)
+        paidDailyNeurons: 0,
+        defaultModel: 'flashLite',
+        models: {
+            flashLite: { enabled: true, modelId: '', requiredTier: '', inputNeuronsPerM: 9091, outputNeuronsPerM: 36364 },
+            flash: { enabled: true, modelId: '', requiredTier: '', inputNeuronsPerM: 27273, outputNeuronsPerM: 227273 }
+        }
+    }
+};
+let aiProviderConfigCache = null;
+function normalizeAiProviderConfig(src) {
+    const s = (src && typeof src === 'object') ? src : {};
+    const g = (s.google && typeof s.google === 'object') ? s.google : {};
+    const D = AI_PROVIDER_CFG_DEFAULTS;
+    const num = (v, d, min, max) => { const x = Number(v); return (v !== null && v !== undefined && Number.isFinite(x) && x >= min && x <= max) ? Math.round(x) : d; };
+    const pick = (v, list, d) => list.includes(String(v)) ? String(v) : d;
+    const models = {};
+    AI_GOOGLE_MODEL_KEYS.forEach((k) => {
+        const m = (g.models && typeof g.models === 'object' && g.models[k] && typeof g.models[k] === 'object') ? g.models[k] : {};
+        const dm = D.google.models[k];
+        models[k] = {
+            enabled: typeof m.enabled === 'boolean' ? m.enabled : dm.enabled,
+            modelId: typeof m.modelId === 'string' ? m.modelId.trim().slice(0, 80).replace(/[^A-Za-z0-9._\-\/]/g, '') : dm.modelId,
+            requiredTier: typeof m.requiredTier === 'string' ? m.requiredTier.trim().slice(0, 40).replace(/[^A-Za-z0-9_\-]/g, '') : dm.requiredTier,
+            inputNeuronsPerM: num(m.inputNeuronsPerM, dm.inputNeuronsPerM, 0, 100000000),
+            outputNeuronsPerM: num(m.outputNeuronsPerM, dm.outputNeuronsPerM, 0, 100000000)
+        };
+    });
+    const defaultProvider = pick(s.defaultProvider, AI_PROVIDER_IDS, D.defaultProvider);
+    let fallbackProvider = pick(s.fallbackProvider, ['none', ...AI_PROVIDER_IDS], D.fallbackProvider);
+    if (fallbackProvider === defaultProvider) fallbackProvider = 'none';
+    return {
+        defaultProvider,
+        fallbackProvider,
+        google: {
+            enabled: typeof g.enabled === 'boolean' ? g.enabled : D.google.enabled,
+            plan: pick(g.plan, ['free', 'paid'], D.google.plan),
+            freeDailyRequests: num(g.freeDailyRequests, D.google.freeDailyRequests, 0, 100000000),
+            paidDailyRequests: num(g.paidDailyRequests, D.google.paidDailyRequests, 0, 100000000),
+            freeDailyNeurons: num(g.freeDailyNeurons, D.google.freeDailyNeurons, 0, 1000000000),
+            paidDailyNeurons: num(g.paidDailyNeurons, D.google.paidDailyNeurons, 0, 1000000000),
+            defaultModel: pick(g.defaultModel, AI_GOOGLE_MODEL_KEYS, D.google.defaultModel),
+            models
+        }
+    };
+}
+async function getAiProviderConfig() {
+    if (aiProviderConfigCache) return aiProviderConfigCache;
+    let stored = null;
+    try { stored = await getPersistentJSON('ai-provider-config', null); } catch (_) { stored = null; }
+    aiProviderConfigCache = normalizeAiProviderConfig(stored);
+    return aiProviderConfigCache;
+}
+function googleModelId(cfg, key) {
+    const m = cfg.google.models[key];
+    return (m && m.modelId) || (key === 'flash' ? GOOGLE_AI_MODEL_FLASH : GOOGLE_AI_MODEL_FLASH_LITE);
+}
+// Magagamit lang ang Google kapag: naka-ON sa admin + may GOOGLE_AI_API_KEY + may kahit isang naka-enable na model.
+function googleUsable(cfg) {
+    return !!(cfg && cfg.google.enabled && isGoogleAiConfigured() && AI_GOOGLE_MODEL_KEYS.some((k) => cfg.google.models[k].enabled));
+}
+function googleDefaultModelKey(cfg) {
+    if (cfg.google.models[cfg.google.defaultModel] && cfg.google.models[cfg.google.defaultModel].enabled) return cfg.google.defaultModel;
+    return AI_GOOGLE_MODEL_KEYS.find((k) => cfg.google.models[k].enabled) || null;
+}
+function googleActiveLimits(cfg) {
+    const paid = cfg.google.plan === 'paid';
+    return { requests: paid ? cfg.google.paidDailyRequests : cfg.google.freeDailyRequests, neurons: paid ? cfg.google.paidDailyNeurons : cfg.google.freeDailyNeurons };
+}
+// Default na hanay ng provider (primary, saka fallback). Kung wala ni isa ang magagamit, kunin ang anumang magagamit (CF muna)
+// para hindi tuluyang tumigil ang Omni AI dahil sa maling setting.
+function aiDefaultProviderChain(cfg) {
+    const out = [];
+    const add = (p) => {
+        if (!p || p === 'none') return;
+        if (p === 'cloudflare' && isCfAiConfigured() && !out.some((x) => x.provider === 'cloudflare')) {
+            out.push({ provider: 'cloudflare', modelKey: 'default', modelId: CF_AI_MODEL });
+        }
+        if (p === 'google' && googleUsable(cfg) && !out.some((x) => x.provider === 'google')) {
+            const mk = googleDefaultModelKey(cfg);
+            if (mk) out.push({ provider: 'google', modelKey: mk, modelId: googleModelId(cfg, mk) });
+        }
+    };
+    add(cfg.defaultProvider);
+    add(cfg.fallbackProvider);
+    if (!out.length) { add('cloudflare'); add('google'); }
+    return out;
+}
+async function relayAiClientMeetsTier(installationId, requiredTierId) {
+    if (!requiredTierId) return true;
+    if (!pgPoolDevices) return false;
+    const tiers = await listRelayAiTiers(false);
+    const req = tiers.find((t) => t.id === requiredTierId);
+    if (!req) return true; // na-delete na ang tier -> walang paghihigpit
+    const cur = await getRelayAiActiveTier(installationId, relayAiMonthKey());
+    return !!cur && cur.priceTokens >= req.priceTokens;
+}
+function normalizeAiModelChoice(v) {
+    const s = String(v || '').trim();
+    return AI_GOOGLE_MODEL_KEYS.includes(s) ? s : '';
+}
+// Hanay ng mga subok para sa isang request: (1) pinili ng client na Gemini model kung pinapayagan ng tier, (2) default/fallback ng admin.
+async function buildAiAttemptPlan(cfg, installationId, modelChoice) {
+    const attempts = [];
+    if (modelChoice && googleUsable(cfg) && cfg.google.models[modelChoice] && cfg.google.models[modelChoice].enabled) {
+        let ok = false;
+        try { ok = await relayAiClientMeetsTier(installationId, cfg.google.models[modelChoice].requiredTier); } catch (_) { ok = false; }
+        if (ok) attempts.push({ provider: 'google', modelKey: modelChoice, modelId: googleModelId(cfg, modelChoice) });
+    }
+    aiDefaultProviderChain(cfg).forEach((a) => {
+        if (!attempts.some((x) => x.provider === a.provider && x.modelKey === a.modelKey)) attempts.push(a);
+    });
+    return attempts;
+}
+// ---- Google estado ng pagkaubos + paggamit (araw ng Google = hatinggabi ng Pacific Time) ----
+let googleProviderState = { exhaustedUntil: 0, reason: '', detectedAt: 0, source: '' };
+let googleUsageStats = null;
+let lastGoogleError = null;
+let googleUsageSaveTimer = null;
+function googleDayInfo(now = Date.now()) {
+    try {
+        const fmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
+        const parts = {};
+        fmt.formatToParts(new Date(now)).forEach((p) => { parts[p.type] = p.value; });
+        const elapsed = (Number(parts.hour) % 24) * 3600 + Number(parts.minute) * 60 + Number(parts.second);
+        return { day: `${parts.year}-${parts.month}-${parts.day}`, nextResetMs: now + Math.max(1, 86400 - elapsed) * 1000 };
+    } catch (_) {
+        return { day: new Date(now).toISOString().slice(0, 10), nextResetMs: relayAiNextUtcMidnightMs(now) };
+    }
+}
+function ensureGoogleUsageDay() {
+    const di = googleDayInfo();
+    if (!googleUsageStats || googleUsageStats.day !== di.day) {
+        googleUsageStats = { day: di.day, requests: 0, neurons: 0, inputTokens: 0, outputTokens: 0, failed: 0, byModel: {} };
+    }
+    return googleUsageStats;
+}
+function scheduleGoogleUsageSave() {
+    if (googleUsageSaveTimer) return;
+    googleUsageSaveTimer = setTimeout(() => {
+        googleUsageSaveTimer = null;
+        try { setPersistentJSON('ai-usage-google', googleUsageStats); } catch (_) {}
+    }, 5000);
+    if (googleUsageSaveTimer.unref) googleUsageSaveTimer.unref();
+}
+async function loadAiGoogleState() {
+    try { await getAiProviderConfig(); } catch (_) {}
+    try {
+        const v = await getPersistentJSON('ai-provider-state-google', null);
+        if (v && typeof v === 'object') {
+            googleProviderState = { exhaustedUntil: Number(v.exhaustedUntil) || 0, reason: String(v.reason || '').slice(0, 300), detectedAt: Number(v.detectedAt) || 0, source: String(v.source || '') };
+        }
+    } catch (_) {}
+    try {
+        const u = await getPersistentJSON('ai-usage-google', null);
+        if (u && typeof u === 'object' && u.day) {
+            googleUsageStats = {
+                day: String(u.day), requests: Number(u.requests) || 0, neurons: Number(u.neurons) || 0,
+                inputTokens: Number(u.inputTokens) || 0, outputTokens: Number(u.outputTokens) || 0, failed: Number(u.failed) || 0,
+                byModel: (u.byModel && typeof u.byModel === 'object') ? u.byModel : {}
+            };
+        }
+    } catch (_) {}
+}
+function saveGoogleProviderState() {
+    try { setPersistentJSON('ai-provider-state-google', googleProviderState); } catch (_) {}
+}
+function getGoogleStateExhaustion() {
+    if (googleProviderState.exhaustedUntil && googleProviderState.exhaustedUntil > Date.now()) {
+        return { exhausted: true, retryAt: googleProviderState.exhaustedUntil, reason: googleProviderState.reason, source: googleProviderState.source, detectedAt: googleProviderState.detectedAt };
+    }
+    if (googleProviderState.exhaustedUntil) {
+        googleProviderState = { exhaustedUntil: 0, reason: '', detectedAt: 0, source: '' };
+        saveGoogleProviderState();
+    }
+    return { exhausted: false, retryAt: null, reason: '', source: '', detectedAt: 0 };
+}
+function getGoogleProviderExhaustion(cfg) {
+    const st = getGoogleStateExhaustion();
+    if (st.exhausted) return st;
+    const c = cfg || aiProviderConfigCache || normalizeAiProviderConfig(null);
+    const lim = googleActiveLimits(c);
+    const u = ensureGoogleUsageDay();
+    const resetAt = googleDayInfo().nextResetMs;
+    if (lim.requests > 0 && u.requests >= lim.requests) {
+        return { exhausted: true, retryAt: resetAt, reason: `Naabot na ang itinakdang Google daily requests (${u.requests}/${lim.requests}).`, source: 'limit', detectedAt: 0 };
+    }
+    if (lim.neurons > 0 && u.neurons >= lim.neurons) {
+        return { exhausted: true, retryAt: resetAt, reason: `Naabot na ang itinakdang Google daily neurons-equivalent (${Math.round(u.neurons)}/${lim.neurons}).`, source: 'limit', detectedAt: 0 };
+    }
+    return { exhausted: false, retryAt: null, reason: '', source: '', detectedAt: 0 };
+}
+function markGoogleProviderExhausted(message, source = 'auto') {
+    const cur = getGoogleStateExhaustion();
+    if (cur.exhausted && source === 'auto') return;
+    googleProviderState = { exhaustedUntil: googleDayInfo().nextResetMs, reason: String(message || 'Google AI daily quota exhausted.').slice(0, 300), detectedAt: Date.now(), source };
+    saveGoogleProviderState();
+    console.warn(`🚫 Google AI marked EXHAUSTED until ${new Date(googleProviderState.exhaustedUntil).toISOString()} (${source}): ${googleProviderState.reason}`);
+}
+function clearGoogleProviderExhausted() {
+    googleProviderState = { exhaustedUntil: 0, reason: '', detectedAt: 0, source: '' };
+    saveGoogleProviderState();
+}
+function computeGoogleCallNeurons(usage, modelKey, cfg) {
+    const m = (cfg && cfg.google.models[modelKey]) || AI_PROVIDER_CFG_DEFAULTS.google.models[modelKey] || AI_PROVIDER_CFG_DEFAULTS.google.models.flashLite;
+    const inTok = usage ? usage.promptTokens : 0;
+    const outTok = usage ? usage.completionTokens : 0;
+    if (usage && (inTok + outTok) > 0) {
+        return { neurons: (inTok * m.inputNeuronsPerM + outTok * m.outputNeuronsPerM) / 1000000, inputTokens: inTok, outputTokens: outTok };
+    }
+    const settings = aiNeuronSettingsCache || normalizeAiNeuronSettings(null);
+    return { neurons: (settings.inputTokens * m.inputNeuronsPerM + settings.outputTokens * m.outputNeuronsPerM) / 1000000, inputTokens: 0, outputTokens: 0 };
+}
+function recordGoogleUsage(modelKey, calc) {
+    try {
+        const s = ensureGoogleUsageDay();
+        s.requests += 1;
+        s.neurons += calc.neurons;
+        s.inputTokens += calc.inputTokens;
+        s.outputTokens += calc.outputTokens;
+        const row = s.byModel[modelKey] || (s.byModel[modelKey] = { q: 0, n: 0 });
+        row.q += 1; row.n += calc.neurons;
+        scheduleGoogleUsageSave();
+    } catch (err) { console.error('⚠️ Google AI usage tracking error:', err.message); }
+}
+function recordGoogleFailure(message) {
+    try {
+        const s = ensureGoogleUsageDay();
+        s.failed += 1;
+        lastGoogleError = { message: String(message || 'Unknown Google AI error.').slice(0, 300), at: Date.now() };
+        scheduleGoogleUsageSave();
+    } catch (_) {}
+}
+// Pangkalahatang estado: "exhausted" lang kapag LAHAT ng provider sa default chain (primary + fallback) ay ubos na.
+// Ito ang ginagamit ng pagbebenta ng plan/extra credits at ng credit status ng client.
+function getAiProviderExhaustion() {
+    const cfg = aiProviderConfigCache || normalizeAiProviderConfig(null);
+    const chain = aiDefaultProviderChain(cfg);
+    if (!chain.length) return getCfProviderExhaustion();
+    const states = chain.map((a) => (a.provider === 'google' ? getGoogleProviderExhaustion(cfg) : getCfProviderExhaustion()));
+    if (states.every((st) => st.exhausted)) {
+        return states.slice().sort((a, b) => (a.retryAt || 0) - (b.retryAt || 0))[0];
+    }
+    return { exhausted: false, retryAt: null, reason: '', source: '', detectedAt: 0 };
 }
 // Mas mahigpit kaysa isCfQuotaOrOutageError: ito lang ang mga error na
 // nangangahulugang UBOS NA ang daily quota (hindi lang pansamantalang rate limit).
@@ -7534,6 +7848,10 @@ async function reserveRelayAiCredits(installationId, requestId, body) {
 function isCfQuotaOrOutageError(message) {
     return /daily free allocation|neurons|upgrade to cloudflare|workers paid|rate limit|quota|capacity|temporarily unavailable|service unavailable/i.test(String(message || ''));
 }
+// Pareho sa itaas pero kasama ang mga error wording ng Google (RESOURCE_EXHAUSTED, overloaded, high demand).
+function isAiProviderQuotaOrOutageError(message) {
+    return isCfQuotaOrOutageError(message) || /resource_exhausted|overloaded|high demand/i.test(String(message || ''));
+}
 // BUGFIX: ibalik ang na-reserve na credits kapag TALAGANG pumalya ang AI
 // (walang sagot na naibigay). Idempotent — isang beses lang naibabalik ang
 // bawat requestId dahil ang status na 'refunded' ay hindi na na-re-refund.
@@ -7602,14 +7920,26 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
     if (!hasActiveRelayAiSubscription(installationId)) {
         return res.status(403).json({ success: false, subscriptionRequired: true, message: 'Walang active OmniPOS AI Assistant subscription para sa device na ito.' });
     }
-    if (!isCfAiConfigured()) {
-        return res.status(503).json({ success: false, message: 'AI Assistant is not configured on the relay server (missing CF_ACCOUNT_ID/CF_AI_API_TOKEN in RELAY .env). Contact the developer.' });
+    if (!isCfAiConfigured() && !isGoogleAiConfigured()) {
+        return res.status(503).json({ success: false, message: 'AI Assistant is not configured on the relay server (missing CF_ACCOUNT_ID/CF_AI_API_TOKEN or GOOGLE_AI_API_KEY in RELAY .env). Contact the developer.' });
     }
     const messages = Array.isArray(req.body?.messages) ? req.body.messages : null;
     if (!messages || !messages.length) return res.status(400).json({ success: false, message: 'Missing messages.' });
-    // "PROVIDER EXHAUSTED" SWITCH: kapag ubos na ang Cloudflare daily quota,
-    // tanggihan agad — walang tawag sa Cloudflare, walang reservation ng credits.
-    const providerNow = getAiProviderExhaustion();
+    // PROVIDER PLAN: pinili ng client na Gemini model (kung pinapayagan ng tier) + default/fallback ng admin.
+    const providerCfg = await getAiProviderConfig();
+    const attemptPlan = await buildAiAttemptPlan(providerCfg, installationId, normalizeAiModelChoice(req.body?.modelChoice));
+    const usableAttempts = attemptPlan.filter((a) => !(a.provider === 'google' ? getGoogleProviderExhaustion(providerCfg) : getCfProviderExhaustion()).exhausted);
+    if (!attemptPlan.length) {
+        return res.status(503).json({ success: false, message: 'AI Assistant has no usable provider on the relay server. Contact the developer.' });
+    }
+    // "PROVIDER EXHAUSTED" SWITCH: kapag ubos na ang daily quota ng LAHAT ng provider sa hanay,
+    // tanggihan agad — walang tawag sa provider, walang reservation ng credits.
+    const providerNow = usableAttempts.length ? { exhausted: false } : getAiProviderExhaustion();
+    if (!usableAttempts.length) {
+        const retryCandidates = attemptPlan.map((a) => (a.provider === 'google' ? getGoogleProviderExhaustion(providerCfg) : getCfProviderExhaustion()).retryAt).filter((x) => x);
+        providerNow.exhausted = true;
+        providerNow.retryAt = retryCandidates.length ? Math.min(...retryCandidates) : getAiProviderExhaustion().retryAt;
+    }
     if (providerNow.exhausted) {
         recordAiBlockedByExhaustion();
         return res.status(503).json({
@@ -7643,21 +7973,41 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
         if (reservation.reused) {
             await markRelayAiRequestStatus(installationId, requestId, 'retrying');
         }
-        const result = await callCloudflareWorkersAI(messages, !!req.body?.vision);
+        // Subukan ang bawat provider sa hanay; lumipat sa susunod kapag naubos/pumalya ang una (fallback).
+        let result = null;
+        let usedAttempt = null;
+        for (let ai = 0; ai < usableAttempts.length; ai++) {
+            const att = usableAttempts[ai];
+            const attResult = att.provider === 'google'
+                ? await callGoogleGeminiAI(messages, !!req.body?.vision, att.modelId)
+                : await callCloudflareWorkersAI(messages, !!req.body?.vision);
+            if (attResult.success) { result = attResult; usedAttempt = att; break; }
+            result = attResult;
+            if (att.provider === 'google') {
+                recordGoogleFailure(attResult.message);
+                if (attResult.googleQuota === 'daily') markGoogleProviderExhausted(attResult.message, 'auto');
+            } else {
+                recordAiProviderFailure(attResult.message, !!req.body?.vision, isCfDailyQuotaError(attResult.message));
+                if (isCfDailyQuotaError(attResult.message)) {
+                    markAiProviderExhausted(attResult.message, 'auto');
+                    syncAiUsageToCloudflareExhausted();
+                }
+            }
+            const eligible = attResult.fallbackOk === true || isAiProviderQuotaOrOutageError(attResult.message) || /timed out|empty response|fetch failed|econn|enotfound|socket/i.test(String(attResult.message || ''));
+            if (ai < usableAttempts.length - 1 && eligible) {
+                console.warn(`↪️ AI fallback: ${att.provider}${att.provider === 'google' ? '/' + att.modelKey : ''} failed (${attResult.message}); trying next provider.`);
+                continue;
+            }
+            break;
+        }
         if (!result.success) {
             // Keep the single reservation for this logical user request.
             // OMNIPOS may use the same requestId once for its vision->text
             // fallback without charging a second time. A later unrelated
             // request always receives a fresh requestId and is charged normally.
-            const providerUnavailable = isCfQuotaOrOutageError(result.message);
+            const providerUnavailable = isAiProviderQuotaOrOutageError(result.message);
             console.error(`⚠️ RELAY AI provider failed (${req.body?.vision ? 'vision' : 'text'}): ${result.message}`);
-            // Kung daily-quota error, i-lock ang provider hanggang 00:00 UTC para
-            // ang susunod na requests ay agad na tatanggihan (walang hintay).
-            recordAiProviderFailure(result.message, !!req.body?.vision, isCfDailyQuotaError(result.message));
-            if (isCfDailyQuotaError(result.message)) {
-                markAiProviderExhausted(result.message, 'auto');
-                syncAiUsageToCloudflareExhausted();
-            }
+            // (Ang pag-lock ng provider sa daily-quota error ay nagawa na sa loob ng loop sa itaas, bawat provider.)
             // BUGFIX: para sa text request (o sa fallback na gumamit ulit ng
             // parehong requestId), walang sagot na naibigay kaya ibinabalik
             // ang credits. Ang unang vision attempt lang ang hindi ibinabalik
@@ -7685,15 +8035,24 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
             });
         }
         // NEURONS DETECTOR: bilangin ang matagumpay na sagot at ang totoong neurons na nagamit nito.
-        recordAiQuestionUsage(installationId, result.cfUsage, !!req.body?.vision);
-        // Idagdag ang TOTOONG neurons ng sagot na ito sa daily usage ng client (daily cap = neurons).
-        await addRelayAiDailyNeurons(installationId, computeAiCallNeurons(result.cfUsage, !!req.body?.vision).neurons);
+        let answerNeurons;
+        if (usedAttempt && usedAttempt.provider === 'google') {
+            // Google: sariling bilang (hindi kasama sa Cloudflare planner); neurons-equivalent ayon sa conversion rate ng model.
+            const gCalc = computeGoogleCallNeurons(result.cfUsage, usedAttempt.modelKey, providerCfg);
+            recordGoogleUsage(usedAttempt.modelKey, gCalc);
+            answerNeurons = gCalc.neurons;
+        } else {
+            recordAiQuestionUsage(installationId, result.cfUsage, !!req.body?.vision);
+            answerNeurons = computeAiCallNeurons(result.cfUsage, !!req.body?.vision).neurons;
+        }
+        // Idagdag ang TOTOONG neurons ng sagot na ito sa daily usage ng client (daily cap = neurons, pareho sa kahit anong provider).
+        await addRelayAiDailyNeurons(installationId, answerNeurons);
         await markRelayAiRequestStatus(installationId, requestId, 'completed');
         // Sariwang status (kasama ang bagong daily neurons) para tama agad ang credit pill ng client.
         let creditsOut = reservation.status;
         try { creditsOut = await getRelayAiCreditStatus(installationId); } catch (_) {}
         const { cfUsage: _cfUsage, ...clientResult } = result;
-        res.json({ ...clientResult, creditCost: reservation.cost, credits: creditsOut });
+        res.json({ ...clientResult, creditCost: reservation.cost, credits: creditsOut, aiModel: usedAttempt && usedAttempt.provider === 'google' ? usedAttempt.modelKey : 'default' });
     } catch (err) {
         console.error('⚠️ RELAY AI credit/request error:', err.message);
         return res.status(503).json({ success: false, message: 'AI credit service temporarily unavailable.' });
@@ -8089,6 +8448,23 @@ async function listRelayAiTiers(onlyEnabled = true) {
     );
     return r.rows.map(mapRelayAiTierRow);
 }
+// Mga Gemini model na puwedeng piliin ng client (Flash / Flash-Lite). null kung walang available (Google OFF/walang key/walang model).
+async function buildRelayAiModelOffer(current) {
+    const cfg = await getAiProviderConfig();
+    if (!googleUsable(cfg)) return null;
+    const allTiers = await listRelayAiTiers(false);
+    const gx = getGoogleProviderExhaustion(cfg);
+    const options = [];
+    AI_GOOGLE_MODEL_KEYS.slice().reverse().forEach((k) => { // Flash-Lite muna, saka Flash
+        const m = cfg.google.models[k];
+        if (!m.enabled) return;
+        const req = m.requiredTier ? allTiers.find((t) => t.id === m.requiredTier) : null;
+        const locked = !!(req && (!current || current.priceTokens < req.priceTokens));
+        options.push({ key: k, name: AI_GOOGLE_MODEL_LABELS[k], requiredTierId: req ? req.id : null, requiredTierName: req ? req.name : null, locked, unavailable: gx.exhausted });
+    });
+    if (!options.length) return null;
+    return { enabled: true, options };
+}
 app.get('/relay/ai-assistant/plans', requireApiKey, requireAllowedDevice, rateLimit('ai-assistant-plans', 60, 10 * 60 * 1000, (req) => req.query?.installationId), async (req, res) => {
     const installationId = String(req.query?.installationId || '').trim();
     if (!installationId) return res.status(400).json({ success: false, message: 'Missing installationId.' });
@@ -8122,7 +8498,8 @@ app.get('/relay/ai-assistant/plans', requireApiKey, requireAllowedDevice, rateLi
             currentTier: current ? { id: current.id, name: current.name, monthlyCredits: current.monthlyCredits, dailyCap: current.dailyCap } : null,
             credits: status,
             plans,
-            extraCredits: await buildRelayAiExtraOffer(installationId, status.month, !!(status.daily && status.daily.unlimited)).catch((e) => { console.error('⚠️ extra offer error:', e.message); return null; })
+            extraCredits: await buildRelayAiExtraOffer(installationId, status.month, !!(status.daily && status.daily.unlimited)).catch((e) => { console.error('⚠️ extra offer error:', e.message); return null; }),
+            aiModels: await buildRelayAiModelOffer(current).catch((e) => { console.error('⚠️ model offer error:', e.message); return null; })
         });
     } catch (err) {
         console.error('⚠️ RELAY AI plans error:', err.message);
@@ -8444,6 +8821,7 @@ app.get('/relay/admin/api/ai-plans', requireAdminKey, async (req, res) => {
             success: true, month: monthKey,
             tiers: tiers.map(t => ({ ...t, buyersThisMonth: (byTier[t.id] || {}).buyers || 0, tokensThisMonth: (byTier[t.id] || {}).tokens || 0 })),
             provider: { exhausted: provider.exhausted, retryAt: provider.retryAt, reason: provider.reason, source: provider.source, detectedAt: provider.detectedAt, model: CF_AI_MODEL, configured: isCfAiConfigured() },
+            providers: await buildAiProvidersStatus(),
             dayResetUtcOffsetHours: RELAY_AI_DAY_UTC_OFFSET_HOURS,
             capacity: capState,
             breakdown
@@ -8538,16 +8916,95 @@ app.delete('/relay/admin/api/ai-plans/tier/:id', requireAdminKey, async (req, re
 });
 app.post('/relay/admin/api/ai-provider', requireAdminKey, async (req, res) => {
     const action = String(req.body?.action || '').trim();
+    // provider: 'cloudflare' | 'google' | 'all' (default = all, kaya gumagana pa rin ang dating mga button).
+    const target = ['cloudflare', 'google', 'all'].includes(String(req.body?.provider || '')) ? String(req.body.provider) : 'all';
     if (action === 'clear') {
-        clearAiProviderExhausted();
-        console.log('🤖 AI provider exhausted flag CLEARED via admin.');
+        if (target !== 'google') clearAiProviderExhausted();
+        if (target !== 'cloudflare') clearGoogleProviderExhausted();
+        console.log(`🤖 AI provider exhausted flag CLEARED via admin (${target}).`);
     } else if (action === 'exhaust') {
-        markAiProviderExhausted(String(req.body?.reason || 'Manually locked by admin.'), 'admin');
+        const reason = String(req.body?.reason || 'Manually locked by admin.');
+        if (target !== 'google') markAiProviderExhausted(reason, 'admin');
+        if (target !== 'cloudflare') markGoogleProviderExhausted(reason, 'admin');
+    } else if (action === 'google-reset-usage') {
+        googleUsageStats = null; ensureGoogleUsageDay(); scheduleGoogleUsageSave();
     } else {
-        return res.status(400).json({ success: false, message: 'action must be "clear" or "exhaust".' });
+        return res.status(400).json({ success: false, message: 'action must be "clear", "exhaust" or "google-reset-usage".' });
     }
     const p = getAiProviderExhaustion();
     return res.json({ success: true, provider: { exhausted: p.exhausted, retryAt: p.retryAt, reason: p.reason, source: p.source, detectedAt: p.detectedAt } });
+});
+// ---- ADMIN: AI Provider (Cloudflare / Google) config ---------------------------------------
+async function buildAiProvidersStatus() {
+    const cfg = await getAiProviderConfig();
+    const cf = getCfProviderExhaustion();
+    const gx = getGoogleProviderExhaustion(cfg);
+    const gu = ensureGoogleUsageDay();
+    const lim = googleActiveLimits(cfg);
+    const models = {};
+    AI_GOOGLE_MODEL_KEYS.forEach((k) => { models[k] = { enabled: cfg.google.models[k].enabled, modelId: googleModelId(cfg, k), label: AI_GOOGLE_MODEL_LABELS[k] }; });
+    return {
+        cloudflare: { configured: isCfAiConfigured(), model: CF_AI_MODEL, exhausted: cf.exhausted, retryAt: cf.retryAt, reason: cf.reason, source: cf.source },
+        google: {
+            configured: isGoogleAiConfigured(), enabled: cfg.google.enabled, usable: googleUsable(cfg), plan: cfg.google.plan,
+            exhausted: gx.exhausted, retryAt: gx.retryAt, reason: gx.reason, source: gx.source,
+            limits: lim, resetsAt: googleDayInfo().nextResetMs,
+            usage: { day: gu.day, requests: gu.requests, neurons: Math.round(gu.neurons * 10) / 10, inputTokens: gu.inputTokens, outputTokens: gu.outputTokens, failed: gu.failed, byModel: gu.byModel },
+            lastError: lastGoogleError ? { ...lastGoogleError } : null,
+            models
+        },
+        chain: aiDefaultProviderChain(cfg).map((a) => ({ provider: a.provider, modelKey: a.modelKey, modelId: a.modelId }))
+    };
+}
+app.get('/relay/admin/api/ai-providers', requireAdminKey, async (req, res) => {
+    try {
+        const cfg = await getAiProviderConfig();
+        let tiers = [];
+        try { tiers = pgPoolDevices ? (await listRelayAiTiers(false)).map((t) => ({ id: t.id, name: t.name, priceTokens: t.priceTokens })) : []; } catch (_) { tiers = []; }
+        return res.json({
+            success: true, config: cfg, tiers,
+            envDefaults: { flash: GOOGLE_AI_MODEL_FLASH, flashLite: GOOGLE_AI_MODEL_FLASH_LITE },
+            status: await buildAiProvidersStatus()
+        });
+    } catch (err) {
+        console.error('AI providers GET error:', err.message);
+        return res.status(503).json({ success: false, message: 'Unable to load AI provider settings.' });
+    }
+});
+app.post('/relay/admin/api/ai-providers/settings', requireAdminKey, async (req, res) => {
+    try {
+        const cur = await getAiProviderConfig();
+        const b = (req.body && typeof req.body === 'object') ? req.body : {};
+        const bg = (b.google && typeof b.google === 'object') ? b.google : {};
+        const bm = (bg.models && typeof bg.models === 'object') ? bg.models : {};
+        const next = normalizeAiProviderConfig({
+            ...cur, ...b,
+            google: {
+                ...cur.google, ...bg,
+                models: {
+                    flashLite: { ...cur.google.models.flashLite, ...(bm.flashLite || {}) },
+                    flash: { ...cur.google.models.flash, ...(bm.flash || {}) }
+                }
+            }
+        });
+        const wantsGoogle = next.google.enabled || next.defaultProvider === 'google' || next.fallbackProvider === 'google';
+        if (wantsGoogle && !isGoogleAiConfigured()) {
+            return res.status(400).json({ success: false, message: 'Walang GOOGLE_AI_API_KEY sa RELAY/.env — idagdag muna ito at i-restart ang RELAY bago piliin ang Google.' });
+        }
+        if (wantsGoogle && !AI_GOOGLE_MODEL_KEYS.some((k) => next.google.models[k].enabled)) {
+            return res.status(400).json({ success: false, message: 'Mag-enable ng kahit isang Gemini model (Flash o Flash-Lite).' });
+        }
+        if ((next.defaultProvider === 'google' || next.fallbackProvider === 'google') && !next.google.enabled) {
+            return res.status(400).json({ success: false, message: 'I-ON muna ang "Google AI enabled" bago gawing default o fallback ang Google.' });
+        }
+        aiProviderConfigCache = next;
+        setPersistentJSON('ai-provider-config', next);
+        console.log(`🤖 AI provider config saved: default=${next.defaultProvider}, fallback=${next.fallbackProvider}, google=${next.google.enabled ? 'ON' : 'OFF'}/${next.google.plan}`);
+        return res.json({ success: true, config: next, status: await buildAiProvidersStatus() });
+    } catch (err) {
+        console.error('AI providers settings error:', err.message);
+        return res.status(503).json({ success: false, message: 'Unable to save AI provider settings.' });
+    }
 });
 // ---- ADMIN: Workers AI neurons planner ----------------------------------
 // Ang free allocation ng Cloudflare Workers AI ay 10,000 neurons/araw (Free at Paid plan).
@@ -8633,7 +9090,7 @@ async function resolveCfPlanDetection(force = false) {
     const det = await detectCfWorkersPlan(force);
     // Kung hindi ma-detect pero kagagaling lang ng daily-quota error mula sa Cloudflare, sigurado nang Free.
     if (det.plan === 'unknown') {
-        const p = getAiProviderExhaustion();
+        const p = getCfProviderExhaustion();
         if (p.exhausted && p.source === 'auto') {
             return { ...det, plan: 'free', source: 'quota-error', detail: 'Na-detect mula sa daily quota error ng Cloudflare (Free plan).' };
         }
@@ -8872,7 +9329,7 @@ async function buildAiUsagePayload() {
     const effective = settings.planOverride !== 'auto' ? settings.planOverride : (det.plan === 'paid' ? 'paid' : 'free');
     const limit = effective === 'paid' ? settings.paidDailyNeurons : CF_FREE_NEURONS_PER_DAY;
     const s = aiUsageStats;
-    const prov = getAiProviderExhaustion();
+    const prov = getCfProviderExhaustion();
     const used = s.neurons;
     const estPerQuestion = aiNeuronsPerQuestion(settings);
     const observedPerQuestion = s.questions > 0 ? s.trackedNeurons / s.questions : null;

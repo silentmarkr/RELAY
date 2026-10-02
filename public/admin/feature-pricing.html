@@ -321,7 +321,10 @@
           <button class="btn-ghost" onclick="aiProviderAction('exhaust')">🚫 Lock hanggang 00:00 UTC</button>
           <button class="btn-ghost" onclick="loadAiPlans()">🔄 Refresh</button>
         </div>
-        <div style="font-size:12px; font-weight:700; margin:14px 0 6px;">Neurons Detector — live na gamit ngayong araw (UTC)</div>
+        <hr style="border:0; border-top:1px solid var(--line); margin:14px 0;">
+        <div style="font-size:12px; font-weight:700; margin-bottom:6px;">AI Provider — Cloudflare / Google (Gemini)</div>
+        <div id="aiProviderCfgBox" style="padding:10px; border:1px solid var(--line); border-radius:10px; margin-bottom:12px;">Loading...</div>
+        <div style="font-size:12px; font-weight:700; margin:14px 0 6px;">Neurons Detector (Cloudflare) — live na gamit ngayong araw (UTC)</div>
         <div id="aiUsageBox" style="padding:10px; border:1px solid var(--line); border-radius:10px;">Loading...</div>
         <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
           <input type="number" id="aiUsageCalibrateInput" min="0" step="1" placeholder="Neurons used ayon sa Cloudflare dashboard" style="flex:1; min-width:200px;">
@@ -852,17 +855,34 @@ function aiTierRowHtml(t, isNew) {
       </div>
     </div>`;
 }
-function renderAiProviderBox(p) {
+function aiProvidersLinesHtml(pv) {
+  if (!pv) return '';
+  const fmt = (ms) => ms ? new Date(ms).toLocaleString() : '—';
+  const line = (name, x, extra) => {
+    if (!x) return '';
+    const st = !x.configured ? '⚪ walang key' : (x.exhausted ? `🚫 ubos hanggang ${escapeHtml(fmt(x.retryAt))}` : '✅ OK');
+    return `<div class="meta">${name}: ${st}${extra ? ' · ' + extra : ''}</div>`;
+  };
+  const g = pv.google || {};
+  const gx = g.configured ? `${g.enabled ? 'ON' : 'OFF'} · ${escapeHtml(g.plan || 'free')}` : '';
+  const chain = (pv.chain || []).map((c) => c.provider === 'google' ? `Google (${escapeHtml(c.modelId)})` : 'Cloudflare').join(' → ') || '—';
+  return `<div style="margin-top:6px; padding-top:6px; border-top:1px dashed var(--line);">
+    ${line('Cloudflare', pv.cloudflare, '')}
+    ${line('Google AI', g, gx)}
+    <div class="meta">Default na hanay: <b>${chain}</b></div>
+  </div>`;
+}
+function renderAiProviderBox(p, pv) {
   const box = document.getElementById('aiProviderBox');
   if (!box || !p) return;
   const fmt = (ms) => ms ? new Date(ms).toLocaleString() : '—';
   if (p.exhausted) {
     box.innerHTML = `<div style="color:var(--danger,#ff6b6b); font-weight:700;">🚫 EXHAUSTED — tinatanggihan ang AI requests hanggang ${escapeHtml(fmt(p.retryAt))}</div>
       <div class="meta" style="margin-top:4px;">Source: ${escapeHtml(p.source || 'auto')} · na-detect: ${escapeHtml(fmt(p.detectedAt))}</div>
-      <div class="meta">${escapeHtml(p.reason || '')}</div>`;
+      <div class="meta">${escapeHtml(p.reason || '')}</div>${aiProvidersLinesHtml(pv)}`;
   } else {
     box.innerHTML = `<div style="color:var(--success,#69db7c); font-weight:700;">✅ Provider OK — tumatanggap ng AI requests</div>
-      <div class="meta" style="margin-top:4px;">Model: ${escapeHtml(p.model || '—')} · Cloudflare ${p.configured ? 'configured' : 'HINDI configured'}</div>`;
+      <div class="meta" style="margin-top:4px;">Model: ${escapeHtml(p.model || '—')} · Cloudflare ${p.configured ? 'configured' : 'HINDI configured'}</div>${aiProvidersLinesHtml(pv)}`;
   }
 }
 let aiUsageState = null;     // sagot ng /ai-usage (neurons detector)
@@ -1438,9 +1458,10 @@ async function loadAiPlans(providerOnly) {
   let data;
   try { data = await aiApi('/relay/admin/api/ai-plans'); } catch (err) { return; }
   if (!data?.success) { if (!providerOnly) toast(data?.message || 'Could not load AI plans.', 'error'); return; }
-  renderAiProviderBox(data.provider);
+  renderAiProviderBox(data.provider, data.providers);
   loadAiUsage();
   if (providerOnly) return;
+  loadAiProviderCfg();
   renderAiBreakdownBox(data.breakdown ? { ...data.breakdown, month: data.month } : null, data.capacity);
   aiBreakdownCache = data.breakdown ? { ...data.breakdown, month: data.month } : null;
   loadAiNeurons(false);
@@ -1483,6 +1504,110 @@ async function deleteAiTier(id) {
     toast('Tier deleted.', 'success');
     loadAiPlans();
   } catch (err) { toast(err.message || 'Could not delete tier.', 'error'); }
+}
+// ---- AI Provider config (Cloudflare / Google) ----
+let aiProviderCfgState = null;
+async function loadAiProviderCfg() {
+  const box = document.getElementById('aiProviderCfgBox');
+  if (!box) return;
+  const data = await aiApi('/relay/admin/api/ai-providers');
+  if (!data?.success) { box.textContent = data?.message || 'Could not load AI provider settings.'; return; }
+  aiProviderCfgState = data;
+  renderAiProviderCfg(data);
+}
+function renderAiProviderCfg(d) {
+  const box = document.getElementById('aiProviderCfgBox');
+  if (!box || !d) return;
+  const c = d.config, st = d.status || {}, g = c.google, gs = st.google || {};
+  const keyOk = !!gs.configured;
+  const n = (x) => Number(x || 0).toLocaleString();
+  const fmt = (ms) => ms ? new Date(ms).toLocaleString() : '—';
+  const sel = (id, val, opts) => `<select id="${id}" style="width:100%; margin-top:4px;">${opts.map((o) => `<option value="${escapeHtml(o[0])}" ${String(o[0]) === String(val) ? 'selected' : ''} ${o[2] ? 'disabled' : ''}>${escapeHtml(o[1])}</option>`).join('')}</select>`;
+  const gOpt = (label) => ['google', label + (keyOk ? '' : ' (walang GOOGLE_AI_API_KEY)'), !keyOk];
+  const tierOpts = [['', 'Lahat ng client (Base pataas)']].concat((d.tiers || []).map((t) => [t.id, `${t.name} pataas (${t.priceTokens} tokens)`]));
+  const modelRow = (key, label) => {
+    const m = g.models[key];
+    const envDefault = (d.envDefaults || {})[key] || '';
+    return `<div style="border:1px solid var(--line); border-radius:8px; padding:8px; margin-top:8px;">
+      <label style="font-size:12px; font-weight:700;"><input type="checkbox" id="aiPv_${key}_enabled" ${m.enabled ? 'checked' : ''}> ${label} — available sa OmniAI (client)</label>
+      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; margin-top:6px;">
+        <label style="font-size:11px; color:var(--muted);">Model ID (blangko = ${escapeHtml(envDefault)})<input type="text" id="aiPv_${key}_modelId" value="${escapeHtml(m.modelId || '')}" placeholder="${escapeHtml(envDefault)}" style="width:100%; margin-top:4px;"></label>
+        <label style="font-size:11px; color:var(--muted);">Kailangang plan ng client${sel('aiPv_' + key + '_tier', m.requiredTier || '', tierOpts)}</label>
+        <label style="font-size:11px; color:var(--muted);">Neurons / 1M input tokens<input type="number" min="0" step="1" id="aiPv_${key}_in" value="${m.inputNeuronsPerM}" style="width:100%; margin-top:4px;"></label>
+        <label style="font-size:11px; color:var(--muted);">Neurons / 1M output tokens<input type="number" min="0" step="1" id="aiPv_${key}_out" value="${m.outputNeuronsPerM}" style="width:100%; margin-top:4px;"></label>
+      </div>
+    </div>`;
+  };
+  const u = gs.usage || {};
+  const lim = gs.limits || {};
+  const usageHtml = keyOk ? `<div class="meta" style="margin-top:8px;">Google ngayong araw (${escapeHtml(u.day || '—')}, Pacific time): <b>${n(u.requests)}</b> requests${lim.requests ? ' / ' + n(lim.requests) : ''} · <b>${n(u.neurons)}</b> neurons-equiv${lim.neurons ? ' / ' + n(lim.neurons) : ''} · tokens in/out: ${n(u.inputTokens)}/${n(u.outputTokens)} · palpak: ${n(u.failed)} · mag-reset: ${escapeHtml(fmt(gs.resetsAt))}${gs.lastError ? `<br>Huling error: ${escapeHtml(gs.lastError.message)}` : ''}</div>` : '';
+  box.innerHTML = `
+    <div class="meta" style="margin-bottom:8px;">GOOGLE_AI_API_KEY sa RELAY/.env: <b>${keyOk ? '✅ nakita' : '❌ wala'}</b>. Nasa Cloudflare pa rin ang Base/Plus/Pro tiers at ang Neurons Planner; ang Google ay may sarili ring limit sa ibaba (hiwalay na bilang).</div>
+    <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:8px;">
+      <label style="font-size:12px; color:var(--muted);">Default provider${sel('aiPvDefault', c.defaultProvider, [['cloudflare', 'Cloudflare Workers AI'], gOpt('Google AI (Gemini)')])}</label>
+      <label style="font-size:12px; color:var(--muted);">Fallback (kapag naubos/pumalya ang una)${sel('aiPvFallback', c.fallbackProvider, [['none', 'Wala'], ['cloudflare', 'Cloudflare Workers AI'], gOpt('Google AI (Gemini)')])}</label>
+    </div>
+    <div style="margin-top:10px; padding-top:8px; border-top:1px dashed var(--line);">
+      <label style="font-size:12px; font-weight:700;"><input type="checkbox" id="aiPvGEnabled" ${g.enabled ? 'checked' : ''} ${keyOk ? '' : 'disabled'}> Google AI enabled (OFF = hindi gagamitin at hindi ipapakita sa clients)</label>
+      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:8px; margin-top:8px;">
+        <label style="font-size:12px; color:var(--muted);">Google plan${sel('aiPvGPlan', g.plan, [['free', 'Free'], ['paid', 'Paid (billing naka-enable)']])}</label>
+        <label style="font-size:12px; color:var(--muted);">Default Gemini model (kapag Google ang default/fallback)${sel('aiPvGDefaultModel', g.defaultModel, [['flashLite', 'Flash-Lite'], ['flash', 'Flash']])}</label>
+      </div>
+      <div id="aiPvPrivacy" class="meta" style="margin-top:6px; color:var(--danger,#ff6b6b); ${g.plan === 'free' ? '' : 'display:none;'}">⚠️ Free tier: puwedeng gamitin ng Google ang data para sa training (ayon sa terms nila). May live store data (benta, imbentaryo) na ipinapasa sa AI — mas ligtas ang Paid.</div>
+      <div style="font-size:11px; color:var(--muted); margin:8px 0 2px;">Daily limit ayon sa plan (0 = walang limit). Per-project at nagbabago ang numero ng Google — kumpirmahin sa kanilang rate-limits docs bago itakda.</div>
+      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px;">
+        <label style="font-size:11px; color:var(--muted);">Free: requests / araw<input type="number" min="0" step="1" id="aiPvFreeRpd" value="${g.freeDailyRequests}" style="width:100%; margin-top:4px;"></label>
+        <label style="font-size:11px; color:var(--muted);">Free: neurons-equiv / araw<input type="number" min="0" step="1" id="aiPvFreeNeu" value="${g.freeDailyNeurons}" style="width:100%; margin-top:4px;"></label>
+        <label style="font-size:11px; color:var(--muted);">Paid: requests / araw<input type="number" min="0" step="1" id="aiPvPaidRpd" value="${g.paidDailyRequests}" style="width:100%; margin-top:4px;"></label>
+        <label style="font-size:11px; color:var(--muted);">Paid: neurons-equiv / araw<input type="number" min="0" step="1" id="aiPvPaidNeu" value="${g.paidDailyNeurons}" style="width:100%; margin-top:4px;"></label>
+      </div>
+      ${modelRow('flashLite', 'Gemini Flash-Lite')}
+      ${modelRow('flash', 'Gemini Flash')}
+      <div class="meta" style="margin-top:6px;">Ang "Neurons / 1M tokens" ang conversion para magamit ang parehong daily neurons ng Base/Plus/Pro sa Google. Default = katumbas ng presyo ($0.011 / 1,000 neurons). Baguhin kapag nagbago ang presyo ng Google.</div>
+      ${usageHtml}
+    </div>
+    <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+      <button class="btn-primary" onclick="saveAiProviderCfg()">💾 I-save ang AI Provider</button>
+      ${keyOk ? `<button class="btn-ghost" onclick="aiGoogleResetUsage()">♻️ I-reset ang bilang ng Google</button>` : ''}
+      <button class="btn-ghost" onclick="loadAiProviderCfg()">🔄 Refresh</button>
+    </div>`;
+  const planEl = document.getElementById('aiPvGPlan');
+  if (planEl) planEl.onchange = () => { const w = document.getElementById('aiPvPrivacy'); if (w) w.style.display = planEl.value === 'free' ? '' : 'none'; };
+}
+async function saveAiProviderCfg() {
+  const v = (id) => document.getElementById(id);
+  const model = (key) => ({
+    enabled: !!v(`aiPv_${key}_enabled`)?.checked,
+    modelId: v(`aiPv_${key}_modelId`)?.value || '',
+    requiredTier: v(`aiPv_${key}_tier`)?.value || '',
+    inputNeuronsPerM: v(`aiPv_${key}_in`)?.value,
+    outputNeuronsPerM: v(`aiPv_${key}_out`)?.value
+  });
+  const body = {
+    defaultProvider: v('aiPvDefault')?.value,
+    fallbackProvider: v('aiPvFallback')?.value,
+    google: {
+      enabled: !!v('aiPvGEnabled')?.checked,
+      plan: v('aiPvGPlan')?.value,
+      defaultModel: v('aiPvGDefaultModel')?.value,
+      freeDailyRequests: v('aiPvFreeRpd')?.value,
+      freeDailyNeurons: v('aiPvFreeNeu')?.value,
+      paidDailyRequests: v('aiPvPaidRpd')?.value,
+      paidDailyNeurons: v('aiPvPaidNeu')?.value,
+      models: { flashLite: model('flashLite'), flash: model('flash') }
+    }
+  };
+  const data = await aiApi('/relay/admin/api/ai-providers/settings', { method: 'POST', body: JSON.stringify(body) });
+  if (!data?.success) { toast(data?.message || 'Could not save AI provider settings.', 'error'); return; }
+  toast('AI provider settings saved.', 'success');
+  await loadAiProviderCfg();
+  loadAiPlans(true);
+}
+async function aiGoogleResetUsage() {
+  const data = await aiApi('/relay/admin/api/ai-provider', { method: 'POST', body: JSON.stringify({ action: 'google-reset-usage' }) });
+  if (!data?.success) { toast(data?.message || 'Could not reset Google usage.', 'error'); return; }
+  toast('Na-reset ang bilang ng Google ngayong araw.', 'success');
+  loadAiProviderCfg();
 }
 async function aiProviderAction(action) {
   try {
