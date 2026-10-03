@@ -388,6 +388,7 @@
           <button type="button" class="ai-chip" onclick="aiNavGo('capacity')">🧮 Capacity</button>
           <button type="button" class="ai-chip" onclick="aiNavGo('planner')">🧠 Free Planner</button>
           <button type="button" class="ai-chip" onclick="aiNavGo('breakdown')">👥 Clients per Plan</button>
+          <button type="button" class="ai-chip" onclick="aiNavGo('clients')">👤 Client Usage</button>
           <button type="button" class="ai-chip" onclick="aiNavGo('provider')">🔌 Provider</button>
           <span class="ai-nav-spacer"></span>
           <button type="button" class="ai-chip ghost" onclick="aiToggleAllSections(true)">Expand all</button>
@@ -478,6 +479,25 @@
           <summary><span class="ai-sec-title">👥 Clients per Plan &amp; Formula ng Extra Credit</span><span class="ai-sec-sub">Ilan ang nasa bawat plan</span></summary>
           <div class="ai-sec-body">
             <div id="aiBreakdownBox" class="ai-box">Loading...</div>
+          </div>
+        </details>
+
+        <details class="ai-sec" id="aisec-clients" data-sec="clients" data-default-open="1">
+          <summary><span class="ai-sec-title">👤 Client Usage — per installation</span><span class="ai-sec-sub">Label, plan, credits at neurons ngayong araw (parehong numero ng nakikita ng client)</span></summary>
+          <div class="ai-sec-body">
+            <div id="aiClientsSummary" class="ai-box" style="margin-bottom:8px;">Loading...</div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:8px;">
+              <input type="text" id="aiClientsSearch" placeholder="Hanapin ang label, store name o installation ID" oninput="renderAiClients()" style="flex:1 1 220px; min-width:180px;">
+              <select id="aiClientsPlan" onchange="renderAiClients()" aria-label="Filter plan">
+                <option value="">Lahat ng plan</option><option value="free">Free</option><option value="base">Base</option><option value="plus">Plus</option><option value="pro">Pro</option><option value="__sync">May sync issue</option>
+              </select>
+              <select id="aiClientsSort" onchange="renderAiClients()" aria-label="Sort clients">
+                <option value="neurons">Pinakamataas na neurons ngayon</option><option value="credits">Pinakamaraming credits na nagamit</option><option value="remaining">Pinakakonting natitirang credits</option><option value="label">Label (A-Z)</option>
+              </select>
+              <button class="btn-ghost" onclick="loadAiClients(true)">🔄 Refresh</button>
+              <button class="btn-ghost" onclick="aiExportClientsCsv()">⬇️ Export (CSV)</button>
+            </div>
+            <div id="aiClientsList" class="ai-box">Loading...</div>
           </div>
         </details>
 
@@ -845,7 +865,7 @@ function confirmAction({ title, message }) {
 }
 function startAiPoll() {
   if (window.__aiProviderPoll) clearInterval(window.__aiProviderPoll);
-  window.__aiProviderPoll = setInterval(() => { if (adminKey) loadAiPlans(true); }, 60000);
+  window.__aiProviderPoll = setInterval(() => { if (adminKey) { loadAiPlans(true); loadAiClients(); } }, 60000);
 }
 function stopAiPoll() {
   if (window.__aiProviderPoll) { clearInterval(window.__aiProviderPoll); window.__aiProviderPoll = null; }
@@ -2030,6 +2050,7 @@ function aiToggleAutoRefresh(cb) {
 function aiRefreshAll() {
   loadAiPlans();
   loadAiCreditSettings();
+  loadAiClients(true);
   toast('Nire-refresh ang Omni AI data...', 'info');
 }
 function aiDownloadText(filename, text, mime) {
@@ -2050,6 +2071,100 @@ function aiCsv(header, rows) {
   return [header.map(aiCsvCell).join(',')].concat(rows.map((r) => r.map(aiCsvCell).join(','))).join('\r\n');
 }
 function aiTodayStamp() { return new Date().toISOString().slice(0, 10); }
+// ---- Client Usage (per installation) ----
+let aiClientsState = null;
+async function loadAiClients(force) {
+  let d;
+  try { d = await aiApi('/relay/admin/api/ai-clients' + (force ? '?force=1' : '')); } catch (e) { d = null; }
+  if (!d || !d.success) {
+    const box = document.getElementById('aiClientsList');
+    if (box && !aiClientsState) box.innerHTML = `<div class="meta">${escapeHtml((d && d.message) || 'Hindi ma-load ang client usage.')}</div>`;
+    return;
+  }
+  aiClientsState = d;
+  renderAiClients();
+}
+function aiClientName(c) { return c.label || c.storeName || ''; }
+function renderAiClients() {
+  const sumEl = document.getElementById('aiClientsSummary');
+  const listEl = document.getElementById('aiClientsList');
+  if (!sumEl || !listEl || !aiClientsState) return;
+  const d = aiClientsState;
+  const all = Array.isArray(d.clients) ? d.clients : [];
+  const counts = d.counts || {};
+  const chip = (txt, tone) => `<span class="badge${tone ? '' : ' default'}" style="margin-right:6px;">${txt}</span>`;
+  sumEl.innerHTML = `<div style="font-size:12px;">
+      ${chip('Free: ' + (counts.free || 0))}${chip('Base: ' + (counts.base || 0))}${chip('Plus: ' + (counts.plus || 0))}${chip('Pro: ' + (counts.pro || 0))}
+      <span class="meta">Kabuuan ${d.total}${d.truncated ? ` (ipinapakita ang unang ${d.shown})` : ''} · Credits buwan ${escapeHtml(d.month)} · Neurons araw ${escapeHtml(d.day)}</span>
+      ${d.outOfSync ? `<div style="color:var(--amber);margin-top:6px;">⚠️ ${d.outOfSync} client ang may sync issue — tingnan ang may ⚠️ sa listahan.</div>` : `<div style="color:var(--green);margin-top:6px;">✅ Tugma ang lahat ng client sa plan/tier na binili nila.</div>`}
+    </div>`;
+  const q = String(document.getElementById('aiClientsSearch')?.value || '').trim().toLowerCase();
+  const planF = document.getElementById('aiClientsPlan')?.value || '';
+  const sortKey = document.getElementById('aiClientsSort')?.value || 'neurons';
+  let rows = all.filter((c) => {
+    if (planF === '__sync' && !(c.sync && !c.sync.ok)) return false;
+    if (planF && planF !== '__sync' && !(c.plan && c.plan.id === planF)) return false;
+    if (!q) return true;
+    return String(c.installationId).toLowerCase().includes(q) || aiClientName(c).toLowerCase().includes(q) || String(c.storeName || '').toLowerCase().includes(q);
+  });
+  const num = (v) => Number(v) || 0;
+  const sorters = {
+    neurons: (a, b) => num(b.daily && b.daily.used) - num(a.daily && a.daily.used),
+    credits: (a, b) => num(b.credits && b.credits.used) - num(a.credits && a.credits.used),
+    remaining: (a, b) => num(a.credits ? a.credits.remaining : 1e12) - num(b.credits ? b.credits.remaining : 1e12),
+    label: (a, b) => (aiClientName(a) || '~').localeCompare(aiClientName(b) || '~')
+  };
+  rows = rows.slice().sort(sorters[sortKey] || sorters.neurons);
+  if (!all.length) { listEl.innerHTML = '<div class="empty">Wala pang client na gumagamit o naka-subscribe sa Omni AI.</div>'; return; }
+  if (!rows.length) { listEl.innerHTML = '<div class="empty">Walang tumugma sa hinahanap.</div>'; return; }
+  const bar = (used, limit) => {
+    const pct = limit > 0 ? Math.min(100, (used / limit) * 100) : 0;
+    const color = pct >= 90 ? 'var(--red)' : (pct >= 70 ? 'var(--amber)' : 'var(--green)');
+    return `<div class="ai-mini-bar"><span style="width:${pct}%;background:${color};"></span></div>`;
+  };
+  const fmt = (n) => Number(n || 0).toLocaleString('en-US');
+  const planColor = { free: 'var(--muted)', base: 'var(--accent)', plus: 'var(--green)', pro: 'var(--amber)' };
+  listEl.innerHTML = rows.map((c) => {
+    if (c.error) return `<div class="row" style="margin-bottom:6px;padding:8px;"><code>${escapeHtml(c.installationId)}</code> <span class="meta" style="color:var(--red);">${escapeHtml(c.error)}</span></div>`;
+    const name = aiClientName(c);
+    const cr = c.credits, dl = c.daily;
+    const planCol = planColor[c.plan.id] || 'var(--accent)';
+    const sync = c.sync && !c.sync.ok ? `<span title="${escapeAttr((c.sync.notes || []).join('\n'))}" style="color:var(--amber);cursor:help;">⚠️ ${escapeHtml((c.sync.notes || [])[0] || 'sync issue')}</span>` : '';
+    const dailyTxt = dl.unlimited ? `${fmt(dl.used)} / ∞` : `${fmt(dl.used)} / ${fmt(dl.cap)}`;
+    const extra = (c.extra.credits || c.extra.dailyBonus) ? `<span class="meta">+${fmt(c.extra.credits)} cr / +${fmt(c.extra.dailyBonus)} neurons extra</span>` : '';
+    const sub = c.plan.isFree ? '<span class="meta">walang Omni AI subscription</span>' : (c.subscriptionExpiresAt ? `<span class="meta">subscription hanggang ${escapeHtml(new Date(c.subscriptionExpiresAt).toLocaleDateString())}</span>` : '');
+    return `<div class="row" style="margin-bottom:6px;padding:8px;">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <b style="min-width:120px;">${name ? '🏷️ ' + escapeHtml(name) : '<span class="meta">(walang label)</span>'}</b>
+        <span style="border:1px solid ${planCol};color:${planCol};border-radius:999px;padding:1px 8px;font-size:11px;font-weight:700;">${escapeHtml(c.plan.name)}</span>
+        ${c.override ? '<span class="badge">override</span>' : ''} ${extra} ${sub}
+        <span style="flex:1 1 auto;"></span>
+        <button class="btn-ghost" style="padding:2px 8px;" onclick="aiClientEdit('${escapeAttr(c.installationId)}')">Override</button>
+      </div>
+      <code style="display:block;font-size:11px;word-break:break-all;opacity:.75;margin:2px 0 6px;">${escapeHtml(c.installationId)}</code>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;font-size:12px;">
+        <div>Credits: <b>${fmt(cr.used)} / ${fmt(cr.limit)}</b> <span class="meta">(left ${fmt(cr.remaining)})</span>${bar(cr.used, cr.limit)}</div>
+        <div>Neurons ngayong araw: <b>${dailyTxt}</b> <span class="meta">· ${fmt(dl.questions)} tanong</span>${bar(dl.used, dl.unlimited ? 0 : dl.cap)}</div>
+      </div>
+      ${sync ? `<div style="margin-top:6px;font-size:12px;">${sync}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+function aiClientEdit(installationId) {
+  const idEl = document.getElementById('aiOverrideInstallation');
+  if (idEl) idEl.value = installationId;
+  if (typeof selectAiOverride === 'function') selectAiOverride(installationId);
+  const d = document.getElementById('aisec-tiers') || document.getElementById('aiOverrideInstallation');
+  if (idEl) idEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+function aiExportClientsCsv() {
+  const all = (aiClientsState && aiClientsState.clients) || [];
+  if (!all.length) { toast('Walang client data na ie-export.', 'error'); return; }
+  aiDownloadText(`omniai-clients-${aiTodayStamp()}.csv`, aiCsv(
+    ['label', 'storeName', 'installationId', 'plan', 'creditsUsed', 'creditsLimit', 'creditsRemaining', 'neuronsToday', 'neuronsCap', 'questionsToday', 'extraCredits', 'extraDailyNeurons', 'override', 'syncOk', 'syncNotes'],
+    all.filter((c) => !c.error).map((c) => [c.label || '', c.storeName || '', c.installationId, c.plan.name, c.credits.used, c.credits.limit, c.credits.remaining, c.daily.used, c.daily.unlimited ? 'unlimited' : c.daily.cap, c.daily.questions, c.extra.credits, c.extra.dailyBonus, c.override ? 'yes' : 'no', c.sync.ok ? 'yes' : 'no', (c.sync.notes || []).join(' | ')])
+  ));
+}
 function aiExportUsageCsv() {
   const clients = (aiUsageState && Array.isArray(aiUsageState.clients)) ? aiUsageState.clients : [];
   if (!clients.length) { toast('Walang client data na ie-export ngayong araw.', 'error'); return; }
@@ -2138,6 +2253,13 @@ function renderAiOverview() {
     if ((Number(hi.monthlyCredits) || 0) < (Number(lo.monthlyCredits) || 0)) add('warn', `"${hi.name}" ay mas mahal pero mas kaunti ang monthly credits kaysa "${lo.name}".`, 'tiers');
     if (effDaily(hi) < effDaily(lo)) add('warn', `"${hi.name}" ay mas mahal pero mas mababa ang daily neurons kaysa "${lo.name}".`, 'tiers');
   }
+  // Base (libre kasama ng subscription) ay hindi dapat lumampas sa binayarang tier.
+  const baseDailyEff = Number(cap.baseDailyEffective);
+  const baseCredits = Number(relayAiCreditSettingsCache && relayAiCreditSettingsCache.defaults && relayAiCreditSettingsCache.defaults.monthlyCredits);
+  enabledTiers.forEach((t) => {
+    if (Number.isFinite(baseDailyEff) && baseDailyEff > 0 && effDaily(t) < baseDailyEff) add('danger', `Mas mataas ang daily neurons ng Base (${n(baseDailyEff)}) kaysa sa "${t.name}" (${Number(t.dailyCap) === 0 ? '∞' : n(t.dailyCap)}). Magmumukhang mas mababa ang binayarang plan — itaas ang ${t.name} o ibaba ang Base (capacity ÷ Max clients).`, 'tiers');
+    if (Number.isFinite(baseCredits) && baseCredits > 0 && (Number(t.monthlyCredits) || 0) < baseCredits) add('danger', `Mas marami ang monthly credits ng Base (${n(baseCredits)}) kaysa sa "${t.name}" (${n(t.monthlyCredits)}).`, 'tiers');
+  });
   if (aiExtraState && aiExtraState.cheapestTierRate !== null && aiExtraState.cheapestTierRate !== undefined && Array.isArray(aiExtraState.packs)) {
     aiExtraState.packs.filter((x) => x.enabled !== false && Number(x.pricePerCredit) <= Number(aiExtraState.cheapestTierRate)).forEach((x) => {
       add('warn', `Ang extra pack na "${x.name}" (${x.pricePerCredit} token/credit) ay mas mura o kasing-mura ng pinakamurang tier (${aiExtraState.cheapestTierRate} token/credit) — matatalo nito ang tiers.`, 'extra');
@@ -2251,6 +2373,7 @@ async function boot() {
     if (autoCb) autoCb.checked = true;
     loadAiCreditSettings();
     loadAiPlans();
+    loadAiClients();
     startAiPoll();
   } catch (err) {
     if (err.message !== 'forbidden') toast(err.message, 'error');

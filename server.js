@@ -7997,13 +7997,20 @@ async function getRelayAiActiveTier(installationId, monthKey, clientOrPool = pgP
         purchasedAt: row.purchased_at
     };
 }
-// Ang tier ay TAAS lang ang puwedeng idulot (max ng base override at tier),
-// hindi nito ibinababa ang admin-set na limit ng isang client.
+// Ang biniling tier ang nagtatakda ng limits ng subscriber (Plus = limits ng Plus, hindi ng Base).
+// Ang MANUAL na per-installation override lang ng admin ang hindi ibinababa (max ng override at tier). Ang default/auto na Base
+// (hal. auto divider) ay HINDI na humahalo sa tier — dati ay max(Base, tier) kaya ang Plus na 4,000/araw ay nagiging 21,272/araw (Base).
 function applyRelayAiTier(settings, tier) {
     if (!tier) return { ...settings, tier: null };
-    const baseDaily = Number(settings.dailyCap);
-    const dailyCap = (baseDaily === 0 || tier.dailyCap === 0) ? 0 : Math.max(baseDaily || 0, tier.dailyCap);
-    return { ...settings, monthlyCredits: Math.max(settings.monthlyCredits, tier.monthlyCredits), dailyCap, tier: { id: tier.id, name: tier.name } };
+    const explicitCredits = !!settings.override;
+    const explicitDaily = !!settings.override && !settings.dailyCapInherited;
+    const baseDaily = Number(settings.dailyCap) || 0;
+    let dailyCap;
+    if (tier.dailyCap === 0) dailyCap = 0;
+    else if (explicitDaily) dailyCap = baseDaily === 0 ? 0 : Math.max(baseDaily, tier.dailyCap);
+    else dailyCap = tier.dailyCap;
+    const monthlyCredits = explicitCredits ? Math.max(Number(settings.monthlyCredits) || 0, tier.monthlyCredits) : tier.monthlyCredits;
+    return { ...settings, monthlyCredits, dailyCap, tier: { id: tier.id, name: tier.name } };
 }
 // Ang daily cap ay NEURONS. used = totoong neurons na nagamit ng client ngayong araw (ibinababa sa buong numero
 // para tugma sa gate: pinapayagan hangga't used < cap); questions = bilang ng tanong ngayong araw (info lang).
@@ -8083,6 +8090,7 @@ async function reserveRelayAiCredits(installationId, requestId, body, opts = {})
             monthlyCredits: Number(overrideRow.monthly_credits), textCost: Number(overrideRow.text_cost),
             fileCost: Number(overrideRow.file_cost), imageCost: Number(overrideRow.image_cost),
             dailyCap: (overrideRow.daily_cap === null || overrideRow.daily_cap === undefined) ? defaultDailyCap : Number(overrideRow.daily_cap),
+            dailyCapInherited: (overrideRow.daily_cap === null || overrideRow.daily_cap === undefined),
             updatedAt: null, source: 'installation-override', override: true
         } : {
             monthlyCredits: Number(defaultRow?.monthly_credits || RELAY_AI_DEFAULT_MONTHLY_CREDITS),
@@ -9984,7 +9992,7 @@ async function buildAiUsagePayload() {
     const percentUsed = limit > 0 ? Math.min(100, (used / limit) * 100) : 0;
     const level = prov.exhausted || used >= limit ? 'exhausted' : (percentUsed >= 95 ? 'critical' : (percentUsed >= 80 ? 'warning' : 'ok'));
     const clients = Object.entries(s.byInstallation)
-        .map(([installationId, row]) => ({ installationId, questions: row.q, neurons: Math.round(row.n * 10) / 10 }))
+        .map(([installationId, row]) => ({ installationId, label: deviceLabels.get(installationId) || (seenDevices.get(installationId) || {}).storeName || null, questions: row.q, neurons: Math.round(row.n * 10) / 10 }))
         .sort((a, b) => (b.questions - a.questions) || (b.neurons - a.neurons));
     return {
         success: true,
@@ -10342,6 +10350,113 @@ app.get('/relay/admin/api/ai-credits/settings', requireAdminKey, async (req, res
     } catch (err) {
         console.error('AI credit settings GET error:', err.message);
         return res.status(503).json({ success: false, message: 'Unable to load AI credit settings.' });
+    }
+});
+// ---- Client Usage (per installation) — gumagamit ng PAREHONG getRelayAiCreditStatus() na nakikita ng client, kaya laging tugma ----
+// plan = Free (walang subscription) / Base / Plus / Pro. Ang `sync` ay cross-check laban sa kasalukuyang tier catalog at sa expected na limits.
+const relayAiClientUsageCache = { at: 0, value: null };
+async function buildRelayAiClientUsage() {
+    if (!pgPoolDevices) throw new Error('AI credit database is not configured on the RELAY.');
+    const monthKey = relayAiMonthKey();
+    const dayKey = relayAiDayKey();
+    const ids = new Set();
+    const addId = (v) => { if (typeof v === 'string' && v.trim() && v !== RELAY_AI_DEFAULT_SETTINGS_ID) ids.add(v.trim()); };
+    Object.keys(issuedUnlocks || {}).forEach((id) => { if ((issuedUnlocks[id] || {}).ai_assistant) addId(id); });
+    const q = async (sql, params) => { try { return (await pgPoolDevices.query(sql, params)).rows; } catch (_) { return []; } };
+    (await q('SELECT installation_id FROM relay_ai_credit_usage WHERE month_key = $1', [monthKey])).forEach((r) => addId(r.installation_id));
+    (await q('SELECT installation_id FROM relay_ai_daily_usage WHERE day_key = $1', [dayKey])).forEach((r) => addId(r.installation_id));
+    (await q('SELECT installation_id FROM relay_ai_tier_purchases WHERE month_key = $1', [monthKey])).forEach((r) => addId(r.installation_id));
+    (await q('SELECT installation_id FROM relay_ai_extra_purchases WHERE month_key = $1', [monthKey])).forEach((r) => addId(r.installation_id));
+    (await q('SELECT installation_id FROM relay_ai_credit_settings WHERE installation_id <> $1', [RELAY_AI_DEFAULT_SETTINGS_ID])).forEach((r) => addId(r.installation_id));
+    const MAX_CLIENTS = 500;
+    const all = [...ids];
+    const list = all.slice(0, MAX_CLIENTS);
+    const catalog = new Map();
+    try { (await listRelayAiTiers(false)).forEach((t) => catalog.set(t.id, t)); } catch (_) {}
+    const rows = new Array(list.length);
+    let next = 0;
+    const worker = async () => {
+        while (next < list.length) {
+            const i = next++;
+            const id = list[i];
+            try {
+                const st = await getRelayAiCreditStatus(id);
+                const sub = hasActiveRelayAiSubscription(id);
+                const ent = (issuedUnlocks[id] || {}).ai_assistant || null;
+                const subExpiresAt = ent ? (Number(ent.expiresAt || (ent.payload && ent.payload.expiresAt) || 0) || null) : null;
+                const meta = seenDevices.get(id);
+                const settings = st.settings || {};
+                const tier = st.isFree ? null : await getRelayAiActiveTier(id, monthKey);
+                const extra = st.isFree ? { credits: 0, dailyBonus: 0 } : await getRelayAiExtraTotalsForClient(id, monthKey);
+                // ---- sync cross-check ----
+                const notes = [];
+                if (!st.isFree) {
+                    const base = await getRelayAiSettings(id);
+                    const explicitDaily = !!base.override && !base.dailyCapInherited;
+                    const explicitCredits = !!base.override;
+                    let expDaily = Number(base.dailyCap) || 0;
+                    let expCredits = Number(base.monthlyCredits) || 0;
+                    if (tier) {
+                        expDaily = tier.dailyCap === 0 ? 0 : (explicitDaily ? (expDaily === 0 ? 0 : Math.max(expDaily, tier.dailyCap)) : tier.dailyCap);
+                        expCredits = explicitCredits ? Math.max(expCredits, tier.monthlyCredits) : tier.monthlyCredits;
+                    }
+                    if (expDaily !== 0) expDaily += extra.dailyBonus;
+                    expCredits += extra.credits;
+                    if (expDaily !== (Number(st.daily.cap) || 0)) notes.push(`Daily neurons: dapat ${expDaily.toLocaleString('en-US')}, ${Number(st.daily.cap).toLocaleString('en-US')} ang aktwal.`);
+                    if (expCredits !== Number(st.limit)) notes.push(`Monthly credits: dapat ${expCredits}, ${Number(st.limit)} ang aktwal.`);
+                    if (tier && catalog.has(tier.id)) {
+                        const c = catalog.get(tier.id);
+                        if (Number(c.monthlyCredits) !== tier.monthlyCredits || Number(c.dailyCap) !== tier.dailyCap) {
+                            notes.push(`Nagbago na ang ${tier.name} sa catalog (${c.monthlyCredits} cr / ${Number(c.dailyCap).toLocaleString('en-US')} neurons) mula nang bilhin (${tier.monthlyCredits} cr / ${tier.dailyCap.toLocaleString('en-US')}).`);
+                        }
+                    } else if (tier && !catalog.has(tier.id)) {
+                        notes.push(`Wala na sa tier catalog ang ${tier.name}.`);
+                    }
+                    if (!sub) notes.push('Expired na ang Omni AI subscription' + (tier ? ' pero may tier pa ngayong buwan.' : '.'));
+                } else if (sub) {
+                    notes.push('May active subscription pero Free ang lumalabas.');
+                }
+                rows[i] = {
+                    installationId: id,
+                    label: deviceLabels.get(id) || null,
+                    storeName: (meta && meta.storeName) || null,
+                    plan: { id: st.planId, name: st.planName, isFree: !!st.isFree },
+                    subscribed: sub, subscriptionExpiresAt: subExpiresAt,
+                    tierPurchasedAt: tier ? tier.purchasedAt : null,
+                    credits: { used: st.used, limit: st.limit, remaining: st.remaining },
+                    daily: { used: st.daily.used, cap: st.daily.cap, remaining: st.daily.remaining, unlimited: !!st.daily.unlimited, questions: st.daily.questions },
+                    extra: { credits: extra.credits, dailyBonus: extra.dailyBonus },
+                    override: !!settings.override, dailyInherited: settings.override ? !!settings.dailyCapInherited : null,
+                    source: settings.source || null,
+                    sync: { ok: notes.length === 0, notes }
+                };
+            } catch (err) {
+                rows[i] = { installationId: id, label: deviceLabels.get(id) || null, error: err.message || 'failed', sync: { ok: false, notes: ['Hindi nakuha ang status: ' + (err.message || 'error')] } };
+            }
+        }
+    };
+    await Promise.all(Array.from({ length: Math.min(6, list.length) }, worker));
+    const plans = {};
+    rows.forEach((r) => { if (r && r.plan) { plans[r.plan.id] = (plans[r.plan.id] || 0) + 1; } });
+    return {
+        success: true, month: monthKey, day: dayKey,
+        total: all.length, shown: rows.length, truncated: all.length > rows.length,
+        counts: plans, outOfSync: rows.filter((r) => r && r.sync && !r.sync.ok).length,
+        dailyResetsAt: relayAiNextDayResetMs(), monthResetsAt: relayAiNextMonthResetMs(),
+        clients: rows
+    };
+}
+app.get('/relay/admin/api/ai-clients', requireAdminKey, async (req, res) => {
+    try {
+        const force = req.query.force === '1';
+        if (!force && relayAiClientUsageCache.value && Date.now() - relayAiClientUsageCache.at < 10 * 1000) return res.json(relayAiClientUsageCache.value);
+        const value = await buildRelayAiClientUsage();
+        relayAiClientUsageCache.at = Date.now();
+        relayAiClientUsageCache.value = value;
+        return res.json(value);
+    } catch (err) {
+        console.error('AI client usage GET error:', err.message);
+        return res.status(503).json({ success: false, message: 'Unable to load AI client usage.' });
     }
 });
 app.post('/relay/admin/api/ai-credits/default', requireAdminKey, async (req, res) => {
