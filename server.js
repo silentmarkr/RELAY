@@ -434,7 +434,7 @@ async function ensureDeviceLicenseSchema() {
     // AUTO capacity: kapag TRUE (default), ang Total daily capacity ay awtomatikong kinukuha sa Neurons Planner
     // (Free = 10,000 neurons/araw; Paid = budget ng admin). Ang daily_capacity column (neurons) ay nagiging manual value na lang kapag FALSE.
     await pgPoolDevices.query(`ALTER TABLE relay_ai_capacity ADD COLUMN IF NOT EXISTS auto_capacity BOOLEAN NOT NULL DEFAULT TRUE`);
-    // DIVIDER: max_clients = ilang client lang ang puwedeng gumamit ng Omni AI (0 = walang limit).
+    // DIVIDER: max_clients = ilang client lang ang puwedeng gumamit ng Omni AI (0 = no limit).
     // base_auto = TRUE -> ang Base neurons kada client ay awtomatikong Total daily capacity ÷ max_clients.
     await pgPoolDevices.query(`ALTER TABLE relay_ai_capacity ADD COLUMN IF NOT EXISTS max_clients INTEGER NOT NULL DEFAULT ${Math.max(0, Number.isFinite(parseInt(process.env.RELAY_AI_MAX_CLIENTS, 10)) ? parseInt(process.env.RELAY_AI_MAX_CLIENTS, 10) : 5)} CHECK (max_clients >= 0)`);
     await pgPoolDevices.query(`ALTER TABLE relay_ai_capacity ADD COLUMN IF NOT EXISTS base_auto BOOLEAN NOT NULL DEFAULT TRUE`);
@@ -488,6 +488,19 @@ async function ensureDeviceLicenseSchema() {
     await pgPoolDevices.query(`CREATE INDEX IF NOT EXISTS relay_ai_extra_purchases_month ON relay_ai_extra_purchases (month_key)`);
     await pgPoolDevices.query(`ALTER TABLE relay_ai_extra_packs ADD COLUMN IF NOT EXISTS daily_bonus INTEGER NOT NULL DEFAULT 0 CHECK (daily_bonus >= 0)`);
     await pgPoolDevices.query(`ALTER TABLE relay_ai_extra_purchases ADD COLUMN IF NOT EXISTS daily_bonus INTEGER NOT NULL DEFAULT 0`);
+    // BAGO: One-day Boost — dagdag na neurons para sa ISANG ARAW lang (hindi buong buwan). Nagre-reset kasabay ng daily cap.
+    await pgPoolDevices.query(`
+        CREATE TABLE IF NOT EXISTS relay_ai_day_boosts (
+            id              BIGSERIAL PRIMARY KEY,
+            installation_id TEXT NOT NULL,
+            day_key         TEXT NOT NULL,
+            boost_id        TEXT NOT NULL,
+            neurons         INTEGER NOT NULL,
+            price_tokens    INTEGER NOT NULL,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    `);
+    await pgPoolDevices.query(`CREATE INDEX IF NOT EXISTS relay_ai_day_boosts_inst_day ON relay_ai_day_boosts (installation_id, day_key)`);
     // ---- ONE-TIME MIGRATION 'daily_neurons_v1': daily cap / extra daily / capacity: TANONG -> NEURONS ----
     // Ang marker ay kinukuha sa loob ng parehong transaction ng conversion, kaya isang beses lang ito
     // tumatakbo (kahit sabay ang dalawang instance) at kung pumalya, ROLLBACK ang lahat at uulitin sa susunod na boot.
@@ -555,6 +568,31 @@ async function ensureDeviceLicenseSchema() {
         for (const t of seed) {
             await pgPoolDevices.query(
                 `INSERT INTO relay_ai_tiers (id, name, price_tokens, monthly_credits, daily_cap, sort_order) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO NOTHING`, t);
+        }
+    }
+    // ONE-TIME MIGRATION 'omni_ladder_v2': dagdag na Lite (entry tier, mas mura kaysa Plus) at Business (top tier).
+    // Hindi ina-overwrite ang kahit anong tier na existing na (ON CONFLICT DO NOTHING), kaya ligtas sa edits ng admin.
+    // Ang Business ay DISABLED muna — buksan lang sa admin kapag nasuri na ang Total daily capacity.
+    {
+        const ladderClient = await pgPoolDevices.connect();
+        try {
+            const claim = await ladderClient.query(`INSERT INTO relay_ai_migrations (id) VALUES ('omni_ladder_v2') ON CONFLICT (id) DO NOTHING RETURNING id`);
+            if (claim.rows[0]) {
+                const ladder = [
+                    // id, name, price_tokens, monthly_credits, daily_cap (neurons), sort_order, enabled
+                    ['lite', 'Lite', 99, 500, 3000, 0, true],       // ~0.198 token/credit (mas mahal kada credit kaysa Plus/Pro)
+                    ['business', 'Business', 999, 8000, 20000, 3, false] // ~0.125 token/credit (pinakamura kada credit)
+                ];
+                for (const t of ladder) {
+                    await ladderClient.query(
+                        `INSERT INTO relay_ai_tiers (id, name, price_tokens, monthly_credits, daily_cap, sort_order, enabled) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (id) DO NOTHING`, t);
+                }
+                console.log('🪜 AI migration omni_ladder_v2 applied: added Lite (enabled) and Business (disabled) tiers.');
+            }
+        } catch (ladderErr) {
+            console.error('⚠️ AI migration omni_ladder_v2 failed:', ladderErr.message);
+        } finally {
+            ladderClient.release();
         }
     }
     // Support tickets submitted from OMNIPOS installations (Help > Omni AI >
@@ -985,7 +1023,7 @@ async function callGoogleGeminiAI(messages, vision, modelId, stepIdx) {
             }
             if (gRes.status === 400 && /api key|API_KEY_INVALID/i.test(errMsg + ' ' + raw.slice(0, 300))) errMsg = `Google AI: hindi tanggap ang GOOGLE_AI_API_KEY (HTTP 400). ${errMsg}`;
             if ((gRes.status === 401 || gRes.status === 403) && !/api key|permission|key/i.test(errMsg)) errMsg = `Google AI: tinanggihan ang API key (HTTP ${gRes.status}). ${errMsg}`;
-            if (gRes.status === 404) errMsg = `Google AI: hindi nahanap ang model "${modelId}" (HTTP 404). Palitan ang Model ID sa admin. ${errMsg}`;
+            if (gRes.status === 404) errMsg = `Google AI: model "${modelId}" was not found (HTTP 404). Change the Model ID in the admin panel. ${errMsg}`;
             console.error(`⚠️ Google AI HTTP ${gRes.status} (${modelId}): ${raw.slice(0, 300)}`);
             if (gRes.status === 429 && !/quota|rate/i.test(errMsg)) errMsg = `Google AI rate limit/quota (HTTP 429): ${errMsg}`;
             if (gRes.status === 503 && !/unavailable/i.test(errMsg)) errMsg = `Google AI temporarily unavailable (HTTP 503): ${errMsg}`;
@@ -5396,7 +5434,7 @@ app.post('/relay/admin/api/pending-otps/approve', requireAdminKey, async (req, r
     if (pending.featureId === 'ai_assistant') {
         let baseVerdict;
         try { baseVerdict = await getRelayAiBaseSubscriptionBlock(pending.installationId); }
-        catch (err) { console.error('admin approve capacity check error:', err); return res.status(500).json({ success: false, message: 'Hindi ma-verify ang AI capacity. Subukan ulit.' }); }
+        catch (err) { console.error('admin approve capacity check error:', err); return res.status(500).json({ success: false, message: 'Could not verify AI capacity. Please try again.' }); }
         if (baseVerdict.blocked) {
             logActivity(pending.installationId, 'ai_base_subscription_blocked', { via: 'admin_approve', reason: baseVerdict.reason, committed: baseVerdict.committed, capacity: baseVerdict.capacity });
             return res.status(409).json({ success: false, aiCapacityLocked: true, message: relayAiBaseBlockMessage(baseVerdict, true) });
@@ -5857,6 +5895,7 @@ app.post('/relay/admin/api/devices/:installationId/purge', requireAdminKey, asyn
         await purgeRows(pgPoolDevices, 'relay_ai_credit_settings');
         await purgeRows(pgPoolDevices, 'relay_ai_tier_purchases');
         await purgeRows(pgPoolDevices, 'relay_ai_extra_purchases');
+        await purgeRows(pgPoolDevices, 'relay_ai_day_boosts');
         await purgeRows(pgPoolDevices, 'relay_ai_daily_usage');
         clearRelayAiPurchaseMemory(installationId);
         await releaseRelayAiLockIfFreed(relayAiMonthKey(), true);
@@ -6774,7 +6813,7 @@ app.post('/relay/admin/api/devices/:installationId/activate', requireAdminKey, a
     let aiGuard = null;
     if (idsToActivate.includes('ai_assistant')) {
         try { aiGuard = await acquireRelayAiBaseGuard(installationId); }
-        catch (err) { console.error('admin activate guard error:', err); return res.status(500).json({ success: false, message: 'Hindi ma-verify ang AI capacity. Subukan ulit.' }); }
+        catch (err) { console.error('admin activate guard error:', err); return res.status(500).json({ success: false, message: 'Could not verify AI capacity. Please try again.' }); }
         if (aiGuard.verdict.blocked) {
             logActivity(installationId, 'ai_base_subscription_blocked', { via: 'admin_activate', reason: aiGuard.verdict.reason, committed: aiGuard.verdict.committed, capacity: aiGuard.verdict.capacity });
             return res.status(409).json({ success: false, aiCapacityLocked: true, message: relayAiBaseBlockMessage(aiGuard.verdict, true) });
@@ -7163,7 +7202,7 @@ function requireApiKey(req, res, next) {
     }
     const provided = req.headers['x-relay-key'];
     if (!safeCompare(String(provided || ''), RELAY_API_KEY)) {
-        return res.status(403).json({ success: false, message: 'Invalid o walang API key.' });
+        return res.status(403).json({ success: false, message: 'Invalid or missing API key.' });
     }
     next();
 }
@@ -7200,7 +7239,7 @@ function rateLimit(bucketName, max, windowMs, keyFn) {
             res.set('Retry-After', String(retryAfterSec));
             return res.status(429).json({
                 success: false,
-                message: 'Sobra sa pinapayagang bilang ng requests. Subukan mamaya.',
+                message: 'Too many requests. Please try again later.',
                 retryAfterSec
             });
         }
@@ -7224,7 +7263,7 @@ const RELAY_AI_DEFAULT_SETTINGS_ID = '__default__';
 // Daily cap ay NEURONS kada araw (hindi na bilang ng tanong). Ito ang manual/fallback na Base neurons kada
 // client kapag naka-OFF ang Base auto (divider). 0 = walang limit.
 const RELAY_AI_DEFAULT_DAILY_CAP = Math.max(0, Number.isFinite(parseInt(process.env.RELAY_AI_DAILY_CAP, 10)) ? parseInt(process.env.RELAY_AI_DAILY_CAP, 10) : 2000);
-// DIVIDER: ilang client lang ang puwedeng gumamit ng Omni AI (0 = walang limit).
+// DIVIDER: ilang client lang ang puwedeng gumamit ng Omni AI (0 = no limit).
 const RELAY_AI_DEFAULT_MAX_CLIENTS = Math.max(0, Number.isFinite(parseInt(process.env.RELAY_AI_MAX_CLIENTS, 10)) ? parseInt(process.env.RELAY_AI_MAX_CLIENTS, 10) : 5);
 // Ang "araw" ng client daily cap ay nagre-reset sa hatinggabi ng oras na ito
 // (default UTC+8 = Pilipinas). Hiwalay ito sa Cloudflare quota na 00:00 UTC.
@@ -7729,7 +7768,7 @@ function handleGoogleQuotaError(modelId, raw, data, errMsg) {
     if (q.daily || q.zero) {
         kind = 'daily';
         const why = q.zero
-            ? `Walang quota ang ${modelId} sa Google plan/proyekto mo (limit 0) — pumili ng ibang model o mag-upgrade.`
+            ? `${modelId} has no quota on your Google plan/project (limit 0) — pick another model or upgrade.`
             : `Naabot ang daily quota ng ${modelId} (Google 429).`;
         markGoogleModelBlocked(modelId, 'daily', why, googleDayInfo(now).nextResetMs);
     } else {
@@ -7775,8 +7814,8 @@ function recordGoogleFailure(message) {
 function getAiProviderExhaustion() {
     const cfg = aiProviderConfigCache || normalizeAiProviderConfig(null);
     if (!googleUsable(cfg)) {
-        const why = !isGoogleAiConfigured() ? 'Walang GOOGLE_AI_API_KEY sa RELAY.' : (!cfg.google.enabled ? 'Naka-OFF ang "Google AI enabled" sa admin.' : 'Walang naka-enable na Gemini model.');
-        return { exhausted: true, retryAt: null, reason: `Hindi magagamit ang Google AI para sa Base/Plus/Pro. ${why}`, source: 'not-configured', detectedAt: 0 };
+        const why = !isGoogleAiConfigured() ? 'GOOGLE_AI_API_KEY is missing in RELAY.' : (!cfg.google.enabled ? '"Google AI enabled" is OFF in the admin panel.' : 'No Gemini model is enabled.');
+        return { exhausted: true, retryAt: null, reason: `Google AI is unavailable for Base/Plus/Pro. ${why}`, source: 'not-configured', detectedAt: 0 };
     }
     const st = getGoogleProviderExhaustion(cfg);
     if (st.exhausted) return st;
@@ -7817,12 +7856,12 @@ function getFreeProviderExhaustion(cfg) {
     const c = cfg || aiProviderConfigCache || normalizeAiProviderConfig(null);
     const none = { retryAt: null, detectedAt: 0 };
     if (!c.free.enabled) return { exhausted: true, reason: 'Naka-OFF ang Free tier sa admin.', source: 'disabled', ...none };
-    if (!isCfAiConfigured()) return { exhausted: true, reason: 'Walang CF_ACCOUNT_ID / CF_AI_API_TOKEN sa RELAY para sa Free tier.', source: 'not-configured', ...none };
+    if (!isCfAiConfigured()) return { exhausted: true, reason: 'CF_ACCOUNT_ID / CF_AI_API_TOKEN are missing in RELAY for the Free tier.', source: 'not-configured', ...none };
     const cx = getCfProviderExhaustion();
     if (cx.exhausted) return cx;
     const pool = getRelayAiFreePoolInfo();
     if (pool.limit > 0 && pool.used >= pool.limit) {
-        return { exhausted: true, retryAt: relayAiNextUtcMidnightMs(), reason: `Ubos na ang shared na daily pool ng Free tier (${Math.round(pool.used)}/${pool.limit} neurons).`, source: 'pool', detectedAt: 0 };
+        return { exhausted: true, retryAt: relayAiNextUtcMidnightMs(), reason: `The shared daily pool of the Free tier is used up (${Math.round(pool.used)}/${pool.limit} neurons).`, source: 'pool', detectedAt: 0 };
     }
     return { exhausted: false, retryAt: null, reason: '', source: '', detectedAt: 0 };
 }
@@ -7879,7 +7918,7 @@ async function getRelayAiCapacityConfig(clientOrPool = pgPoolDevices) {
         manualCapacity: row ? Number(row.daily_capacity) || 0 : 0,
         // Walang saved row pa = auto (default).
         capacityAuto: row ? row.auto_capacity !== false : true,
-        lockedTierIds: String(row?.locked_tier_ids || 'plus,pro').split(',').map(x => x.trim().toLowerCase()).filter(Boolean),
+        lockedTierIds: String(row?.locked_tier_ids || 'lite,plus,pro,business').split(',').map(x => x.trim().toLowerCase()).filter(Boolean),
         maxClients: Number.isFinite(mc) && mc >= 0 ? mc : RELAY_AI_DEFAULT_MAX_CLIENTS,
         baseAuto: row ? row.base_auto !== false : true,
         reserveSlots: row ? row.reserve_slots === true : false
@@ -7899,9 +7938,32 @@ function relayAiBaseAutoActive(capCfg, capacity) {
     return !!(capCfg.baseAuto && capCfg.maxClients > 0 && capacity > 0);
 }
 // Base neurons kada client = Total daily capacity ÷ divider (hindi kailanman 0, dahil 0 = walang limit).
-function relayAiResolveBaseDaily(storedDaily, capCfg, capacity) {
-    if (relayAiBaseAutoActive(capCfg, capacity)) return Math.max(1, Math.floor(capacity / capCfg.maxClients));
-    return Number(storedDaily) || 0;
+// BUGFIX (Base > Plus): dati, ang Base (capacity ÷ divider) ay puwedeng lumampas sa daily neurons ng pinakamababang
+// bayad na tier (hal. Base 21,272/araw pero Plus 4,000/araw) — hindi makatwiran dahil libre ang Base. Ngayon, ang Base
+// ay hindi kailanman lalampas sa RELAY_AI_BASE_MAX_TIER_RATIO (default 50%) ng pinakamababang enabled tier na may limit.
+const RELAY_AI_BASE_MAX_TIER_RATIO = (() => {
+    const r = parseFloat(process.env.RELAY_AI_BASE_MAX_TIER_RATIO);
+    return Number.isFinite(r) && r > 0 && r < 1 ? r : 0.5;
+})();
+function relayAiClampBaseDaily(baseDaily, lowestTierDaily) {
+    const b = Number(baseDaily) || 0;
+    const t = Number(lowestTierDaily) || 0;
+    if (t <= 0) return b; // walang tier na may limit (o unlimited ang lahat) — walang ikukumpara
+    const maxBase = Math.max(1, Math.floor(t * RELAY_AI_BASE_MAX_TIER_RATIO));
+    return b === 0 ? maxBase : Math.min(b, maxBase); // 0 = walang limit; hindi puwede sa Base kung may bayad na tier na may limit
+}
+// Pinakamababang daily neurons ng mga ENABLED tier na may limit (0/unlimited ay hindi binibilang).
+async function getRelayAiLowestTierDaily(clientOrPool = pgPoolDevices) {
+    try {
+        const r = await clientOrPool.query(`SELECT MIN(daily_cap) AS m FROM relay_ai_tiers WHERE enabled = TRUE AND daily_cap > 0`);
+        return r.rows[0] && r.rows[0].m !== null ? Number(r.rows[0].m) || 0 : 0;
+    } catch (_) { return 0; }
+}
+function relayAiResolveBaseDaily(storedDaily, capCfg, capacity, lowestTierDaily) {
+    let base;
+    if (relayAiBaseAutoActive(capCfg, capacity)) base = Math.max(1, Math.floor(capacity / capCfg.maxClients));
+    else base = Number(storedDaily) || 0;
+    return relayAiClampBaseDaily(base, lowestTierDaily);
 }
 // Bilang ng clients na may active Omni AI subscription (Base + may tier) — ito ang binibilang ng divider.
 function getRelayAiLiveClientCount() {
@@ -7919,9 +7981,11 @@ async function getRelayAiDefaultSettings(clientOrPool = pgPoolDevices) {
     const { capacity } = await resolveRelayAiCapacity(capCfg);
     const row = result.rows[0];
     const storedDaily = (!row || row.daily_cap === null || row.daily_cap === undefined) ? RELAY_AI_DEFAULT_DAILY_CAP : Number(row.daily_cap);
+    const lowestTierDaily = await getRelayAiLowestTierDaily(clientOrPool);
     const baseFields = {
-        // dailyCap = ang EPEKTIBONG Base neurons/client (auto divider kung naka-ON); dailyCapManual = naka-save na manual value.
-        dailyCap: relayAiResolveBaseDaily(storedDaily, capCfg, capacity),
+        // dailyCap = ang EPEKTIBONG Base neurons/client (auto divider kung naka-ON, at hindi lalampas sa Plus/pinakamababang tier);
+        // dailyCapManual = naka-save na manual value.
+        dailyCap: relayAiResolveBaseDaily(storedDaily, capCfg, capacity, lowestTierDaily),
         dailyCapManual: storedDaily,
         dailyCapAuto: relayAiBaseAutoActive(capCfg, capacity),
         maxClients: capCfg.maxClients
@@ -8049,6 +8113,18 @@ async function getRelayAiCreditStatus(installationId, clientOrPool = pgPoolDevic
     );
     const used = result.rows[0] ? Number(result.rows[0].used_credits) || 0 : 0;
     const daily = await getRelayAiDailyStatus(installationId, settings.dailyCap, clientOrPool);
+    // Tantiyang bilang ng tanong (mas madaling intindihin kaysa neurons) + dagdag na One-day Boost ngayong araw.
+    daily.dayBoost = Number(settings.dayBoost) || 0;
+    try {
+        const pq = await getRelayAiPerQuestionNeurons(isFree);
+        if (pq > 0) {
+            daily.perQuestion = Math.round(pq * 10) / 10;
+            if (!daily.unlimited) {
+                daily.questionsLeft = (daily.remaining || 0) > 0 ? Math.max(1, Math.floor(daily.remaining / pq)) : 0;
+                daily.questionsCap = Math.floor(daily.cap / pq);
+            }
+        }
+    } catch (_) { /* optional lang ang field na ito */ }
     const provider = isFree ? getFreeProviderExhaustion() : getAiProviderExhaustion();
     return {
         month: monthKey,
@@ -8292,7 +8368,7 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
     const isFree = relayAiIsFreeInstallation(installationId);
     const providerCfg = await getAiProviderConfig();
     if (isFree && !providerCfg.free.enabled) {
-        return res.status(403).json({ success: false, subscriptionRequired: true, message: 'Walang active OmniPOS AI Assistant subscription para sa device na ito.' });
+        return res.status(403).json({ success: false, subscriptionRequired: true, message: 'No active OmniPOS AI Assistant subscription for this device.' });
     }
     if (!isFree && !isGoogleAiConfigured()) {
         return res.status(503).json({ success: false, message: 'Omni AI (Base/Plus/Pro) is not configured on the relay server (missing GOOGLE_AI_API_KEY in RELAY .env). Contact the developer.' });
@@ -8308,7 +8384,7 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
         if (req.body?.vision || hasImagePart || req.body?.attachmentType) {
             return res.status(403).json({
                 success: false, subscriptionRequired: true, freeTierLimit: true, creditCost: 0,
-                message: 'Ang Free plan ay para sa text na tanong lang. Mag-subscribe sa Omni AI (Base/Plus/Pro) para makapag-attach ng larawan o file.'
+                message: 'The Free plan is for text questions only. Subscribe to Omni AI (Base/Plus/Pro) to attach images or files.'
             });
         }
     }
@@ -8347,7 +8423,7 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
                 providerExhausted: false,
                 retryAt,
                 creditCost: 0,
-                message: `Sandaling abala ang AI provider (limit kada minuto). Subukan muli sa loob ng ~${secs} segundo. Hindi ka nasingil ng credits.`
+                message: `The AI provider is briefly busy (per-minute limit). Please try again in ~${secs} seconds. You were not charged any credits.`
             });
         }
         const retryCandidates = attemptStates.map((x) => x.st.retryAt).filter((x) => x);
@@ -8360,8 +8436,8 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
             retryAt: exhaustRetryAt,
             creditCost: 0,
             message: isFree
-                ? 'Naubos na ang libreng daily AI capacity (Free plan) ng system ngayon. Subukan muli mamaya (mag-re-reset ito sa 8:00 AM PH time) o mag-subscribe sa Omni AI para sa Base/Plus/Pro. Hindi ka nasingil ng credits.'
-                : `Naubos na ang daily AI capacity ng system ngayon. Subukan muli mamaya${relayAiResetPhrase(exhaustRetryAt) ? ` (mag-re-reset ito ~${relayAiResetPhrase(exhaustRetryAt)})` : ''}. Hindi ka nasingil ng credits.`
+                ? 'The free daily AI capacity (Free plan) is used up for today. Please try again later (it resets at 8:00 AM PH time) or subscribe to Omni AI for Base/Plus/Pro. You were not charged any credits.'
+                : `The daily AI capacity is used up for today. Please try again later${relayAiResetPhrase(exhaustRetryAt) ? ` (it resets ~${relayAiResetPhrase(exhaustRetryAt)})` : ''}. You were not charged any credits.`
         });
     }
     try {
@@ -8369,13 +8445,18 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
         if (!reservation.ok) {
             if (reservation.reason === 'daily_cap') {
                 const cap = reservation.status.daily.cap;
+                let dailyOut = reservation.status.daily;
+                try {
+                    const pq = await getRelayAiPerQuestionNeurons(isFree);
+                    dailyOut = { ...dailyOut, dayBoost: Number(reservation.status.settings && reservation.status.settings.dayBoost) || 0, ...(pq > 0 ? { perQuestion: Math.round(pq * 10) / 10, questionsLeft: 0, questionsCap: Math.floor(cap / pq) } : {}) };
+                } catch (_) { /* optional */ }
                 return res.status(402).json({
-                    success: false, dailyLimitReached: true, creditsExhausted: false, creditCost: 0, ...reservation.status,
-                    message: `Naabot mo na ang daily limit ng Omni AI (${Number(cap).toLocaleString('en-US')} neurons kada araw). Mare-reset ito bukas ng hatinggabi, o mag-upgrade ng plan para sa mas mataas na daily neurons.`
+                    success: false, dailyLimitReached: true, creditsExhausted: false, creditCost: 0, ...reservation.status, daily: dailyOut,
+                    message: `You have reached the Omni AI daily limit (${Number(cap).toLocaleString('en-US')} neurons per day). It resets at midnight tonight. You can also buy a One-day Boost to keep going now, or upgrade your plan for a higher daily limit.`
                 });
             }
             if (reservation.reason === 'exhausted') {
-                return res.status(402).json({ success: false, creditsExhausted: true, creditCost: reservation.cost, ...reservation.status, message: `Naubos na ang buwanang AI credits (${reservation.status.used}/${reservation.status.limit}). Mare-reset ito sa susunod na buwan.` });
+                return res.status(402).json({ success: false, creditsExhausted: true, creditCost: reservation.cost, ...reservation.status, message: `Your monthly AI credits are used up (${reservation.status.used}/${reservation.status.limit}). They reset next month.` });
             }
             if (reservation.reason === 'request_mismatch' || reservation.reason === 'request_reuse') return res.status(409).json({ success: false, message: 'Invalid AI request reuse.' });
             return res.status(503).json({ success: false, message: reservation.reason });
@@ -8475,7 +8556,7 @@ app.get('/relay/ai-assistant/usage', requireApiKey, requireAllowedDevice, rateLi
     const installationId = String(req.query?.installationId || '').trim();
     if (!installationId) return res.status(400).json({ success: false, message: 'Missing installationId.' });
     // Naka-subscribe = Base/Plus/Pro; walang subscription = FREE tier (kung naka-ON sa admin).
-    if (relayAiIsFreeInstallation(installationId) && !(await getAiProviderConfig()).free.enabled) return res.status(403).json({ success: false, subscriptionRequired: true, message: 'Walang active OmniPOS AI Assistant subscription para sa device na ito.' });
+    if (relayAiIsFreeInstallation(installationId) && !(await getAiProviderConfig()).free.enabled) return res.status(403).json({ success: false, subscriptionRequired: true, message: 'No active OmniPOS AI Assistant subscription for this device.' });
     try {
         const credits = await getRelayAiCreditStatus(installationId);
         return res.json({ success: true, ...credits });
@@ -8652,7 +8733,7 @@ async function getRelayAiCapacityState(monthKey, clientOrPool = pgPoolDevices) {
     const extraDaily = extraRes.rows.reduce((a, r) => a + (isRelayAiInstallationLive(r.installation_id) ? (Number(r.daily_bonus) || 0) : 0), 0);
     const tiersDaily = sum.rows.reduce((a, r) => a + (isRelayAiInstallationLive(r.installation_id) ? relayAiEffectiveCap(r.daily_cap, capacity) : 0), 0);
     const storedBaseDaily = await getRelayAiStoredDefaultDaily(clientOrPool);
-    const baseDailyEffective = relayAiResolveBaseDaily(storedBaseDaily, capCfg, capacity);
+    const baseDailyEffective = relayAiResolveBaseDaily(storedBaseDaily, capCfg, capacity, await getRelayAiLowestTierDaily(clientOrPool));
     const base = await getRelayAiBaseState(capacity, new Set(sum.rows.map((r) => r.installation_id)), clientOrPool, baseDailyEffective);
     const committed = tiersDaily + base.dailyTotal + extraDaily;
     const lock = await clientOrPool.query(`SELECT locked_at, reason FROM relay_ai_tier_lock WHERE month_key = $1`, [monthKey]);
@@ -8665,7 +8746,7 @@ async function getRelayAiCapacityState(monthKey, clientOrPool = pgPoolDevices) {
         enabled: capacity > 0, capacity, capacityAuto, manualCapacity,
         autoPlan: autoInfo ? autoInfo.plan : null, autoNeuronsPerDay: autoInfo ? autoInfo.neuronsPerDay : null,
         autoPerQuestion: autoInfo ? autoInfo.perQuestion : null, autoBasis: autoInfo ? autoInfo.basis : null, autoSource: autoInfo ? autoInfo.source : null,
-        // DIVIDER: maxClients = ilang client lang ang puwedeng gumamit ng Omni AI (0 = walang limit);
+        // DIVIDER: maxClients = ilang client lang ang puwedeng gumamit ng Omni AI (0 = no limit);
         // baseAuto = Base neurons/client = capacity ÷ maxClients.
         maxClients, baseAuto, baseAutoActive: relayAiBaseAutoActive(capCfg, capacity),
         baseDailyEffective, storedBaseDaily, liveClients,
@@ -8738,7 +8819,7 @@ function relayAiTierCapacityVerdict(state, tier, current, baseCap = 0) {
     if (state.committed + delta > state.capacity) return { blocked: true, reason: 'would_exceed' };
     return { blocked: false };
 }
-const RELAY_AI_TIER_LOCK_MESSAGE = 'Naka-lock muna ang Plus/Pro AI upgrade ngayong buwan dahil puno na ang kabuuang daily AI capacity. Magbubukas ulit sa susunod na buwan.';
+const RELAY_AI_TIER_LOCK_MESSAGE = 'AI plan upgrades are locked for this month because the total daily AI capacity is full. They will reopen next month.';
 // Oras ng pag-reset sa PH time mula sa retryAt (Google = hatinggabi ng Pacific Time, kaya HINDI laging 8:00 AM PH; ang 8:00 AM PH ay sa Cloudflare/Free lang).
 function relayAiResetPhrase(retryAt) {
     const ms = Number(retryAt);
@@ -8746,9 +8827,9 @@ function relayAiResetPhrase(retryAt) {
     try { return new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Manila', hour: 'numeric', minute: '2-digit', hour12: true }).format(new Date(ms)) + ' PH time'; } catch (_) { return ''; }
 }
 function relayAiProviderExhaustedBuyMessage(retryAt, source) {
-    if (source === 'not-configured') return 'Hindi pa available ang pagbili ng AI plan at extra credits dahil hindi pa naka-set up ang AI provider ng system. Subukan muli mamaya.';
+    if (source === 'not-configured') return 'Buying AI plans and extra credits is not available yet because the AI provider has not been set up. Please try again later.';
     const t = relayAiResetPhrase(retryAt);
-    return `Hindi muna available ang pagbili ng AI plan at extra credits dahil naubos na ang daily AI capacity ng system ngayon. Subukan muli pagkatapos mag-reset${t ? ` (~${t})` : ''}.`;
+    return `Buying AI plans and extra credits is unavailable for now because the daily AI capacity is used up for today. Please try again after the reset${t ? ` (~${t})` : ''}.`;
 }
 function relayAiTierBlockMessage(verdict) {
     return verdict && verdict.reason === 'provider_exhausted' ? relayAiProviderExhaustedBuyMessage(verdict.retryAt, verdict.source) : RELAY_AI_TIER_LOCK_MESSAGE;
@@ -8789,18 +8870,18 @@ async function getRelayAiBaseSubscriptionBlock(installationId) {
         return { blocked: false };
     }
 }
-const RELAY_AI_BASE_LOCK_MESSAGE = 'Naka-lock muna ang bagong Omni AI subscription dahil puno na ang kabuuang daily AI capacity ng system. Awtomatiko itong magbubukas kapag may nabakante — subukan ulit mamaya o sa susunod na buwan.';
+const RELAY_AI_BASE_LOCK_MESSAGE = 'New Omni AI subscriptions are locked for now because the total daily AI capacity is full. They will open automatically when space frees up — please try again later or next month.';
 function relayAiBaseBlockMessage(verdict, forAdmin = false) {
     if (verdict && verdict.reason === 'provider_exhausted') return relayAiProviderExhaustedBuyMessage(verdict.retryAt, verdict.source);
     if (verdict && verdict.reason === 'slots_full') {
-        if (!forAdmin) return 'Puno na ang bilang ng client na puwedeng gumamit ng Omni AI. Awtomatiko itong magbubukas kapag may nabakante — subukan ulit mamaya.';
-        return `Hindi ma-activate ang bagong Omni AI subscription: puno na ang limit ng clients (${verdict.liveClients}/${verdict.maxClients}). ` +
-               `Walang bagong client na maa-activate (pati manual ng developer) hangga't walang nabakante. Magbubukas ito kapag may nag-expire/na-reset na client, o kapag itinaas ang Max clients (divider) sa AI Plans.`;
+        if (!forAdmin) return 'The number of clients allowed to use Omni AI is full. It will open automatically when a slot frees up — please try again later.';
+        return `Cannot activate a new Omni AI subscription: the client limit is full (${verdict.liveClients}/${verdict.maxClients}). ` +
+               `No new client can be activated (including manually by the developer) until a slot frees up. It will open when a client expires or resets, or when Max clients (divider) is raised in AI Plans.`;
     }
     if (!forAdmin) return RELAY_AI_BASE_LOCK_MESSAGE;
     const usage = (verdict && Number.isFinite(verdict.committed) && Number.isFinite(verdict.capacity)) ? ` (${verdict.committed}/${verdict.capacity} neurons/araw na ang nakalaan)` : '';
-    return `Hindi ma-activate ang bagong Omni AI subscription: puno na ang kabuuang daily AI allowance${usage}. Walang bagong client na maa-activate (pati manual ng developer) hangga't walang nabakante. ` +
-           `Magbubukas ito kapag may nag-expire/na-reset na client, o kapag itinaas ang capacity sa AI Plans.`;
+    return `Cannot activate a new Omni AI subscription: the total daily AI allowance is full${usage}. No new client can be activated (including manually by the developer) until a slot frees up. ` +
+           `It will open when a client expires or resets, or when the capacity is raised in AI Plans.`;
 }
 // Serialize ang capacity check + ang aktwal na pag-issue ng token, para hindi sabay na makalusot ang dalawang
 // BAGONG client sa huling natitirang allowance (parehong global lock ng Plus/Pro tier purchase).
@@ -8860,13 +8941,80 @@ async function getRelayAiExtraTotalsForClient(installationId, monthKey, clientOr
 // Kung unlimited (0) na ang daily cap ng client, walang idadagdag.
 async function applyRelayAiExtra(settings, installationId, monthKey, clientOrPool = pgPoolDevices) {
     const t = await getRelayAiExtraTotalsForClient(installationId, monthKey, clientOrPool);
-    if (!t.credits && !t.dailyBonus) return { ...settings, extraCredits: 0, extraDailyBonus: 0 };
+    const boost = await getRelayAiDayBoostNeurons(installationId, clientOrPool); // One-day Boost: ngayong araw lang
+    if (!t.credits && !t.dailyBonus && !boost) return { ...settings, extraCredits: 0, extraDailyBonus: 0, dayBoost: 0 };
     const baseDaily = Number(settings.dailyCap) || 0;
     return {
         ...settings,
         monthlyCredits: Number(settings.monthlyCredits) + t.credits,
-        dailyCap: baseDaily === 0 ? 0 : baseDaily + t.dailyBonus,
-        extraCredits: t.credits, extraDailyBonus: t.dailyBonus
+        dailyCap: baseDaily === 0 ? 0 : baseDaily + t.dailyBonus + boost,
+        extraCredits: t.credits, extraDailyBonus: t.dailyBonus, dayBoost: boost
+    };
+}
+// ---- ONE-DAY BOOST ------------------------------------------------------
+// Maliit na dagdag na neurons para sa ISANG ARAW lang kapag naubos ang daily limit (hindi buong buwan).
+// Presyo: sinadyang mas mahal kada neuron kaysa Extra Credits at tier, para hindi natatalo ang mga ito.
+// Editable gamit ang env: RELAY_AI_DAY_BOOST_ENABLED (0 para patayin), RELAY_AI_DAY_BOOST_MAX_PER_DAY, RELAY_AI_DAY_BOOST_OPTIONS ("id:neurons:tokens,...").
+const RELAY_AI_DAY_BOOST_ENABLED = String(process.env.RELAY_AI_DAY_BOOST_ENABLED || '1') !== '0';
+const RELAY_AI_DAY_BOOST_MAX_PER_DAY = Math.max(1, parseInt(process.env.RELAY_AI_DAY_BOOST_MAX_PER_DAY, 10) || 3);
+const RELAY_AI_DAY_BOOST_OPTIONS = (() => {
+    const fallback = [{ id: 'boost1', neurons: 1000, priceTokens: 10 }, { id: 'boost3', neurons: 3000, priceTokens: 25 }];
+    const raw = String(process.env.RELAY_AI_DAY_BOOST_OPTIONS || '').trim();
+    if (!raw) return fallback;
+    const out = raw.split(',').map((x) => x.trim().split(':')).map(([id, n, p]) => ({
+        id: String(id || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 30), neurons: parseInt(n, 10), priceTokens: parseInt(p, 10)
+    })).filter((o) => o.id && o.neurons > 0 && o.priceTokens > 0);
+    return out.length ? out : fallback;
+})();
+async function getRelayAiDayBoostNeurons(installationId, clientOrPool = pgPoolDevices) {
+    if (!RELAY_AI_DAY_BOOST_ENABLED || !installationId) return 0;
+    try {
+        const r = await clientOrPool.query(
+            `SELECT COALESCE(SUM(neurons),0)::int AS n FROM relay_ai_day_boosts WHERE installation_id = $1 AND day_key = $2`,
+            [installationId, relayAiDayKey()]);
+        return r.rows[0] ? Number(r.rows[0].n) || 0 : 0;
+    } catch (_) { return 0; }
+}
+async function getRelayAiDayBoostCount(installationId, clientOrPool = pgPoolDevices) {
+    try {
+        const r = await clientOrPool.query(
+            `SELECT COUNT(*)::int AS c FROM relay_ai_day_boosts WHERE installation_id = $1 AND day_key = $2`,
+            [installationId, relayAiDayKey()]);
+        return r.rows[0] ? Number(r.rows[0].c) || 0 : 0;
+    } catch (_) { return 0; }
+}
+// Tantiyang neurons kada tanong (para maipakita ang "~N tanong" sa halip na teknikal na neurons).
+async function getRelayAiPerQuestionNeurons(isFree) {
+    try {
+        const ns = await getAiNeuronSettings();
+        if (isFree) return aiNeuronsPerQuestion(ns);
+        const cfg = await getAiProviderConfig();
+        return computeGoogleCallNeurons(null, googleDefaultModelKey(cfg) || 'flashLite', cfg).neurons;
+    } catch (_) { return 0; }
+}
+function relayAiDayBoostVerdict(opt, status, boughtToday, capState) {
+    if (!RELAY_AI_DAY_BOOST_ENABLED) return { ok: false, reason: 'One-day Boost is not available right now.' };
+    const px = getAiProviderExhaustion();
+    if (px.exhausted) return { ok: false, reason: relayAiProviderExhaustedBuyMessage(px.retryAt, px.source) };
+    if (!status || !status.daily || status.daily.unlimited) return { ok: false, reason: 'Your plan has no daily limit, so you do not need a Boost.' };
+    if (status.remaining <= 0) return { ok: false, reason: 'Your monthly credits are used up — a Boost will not help. Buy Extra Credits or upgrade.' };
+    if (boughtToday >= RELAY_AI_DAY_BOOST_MAX_PER_DAY) return { ok: false, reason: `You have reached the limit of ${RELAY_AI_DAY_BOOST_MAX_PER_DAY} Boosts for today.` };
+    if (capState && capState.enabled && capState.extraAvailable !== null && capState.extraAvailable !== undefined && opt.neurons > capState.extraAvailable) {
+        return { ok: false, reason: 'The total daily AI capacity is full, so no Boost can be given right now.' };
+    }
+    return { ok: true };
+}
+async function buildRelayAiDayBoostOffer(installationId, status, capState) {
+    if (!RELAY_AI_DAY_BOOST_ENABLED || !status || !status.daily || status.daily.unlimited || status.isFree) return null;
+    const bought = await getRelayAiDayBoostCount(installationId);
+    const boostedNeurons = await getRelayAiDayBoostNeurons(installationId);
+    const pq = Number(status.daily.perQuestion) || 0;
+    return {
+        enabled: true, maxPerDay: RELAY_AI_DAY_BOOST_MAX_PER_DAY, boughtToday: bought, boostedNeurons,
+        options: RELAY_AI_DAY_BOOST_OPTIONS.map((o) => {
+            const v = relayAiDayBoostVerdict(o, status, bought, capState);
+            return { id: o.id, neurons: o.neurons, priceTokens: o.priceTokens, approxQuestions: pq > 0 ? Math.floor(o.neurons / pq) : null, canPurchase: v.ok, unavailableReason: v.ok ? null : v.reason };
+        })
     };
 }
 function mapRelayAiExtraPackRow(r) {
@@ -8875,14 +9023,14 @@ function mapRelayAiExtraPackRow(r) {
 function relayAiExtraPackVerdict(pack, es, sold, clientBought, capState) {
     const pxBuy = getAiProviderExhaustion();
     if (pxBuy.exhausted) return { ok: false, reason: relayAiProviderExhaustedBuyMessage(pxBuy.retryAt, pxBuy.source) };
-    if (!es.enabled) return { ok: false, reason: 'Hindi available ang extra credits sa ngayon.' };
-    if (!pack.enabled) return { ok: false, reason: 'Hindi available ang pack na ito.' };
-    if (es.monthlyPool > 0 && sold + pack.credits > es.monthlyPool) return { ok: false, reason: 'Kulang na ang natitirang extra credits ngayong buwan para sa pack na ito.' };
-    if (es.maxPerClient > 0 && clientBought + pack.credits > es.maxPerClient) return { ok: false, reason: `Umabot ka na sa limit na ${es.maxPerClient} extra credits ngayong buwan.` };
+    if (!es.enabled) return { ok: false, reason: 'Extra credits are not available right now.' };
+    if (!pack.enabled) return { ok: false, reason: 'This pack is not available.' };
+    if (es.monthlyPool > 0 && sold + pack.credits > es.monthlyPool) return { ok: false, reason: 'The remaining extra credits for this month are not enough for this pack.' };
+    if (es.maxPerClient > 0 && clientBought + pack.credits > es.maxPerClient) return { ok: false, reason: `You have reached the limit of ${es.maxPerClient} extra credits for this month.` };
     // Ang extra daily cap ay kinukuha sa natitirang (hindi pa nagagamit) na kabuuang daily capacity.
     // Kapag naka-lock na ang capacity ngayong buwan, walang extra daily cap na maibebenta kahit may natitira pa.
     if (capState && capState.enabled && pack.dailyBonus > 0 && (capState.locked || pack.dailyBonus > capState.extraAvailable)) {
-        return { ok: false, reason: 'Puno na ang kabuuang daily AI capacity ngayong buwan (kasama ang nakareserba para sa mga bakanteng client slot), walang extra neurons na maibibigay.' };
+        return { ok: false, reason: 'The total daily AI capacity for this month is full (including what is reserved for empty client slots), so no extra neurons can be given.' };
     }
     return { ok: true };
 }
@@ -8929,11 +9077,22 @@ async function buildRelayAiModelOffer(current) {
     if (!options.length) return null;
     return { enabled: true, options };
 }
+// Dagdag na impormasyon sa bawat plan para madaling ikumpara (tulad ng "5x usage" ng mga sikat na AI app):
+// approxQuestionsPerDay = tantiyang tanong/araw; creditsMultiplier = ilang beses ng monthly credits ng Base.
+function relayAiDecoratePlan(p, baseCredits, perQuestion) {
+    const dc = Number(p.dailyCap) || 0;
+    const mc = Number(p.monthlyCredits) || 0;
+    return {
+        ...p,
+        approxQuestionsPerDay: (dc > 0 && perQuestion > 0) ? Math.floor(dc / perQuestion) : null,
+        creditsMultiplier: (baseCredits > 0 && mc > 0) ? Math.round((mc / baseCredits) * 10) / 10 : null
+    };
+}
 app.get('/relay/ai-assistant/plans', requireApiKey, requireAllowedDevice, rateLimit('ai-assistant-plans', 60, 10 * 60 * 1000, (req) => req.query?.installationId), async (req, res) => {
     const installationId = String(req.query?.installationId || '').trim();
     if (!installationId) return res.status(400).json({ success: false, message: 'Missing installationId.' });
     const planFree = relayAiIsFreeInstallation(installationId);
-    if (planFree && !(await getAiProviderConfig()).free.enabled) return res.status(403).json({ success: false, subscriptionRequired: true, message: 'Walang active OmniPOS AI Assistant subscription para sa device na ito.' });
+    if (planFree && !(await getAiProviderConfig()).free.enabled) return res.status(403).json({ success: false, subscriptionRequired: true, message: 'No active OmniPOS AI Assistant subscription for this device.' });
     if (!pgPoolDevices) return res.status(503).json({ success: false, message: 'AI credit database is not configured on the RELAY.' });
     if (planFree) {
         // FREE client: ipakita ang apat na tier (Free ang kasalukuyan). Hindi mabibili ang Plus/Pro hangga't walang Omni AI subscription (Base).
@@ -8942,14 +9101,14 @@ app.get('/relay/ai-assistant/plans', requireApiKey, requireAllowedDevice, rateLi
             const status = await getRelayAiCreditStatus(installationId);
             const freeCfg = (await getAiProviderConfig()).free;
             const baseSettings = await getRelayAiDefaultSettings();
-            const subMsg = 'Kailangan muna ng Omni AI subscription (Base) para makabili ng plan na ito.';
+            const subMsg = 'An Omni AI subscription (Base) is required first to buy this plan.';
             return res.json({
                 success: true, isFree: true, month: status.month, validUntil: relayAiNextMonthResetMs(),
-                freeTier: { id: 'free', name: 'Free', priceTokens: 0, monthlyCredits: freeCfg.monthlyCredits, dailyCap: freeCfg.dailyNeurons, isFree: true, isCurrent: true, canPurchase: false, costTokens: 0, locked: false, lockedReason: null, textOnly: true },
-                baseTier: { id: 'base', name: 'Base', priceTokens: 0, monthlyCredits: Number(baseSettings.monthlyCredits) || 0, dailyCap: Number(baseSettings.dailyCap) || 0, isBase: true, isCurrent: false, canPurchase: false, needsSubscription: true, costTokens: 0, locked: false, lockedReason: null },
+                freeTier: relayAiDecoratePlan({ id: 'free', name: 'Free', priceTokens: 0, monthlyCredits: freeCfg.monthlyCredits, dailyCap: freeCfg.dailyNeurons, isFree: true, isCurrent: true, canPurchase: false, costTokens: 0, locked: false, lockedReason: null, textOnly: true }, Number(baseSettings.monthlyCredits) || 0, await getRelayAiPerQuestionNeurons(true)),
+                baseTier: relayAiDecoratePlan({ id: 'base', name: 'Base', priceTokens: 0, monthlyCredits: Number(baseSettings.monthlyCredits) || 0, dailyCap: Number(baseSettings.dailyCap) || 0, isBase: true, isCurrent: false, canPurchase: false, needsSubscription: true, costTokens: 0, locked: false, lockedReason: null }, Number(baseSettings.monthlyCredits) || 0, await getRelayAiPerQuestionNeurons(false)),
                 currentTier: null,
                 credits: status,
-                plans: tiers.map((t) => ({ ...t, isCurrent: false, canPurchase: false, costTokens: 0, locked: true, lockedReason: subMsg, needsSubscription: true })),
+                plans: await (async () => { const pq = await getRelayAiPerQuestionNeurons(false); return tiers.map((t) => relayAiDecoratePlan({ ...t, isCurrent: false, canPurchase: false, costTokens: 0, locked: true, lockedReason: subMsg, needsSubscription: true }, Number(baseSettings.monthlyCredits) || 0, pq)); })(),
                 extraCredits: null,
                 aiModels: null
             });
@@ -8964,20 +9123,23 @@ app.get('/relay/ai-assistant/plans', requireApiKey, requireAllowedDevice, rateLi
         const current = await getRelayAiActiveTier(installationId, status.month);
         const capState = await getRelayAiCapacityState(status.month);
         const baseCap = current ? 0 : await getRelayAiBaseCapForClient(installationId, capState);
+        const baseSettingsForDeco = await getRelayAiSettings(installationId);
+        const decoBaseCredits = Number(baseSettingsForDeco.monthlyCredits) || 0;
+        const decoPq = (status.daily && Number(status.daily.perQuestion)) || await getRelayAiPerQuestionNeurons(false);
         const plans = tiers.map((t) => {
             const isCurrent = !!current && current.id === t.id;
             const verdict = relayAiTierCapacityVerdict(capState, t, current, baseCap);
             const upgradeable = !current || t.priceTokens > current.priceTokens;
             const canPurchase = upgradeable && !verdict.blocked;
             const costTokens = canPurchase ? Math.max(0, t.priceTokens - (current ? current.tokensSpent : 0)) : 0;
-            return { ...t, isCurrent, canPurchase, costTokens, locked: upgradeable && !isCurrent && verdict.blocked, lockedReason: (upgradeable && !isCurrent && verdict.blocked) ? relayAiTierBlockMessage(verdict) : null };
+            return relayAiDecoratePlan({ ...t, isCurrent, canPurchase, costTokens, locked: upgradeable && !isCurrent && verdict.blocked, lockedReason: (upgradeable && !isCurrent && verdict.blocked) ? relayAiTierBlockMessage(verdict) : null }, decoBaseCredits, decoPq);
         });
         // BASE = pinakamababang tier (libre, default ng lahat) — ipinapakita lang, hindi mabibili.
         const baseSettings = await getRelayAiSettings(installationId);
-        const baseTier = {
+        const baseTier = relayAiDecoratePlan({
             id: 'base', name: 'Base', priceTokens: 0, monthlyCredits: Number(baseSettings.monthlyCredits) || 0, dailyCap: Number(baseSettings.dailyCap) || 0,
             isBase: true, isCurrent: !current, canPurchase: false, costTokens: 0, locked: false, lockedReason: null
-        };
+        }, decoBaseCredits, decoPq);
         return res.json({
             success: true,
             month: status.month,
@@ -8987,6 +9149,7 @@ app.get('/relay/ai-assistant/plans', requireApiKey, requireAllowedDevice, rateLi
             credits: status,
             plans,
             extraCredits: await buildRelayAiExtraOffer(installationId, status.month, !!(status.daily && status.daily.unlimited)).catch((e) => { console.error('⚠️ extra offer error:', e.message); return null; }),
+            dayBoost: await buildRelayAiDayBoostOffer(installationId, status, capState).catch((e) => { console.error('⚠️ day boost offer error:', e.message); return null; }),
             aiModels: await buildRelayAiModelOffer(current).catch((e) => { console.error('⚠️ model offer error:', e.message); return null; })
         });
     } catch (err) {
@@ -9002,7 +9165,7 @@ app.post('/relay/ai-assistant/plans/purchase', requireApiKey, requireAllowedDevi
     const tierId = String(req.body?.tierId || '').trim();
     const clientRequestId = String(req.body?.clientRequestId || '').trim().slice(0, 120);
     if (!installationId || !tierId) return res.status(400).json({ success: false, message: 'Missing installationId or tierId.' });
-    if (!hasActiveRelayAiSubscription(installationId)) return res.status(403).json({ success: false, subscriptionRequired: true, message: 'Walang active OmniPOS AI Assistant subscription para sa device na ito.' });
+    if (!hasActiveRelayAiSubscription(installationId)) return res.status(403).json({ success: false, subscriptionRequired: true, message: 'No active OmniPOS AI Assistant subscription for this device.' });
     if (!pgPool || !pgPoolDevices) return res.status(503).json({ success: false, message: 'Postgres is not configured — the Omni Token wallet needs it.' });
     const dedupeKey = clientRequestId ? `${installationId}:${clientRequestId}` : null;
     if (dedupeKey && aiTierPurchaseDedupe.has(dedupeKey)) {
@@ -9010,7 +9173,7 @@ app.post('/relay/ai-assistant/plans/purchase', requireApiKey, requireAllowedDevi
         return res.status(cached.status).json(cached.body);
     }
     if (aiTierPurchaseInFlight.has(installationId)) {
-        return res.status(429).json({ success: false, message: 'May kasalukuyang pagbili ng AI plan para sa device na ito. Hintayin munang matapos.' });
+        return res.status(429).json({ success: false, message: 'An AI plan purchase is already in progress for this device. Please wait for it to finish.' });
     }
     aiTierPurchaseInFlight.add(installationId);
     const releaseGlobalLock = await acquireAiTierGlobalLock();
@@ -9020,11 +9183,11 @@ app.post('/relay/ai-assistant/plans/purchase', requireApiKey, requireAllowedDevi
         const tierRes = await pgPoolDevices.query(
             `SELECT id, name, price_tokens, monthly_credits, daily_cap, sort_order, enabled FROM relay_ai_tiers WHERE id = $1`, [tierId]);
         const tier = tierRes.rows[0] ? mapRelayAiTierRow(tierRes.rows[0]) : null;
-        if (!tier || !tier.enabled) return res.status(404).json({ success: false, message: 'Hindi available ang plan na ito.' });
+        if (!tier || !tier.enabled) return res.status(404).json({ success: false, message: 'This plan is not available.' });
         const monthKey = relayAiMonthKey();
         const current = await getRelayAiActiveTier(installationId, monthKey);
         if (current && tier.priceTokens <= current.priceTokens) {
-            return res.status(409).json({ success: false, message: `Mayroon ka nang ${current.name} plan ngayong buwan — mas mataas na plan lang ang puwedeng i-upgrade.` });
+            return res.status(409).json({ success: false, message: `You already have the ${current.name} plan this month — you can only upgrade to a higher plan.` });
         }
         const capState = await getRelayAiCapacityState(monthKey);
         const baseCapForClient = current ? 0 : await getRelayAiBaseCapForClient(installationId, capState);
@@ -9102,7 +9265,7 @@ app.post('/relay/ai-assistant/plans/purchase', requireApiKey, requireAllowedDevi
         const credits = await getRelayAiCreditStatus(installationId);
         const body = {
             success: true,
-            message: `${tier.name} plan activated (${tier.monthlyCredits} credits/month, ${tier.dailyCap === 0 ? 'unlimited' : tier.dailyCap.toLocaleString('en-US') + ' neurons/day'}) hanggang katapusan ng buwan.`,
+            message: `${tier.name} plan activated (${tier.monthlyCredits} credits/month, ${tier.dailyCap === 0 ? 'unlimited' : tier.dailyCap.toLocaleString('en-US') + ' neurons/day'}) until the end of the month.`,
             tier: { id: tier.id, name: tier.name, monthlyCredits: tier.monthlyCredits, dailyCap: tier.dailyCap },
             tokensSpent: costTokens,
             balanceTokens: balanceAfter,
@@ -9112,7 +9275,7 @@ app.post('/relay/ai-assistant/plans/purchase', requireApiKey, requireAllowedDevi
         return res.json(body);
     } catch (err) {
         console.error('⚠️ RELAY AI plan purchase error:', err.message);
-        return res.status(500).json({ success: false, message: 'Hindi ma-activate ang AI plan. Walang nasingil (o naibalik na). Subukan muli.' });
+        return res.status(500).json({ success: false, message: 'Could not activate the AI plan. You were not charged (or it was refunded). Please try again.' });
     } finally {
         releaseGlobalLock();
         aiTierPurchaseInFlight.delete(installationId);
@@ -9126,7 +9289,7 @@ app.post('/relay/ai-assistant/extra-credits/purchase', requireApiKey, requireAll
     const packId = String(req.body?.packId || '').trim();
     const clientRequestId = String(req.body?.clientRequestId || '').trim().slice(0, 120);
     if (!installationId || !packId) return res.status(400).json({ success: false, message: 'Missing installationId or packId.' });
-    if (!hasActiveRelayAiSubscription(installationId)) return res.status(403).json({ success: false, subscriptionRequired: true, message: 'Walang active OmniPOS AI Assistant subscription para sa device na ito.' });
+    if (!hasActiveRelayAiSubscription(installationId)) return res.status(403).json({ success: false, subscriptionRequired: true, message: 'No active OmniPOS AI Assistant subscription for this device.' });
     if (!pgPool || !pgPoolDevices) return res.status(503).json({ success: false, message: 'Postgres is not configured — the Omni Token wallet needs it.' });
     const dedupeKey = clientRequestId ? `${installationId}:${clientRequestId}` : null;
     if (dedupeKey && aiExtraPurchaseDedupe.has(dedupeKey)) {
@@ -9134,7 +9297,7 @@ app.post('/relay/ai-assistant/extra-credits/purchase', requireApiKey, requireAll
         return res.status(cached.status).json(cached.body);
     }
     if (aiExtraPurchaseInFlight.has(installationId)) {
-        return res.status(429).json({ success: false, message: 'May kasalukuyang pagbili ng extra credits para sa device na ito. Hintayin munang matapos.' });
+        return res.status(429).json({ success: false, message: 'An extra credits purchase is already in progress for this device. Please wait for it to finish.' });
     }
     aiExtraPurchaseInFlight.add(installationId);
     const releaseGlobalLock = await acquireAiTierGlobalLock(); // serialize para tama ang natitirang pool
@@ -9142,7 +9305,7 @@ app.post('/relay/ai-assistant/extra-credits/purchase', requireApiKey, requireAll
     try {
         const packRes = await pgPoolDevices.query(`SELECT id, name, credits, daily_bonus, price_tokens, sort_order, enabled FROM relay_ai_extra_packs WHERE id = $1`, [packId]);
         const pack = packRes.rows[0] ? mapRelayAiExtraPackRow(packRes.rows[0]) : null;
-        if (!pack || !pack.enabled) return res.status(404).json({ success: false, message: 'Hindi available ang pack na ito.' });
+        if (!pack || !pack.enabled) return res.status(404).json({ success: false, message: 'This pack is not available.' });
         const monthKey = relayAiMonthKey();
         const es = await getRelayAiExtraSettings();
         const sold = await getRelayAiExtraSold(monthKey);
@@ -9212,7 +9375,97 @@ app.post('/relay/ai-assistant/extra-credits/purchase', requireApiKey, requireAll
         return res.json(body);
     } catch (err) {
         console.error('⚠️ RELAY AI extra purchase error:', err.message);
-        return res.status(500).json({ success: false, message: 'Hindi ma-add ang extra credits. Walang nasingil (o naibalik na). Subukan muli.' });
+        return res.status(500).json({ success: false, message: 'Could not add the extra credits. You were not charged (or it was refunded). Please try again.' });
+    } finally {
+        releaseGlobalLock();
+        aiExtraPurchaseInFlight.delete(installationId);
+    }
+});
+app.post('/relay/ai-assistant/day-boost/purchase', requireApiKey, requireAllowedDevice, rateLimit('ai-assistant-day-boost', 20, 10 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    if (!ACTIVATION_FLAGS.omniTokenActivationEnabled) {
+        return res.status(503).json({ success: false, message: '"Activate via Omni Tokens" is temporarily disabled (maintenance/upgrade). Please try again later.' });
+    }
+    const installationId = String(req.body?.installationId || '').trim();
+    const boostId = String(req.body?.boostId || '').trim();
+    const clientRequestId = String(req.body?.clientRequestId || '').trim().slice(0, 120);
+    if (!installationId || !boostId) return res.status(400).json({ success: false, message: 'Missing installationId or boostId.' });
+    if (!hasActiveRelayAiSubscription(installationId)) return res.status(403).json({ success: false, subscriptionRequired: true, message: 'No active OmniPOS AI Assistant subscription for this device.' });
+    if (!pgPool || !pgPoolDevices) return res.status(503).json({ success: false, message: 'Postgres is not configured — the Omni Token wallet needs it.' });
+    const dedupeKey = clientRequestId ? `boost:${installationId}:${clientRequestId}` : null;
+    if (dedupeKey && aiExtraPurchaseDedupe.has(dedupeKey)) {
+        const cached = aiExtraPurchaseDedupe.get(dedupeKey);
+        return res.status(cached.status).json(cached.body);
+    }
+    if (aiExtraPurchaseInFlight.has(installationId)) {
+        return res.status(429).json({ success: false, message: 'A purchase is already in progress for this device. Please wait for it to finish.' });
+    }
+    aiExtraPurchaseInFlight.add(installationId);
+    const releaseGlobalLock = await acquireAiTierGlobalLock(); // serialize para tama ang natitirang capacity
+    let tokensDeducted = 0;
+    try {
+        const opt = RELAY_AI_DAY_BOOST_OPTIONS.find((o) => o.id === boostId);
+        if (!opt) return res.status(404).json({ success: false, message: 'This Boost is not available.' });
+        const monthKey = relayAiMonthKey();
+        const dayKey = relayAiDayKey();
+        const status = await getRelayAiCreditStatus(installationId);
+        const boughtToday = await getRelayAiDayBoostCount(installationId);
+        const capState = await getRelayAiCapacityState(monthKey);
+        const verdict = relayAiDayBoostVerdict(opt, status, boughtToday, capState);
+        if (!verdict.ok) return res.status(409).json({ success: false, unavailable: true, message: verdict.reason });
+        const costTokens = opt.priceTokens; // eksaktong presyo — walang dagdag
+        await getOrCreateCloudTokenWallet(installationId);
+        const safetyNet = await getCostSafetyNetFloor(installationId);
+        const effectiveFloor = safetyNet.floor;
+        const deduct = await queryWithRetry(
+            pgPool,
+            `UPDATE cloud_token_wallets SET balance_tokens = balance_tokens - $2, updated_at = now()
+             WHERE installation_id = $1 AND balance_tokens - $2 >= $3 RETURNING balance_tokens`,
+            [installationId, costTokens, effectiveFloor]
+        );
+        if (!deduct.rows[0]) {
+            const cur = await queryWithRetry(pgPool, 'SELECT balance_tokens FROM cloud_token_wallets WHERE installation_id = $1', [installationId]);
+            const currentBalance = cur.rows[0] ? Number(cur.rows[0].balance_tokens) : 0;
+            const reserveProtected = currentBalance >= costTokens && effectiveFloor > 0;
+            return res.status(402).json({
+                success: false, insufficient: true, reserveProtected,
+                balanceTokens: currentBalance, requiredTokens: costTokens,
+                message: reserveProtected
+                    ? `This purchase is blocked by this account's cost safety net (${effectiveFloor} token buffer). Buy more Omni Tokens first, then try again.`
+                    : `Insufficient Omni Tokens. ${costTokens} token(s) are needed for this Boost. Please buy more Omni Tokens first, then try again.`
+            });
+        }
+        tokensDeducted = costTokens;
+        const balanceAfter = Number(deduct.rows[0].balance_tokens);
+        invalidateWalletCache(installationId);
+        await queryWithRetry(pgPool,
+            `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note, category) VALUES ($1, 'consume', $2, $3, $4, 'ADDON_PURCHASE')`,
+            [installationId, -costTokens, balanceAfter, `Omni AI One-day Boost: +${opt.neurons} neurons (${dayKey})`]);
+        try {
+            await queryWithRetry(pgPoolDevices,
+                `INSERT INTO relay_ai_day_boosts (installation_id, day_key, boost_id, neurons, price_tokens) VALUES ($1,$2,$3,$4,$5)`,
+                [installationId, dayKey, opt.id, opt.neurons, costTokens]);
+        } catch (insErr) {
+            try {
+                const back = await queryWithRetry(pgPool, `UPDATE cloud_token_wallets SET balance_tokens = balance_tokens + $2, updated_at = now() WHERE installation_id = $1 RETURNING balance_tokens`, [installationId, tokensDeducted]);
+                invalidateWalletCache(installationId);
+                await queryWithRetry(pgPool, `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note, category) VALUES ($1, 'consume', $2, $3, $4, 'ADDON_PURCHASE')`,
+                    [installationId, tokensDeducted, Number(back.rows[0].balance_tokens), `Reversal: One-day Boost could not be applied`]);
+            } catch (revErr) { console.error('⚠️ Day boost reversal failed:', revErr.message); }
+            throw insErr;
+        }
+        logActivity(installationId, 'ai_day_boost_purchased', { boostId: opt.id, neurons: opt.neurons, tokensSpent: costTokens, day: dayKey });
+        const credits = await getRelayAiCreditStatus(installationId);
+        const body = {
+            success: true,
+            message: `+${opt.neurons.toLocaleString('en-US')} neurons${credits.daily && credits.daily.perQuestion ? ` (~${Math.floor(opt.neurons / credits.daily.perQuestion)} questions)` : ''} for today only. They expire at midnight.`,
+            boost: { id: opt.id, neurons: opt.neurons },
+            tokensSpent: costTokens, balanceTokens: balanceAfter, credits
+        };
+        if (dedupeKey) aiExtraPurchaseDedupe.set(dedupeKey, { status: 200, body, expiresAt: Date.now() + 15 * 60 * 1000 });
+        return res.json(body);
+    } catch (err) {
+        console.error('⚠️ RELAY AI day boost purchase error:', err.message);
+        return res.status(500).json({ success: false, message: 'Could not add the Boost. You were not charged (or it was refunded). Please try again.' });
     } finally {
         releaseGlobalLock();
         aiExtraPurchaseInFlight.delete(installationId);
@@ -9337,12 +9590,12 @@ app.post('/relay/admin/api/ai-plans/capacity', requireAdminKey, async (req, res)
     let maxClients = curCfg.maxClients;
     if (req.body?.maxClients !== undefined) {
         const m = normalizeRelayAiSettingNumber(req.body.maxClients, NaN, 0, 100000);
-        if (!Number.isFinite(m)) return res.status(400).json({ success: false, message: 'maxClients must be a whole number >= 0 (0 = walang limit).' });
+        if (!Number.isFinite(m)) return res.status(400).json({ success: false, message: 'maxClients must be a whole number >= 0 (0 = no limit).' });
         maxClients = m;
     }
     const baseAuto = typeof req.body?.baseAuto === 'boolean' ? req.body.baseAuto : curCfg.baseAuto;
     const reserveSlots = typeof req.body?.reserveSlots === 'boolean' ? req.body.reserveSlots : curCfg.reserveSlots;
-    const ids = (Array.isArray(req.body?.lockedTierIds) ? req.body.lockedTierIds : String(req.body?.lockedTierIds || 'plus,pro').split(','))
+    const ids = (Array.isArray(req.body?.lockedTierIds) ? req.body.lockedTierIds : String(req.body?.lockedTierIds || 'lite,plus,pro,business').split(','))
         .map(x => String(x).trim().toLowerCase()).filter(x => /^[a-z0-9_-]{1,30}$/.test(x));
     try {
         await pgPoolDevices.query(
@@ -9474,7 +9727,7 @@ app.get('/relay/admin/api/ai-providers', requireAdminKey, async (req, res) => {
         try { tiers = pgPoolDevices ? (await listRelayAiTiers(false)).map((t) => ({ id: t.id, name: t.name, priceTokens: t.priceTokens })) : []; } catch (_) { tiers = []; }
         // Tier map (read-only): aling provider ang gumagamit ng bawat tier. Ito ang ipinapakita sa admin page.
         const tierMap = [
-            { id: 'free', name: 'Free', provider: 'cloudflare', requires: 'Walang subscription', purchasable: false },
+            { id: 'free', name: 'Free', provider: 'cloudflare', requires: 'No subscription', purchasable: false },
             { id: 'base', name: 'Base', provider: 'google', requires: 'Omni AI subscription', purchasable: false }
         ].concat(tiers.map((t) => ({ id: t.id, name: t.name, provider: 'google', requires: 'Omni AI subscription + Omni Tokens', purchasable: true, priceTokens: t.priceTokens })));
         return res.json({
@@ -9507,14 +9760,14 @@ app.post('/relay/admin/api/ai-providers/settings', requireAdminKey, async (req, 
         });
         // Google = Base/Plus/Pro. Kapag ino-ON ito, kailangan ng API key at kahit isang model.
         if (next.google.enabled && !isGoogleAiConfigured()) {
-            return res.status(400).json({ success: false, message: 'Walang GOOGLE_AI_API_KEY sa RELAY/.env — idagdag muna ito at i-restart ang RELAY bago i-ON ang Google AI (Base/Plus/Pro).' });
+            return res.status(400).json({ success: false, message: 'GOOGLE_AI_API_KEY is missing in RELAY/.env — add it and restart RELAY before turning Google AI (Base/Plus/Pro) ON.' });
         }
         if (next.google.enabled && !AI_GOOGLE_MODEL_KEYS.some((k) => next.google.models[k].enabled)) {
             return res.status(400).json({ success: false, message: 'Mag-enable ng kahit isang Gemini model (Flash o Flash-Lite).' });
         }
         // Free = Cloudflare. Kapag ino-ON ito, kailangan ng CF_ACCOUNT_ID at CF_AI_API_TOKEN.
         if (next.free.enabled && !cur.free.enabled && !isCfAiConfigured()) {
-            return res.status(400).json({ success: false, message: 'Walang CF_ACCOUNT_ID / CF_AI_API_TOKEN sa RELAY/.env — idagdag muna ang mga ito at i-restart ang RELAY bago i-ON ang Free tier.' });
+            return res.status(400).json({ success: false, message: 'CF_ACCOUNT_ID / CF_AI_API_TOKEN are missing in RELAY/.env — add them and restart RELAY before turning the Free tier ON.' });
         }
         // Nagbago ang Google plan (Free <-> Paid): iba na ang quota, kaya burahin ang mga natutunang limit at lock ng mga model.
         if (next.google.plan !== cur.google.plan) {
@@ -9609,19 +9862,19 @@ async function fetchGoogleModelList(force) {
 }
 app.get('/relay/admin/api/ai-providers/models', requireAdminKey, async (req, res) => {
     try {
-        if (!isGoogleAiConfigured()) return res.json({ success: false, message: 'Walang GOOGLE_AI_API_KEY sa RELAY environment.' });
+        if (!isGoogleAiConfigured()) return res.json({ success: false, message: 'GOOGLE_AI_API_KEY is missing in the RELAY environment.' });
         const models = await fetchGoogleModelList(req.query?.refresh === '1');
         return res.json({ success: true, models, cachedAt: googleModelListCache.at });
     } catch (err) {
         console.error('AI providers models error:', err.message);
-        return res.json({ success: false, message: 'Hindi makuha ang listahan ng model: ' + err.message });
+        return res.json({ success: false, message: 'Could not fetch the model list: ' + err.message });
     }
 });
 // Totoong test na tawag sa Google (hindi nagbabawas ng credits ng kahit sinong client, hindi binibilang sa usage).
 // Test ng FREE tier engine (Cloudflare Workers AI, text). Gumagamit ng ~100-200 neurons ng shared na Free pool.
 app.post('/relay/admin/api/ai-providers/test-free', requireAdminKey, async (req, res) => {
     try {
-        if (!isCfAiConfigured()) return res.json({ success: false, message: 'Walang CF_ACCOUNT_ID / CF_AI_API_TOKEN sa RELAY environment. Idagdag sa Render > Environment, saka mag-redeploy.' });
+        if (!isCfAiConfigured()) return res.json({ success: false, message: 'CF_ACCOUNT_ID / CF_AI_API_TOKEN are missing in the RELAY environment. Add them in Render > Environment, then redeploy.' });
         const t0 = Date.now();
         const r = await callCloudflareWorkersAI([{ role: 'system', content: 'You are a connectivity test.' }, { role: 'user', content: 'Reply with the single word: OK' }], false);
         if (!r.success) {
@@ -9634,12 +9887,12 @@ app.post('/relay/admin/api/ai-providers/test-free', requireAdminKey, async (req,
         return res.json({ success: true, model: CF_AI_MODEL, answer: String(r.answer || '').slice(0, 80), tookMs: Date.now() - t0, enabledInAdmin: !!(await getAiProviderConfig()).free.enabled });
     } catch (err) {
         console.error('AI free test error:', err.message);
-        return res.status(503).json({ success: false, message: 'Hindi naisagawa ang test: ' + err.message });
+        return res.status(503).json({ success: false, message: 'Could not run the test: ' + err.message });
     }
 });
 app.post('/relay/admin/api/ai-providers/test', requireAdminKey, async (req, res) => {
     try {
-        if (!isGoogleAiConfigured()) return res.json({ success: false, message: 'Walang GOOGLE_AI_API_KEY sa RELAY environment. Idagdag sa Render > Environment, saka mag-redeploy.' });
+        if (!isGoogleAiConfigured()) return res.json({ success: false, message: 'GOOGLE_AI_API_KEY is missing in the RELAY environment. Add it in Render > Environment, then redeploy.' });
         const cfg = await getAiProviderConfig();
         const key = AI_GOOGLE_MODEL_KEYS.includes(String(req.body?.model || '')) ? String(req.body.model) : googleDefaultModelKey(cfg) || 'flashLite';
         // Puwedeng ipasa ang eksaktong modelId (ang nasa input box, kahit hindi pa na-save).
@@ -9654,7 +9907,7 @@ app.post('/relay/admin/api/ai-providers/test', requireAdminKey, async (req, res)
         return res.json({ success: true, model: modelId, answer: String(r.answer || '').slice(0, 80), tookMs: Date.now() - t0, usage: r.cfUsage || null, reasoningEffort: r.reasoningEffort || 'default', enabledInAdmin: !!cfg.google.enabled, usable: googleUsable(cfg) });
     } catch (err) {
         console.error('AI providers test error:', err.message);
-        return res.status(503).json({ success: false, message: 'Hindi naisagawa ang test: ' + err.message });
+        return res.status(503).json({ success: false, message: 'Could not run the test: ' + err.message });
     }
 });
 // ---- ADMIN: Workers AI neurons planner ----------------------------------
@@ -9705,7 +9958,7 @@ async function detectCfWorkersPlan(force = false) {
     }
     let result;
     if (!isCfAiConfigured()) {
-        result = { plan: 'unknown', source: 'none', detail: 'Walang CF_ACCOUNT_ID / CF_AI_API_TOKEN sa RELAY .env.' };
+        result = { plan: 'unknown', source: 'none', detail: 'CF_ACCOUNT_ID / CF_AI_API_TOKEN are missing in RELAY .env.' };
     } else {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 10000);
@@ -9723,7 +9976,7 @@ async function detectCfWorkersPlan(force = false) {
                 });
                 result = hit
                     ? { plan: 'paid', source: 'cloudflare-api', detail: `Active subscription: ${String((hit.rate_plan && (hit.rate_plan.public_name || hit.rate_plan.id)) || 'Workers').slice(0, 60)}` }
-                    : { plan: 'free', source: 'cloudflare-api', detail: 'Walang active Workers Paid subscription sa account.' };
+                    : { plan: 'free', source: 'cloudflare-api', detail: 'No active Workers Paid subscription on the account.' };
             } else {
                 const msg = (data && data.errors && data.errors[0] && data.errors[0].message) || `HTTP ${r.status}`;
                 result = { plan: 'unknown', source: 'cloudflare-api-error', detail: `Hindi mabasa ang subscriptions (${String(msg).slice(0, 120)}). Posibleng kulang ang permission ng API token.` };
@@ -9798,7 +10051,7 @@ app.post('/relay/admin/api/ai-neurons/settings', requireAdminKey, async (req, re
             next.planOverride = ov;
         }
         if (!(aiNeuronsPerQuestion(next) > 0)) {
-            return res.status(400).json({ success: false, message: 'Ang neurons kada tanong ay dapat higit sa 0 (lagyan ng tokens at rate).' });
+            return res.status(400).json({ success: false, message: 'Neurons per question must be greater than 0 (fill in the tokens and rates).' });
         }
         aiNeuronSettingsCache = next;
         setPersistentJSON('ai-neuron-settings', next);
@@ -10407,7 +10660,7 @@ async function buildRelayAiClientUsage() {
                     if (tier && catalog.has(tier.id)) {
                         const c = catalog.get(tier.id);
                         if (Number(c.monthlyCredits) !== tier.monthlyCredits || Number(c.dailyCap) !== tier.dailyCap) {
-                            notes.push(`Nagbago na ang ${tier.name} sa catalog (${c.monthlyCredits} cr / ${Number(c.dailyCap).toLocaleString('en-US')} neurons) mula nang bilhin (${tier.monthlyCredits} cr / ${tier.dailyCap.toLocaleString('en-US')}).`);
+                            notes.push(`${tier.name} has changed in the catalog (${c.monthlyCredits} cr / ${Number(c.dailyCap).toLocaleString('en-US')} neurons) since it was purchased (${tier.monthlyCredits} cr / ${tier.dailyCap.toLocaleString('en-US')}).`);
                         }
                     } else if (tier && !catalog.has(tier.id)) {
                         notes.push(`Wala na sa tier catalog ang ${tier.name}.`);
@@ -10431,7 +10684,7 @@ async function buildRelayAiClientUsage() {
                     sync: { ok: notes.length === 0, notes }
                 };
             } catch (err) {
-                rows[i] = { installationId: id, label: deviceLabels.get(id) || null, error: err.message || 'failed', sync: { ok: false, notes: ['Hindi nakuha ang status: ' + (err.message || 'error')] } };
+                rows[i] = { installationId: id, label: deviceLabels.get(id) || null, error: err.message || 'failed', sync: { ok: false, notes: ['Could not get the status: ' + (err.message || 'error')] } };
             }
         }
     };
@@ -10531,6 +10784,7 @@ app.post('/relay/admin/api/ai-credits/installation/reset', requireAdminKey, asyn
                 removedTier = t.rowCount || 0;
                 const x = await client.query(`DELETE FROM relay_ai_extra_purchases WHERE installation_id = $1 AND month_key = $2`, [installationId, monthKey]);
                 removedExtraPacks = x.rowCount || 0;
+                await client.query(`DELETE FROM relay_ai_day_boosts WHERE installation_id = $1 AND day_key = $2`, [installationId, dayKey]);
             }
             if (!keepUsage) {
                 const u1 = await client.query(`DELETE FROM relay_ai_credit_usage WHERE installation_id = $1 AND month_key = $2`, [installationId, monthKey]);
@@ -14434,7 +14688,7 @@ app.post('/relay/confirm-unlock', requireApiKey, requireAllowedDevice, rateLimit
     let aiGuard = null;
     if (featureId === 'ai_assistant') {
         try { aiGuard = await acquireRelayAiBaseGuard(installationId); }
-        catch (err) { console.error('confirm-unlock guard error:', err); return res.status(500).json({ success: false, message: 'Hindi ma-verify ang AI capacity. Subukan ulit.' }); }
+        catch (err) { console.error('confirm-unlock guard error:', err); return res.status(500).json({ success: false, message: 'Could not verify AI capacity. Please try again.' }); }
         if (aiGuard.verdict.blocked) {
             logActivity(installationId, 'ai_base_subscription_blocked', { via: 'otp_confirm', reason: aiGuard.verdict.reason, committed: aiGuard.verdict.committed, capacity: aiGuard.verdict.capacity });
             return res.status(409).json({ success: false, aiCapacityLocked: true, message: relayAiBaseBlockMessage(aiGuard.verdict) });
