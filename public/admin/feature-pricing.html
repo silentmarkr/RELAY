@@ -2131,7 +2131,7 @@ function renderAiClients() {
     const planCol = planColor[c.plan.id] || 'var(--accent)';
     const sync = c.sync && !c.sync.ok ? `<span title="${escapeAttr((c.sync.notes || []).join('\n'))}" style="color:var(--amber);cursor:help;">⚠️ ${escapeHtml((c.sync.notes || [])[0] || 'sync issue')}</span>` : '';
     const dailyTxt = dl.unlimited ? `${fmt(dl.used)} / ∞` : `${fmt(dl.used)} / ${fmt(dl.cap)}`;
-    const extra = (c.extra.credits || c.extra.dailyBonus) ? `<span class="meta">+${fmt(c.extra.credits)} cr / +${fmt(c.extra.dailyBonus)} neurons extra</span>` : '';
+    const extra = (c.extra.credits || c.extra.dailyBonus || c.extra.dayBoost) ? `<span class="meta">+${fmt(c.extra.credits)} cr / +${fmt(c.extra.dailyBonus)} neurons extra${c.extra.dayBoost ? ` / +${fmt(c.extra.dayBoost)} neurons boost (ngayong araw)` : ''}</span>` : '';
     const sub = c.plan.isFree ? '<span class="meta">no Omni AI subscription</span>' : (c.subscriptionExpiresAt ? `<span class="meta">subscription until ${escapeHtml(new Date(c.subscriptionExpiresAt).toLocaleDateString())}</span>` : '');
     return `<div class="row" style="margin-bottom:6px;padding:8px;">
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">

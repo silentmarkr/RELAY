@@ -7823,6 +7823,26 @@ function getAiProviderExhaustion() {
 }
 // ---- FREE TIER (Cloudflare) -------------------------------------------------------------------
 // Ang "Free" ay ang mga installation na WALANG active Omni AI subscription. Text lang, Cloudflare lang, sariling credits/neurons.
+// Compact na pagpapakita ng neurons sa mga mensaheng nakikita ng client: 4500 -> 4.5k, 19000 -> 19k, 1250000 -> 1.25M.
+function relayAiFmtNeurons(n) {
+    const v = Math.max(0, Number(n) || 0);
+    const trim = (x, d) => String(Number(x.toFixed(d)));
+    if (v >= 999500) return trim(v / 1000000, 2) + 'M';
+    if (v >= 1000) return trim(v / 1000, 1) + 'k';
+    return String(Math.round(v));
+}
+// "Hanggang kailan valid" na pangungusap para sa mga purchase message: katapusan ng buwan, o mas maaga kung mag-e-expire muna ang subscription.
+function relayAiValidityPhrase(installationId) {
+    try {
+        const ent = (issuedUnlocks[installationId] || {}).ai_assistant || null;
+        const exp = ent ? (Number(ent.expiresAt || (ent.payload && ent.payload.expiresAt) || 0) || 0) : 0;
+        if (exp && exp < relayAiNextMonthResetMs()) {
+            const d = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Manila', year: 'numeric', month: 'short', day: 'numeric' }).format(new Date(exp));
+            return `until your Omni AI subscription ends on ${d} (earlier than the end of the month). It pauses if the subscription lapses and resumes if you renew within the month.`;
+        }
+    } catch (_) { /* fall through */ }
+    return 'until the end of the month.';
+}
 function relayAiIsFreeInstallation(installationId) {
     return !!installationId && installationId !== RELAY_AI_DEFAULT_SETTINGS_ID && !hasActiveRelayAiSubscription(installationId);
 }
@@ -8116,11 +8136,16 @@ async function getRelayAiCreditStatus(installationId, clientOrPool = pgPoolDevic
     // Tantiyang bilang ng tanong (mas madaling intindihin kaysa neurons) + dagdag na One-day Boost ngayong araw.
     daily.dayBoost = Number(settings.dayBoost) || 0;
     try {
-        const pq = await getRelayAiPerQuestionNeurons(isFree);
+        const pq = await getRelayAiClientPerQuestionNeurons(isFree, daily);
         if (pq > 0) {
             daily.perQuestion = Math.round(pq * 10) / 10;
             if (!daily.unlimited) {
                 daily.questionsLeft = (daily.remaining || 0) > 0 ? Math.max(1, Math.floor(daily.remaining / pq)) : 0;
+                // Hindi puwedeng mas marami ang "tanong na natitira" kaysa kayang bayaran ng natitirang monthly credits
+                // (hal. 3 credits na lang pero "~150 tanong na lang ngayon" ang nakikita ng client).
+                const textCost = Math.max(1, Number(settings.textCost) || 1);
+                const creditsLeft = Math.max(0, settings.monthlyCredits - used);
+                daily.questionsLeft = Math.min(daily.questionsLeft, Math.floor(creditsLeft / textCost));
                 daily.questionsCap = Math.floor(daily.cap / pq);
             }
         }
@@ -8447,12 +8472,12 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
                 const cap = reservation.status.daily.cap;
                 let dailyOut = reservation.status.daily;
                 try {
-                    const pq = await getRelayAiPerQuestionNeurons(isFree);
+                    const pq = await getRelayAiClientPerQuestionNeurons(isFree, dailyOut);
                     dailyOut = { ...dailyOut, dayBoost: Number(reservation.status.settings && reservation.status.settings.dayBoost) || 0, ...(pq > 0 ? { perQuestion: Math.round(pq * 10) / 10, questionsLeft: 0, questionsCap: Math.floor(cap / pq) } : {}) };
                 } catch (_) { /* optional */ }
                 return res.status(402).json({
                     success: false, dailyLimitReached: true, creditsExhausted: false, creditCost: 0, ...reservation.status, daily: dailyOut,
-                    message: `You have reached the Omni AI daily limit (${Number(cap).toLocaleString('en-US')} neurons per day). It resets at midnight tonight. You can also buy a One-day Boost to keep going now, or upgrade your plan for a higher daily limit.`
+                    message: `You have reached the Omni AI daily limit (${relayAiFmtNeurons(cap)} neurons per day). It resets at midnight tonight. You can also buy a One-day Boost to keep going now, or upgrade your plan for a higher daily limit.`
                 });
             }
             if (reservation.reason === 'exhausted') {
@@ -8984,6 +9009,50 @@ async function getRelayAiDayBoostCount(installationId, clientOrPool = pgPoolDevi
     } catch (_) { return 0; }
 }
 // Tantiyang neurons kada tanong (para maipakita ang "~N tanong" sa halip na teknikal na neurons).
+// ---- TOTOONG neurons bawat tanong (para sa "tanong na natitira") ----------------------------------------
+// Dati: floor(natitirang neurons / NAKAPIRMING tantiya). Kapag mas malaki ang totoong gastos ng sagot kaysa tantiya
+// (ibang model, mahabang usapan, mahabang sagot), biglang bumababa ang "tanong na natitira" (hal. 5 -> 3 pagkatapos ng 1 tanong).
+// Ngayon: 1) prior = average ng TOTOONG nagamit ng lahat ng client nitong nakaraang 7 araw (kung may sapat na sample),
+// kung wala, ang tantiya ng admin; 2) hinahalo ito sa totoong average ng mismong client ngayong araw.
+const relayAiObservedPqCache = { at: 0, free: null, paid: null };
+async function getRelayAiObservedPerQuestion(isFree, configured) {
+    try {
+        if (!pgPoolDevices || !(configured > 0)) return configured;
+        if (Date.now() - relayAiObservedPqCache.at > 60 * 1000) {
+            const days = [];
+            for (let i = 0; i < 7; i++) days.push(relayAiDayKey(Date.now() - i * 86400000));
+            const r = await pgPoolDevices.query(
+                `SELECT installation_id, used_count, used_neurons FROM relay_ai_daily_usage WHERE day_key = ANY($1::text[]) AND used_count > 0 AND used_neurons > 0`,
+                [days]
+            );
+            const acc = { free: { n: 0, q: 0 }, paid: { n: 0, q: 0 } };
+            for (const row of r.rows) {
+                const bucket = relayAiIsFreeInstallation(row.installation_id) ? acc.free : acc.paid;
+                bucket.n += Number(row.used_neurons) || 0;
+                bucket.q += Number(row.used_count) || 0;
+            }
+            relayAiObservedPqCache.at = Date.now();
+            relayAiObservedPqCache.free = acc.free;
+            relayAiObservedPqCache.paid = acc.paid;
+        }
+        const b = isFree ? relayAiObservedPqCache.free : relayAiObservedPqCache.paid;
+        if (!b || b.q < 5 || b.n <= 0) return configured;
+        const obs = b.n / b.q;
+        return Math.min(configured * 6, Math.max(configured * 0.3, obs));
+    } catch (_) { return configured; }
+}
+// Tantiya para sa ISANG client: hinahalo ang prior sa totoong average niya ngayong araw (K = bigat ng prior, parang 2 tanong).
+async function getRelayAiClientPerQuestionNeurons(isFree, daily) {
+    const configured = await getRelayAiPerQuestionNeurons(isFree);
+    if (!(configured > 0)) return 0;
+    const prior = await getRelayAiObservedPerQuestion(isFree, configured);
+    const answered = Number(daily && daily.questions) || 0;
+    const usedN = Number(daily && daily.used) || 0;
+    // Kung may tanong na bilang pero wala pang neurons (nasa proseso pa ang sagot), prior muna ang gamitin.
+    if (answered <= 0 || usedN <= 0) return prior;
+    const K = 2;
+    return (usedN + K * prior) / (answered + K);
+}
 async function getRelayAiPerQuestionNeurons(isFree) {
     try {
         const ns = await getAiNeuronSettings();
@@ -9140,10 +9209,16 @@ app.get('/relay/ai-assistant/plans', requireApiKey, requireAllowedDevice, rateLi
             id: 'base', name: 'Base', priceTokens: 0, monthlyCredits: Number(baseSettings.monthlyCredits) || 0, dailyCap: Number(baseSettings.dailyCap) || 0,
             isBase: true, isCurrent: !current, canPurchase: false, costTokens: 0, locked: false, lockedReason: null
         }, decoBaseCredits, decoPq);
+        // Ang tier/extra ay valid hanggang katapusan ng buwan, PERO titigil ito kapag nag-expire muna ang Omni AI subscription.
+        const subEnt = (issuedUnlocks[installationId] || {}).ai_assistant || null;
+        const subExp = subEnt ? (Number(subEnt.expiresAt || (subEnt.payload && subEnt.payload.expiresAt) || 0) || null) : null;
+        const monthEnd = relayAiNextMonthResetMs();
         return res.json({
             success: true,
             month: status.month,
-            validUntil: relayAiNextMonthResetMs(),
+            validUntil: subExp && subExp < monthEnd ? subExp : monthEnd,
+            subscriptionExpiresAt: subExp,
+            subscriptionEndsFirst: !!(subExp && subExp < monthEnd),
             baseTier,
             currentTier: current ? { id: current.id, name: current.name, monthlyCredits: current.monthlyCredits, dailyCap: current.dailyCap } : null,
             credits: status,
@@ -9265,7 +9340,7 @@ app.post('/relay/ai-assistant/plans/purchase', requireApiKey, requireAllowedDevi
         const credits = await getRelayAiCreditStatus(installationId);
         const body = {
             success: true,
-            message: `${tier.name} plan activated (${tier.monthlyCredits} credits/month, ${tier.dailyCap === 0 ? 'unlimited' : tier.dailyCap.toLocaleString('en-US') + ' neurons/day'}) until the end of the month.`,
+            message: `${tier.name} plan activated (${tier.monthlyCredits} credits/month, ${tier.dailyCap === 0 ? 'unlimited' : relayAiFmtNeurons(tier.dailyCap) + ' neurons/day'}) ${relayAiValidityPhrase(installationId)}`,
             tier: { id: tier.id, name: tier.name, monthlyCredits: tier.monthlyCredits, dailyCap: tier.dailyCap },
             tokensSpent: costTokens,
             balanceTokens: balanceAfter,
@@ -9367,7 +9442,7 @@ app.post('/relay/ai-assistant/extra-credits/purchase', requireApiKey, requireAll
         const credits = await getRelayAiCreditStatus(installationId);
         const body = {
             success: true,
-            message: `+${pack.credits} extra AI credits${appliedDailyBonus > 0 ? ` at +${appliedDailyBonus.toLocaleString('en-US')} neurons/araw` : ''} added (valid hanggang katapusan ng buwan).`,
+            message: `+${pack.credits} extra AI credits${appliedDailyBonus > 0 ? ` at +${relayAiFmtNeurons(appliedDailyBonus)} neurons/araw` : ''} added (valid hanggang katapusan ng buwan).`,
             pack: { id: pack.id, name: pack.name, credits: pack.credits, dailyBonus: appliedDailyBonus },
             tokensSpent: costTokens, balanceTokens: balanceAfter, credits
         };
@@ -9457,7 +9532,7 @@ app.post('/relay/ai-assistant/day-boost/purchase', requireApiKey, requireAllowed
         const credits = await getRelayAiCreditStatus(installationId);
         const body = {
             success: true,
-            message: `+${opt.neurons.toLocaleString('en-US')} neurons${credits.daily && credits.daily.perQuestion ? ` (~${Math.floor(opt.neurons / credits.daily.perQuestion)} questions)` : ''} for today only. They expire at midnight.`,
+            message: `+${relayAiFmtNeurons(opt.neurons)} neurons for today only. They expire at midnight.`,
             boost: { id: opt.id, neurons: opt.neurons },
             tokensSpent: costTokens, balanceTokens: balanceAfter, credits
         };
@@ -10653,7 +10728,11 @@ async function buildRelayAiClientUsage() {
                         expDaily = tier.dailyCap === 0 ? 0 : (explicitDaily ? (expDaily === 0 ? 0 : Math.max(expDaily, tier.dailyCap)) : tier.dailyCap);
                         expCredits = explicitCredits ? Math.max(expCredits, tier.monthlyCredits) : tier.monthlyCredits;
                     }
-                    if (expDaily !== 0) expDaily += extra.dailyBonus;
+                    // Kasama sa aktwal na daily cap (applyRelayAiExtra) ang One-day Boost ngayong araw, kaya dapat kasama rin ito sa expected —
+                    // kung hindi, laging lalabas na "sync issue" ang client na bumili ng boost (hal. dapat 13,000, 19,000 ang aktwal).
+                    let dayBoost = 0;
+                    try { dayBoost = Number(await getRelayAiDayBoostNeurons(id)) || 0; } catch (_) { dayBoost = Number((st.settings || {}).dayBoost) || 0; }
+                    if (expDaily !== 0) expDaily += extra.dailyBonus + dayBoost;
                     expCredits += extra.credits;
                     if (expDaily !== (Number(st.daily.cap) || 0)) notes.push(`Daily neurons: dapat ${expDaily.toLocaleString('en-US')}, ${Number(st.daily.cap).toLocaleString('en-US')} ang aktwal.`);
                     if (expCredits !== Number(st.limit)) notes.push(`Monthly credits: dapat ${expCredits}, ${Number(st.limit)} ang aktwal.`);
@@ -10678,7 +10757,7 @@ async function buildRelayAiClientUsage() {
                     tierPurchasedAt: tier ? tier.purchasedAt : null,
                     credits: { used: st.used, limit: st.limit, remaining: st.remaining },
                     daily: { used: st.daily.used, cap: st.daily.cap, remaining: st.daily.remaining, unlimited: !!st.daily.unlimited, questions: st.daily.questions },
-                    extra: { credits: extra.credits, dailyBonus: extra.dailyBonus },
+                    extra: { credits: extra.credits, dailyBonus: extra.dailyBonus, dayBoost: Number(settings.dayBoost) || 0 },
                     override: !!settings.override, dailyInherited: settings.override ? !!settings.dailyCapInherited : null,
                     source: settings.source || null,
                     sync: { ok: notes.length === 0, notes }
