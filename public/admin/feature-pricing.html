@@ -380,12 +380,13 @@
         <div id="aiOverview" class="ai-kpis"><div class="empty" style="grid-column:1/-1;">Loading...</div></div>
         <div id="aiAlerts"></div>
         <div class="ai-nav" id="aiNav">
+          <button type="button" class="ai-chip" onclick="aiNavGo('setup')">🧭 Setup</button>
           <button type="button" class="ai-chip" onclick="aiNavGo('status')">🚦 Status</button>
-          <button type="button" class="ai-chip" onclick="aiNavGo('usage')">📊 Neurons Detector</button>
           <button type="button" class="ai-chip" onclick="aiNavGo('tiers')">🏷️ Tiers</button>
+          <button type="button" class="ai-chip" onclick="aiNavGo('usage')">📊 Free pool (Cloudflare)</button>
           <button type="button" class="ai-chip" onclick="aiNavGo('extra')">➕ Extra Credits</button>
           <button type="button" class="ai-chip" onclick="aiNavGo('capacity')">🧮 Capacity</button>
-          <button type="button" class="ai-chip" onclick="aiNavGo('planner')">🧠 Planner</button>
+          <button type="button" class="ai-chip" onclick="aiNavGo('planner')">🧠 Free Planner</button>
           <button type="button" class="ai-chip" onclick="aiNavGo('breakdown')">👥 Clients per Plan</button>
           <button type="button" class="ai-chip" onclick="aiNavGo('provider')">🔌 Provider</button>
           <span class="ai-nav-spacer"></span>
@@ -393,26 +394,40 @@
           <button type="button" class="ai-chip ghost" onclick="aiToggleAllSections(false)">Collapse all</button>
         </div>
         <details class="ai-help">
-          <summary>ℹ️ Paano gumagana ang Omni AI limits</summary>
+          <summary>ℹ️ Paano gumagana ang Omni AI tiers (basahin muna)</summary>
           <div class="backup-note">
-            Ang <b>Provider status</b> ay awtomatikong nagla-lock kapag naubos ang Cloudflare daily quota (10k neurons) — agad na tatanggihan ang AI requests hanggang 00:00 UTC (8:00 AM PH), walang hintay at walang nasisingil na credits. I-<b>Clear</b> ito pagkatapos mag-upgrade sa Workers Paid. Ang daily limit ay <b>NEURONS kada araw</b> (hindi na bilang ng tanong). Tatlo ang tier: <b>Base</b> (libre, hati ng Total daily capacity sa <b>Max clients / divider</b>), <b>Plus</b> at <b>Pro</b> (binibili gamit ang Omni Tokens, ≈ ₱1 bawat token, valid hanggang katapusan ng buwan). Lalabas ang upgrade sa Help page ng client kapag naabot niya ang daily/monthly limit. Ang daily neurons ay <b>0 = walang limit</b>.
+            <b>Apat ang tier, dalawa ang provider — fixed ang mapa:</b><br>
+            • <b>Free</b> — client na <u>walang</u> Omni AI subscription ➜ <b>Cloudflare</b> Workers AI. Text lang (walang larawan/file/model picker). May sariling maliit na monthly credits at daily neurons; hati ang lahat ng Free clients sa iisang libreng pool ng Cloudflare (10,000 neurons/araw).<br>
+            • <b>Base</b> — client na may Omni AI subscription ➜ <b>Google (Gemini)</b>. Libre na kasama ng subscription. Ang daily neurons ay hati ng Total daily capacity sa <b>Max clients (divider)</b>.<br>
+            • <b>Plus / Pro</b> — upgrade ng naka-subscribe, binibili gamit ang Omni Tokens (≈ ₱1 bawat token, valid hanggang katapusan ng buwan) ➜ <b>Google (Gemini)</b>. Puwedeng i-lock ang Gemini Flash sa isang tier lang.<br>
+            Hindi bumabagsak ang Free sa Google, at hindi bumabagsak ang Base/Plus/Pro sa Cloudflare — kaya hindi nauubos ng isa ang quota ng isa. Kapag ubos ang provider, tinatanggihan agad ang request (walang nasisingil na credits). Ang daily limit ng lahat ay <b>NEURONS kada araw</b>; 0 = walang limit. Pag-setup: tingnan ang <b>🧭 Setup checklist</b> sa ibaba.
+          </div>
+        </details>
+
+        <details class="ai-sec" id="aisec-setup" data-sec="setup" data-default-open="1">
+          <summary><span class="ai-sec-title">🧭 Setup Checklist</span><span class="ai-sec-sub">Ano pa ang kulang bago gumana ang bawat tier</span></summary>
+          <div class="ai-sec-body">
+            <div id="aiSetupBox" class="ai-box">Loading...</div>
           </div>
         </details>
 
         <details class="ai-sec" id="aisec-status" data-sec="status" data-default-open="1">
-          <summary><span class="ai-sec-title">🚦 Provider Status</span><span class="ai-sec-sub">Lock / unlock ng AI requests</span></summary>
+          <summary><span class="ai-sec-title">🚦 Provider Status</span><span class="ai-sec-sub">Free (Cloudflare) at Base/Plus/Pro (Google)</span></summary>
           <div class="ai-sec-body">
             <div id="aiProviderBox" class="ai-box">Loading...</div>
             <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
-              <button class="btn-primary" onclick="aiProviderAction('clear')">✅ Clear (provider OK na)</button>
-              <button class="btn-ghost" onclick="aiProviderAction('exhaust')">🚫 Lock hanggang 00:00 UTC</button>
+              <button class="btn-primary" onclick="aiProviderAction('clear')">✅ Clear lahat (provider OK na)</button>
+              <button class="btn-ghost" onclick="aiProviderAction('clear','cloudflare')">✅ Clear Free (Cloudflare)</button>
+              <button class="btn-ghost" onclick="aiProviderAction('clear','google')">✅ Clear Base/Plus/Pro (Google)</button>
+              <button class="btn-ghost" onclick="aiProviderAction('exhaust','cloudflare')">🚫 Lock Free</button>
+              <button class="btn-ghost" onclick="aiProviderAction('exhaust','google')">🚫 Lock Base/Plus/Pro</button>
               <button class="btn-ghost" onclick="loadAiPlans()">🔄 Refresh</button>
             </div>
           </div>
         </details>
 
         <details class="ai-sec" id="aisec-usage" data-sec="usage" data-default-open="1">
-          <summary><span class="ai-sec-title">📊 Neurons Detector (Cloudflare)</span><span class="ai-sec-sub">Live na gamit ngayong araw (UTC)</span></summary>
+          <summary><span class="ai-sec-title">📊 Free Pool — Neurons Detector (Cloudflare)</span><span class="ai-sec-sub">Live na gamit ng Free tier ngayong araw (UTC)</span></summary>
           <div class="ai-sec-body">
             <div id="aiUsageBox" class="ai-box">Loading...</div>
             <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
@@ -426,8 +441,12 @@
         </details>
 
         <details class="ai-sec" id="aisec-tiers" data-sec="tiers" data-default-open="1">
-          <summary><span class="ai-sec-title">🏷️ Upgrade Tiers</span><span class="ai-sec-sub">Base / Plus / Pro — presyo sa Omni Tokens</span></summary>
+          <summary><span class="ai-sec-title">🏷️ Tiers</span><span class="ai-sec-sub">Free (Cloudflare) · Base / Plus / Pro (Google)</span></summary>
           <div class="ai-sec-body">
+            <div id="aiTierMapBox" class="ai-box" style="margin-bottom:10px;">Loading...</div>
+            <div style="font-size:12px; font-weight:700; margin:6px 0;">🆓 Free tier (Cloudflare) — settings</div>
+            <div id="aiFreeTierBox" class="ai-box" style="margin-bottom:12px;">Loading...</div>
+            <div style="font-size:12px; font-weight:700; margin:6px 0;">💳 Plus / Pro (Google) — mga mabibiling upgrade</div>
             <div id="aiTierList" class="empty">Loading...</div>
             <div style="font-size:12px; font-weight:700; margin:14px 0 6px;">Magdagdag ng bagong tier</div>
             <div id="aiTierNew"></div>
@@ -442,14 +461,14 @@
         </details>
 
         <details class="ai-sec" id="aisec-capacity" data-sec="capacity">
-          <summary><span class="ai-sec-title">🧮 Total Daily Capacity &amp; Divider</span><span class="ai-sec-sub">Auto-lock ng Plus/Pro, max clients</span></summary>
+          <summary><span class="ai-sec-title">🧮 Total Daily Capacity &amp; Divider</span><span class="ai-sec-sub">Google capacity · auto-lock ng Plus/Pro · max clients</span></summary>
           <div class="ai-sec-body">
             <div id="aiCapacityBox" class="ai-box">Loading...</div>
           </div>
         </details>
 
         <details class="ai-sec" id="aisec-planner" data-sec="planner">
-          <summary><span class="ai-sec-title">🧠 Neurons Planner</span><span class="ai-sec-sub">Hatian ng daily limit</span></summary>
+          <summary><span class="ai-sec-title">🧠 Free Pool Planner (Cloudflare)</span><span class="ai-sec-sub">Ilang Free client ang kasya sa pool · ang avg tokens dito ay ginagamit din sa Google capacity</span></summary>
           <div class="ai-sec-body">
             <div id="aiNeuronBox" class="ai-box">Loading...</div>
           </div>
@@ -463,7 +482,7 @@
         </details>
 
         <details class="ai-sec" id="aisec-provider" data-sec="provider">
-          <summary><span class="ai-sec-title">🔌 AI Provider — Cloudflare / Google (Gemini)</span><span class="ai-sec-sub">Default, fallback, models, limits</span></summary>
+          <summary><span class="ai-sec-title">🔌 Providers — Google (Base/Plus/Pro) &amp; Cloudflare (Free)</span><span class="ai-sec-sub">Models, limits, test</span></summary>
           <div class="ai-sec-body">
             <div id="aiProviderCfgBox" class="ai-box">Loading...</div>
           </div>
@@ -986,25 +1005,35 @@ function aiProvidersLinesHtml(pv) {
   };
   const g = pv.google || {};
   const gx = g.configured ? `${g.enabled ? 'ON' : 'OFF'} · ${escapeHtml(g.plan || 'free')}` : '';
-  const chain = (pv.chain || []).map((c) => c.provider === 'google' ? `Google (${escapeHtml(c.modelId)})` : 'Cloudflare').join(' → ') || '—';
+  const chain = (pv.chain || []).map((c) => `Google (${escapeHtml(c.modelId)})`).join(' → ') || '—';
   return `<div style="margin-top:6px; padding-top:6px; border-top:1px dashed var(--line);">
-    ${line('Cloudflare', pv.cloudflare, '')}
-    ${line('Google AI', g, gx)}
-    <div class="meta">Default na hanay: <b>${chain}</b></div>
+    ${line('Cloudflare (Free tier)', pv.cloudflare, '')}
+    ${line('Google AI (Base/Plus/Pro)', g, gx)}
+    <div class="meta">Provider ng Base/Plus/Pro: <b>${chain}</b> · Provider ng Free: <b>Cloudflare</b></div>
   </div>`;
 }
 function renderAiProviderBox(p, pv) {
   const box = document.getElementById('aiProviderBox');
   if (!box || !p) return;
   const fmt = (ms) => ms ? new Date(ms).toLocaleString() : '—';
-  if (p.exhausted) {
-    box.innerHTML = `<div style="color:var(--danger,#ff6b6b); font-weight:700;">🚫 EXHAUSTED — tinatanggihan ang AI requests hanggang ${escapeHtml(fmt(p.retryAt))}</div>
-      <div class="meta" style="margin-top:4px;">Source: ${escapeHtml(p.source || 'auto')} · na-detect: ${escapeHtml(fmt(p.detectedAt))}</div>
-      <div class="meta">${escapeHtml(p.reason || '')}</div>${aiProvidersLinesHtml(pv)}`;
-  } else {
-    box.innerHTML = `<div style="color:var(--success,#69db7c); font-weight:700;">✅ Provider OK — tumatanggap ng AI requests</div>
-      <div class="meta" style="margin-top:4px;">Model: ${escapeHtml(p.model || '—')} · Cloudflare ${p.configured ? 'configured' : 'HINDI configured'}</div>${aiProvidersLinesHtml(pv)}`;
-  }
+  const f = (pv && pv.free) || (aiPlansState && aiPlansState.freeProvider) || null;
+  const row = (title, sub, x, model) => {
+    if (!x) return '';
+    const bad = x.exhausted;
+    const off = x.enabled === false;
+    const head = off ? '⚪ OFF' : (bad ? `🚫 ${x.source === 'not-configured' ? 'HINDI NAKA-SET UP' : 'EXHAUSTED'}` : '✅ OK');
+    const color = off ? 'var(--muted)' : (bad ? 'var(--danger,#ff6b6b)' : 'var(--success,#69db7c)');
+    return `<div style="padding:8px; border:1px solid var(--line); border-radius:8px; margin-bottom:8px;">
+      <div style="font-weight:700;">${title} <span class="meta">${sub}</span></div>
+      <div style="color:${color}; font-weight:700; margin-top:2px;">${head}${bad && x.retryAt ? ` — tinatanggihan ang requests hanggang ${escapeHtml(fmt(x.retryAt))}` : ''}</div>
+      <div class="meta">Model: ${escapeHtml(model || '—')}${bad ? ' · ' + escapeHtml(x.reason || '') : ''}${bad && x.source ? ' · source: ' + escapeHtml(x.source) : ''}</div>
+    </div>`;
+  };
+  const gModel = (p.model) || '—';
+  box.innerHTML = row('Base / Plus / Pro', '→ Google (Gemini)', { ...p, enabled: true }, gModel + (p.configured ? '' : ' (hindi usable)'))
+    + row('Free', '→ Cloudflare Workers AI (text lang)', f, f && f.model)
+    + (f && f.pool ? `<div class="meta">Free pool ngayong araw: <b>${aiUsageN(f.pool.used)}</b> / ${aiUsageN(f.pool.limit)} neurons (${f.pool.plan === 'paid' ? 'Workers Paid' : 'Workers Free'}).</div>` : '')
+    + aiProvidersLinesHtml(pv);
 }
 let aiUsageState = null;     // sagot ng /ai-usage (neurons detector)
 function aiUsageN(n, d) { return Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: d || 0 }); }
@@ -1146,7 +1175,7 @@ function renderAiBreakdownBox(b, c) {
     const over = Math.max(0, -rawLeft);
     formula = `<div style="font-size:12px; font-weight:700; margin:0 0 4px;">Formula ng Extra Credit (neurons/araw)</div>
       <div style="display:grid; grid-template-columns:1fr auto; gap:2px 12px; font-size:12px; max-width:460px;">
-        <span>Cloudflare daily limit (Total daily capacity, neurons)</span><b style="text-align:right;">${n(c.capacity)}</b>
+        <span>Google daily limit (Total daily capacity, neurons)</span><b style="text-align:right;">${n(c.capacity)}</b>
         <span>− Total ng client tier plans (${tiers.map(t => escapeHtml(t.name || t.id)).join(' + ') || 'walang tier'})</span><b style="text-align:right;">${n(tiersTotal)}</b>
         <span>− Base clients (${n(base.clients)} client(s), may active AI)</span><b style="text-align:right;">${n(baseDaily)}</b>
         <span>− Extra daily na naibenta na</span><b style="text-align:right;">${n(extraDaily)}</b>
@@ -1182,13 +1211,10 @@ function aiNeuFmt(x, d) {
   return Number(x || 0).toLocaleString(undefined, { maximumFractionDigits: d || 0 });
 }
 function aiNeuBuildRows() {
-  const b = aiBreakdownCache;
-  if (!b) return [];
-  const rows = [{ key: 'base', label: 'Base', cap: Number(b.base && b.base.dailyCapDefault) || 0, actual: Number(b.base && b.base.clients) || 0 }];
-  (b.tiers || []).filter((t) => t.enabled && !t.removed).forEach((t) => {
-    rows.push({ key: 'tier:' + t.id, label: t.name || t.id, cap: Number(t.dailyCap) || 0, actual: Number(t.clients) || 0 });
-  });
-  return rows;
+  // Ang planner na ito ay para sa FREE tier (Cloudflare pool) lang: isang row — ilang Free client ang kasya.
+  const f = aiProviderCfgState && aiProviderCfgState.config && aiProviderCfgState.config.free;
+  const actual = (aiUsageState && Number(aiUsageState.clientCount)) || 0;
+  return [{ key: 'free', label: 'Free', cap: f ? Number(f.dailyNeurons) || 0 : 0, actual }];
 }
 // Pure computation (walang DOM) para madaling i-test. Lahat ng daily limit ay NEURONS; ang "tanong" ay tantiya lang
 // (neurons ÷ neurons kada tanong) para madaling ma-visualize.
@@ -1283,7 +1309,7 @@ function renderAiNeuronBox() {
     <div style="overflow-x:auto; margin-bottom:8px;">
       <table style="border-collapse:collapse; width:100%; font-size:12px;">
         <thead><tr>
-          <th style="${tdL} color:var(--muted);">Plan</th>${hd('Customers')}${hd('Neurons/araw bawat isa')}${hd('≈ Tanong bawat isa')}${hd('Total neurons')}${hd('% ng budget')}
+          <th style="${tdL} color:var(--muted);">Tier</th>${hd('Free clients')}${hd('Neurons/araw bawat isa')}${hd('≈ Tanong bawat isa')}${hd('Total neurons')}${hd('% ng budget')}
         </tr></thead>
         <tbody>${rowsHtml}
           <tr data-sim-extra>
@@ -1303,9 +1329,8 @@ function renderAiNeuronBox() {
       <button class="btn-ghost" onclick="aiNeuronRedetect()">🔄 Re-detect Cloudflare plan</button>
       <button class="btn-ghost" onclick="aiSimUseActual()">↩️ Gamitin ang actual na bilang</button>
       <button class="btn-ghost" onclick="aiSimClear()">0 lahat</button>
-      <button class="btn-ghost" onclick="aiSimApplyCapacity()">📏 Gawing Total daily capacity</button>
     </div>
-    <div class="meta" style="margin-top:8px;">Model: ${escapeHtml(st.model || '—')}. Default rates ay para sa Llama 3.3 70B fp8-fast; palitan kung iba ang model. Text requests lang ang estimate (mas mahal ang image/vision). Sa Workers Paid, ang unang 10,000 neurons/araw ay libre pa rin at ang sobra ay $${st.usdPer1000Neurons}/1,000 neurons.</div>`;
+    <div class="meta" style="margin-top:8px;">Para sa <b>Free tier</b> lang ang table na ito (Cloudflare pool); ang <b>Avg input/output tokens</b> ay ginagamit din sa pagtantiya ng neurons kada tanong ng Google (capacity ng Base/Plus/Pro). Model (Free): ${escapeHtml(st.model || '—')}. Default rates ay para sa Llama 3.3 70B fp8-fast; palitan kung iba ang model. Text requests lang ang estimate (mas mahal ang image/vision). Sa Workers Paid, ang unang 10,000 neurons/araw ay libre pa rin at ang sobra ay $${st.usdPer1000Neurons}/1,000 neurons.</div>`;
   recomputeAiSim(false);
 }
 function recomputeAiSim(fromInput) {
@@ -1364,13 +1389,13 @@ function recomputeAiSim(fromInput) {
   const stEl = document.getElementById('aiSimStatus');
   if (!stEl) return;
   if (R.status === 'empty') {
-    stEl.innerHTML = '<div class="meta">⚪ Maglagay ng bilang ng customers sa table para makita kung kasya sa daily neurons.</div>';
+    stEl.innerHTML = '<div class="meta">⚪ Maglagay ng bilang ng Free clients sa table para makita kung kasya sa daily pool.</div>';
     return;
   }
   const color = R.status === 'over' ? 'var(--danger,#ff6b6b)' : (R.status === 'tight' ? 'var(--warning,#ffa94d)' : 'var(--success,#69db7c)');
   const title = R.status === 'over' ? '❌ HINDI KASYA' : (R.status === 'tight' ? '⚠️ KASYA PERO HALOS PUNO' : '✅ KASYA');
   let html = `<div style="color:${color}; font-weight:700;">${title}</div>
-    <div style="font-size:12px; margin-top:4px;">Kung lahat ng ${F(R.totalClients)} customer ay maubos ang daily neurons nila: <b>${F(R.totalN, 1)}</b> neurons / ${F(R.budget)} neurons (<b>${F(R.pct, 1)}%</b>).</div>`;
+    <div style="font-size:12px; margin-top:4px;">Kung lahat ng ${F(R.totalClients)} Free client ay maubos ang daily neurons nila: <b>${F(R.totalN, 1)}</b> neurons / ${F(R.budget)} neurons (<b>${F(R.pct, 1)}%</b>).</div>`;
   if (R.status === 'over') {
     html += `<div style="font-size:12px; margin-top:4px;">Lampas ng <b>${F(R.shortN, 1)}</b> neurons (≈ ${F(R.shortQ)} tanong/araw). ${cfg.effective === 'paid'
       ? 'Lampas ito sa paid budget na itinakda mo.'
@@ -1432,18 +1457,6 @@ function aiSimClear() {
   aiSimExtra = 0;
   renderAiNeuronBox();
 }
-async function aiSimApplyCapacity() {
-  if (!aiNeuronState) return;
-  const cfg = aiNeuronReadConfig();
-  const R = aiNeuronCompute(cfg, [], [], 0);
-  if (!(R.perQ > 0)) { toast('Lagyan muna ng tokens at rate para makuha ang capacity.', 'error'); return; }
-  const ok = await confirmAction({ title: 'Gawing AUTO ang Total daily capacity?', message: `Sasave ang Neurons Planner settings at ise-set ang Total daily capacity sa AUTO: ${aiNeuFmt(R.budget)} neurons/araw (Free = 10,000; Paid = budget na itinakda mo). Kusa na itong susunod sa Neurons Planner. Ito ang gagamitin ng Base divider, ng auto-lock ng Plus/Pro at ng extra credit.` });
-  if (!ok) return;
-  const saved = await saveAiNeuronSettings();
-  if (!saved) return;
-  const data = await aiApi('/relay/admin/api/ai-plans/capacity', { method:'POST', body:JSON.stringify({ auto:true, lockedTierIds: (document.getElementById('aiCapacityTiers')?.value) || 'plus,pro' }) });
-  if (data?.success) { toast('Total daily capacity ay AUTO na.', 'success'); loadAiPlans(); } else toast(data?.message || 'Save failed.', 'error');
-}
 function renderAiCapacityBox(c) {
   const box = document.getElementById('aiCapacityBox');
   if (!box || !c) return;
@@ -1454,7 +1467,7 @@ function renderAiCapacityBox(c) {
   const auto = c.capacityAuto !== false;
   const baseAuto = c.baseAuto !== false;
   const autoTxt = auto
-    ? `<div class="meta" style="margin:0 0 6px;">⚙️ AUTO — kinukuha sa Neurons Planner: <b>${n(c.autoNeuronsPerDay)}</b> neurons/araw (${escapeHtml(c.autoPlan === 'paid' ? 'Paid' : 'Free')}) = Total daily capacity. Kusang nagbabago kapag binago ang Neurons Planner.</div>`
+    ? `<div class="meta" style="margin:0 0 6px;">⚙️ AUTO — galing sa <b>Google</b> (Base/Plus/Pro): <b>${n(c.autoNeuronsPerDay)}</b> neurons/araw (Google ${escapeHtml(c.autoPlan === 'paid' ? 'Paid' : 'Free')} plan; basehan: ${escapeHtml({ neurons: 'daily neurons-equiv limit', requests: 'daily requests × neurons kada tanong', 'model-rpd': 'RPD ng mga model × neurons kada tanong', none: 'WALANG nakitang limit — itakda sa 🔌 Providers' }[c.autoBasis] || '—')}) = Total daily capacity. Kusang nagbabago kapag binago ang Google limits. Hiwalay ito sa Free pool ng Cloudflare.</div>`
     : `<div class="meta" style="margin:0 0 6px;">✍️ MANUAL — mano-manong itinakda. Lagyan ng tsek ang Auto para sundin ang Neurons Planner.</div>`;
   const maxClients = Number(c.maxClients) || 0;
   const slotsTxt = maxClients > 0
@@ -1467,7 +1480,7 @@ function renderAiCapacityBox(c) {
     <div class="meta" style="margin:4px 0 8px;">Committed: <b>${n(c.committed)}</b> / ${n(c.capacity)} neurons kada araw (tier: ${n(c.tiersDaily)} + base: ${n(c.baseDaily)} + extra: ${n(c.extraDaily)}; ${c.reserveSlots ? 'nakareserba sa bakanteng slots (extra credits lang): ' + n(c.reservedForSlots) + ';' : 'reserve sa bakanteng slots: OFF;'} natitira: ${c.leftover === null || c.leftover === undefined ? '—' : n(c.leftover)}${c.overCapacity > 0 ? `, lampas ng ${n(c.overCapacity)}` : ''}). Naka-lock na tier: ${escapeHtml((c.lockedTierIds||[]).join(', '))}</div>
     ${autoTxt}
     <label style="display:flex; gap:6px; align-items:center; font-size:12px; margin-bottom:8px;">
-      <input id="aiCapacityAuto" type="checkbox" ${auto ? 'checked' : ''} onchange="aiCapacityAutoToggle(${Number(c.manualCapacity) || 0}, ${Number(c.capacity) || 0})"> Auto (galing sa Neurons Planner)
+      <input id="aiCapacityAuto" type="checkbox" ${auto ? 'checked' : ''} onchange="aiCapacityAutoToggle(${Number(c.manualCapacity) || 0}, ${Number(c.capacity) || 0})"> Auto (galing sa Google limits)
     </label>
     <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:10px;">
       <label style="font-size:11px; color:var(--muted);">Total daily capacity (neurons)<br><input id="aiCapacityInput" type="number" min="0" value="${auto ? c.capacity : (Number(c.manualCapacity) || 0)}" ${auto ? 'disabled' : ''} style="width:150px;" placeholder="Total daily capacity"></label>
@@ -1509,7 +1522,7 @@ async function saveAiCapacity() {
     body.dailyCapacity = dailyCapacity;
   }
   const data = await aiApi('/relay/admin/api/ai-plans/capacity', { method:'POST', body:JSON.stringify(body) });
-  if (data?.success) { toast(auto ? 'Capacity: AUTO (sinusundan ang Neurons Planner). Divider saved.' : 'Capacity saved (manual). Divider saved.', 'success'); loadAiPlans(); loadAiCreditSettings(); return true; }
+  if (data?.success) { toast(auto ? 'Capacity: AUTO (sinusundan ang Google limits). Divider saved.' : 'Capacity saved (manual). Divider saved.', 'success'); loadAiPlans(); loadAiCreditSettings(); return true; }
   toast(data?.message || 'Save failed.', 'error');
   return false;
 }
@@ -1587,6 +1600,8 @@ async function loadAiPlans(providerOnly) {
   if (!data?.success) { if (!providerOnly) toast(data?.message || 'Could not load AI plans.', 'error'); return; }
   aiPlansState = data;
   renderAiProviderBox(data.provider, data.providers);
+  renderAiSetupBox();
+  renderAiTierMapBox();
   renderAiOverview();
   loadAiUsage();
   if (providerOnly) return;
@@ -1635,6 +1650,104 @@ async function deleteAiTier(id) {
     loadAiPlans();
   } catch (err) { toast(err.message || 'Could not delete tier.', 'error'); }
 }
+// ---- Tier map, Free tier settings, Setup checklist ----
+function aiNum(x) { return Number(x || 0).toLocaleString(); }
+function renderAiTierMapBox() {
+  const box = document.getElementById('aiTierMapBox');
+  if (!box) return;
+  const d = aiProviderCfgState, p = aiPlansState;
+  if (!d || !d.tierMap) { box.innerHTML = '<div class="meta">Naglo-load...</div>'; return; }
+  const c = d.config, cap = (p && p.capacity) || {};
+  const cell = 'padding:6px 8px; border-bottom:1px solid var(--line); text-align:left;';
+  const rows = d.tierMap.map((t) => {
+    const prov = t.provider === 'cloudflare' ? '☁️ Cloudflare' : '✨ Google (Gemini)';
+    let limits = '—';
+    if (t.id === 'free') limits = `${aiNum(c.free.monthlyCredits)} credits/buwan · ${Number(c.free.dailyNeurons) === 0 ? '∞' : aiNum(c.free.dailyNeurons)} neurons/araw`;
+    else if (t.id === 'base') limits = `${aiNum(cap.baseDailyEffective)} neurons/araw (auto = capacity ÷ max clients) · credits: AI Credits > Default`;
+    else { const tr = (p && p.tiers || []).find((x) => x.id === t.id); if (tr) limits = `${aiNum(tr.monthlyCredits)} credits/buwan · ${Number(tr.dailyCap) === 0 ? '∞' : aiNum(tr.dailyCap)} neurons/araw`; }
+    const price = t.id === 'free' || t.id === 'base' ? 'libre' : `${aiNum(t.priceTokens)} tokens`;
+    return `<tr><td style="${cell}"><b>${escapeHtml(t.name)}</b></td><td style="${cell}">${prov}</td><td style="${cell}">${escapeHtml(t.requires)}</td><td style="${cell}">${price}</td><td style="${cell}">${limits}</td></tr>`;
+  }).join('');
+  box.innerHTML = `<div style="overflow-x:auto;"><table style="border-collapse:collapse; width:100%; font-size:12px;">
+    <thead><tr><th style="${cell} color:var(--muted);">Tier</th><th style="${cell} color:var(--muted);">Provider</th><th style="${cell} color:var(--muted);">Kailangan</th><th style="${cell} color:var(--muted);">Presyo</th><th style="${cell} color:var(--muted);">Limits</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>
+    <div class="meta" style="margin-top:6px;">Read-only na buod. Ang Free ay para sa walang subscription (text lang). Kapag nag-expire ang subscription, awtomatikong babalik ang client sa Free.</div>`;
+}
+function renderAiFreeTierBox() {
+  const box = document.getElementById('aiFreeTierBox');
+  if (!box) return;
+  const d = aiProviderCfgState;
+  if (!d) { box.innerHTML = '<div class="meta">Naglo-load...</div>'; return; }
+  const f = d.config.free, st = (d.status && d.status.free) || {};
+  const pool = st.pool || { limit: 0, used: 0, perQuestion: 0, plan: 'free' };
+  const field = (label, id, val, min, hint) => `<label style="font-size:11px; color:var(--muted);">${label}<input type="number" min="${min}" step="1" id="${id}" value="${val}" oninput="aiFreePreview()" style="width:100%; margin-top:4px;">${hint ? `<span style="display:block; margin-top:2px;">${hint}</span>` : ''}</label>`;
+  box.innerHTML = `
+    <label style="font-size:12px; font-weight:700;"><input type="checkbox" id="aiFreeEnabled" ${f.enabled ? 'checked' : ''} onchange="aiFreePreview()"> Free tier enabled (OFF = kailangan ng subscription para magamit ang Omni AI)</label>
+    <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:8px; margin-top:8px;">
+      ${field('Monthly credits / client', 'aiFreeMonthly', f.monthlyCredits, 1, '')}
+      ${field('Credits kada text na tanong', 'aiFreeCost', f.textCost, 1, 'Larawan/file ay hindi pinapayagan sa Free')}
+      ${field('Daily neurons / client (0 = ∞)', 'aiFreeDaily', f.dailyNeurons, 0, 'Iwasan ang 0: shared ang pool')}
+    </div>
+    <div id="aiFreePreview" class="meta" style="margin-top:8px;"></div>
+    <div class="meta" style="margin-top:4px;">Pool ng Cloudflare ngayong araw: <b>${aiNum(pool.used)}</b> / ${aiNum(pool.limit)} neurons (${pool.plan === 'paid' ? 'Workers Paid' : 'Workers Free'}). Engine: ${escapeHtml(st.model || '—')} · Cloudflare keys: <b>${st.configured ? '✅' : '❌ wala'}</b></div>
+    <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
+      <button class="btn-primary" onclick="saveAiFreeTier()">💾 Save Free tier</button>
+      <button class="btn-ghost" onclick="aiFreeTest()">🧪 Test Cloudflare</button>
+    </div>`;
+  aiFreePreview();
+}
+function aiFreePreview() {
+  const el = document.getElementById('aiFreePreview');
+  const d = aiProviderCfgState;
+  if (!el || !d) return;
+  const g = (id) => Number(document.getElementById(id)?.value);
+  const monthly = g('aiFreeMonthly'), cost = g('aiFreeCost'), daily = g('aiFreeDaily');
+  const pool = ((d.status && d.status.free) || {}).pool || { limit: 10000, perQuestion: 0 };
+  if (![monthly, cost, daily].every(Number.isFinite) || cost < 1) { el.textContent = ''; return; }
+  const q = Math.floor(monthly / cost);
+  let html = `≈ <b>${aiNum(q)}</b> tanong kada buwan kada client`;
+  if (pool.perQuestion > 0 && daily > 0) {
+    const perDayQ = Math.max(1, Math.floor(daily / pool.perQuestion));
+    const clients = Math.floor(pool.limit / daily);
+    html += ` · ≈ <b>${aiNum(perDayQ)}</b> tanong/araw (≈ ${aiNum(pool.perQuestion)} neurons/tanong) · kasya sa pool: ≈ <b>${aiNum(clients)}</b> client na ubos ang daily limit sabay-sabay`;
+  } else if (daily === 0) {
+    html += ' · <span style="color:var(--danger,#ff6b6b);">walang daily limit: puwedeng ubusin ng isang client ang buong pool</span>';
+  }
+  el.innerHTML = html;
+}
+async function saveAiFreeTier() {
+  const g = (id) => document.getElementById(id);
+  const body = { free: { enabled: !!g('aiFreeEnabled')?.checked, monthlyCredits: g('aiFreeMonthly')?.value, textCost: g('aiFreeCost')?.value, dailyNeurons: g('aiFreeDaily')?.value } };
+  const data = await aiApi('/relay/admin/api/ai-providers/settings', { method: 'POST', body: JSON.stringify(body) });
+  if (!data?.success) { toast(data?.message || 'Could not save Free tier.', 'error'); return; }
+  toast('Free tier saved.', 'success');
+  await loadAiProviderCfg();
+  loadAiPlans(true);
+}
+function renderAiSetupBox() {
+  const box = document.getElementById('aiSetupBox');
+  if (!box) return;
+  const d = aiProviderCfgState, p = aiPlansState;
+  if (!d || !p) { box.innerHTML = '<div class="meta">Naglo-load...</div>'; return; }
+  const c = d.config, st = d.status || {}, gs = st.google || {}, fs = st.free || {}, cap = p.capacity || {};
+  const item = (ok, title, fix, warn) => `<div style="display:flex; gap:8px; padding:5px 0; border-bottom:1px dashed var(--line);"><span>${ok ? '✅' : (warn ? '⚠️' : '❌')}</span><div><b>${title}</b>${ok ? '' : `<div class="meta">${fix}</div>`}</div></div>`;
+  const gModels = ['flashLite', 'flash'].filter((k) => c.google.models[k].enabled);
+  const gOk = gs.usable;
+  const freeOk = c.free.enabled && fs.configured;
+  box.innerHTML = `
+    <div style="font-weight:700; margin-bottom:4px;">🆓 Free tier (Cloudflare) — ${freeOk ? '<span style="color:var(--success,#69db7c);">HANDA</span>' : '<span style="color:var(--danger,#ff6b6b);">HINDI PA GUMAGANA</span>'}</div>
+    ${item(fs.configured, 'CF_ACCOUNT_ID at CF_AI_API_TOKEN sa RELAY/.env (o Render > Environment)', 'Idagdag ang dalawa, saka i-restart/redeploy ang RELAY. Ang token ay dapat may Workers AI permission.')}
+    ${item(c.free.enabled, 'Free tier enabled', 'Lagyan ng tsek ang "Free tier enabled" sa 🏷️ Tiers at i-save.')}
+    ${item(Number(c.free.dailyNeurons) > 0, 'May daily neurons limit ang Free client', 'Itakda ang Daily neurons / client (hindi 0) para hindi maubos ng isang client ang shared pool.', true)}
+    ${item(!fs.exhausted, 'Hindi ubos ang Free pool ngayon', fs.reason || '', true)}
+    <div style="font-weight:700; margin:10px 0 4px;">✨ Base / Plus / Pro (Google) — ${gOk ? '<span style="color:var(--success,#69db7c);">HANDA</span>' : '<span style="color:var(--danger,#ff6b6b);">HINDI PA GUMAGANA</span>'}</div>
+    ${item(gs.configured, 'GOOGLE_AI_API_KEY sa RELAY/.env (o Render > Environment)', 'Kunin sa Google AI Studio, idagdag, saka i-restart/redeploy ang RELAY.')}
+    ${item(c.google.enabled, 'Google AI enabled', 'Lagyan ng tsek ang "Google AI enabled" sa 🔌 Providers at i-save.')}
+    ${item(gModels.length > 0, 'May naka-enable na Gemini model (Flash-Lite / Flash)', 'I-enable kahit isang model sa 🔌 Providers.')}
+    ${item(Number(cap.capacity) > 0, 'May Total daily capacity (galing sa Google limits)', 'Itakda ang Google requests/neurons kada araw o ang RPD ng model sa 🔌 Providers; kung wala, naka-OFF ang auto-lock at extra-credit formula.', true)}
+    ${item(!(gs.exhausted), 'Hindi ubos ang Google ngayon', gs.reason || '', true)}
+    <div class="meta" style="margin-top:8px;">Pagkatapos ng checklist, subukan ang 🧪 Test sa 🔌 Providers (isa para sa Google, isa para sa Cloudflare). Sa OMNIPOS: walang kailangang baguhin sa .env maliban sa RELAY_URL at RELAY_API_KEY.</div>`;
+}
 // ---- AI Provider config (Cloudflare / Google) ----
 let aiProviderCfgState = null;
 async function loadAiProviderCfg() {
@@ -1644,6 +1757,9 @@ async function loadAiProviderCfg() {
   if (!data?.success) { box.textContent = data?.message || 'Could not load AI provider settings.'; return; }
   aiProviderCfgState = data;
   renderAiProviderCfg(data);
+  renderAiTierMapBox();
+  renderAiFreeTierBox();
+  renderAiSetupBox();
   renderAiOverview();
   if (!aiGoogleModelList && !aiGoogleModelListLoading && data.status && data.status.google && data.status.google.configured) aiFetchGoogleModels(false);
 }
@@ -1715,8 +1831,7 @@ function renderAiProviderCfg(d) {
   const n = (x) => Number(x || 0).toLocaleString();
   const fmt = (ms) => ms ? new Date(ms).toLocaleString() : '—';
   const sel = (id, val, opts) => `<select id="${id}" style="width:100%; margin-top:4px;">${opts.map((o) => `<option value="${escapeHtml(o[0])}" ${String(o[0]) === String(val) ? 'selected' : ''} ${o[2] ? 'disabled' : ''}>${escapeHtml(o[1])}</option>`).join('')}</select>`;
-  const gOpt = (label) => ['google', label + (keyOk ? '' : ' (walang GOOGLE_AI_API_KEY)'), !keyOk];
-  const tierOpts = [['', 'Lahat ng client (Base pataas)']].concat((d.tiers || []).map((t) => [t.id, `${t.name} pataas (${t.priceTokens} tokens)`]));
+    const tierOpts = [['', 'Lahat ng naka-subscribe (Base pataas)']].concat((d.tiers || []).map((t) => [t.id, `${t.name} pataas (${t.priceTokens} tokens)`]));
   const ml = aiGoogleModelList;
   const mst = (gs.models || {});
   const modelRow = (key, label) => {
@@ -1758,16 +1873,18 @@ function renderAiProviderCfg(d) {
   const lim = gs.limits || {};
   const usageHtml = keyOk ? `<div class="meta" style="margin-top:8px;">Google ngayong araw (${escapeHtml(u.day || '—')}, Pacific time): <b>${n(u.requests)}</b> requests${lim.requests ? ' / ' + n(lim.requests) : ''} · <b>${n(u.neurons)}</b> neurons-equiv${lim.neurons ? ' / ' + n(lim.neurons) : ''} · tokens in/out: ${n(u.inputTokens)}/${n(u.outputTokens)} · palpak: ${n(u.failed)} · mag-reset: ${escapeHtml(fmt(gs.resetsAt))}${gs.lastError ? `<br>Huling error: ${escapeHtml(gs.lastError.message)}` : ''}</div>` : '';
   box.innerHTML = `
-    <div class="meta" style="margin-bottom:8px;">GOOGLE_AI_API_KEY sa RELAY/.env: <b>${keyOk ? '✅ nakita' : '❌ wala'}</b>. Nasa Cloudflare pa rin ang Base/Plus/Pro tiers at ang Neurons Planner; ang Google ay may sarili ring limit sa ibaba (hiwalay na bilang).</div>
-    <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:8px;">
-      <label style="font-size:12px; color:var(--muted);">Default provider${sel('aiPvDefault', c.defaultProvider, [['cloudflare', 'Cloudflare Workers AI'], gOpt('Google AI (Gemini)')])}</label>
-      <label style="font-size:12px; color:var(--muted);">Fallback (kapag naubos/pumalya ang una)${sel('aiPvFallback', c.fallbackProvider, [['none', 'Wala'], ['cloudflare', 'Cloudflare Workers AI'], gOpt('Google AI (Gemini)')])}</label>
+    <div class="meta" style="margin-bottom:8px;">GOOGLE_AI_API_KEY sa RELAY/.env: <b>${keyOk ? '✅ nakita' : '❌ wala'}</b>. Ang Google ang provider ng Base/Plus/Pro; ang limit sa ibaba ang basehan ng Total daily capacity nila (hiwalay sa Cloudflare pool ng Free).</div>
+    <div style="padding:8px; border:1px solid var(--line); border-radius:8px; margin-bottom:8px;">
+      <div style="font-size:12px; font-weight:700; margin-bottom:4px;">Provider kada tier (fixed — walang dapat piliin)</div>
+      <div class="meta">🆓 <b>Free</b> ➜ Cloudflare Workers AI · <b>Base / Plus / Pro</b> ➜ Google (Gemini). Walang fallback sa pagitan ng dalawa. Ang settings ng Free ay nasa <b>🏷️ Tiers</b>; ang settings ng Google ay sa ibaba.</div>
+      <div class="meta" style="margin-top:4px;">CF_ACCOUNT_ID / CF_AI_API_TOKEN: <b>${(st.free && st.free.configured) ? '✅ nakita' : '❌ wala'}</b> (Free) · Cloudflare model: <b>${escapeHtml((st.free && st.free.model) || '—')}</b></div>
+      <div style="margin-top:6px;"><button class="btn-ghost" onclick="aiFreeTest()">🧪 Subukan ang Free (Cloudflare)</button> <span id="aiFreeTestResult" class="meta" style="font-weight:700; word-break:break-word;"></span></div>
     </div>
     <div style="margin-top:10px; padding-top:8px; border-top:1px dashed var(--line);">
       <label style="font-size:12px; font-weight:700;"><input type="checkbox" id="aiPvGEnabled" ${g.enabled ? 'checked' : ''} ${keyOk ? '' : 'disabled'}> Google AI enabled (OFF = hindi gagamitin at hindi ipapakita sa clients)</label>
       <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:8px; margin-top:8px;">
         <label style="font-size:12px; color:var(--muted);">Google plan${sel('aiPvGPlan', g.plan, [['free', 'Free'], ['paid', 'Paid (billing naka-enable)']])}</label>
-        <label style="font-size:12px; color:var(--muted);">Default Gemini model (kapag Google ang default/fallback)${sel('aiPvGDefaultModel', g.defaultModel, [['flashLite', 'Flash-Lite'], ['flash', 'Flash']])}</label>
+        <label style="font-size:12px; color:var(--muted);">Default Gemini model (para sa Base at lahat ng walang pinili)${sel('aiPvGDefaultModel', g.defaultModel, [['flashLite', 'Flash-Lite'], ['flash', 'Flash']])}</label>
       </div>
       <div id="aiPvPrivacy" class="meta" style="margin-top:6px; color:var(--danger,#ff6b6b); ${g.plan === 'free' ? '' : 'display:none;'}">⚠️ Free tier: puwedeng gamitin ng Google ang data para sa training (ayon sa terms nila). May live store data (benta, imbentaryo) na ipinapasa sa AI — mas ligtas ang Paid.</div>
       <div style="font-size:11px; color:var(--muted); margin:8px 0 2px;">Daily limit ayon sa plan (0 = walang limit). Per-project at nagbabago ang numero ng Google — kumpirmahin sa kanilang rate-limits docs bago itakda.</div>
@@ -1804,8 +1921,6 @@ async function saveAiProviderCfg() {
     tpm: v(`aiPv_${key}_tpm`)?.value
   });
   const body = {
-    defaultProvider: v('aiPvDefault')?.value,
-    fallbackProvider: v('aiPvFallback')?.value,
     google: {
       enabled: !!v('aiPvGEnabled')?.checked,
       plan: v('aiPvGPlan')?.value,
@@ -1847,17 +1962,31 @@ async function aiGoogleTest(key) {
   const el3 = document.getElementById('aiPvTestResult');
   if (el3 && msgText) { el3.style.display = ''; el3.style.color = msgColor; el3.textContent = msgText; }
 }
+async function aiFreeTest() {
+  const el = document.getElementById('aiFreeTestResult');
+  const setMsg = (t, ok) => { if (el) { el.style.color = ok ? '#16a34a' : 'var(--danger,#ff6b6b)'; el.textContent = t; } };
+  setMsg('Sinusubukan ang Cloudflare...', true);
+  const data = await aiApi('/relay/admin/api/ai-providers/test-free', { method: 'POST', body: '{}' });
+  if (!data) { setMsg('Walang sagot mula sa RELAY.', false); return; }
+  if (data.success) setMsg(`✅ Gumagana ang Free engine (${data.model}, ${data.tookMs} ms). Sagot: ${data.answer}${data.enabledInAdmin ? '' : ' (Naka-OFF pa ang Free tier — i-ON sa Tiers.)'}`, !!data.enabledInAdmin);
+  else setMsg(`❌ ${data.message || 'Pumalya ang Cloudflare.'}${data.quota ? ' — ubos na ang daily quota.' : ''}`, false);
+  loadAiPlans(true);
+  loadAiUsage();
+}
 async function aiGoogleResetUsage() {
   const data = await aiApi('/relay/admin/api/ai-provider', { method: 'POST', body: JSON.stringify({ action: 'google-reset-usage' }) });
   if (!data?.success) { toast(data?.message || 'Could not reset Google usage.', 'error'); return; }
   toast('Na-reset ang bilang ng Google ngayong araw.', 'success');
   loadAiProviderCfg();
 }
-async function aiProviderAction(action) {
+async function aiProviderAction(action, provider) {
   try {
-    const data = await aiApi('/relay/admin/api/ai-provider', { method:'POST', body:JSON.stringify({ action }) });
+    const body = { action };
+    if (provider) body.provider = provider; // 'cloudflare' = Free tier, 'google' = Base/Plus/Pro, wala = lahat
+    const data = await aiApi('/relay/admin/api/ai-provider', { method:'POST', body:JSON.stringify(body) });
     if (!data?.success) throw new Error(data?.message || 'Failed');
-    toast(action === 'clear' ? 'Provider flag cleared.' : 'Provider locked hanggang 00:00 UTC.', 'success');
+    const who = provider === 'cloudflare' ? 'Free (Cloudflare)' : (provider === 'google' ? 'Base/Plus/Pro (Google)' : 'Lahat ng provider');
+    toast(action === 'clear' ? `${who}: na-clear ang lock.` : `${who}: naka-lock hanggang sa susunod na reset.`, 'success');
     loadAiPlans(true);
   } catch (err) { toast(err.message || 'Could not update provider status.', 'error'); }
 }
@@ -1957,17 +2086,19 @@ function renderAiOverview() {
   const extraTokens = (aiExtraState && Array.isArray(aiExtraState.packs))
     ? aiExtraState.packs.reduce((s, x) => s + (Number(x.tokensThisMonth) || 0), 0) : 0;
   const totalTokens = tierTokens + extraTokens;
-  const chain = ((p.providers && p.providers.chain) || []).map((c) => c.provider === 'google' ? 'Google' : 'Cloudflare').join(' → ');
+  const fp = p.freeProvider || {};
   const cards = [];
-  cards.push(aiKpiHtml('Provider', prov.exhausted ? '🚫 Locked' : '✅ Online',
-    prov.exhausted ? `hanggang ${escapeHtml(fmt(prov.retryAt))}` : escapeHtml(chain || 'Cloudflare'), prov.exhausted ? 'danger' : 'ok'));
+  cards.push(aiKpiHtml('Base/Plus/Pro (Google)', prov.exhausted ? (prov.source === 'not-configured' ? '⚠️ Not set up' : '🚫 Locked') : '✅ Online',
+    prov.exhausted ? (prov.retryAt ? `hanggang ${escapeHtml(fmt(prov.retryAt))}` : escapeHtml(prov.reason || '')) : escapeHtml(prov.model || 'Google'), prov.exhausted ? 'danger' : 'ok'));
+  cards.push(aiKpiHtml('Free (Cloudflare)', fp.enabled === false ? '⚪ OFF' : (fp.exhausted ? (fp.source === 'not-configured' ? '⚠️ Not set up' : '🚫 Locked') : '✅ Online'),
+    fp.exhausted && fp.retryAt ? `hanggang ${escapeHtml(fmt(fp.retryAt))}` : 'text lang · walang subscription', fp.enabled === false ? 'neutral' : (fp.exhausted ? 'danger' : 'ok')));
   if (u) {
     const lvlTone = { ok: 'ok', warning: 'warn', critical: 'danger', exhausted: 'danger' }[u.level] || 'ok';
-    cards.push(aiKpiHtml('Neurons ngayong araw', `${n(u.percentUsed, 1)}%`, `${n(u.usedNeurons)} / ${n(u.limitNeurons)} neurons`, lvlTone, Number(u.percentUsed) || 0));
-    cards.push(aiKpiHtml('Tanong ngayong araw', n(u.questions), `≈ ${n(u.remainingQuestions)} pa ang kayang sagutin`, 'neutral'));
+    cards.push(aiKpiHtml('Free pool ngayong araw', `${n(u.percentUsed, 1)}%`, `${n(u.usedNeurons)} / ${n(u.limitNeurons)} neurons`, lvlTone, Number(u.percentUsed) || 0));
+    cards.push(aiKpiHtml('Free na tanong ngayong araw', n(u.questions), `≈ ${n(u.remainingQuestions)} pa ang kayang sagutin`, 'neutral'));
   } else {
-    cards.push(aiKpiHtml('Neurons ngayong araw', '—', 'naglo-load...', 'neutral'));
-    cards.push(aiKpiHtml('Tanong ngayong araw', '—', 'naglo-load...', 'neutral'));
+    cards.push(aiKpiHtml('Free pool ngayong araw', '—', 'naglo-load...', 'neutral'));
+    cards.push(aiKpiHtml('Free na tanong ngayong araw', '—', 'naglo-load...', 'neutral'));
   }
   cards.push(aiKpiHtml('Clients na may Omni AI', `${n(cap.liveClients)}${maxClients > 0 ? ' / ' + n(maxClients) : ''}`,
     maxClients > 0 ? `${n(slotsLeft)} slot ang bakante` : 'walang limit', (maxClients > 0 && slotsLeft === 0) ? 'warn' : 'neutral'));
@@ -1984,13 +2115,14 @@ function renderAiOverview() {
   // ---- Health checks / alerts ----
   const alerts = [];
   const add = (level, text, go) => alerts.push({ level, text, go });
-  if (prov.exhausted) add('danger', `Naka-lock ang AI provider hanggang ${fmt(prov.retryAt)} — tinatanggihan ang AI requests ng mga client.`, 'status');
+  if (prov.exhausted) add('danger', prov.source === 'not-configured' ? `Hindi gumagana ang Base/Plus/Pro: ${prov.reason}` : `Naka-lock ang Google (Base/Plus/Pro)${prov.retryAt ? ' hanggang ' + fmt(prov.retryAt) : ''} — tinatanggihan ang AI requests ng mga naka-subscribe.`, prov.source === 'not-configured' ? 'setup' : 'status');
+  if (fp.enabled !== false && fp.exhausted) add('warn', `Free tier (Cloudflare) ay hindi available${fp.retryAt ? ' hanggang ' + fmt(fp.retryAt) : ''}: ${fp.reason || ''}`, fp.source === 'not-configured' ? 'setup' : 'status');
   if (u) {
-    if (u.level === 'exhausted') add('danger', 'Ubos na ang daily neurons ngayong araw.', 'usage');
-    else if (u.level === 'critical') add('danger', `Halos ubos na ang daily neurons (${n(u.percentUsed, 1)}% na ang nagamit).`, 'usage');
-    else if (u.level === 'warning') add('warn', `Malapit nang maubos ang daily neurons (${n(u.percentUsed, 1)}% na ang nagamit).`, 'usage');
+    if (u.level === 'exhausted') add('danger', 'Ubos na ang daily neurons ng Free pool ngayong araw.', 'usage');
+    else if (u.level === 'critical') add('danger', `Halos ubos na ang Free pool (${n(u.percentUsed, 1)}% na ang nagamit).`, 'usage');
+    else if (u.level === 'warning') add('warn', `Malapit nang maubos ang Free pool (${n(u.percentUsed, 1)}% na ang nagamit).`, 'usage');
   }
-  if (!cap.enabled) add('warn', 'Naka-OFF ang Total daily capacity — hindi gagana ang formula ng extra credit at auto-lock ng tiers.', 'capacity');
+  if (!cap.enabled) add('warn', 'Naka-OFF ang Total daily capacity ng Google — hindi gagana ang formula ng extra credit at auto-lock ng tiers. Itakda ang Google requests/neurons o RPD sa 🔌 Providers.', 'capacity');
   else {
     if (Number(cap.overCapacity) > 0) add('danger', `Lampas ng ${n(cap.overCapacity)} neurons/araw ang committed na daily kumpara sa Total daily capacity.`, 'capacity');
     if (cap.locked) add('warn', `Naka-lock ang tiers ngayong buwan${cap.lockReason ? ' — ' + cap.lockReason : ''}.`, 'capacity');
@@ -2014,10 +2146,13 @@ function renderAiOverview() {
   if (aiProviderCfgState && aiProviderCfgState.config) {
     const c = aiProviderCfgState.config;
     const gs = (aiProviderCfgState.status && aiProviderCfgState.status.google) || {};
-    if ((c.defaultProvider === 'google' || c.fallbackProvider === 'google') && !gs.configured) add('danger', 'Google ang default/fallback provider pero walang GOOGLE_AI_API_KEY sa RELAY.', 'provider');
+    if (!gs.configured) add('danger', 'Walang GOOGLE_AI_API_KEY sa RELAY — hindi gagana ang Base/Plus/Pro.', 'setup');
+    else if (!c.google.enabled) add('danger', 'Naka-OFF ang "Google AI enabled" — hindi gagana ang Base/Plus/Pro.', 'provider');
+    if (c.free.enabled && !(aiProviderCfgState.status.free || {}).configured) add('danger', 'Naka-ON ang Free tier pero walang CF_ACCOUNT_ID / CF_AI_API_TOKEN sa RELAY.', 'setup');
+    if (c.free.enabled && Number(c.free.dailyNeurons) === 0) add('warn', 'Walang daily neurons limit ang Free clients (0) — puwedeng ubusin ng isa ang buong Cloudflare pool.', 'tiers');
   }
   if (relayAiCreditSettingsCache && relayAiCreditSettingsCache.defaults && Number(relayAiCreditSettingsCache.defaults.dailyCap) === 0) {
-    add('warn', 'Walang daily neurons limit ang Base clients (0 = unlimited) — puwede nilang ubusin ang buong Cloudflare quota.', 'capacity');
+    add('warn', 'Walang daily neurons limit ang Base clients (0 = unlimited) — puwede nilang ubusin ang buong Google quota.', 'capacity');
   }
   if (!alerts.length) add('ok', '✅ Walang nakitang problema sa kasalukuyang Omni AI settings.');
   if (alertsEl) {
