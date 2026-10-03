@@ -176,6 +176,53 @@
     .topbar-actions { flex-wrap: wrap; width: 100%; gap: 8px; }
     .topbar-actions .icon-btn { flex: 1 1 auto; justify-content: center; font-size: .82rem; padding: 9px 10px; }
   }
+  /* ===== Omni AI Control Center ===== */
+  .ai-head { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:14px; }
+  .ai-head-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .ai-auto { font-size:12px; color:var(--muted); display:inline-flex; gap:6px; align-items:center; cursor:pointer; }
+  .ai-kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:10px; margin-bottom:12px; }
+  .ai-kpi { border:1px solid var(--border); border-left:4px solid var(--accent-dim); border-radius:var(--radius-lg); padding:12px; background:rgba(255,255,255,.025); }
+  .ai-kpi.ok { border-left-color:var(--green); }
+  .ai-kpi.warn { border-left-color:var(--amber); }
+  .ai-kpi.danger { border-left-color:var(--red); }
+  .ai-kpi-label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
+  .ai-kpi-value { font-size:1.35rem; font-weight:700; margin-top:2px; word-break:break-word; }
+  .ai-kpi-sub { font-size:11px; color:var(--muted); margin-top:2px; }
+  .ai-kpi-bar { height:6px; border-radius:3px; background:var(--line); overflow:hidden; margin-top:8px; }
+  .ai-kpi-bar > span { display:block; height:100%; background:var(--accent); }
+  .ai-kpi.ok .ai-kpi-bar > span { background:var(--green); }
+  .ai-kpi.warn .ai-kpi-bar > span { background:var(--amber); }
+  .ai-kpi.danger .ai-kpi-bar > span { background:var(--red); }
+  .ai-alert { display:flex; gap:10px; align-items:flex-start; justify-content:space-between; padding:9px 12px; border-radius:var(--radius); border:1px solid var(--border); font-size:.84rem; margin-bottom:6px; line-height:1.45; }
+  .ai-alert.danger { background:var(--red-bg); border-color:var(--red-line); color:var(--red); }
+  .ai-alert.warn { background:var(--amber-bg); border-color:var(--amber-line); color:var(--amber); }
+  .ai-alert.ok { background:var(--green-bg); border-color:var(--green-line); color:var(--green); }
+  .ai-link { background:transparent; border:none; color:inherit; text-decoration:underline; cursor:pointer; font-family:var(--font-ui); font-size:.8rem; white-space:nowrap; padding:0; }
+  .ai-nav { position:sticky; top:0; z-index:5; display:flex; gap:6px; flex-wrap:nowrap; overflow-x:auto; padding:8px 0; margin:8px 0 12px; background:var(--bg); border-bottom:1px solid var(--line); }
+  .ai-chip { flex:0 0 auto; white-space:nowrap; background:transparent; border:1.5px solid var(--border); color:var(--muted); border-radius:999px; padding:6px 13px; cursor:pointer; font-family:var(--font-ui); font-size:.8rem; }
+  .ai-chip:hover { border-color:var(--border-soft); color:var(--text); }
+  .ai-chip.ghost { border-style:dashed; }
+  .ai-nav-spacer { flex:1 1 auto; }
+  .ai-help { margin-bottom:12px; }
+  .ai-help > summary { cursor:pointer; font-size:.85rem; color:var(--muted); }
+  .ai-sec { border:1px solid var(--border); border-radius:var(--radius-lg); margin-bottom:10px; background:rgba(255,255,255,.015); scroll-margin-top:60px; }
+  .ai-sec > summary { list-style:none; cursor:pointer; padding:12px 14px; display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+  .ai-sec > summary::-webkit-details-marker { display:none; }
+  .ai-sec > summary::before { content:'▸'; color:var(--accent); display:inline-block; transition:transform .15s; }
+  .ai-sec[open] > summary::before { transform:rotate(90deg); }
+  .ai-sec-title { font-weight:700; font-size:.95rem; }
+  .ai-sec-sub { font-size:.75rem; color:var(--muted); }
+  .ai-sec-body { padding:0 14px 14px; }
+  .ai-box { padding:10px; border:1px solid var(--line); border-radius:10px; }
+  .ai-mini-bar { flex:1 1 100%; height:5px; border-radius:3px; background:var(--line); overflow:hidden; }
+  .ai-mini-bar > span { display:block; height:100%; }
+  .ai-toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; }
+  .ai-toolbar input[type="text"] { flex:1 1 200px; min-width:160px; }
+  .ai-toolbar select { background:var(--bg-raise); color:var(--text); border:1.5px solid var(--border); border-radius:var(--radius); padding:8px 10px; font-family:var(--font-ui); font-size:.85rem; }
+  @media (max-width: 720px) {
+    .ai-head-actions { width:100%; }
+    .ai-kpis { grid-template-columns:repeat(2,1fr); }
+  }
 </style>
 </head>
 <body>
@@ -281,12 +328,13 @@
           Dito mismo sa RELAY/Neon naka-save ang tunay na AI credit limit at per-request cost. Hindi ito kinokontrol ng OMNIPOS client .env. Ang <b>Default</b> ay para sa lahat ng walang custom override; puwedeng magtakda ng sariling limit para sa isang installation/customer.
         </div>
         <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; margin-top:12px;">
-          <label style="font-size:12px; color:var(--muted);">Monthly credits<input type="number" min="1" step="1" id="aiDefaultMonthly" style="width:100%; margin-top:4px;"></label>
-          <label style="font-size:12px; color:var(--muted);">Text cost<input type="number" min="1" step="1" id="aiDefaultText" style="width:100%; margin-top:4px;"></label>
-          <label style="font-size:12px; color:var(--muted);">File cost<input type="number" min="1" step="1" id="aiDefaultFile" style="width:100%; margin-top:4px;"></label>
-          <label style="font-size:12px; color:var(--muted);">Image cost<input type="number" min="1" step="1" id="aiDefaultImage" style="width:100%; margin-top:4px;"></label>
+          <label style="font-size:12px; color:var(--muted);">Monthly credits<input type="number" min="1" step="1" id="aiDefaultMonthly" oninput="updateAiDefaultPreview()" style="width:100%; margin-top:4px;"></label>
+          <label style="font-size:12px; color:var(--muted);">Text cost<input type="number" min="1" step="1" id="aiDefaultText" oninput="updateAiDefaultPreview()" style="width:100%; margin-top:4px;"></label>
+          <label style="font-size:12px; color:var(--muted);">File cost<input type="number" min="1" step="1" id="aiDefaultFile" oninput="updateAiDefaultPreview()" style="width:100%; margin-top:4px;"></label>
+          <label style="font-size:12px; color:var(--muted);">Image cost<input type="number" min="1" step="1" id="aiDefaultImage" oninput="updateAiDefaultPreview()" style="width:100%; margin-top:4px;"></label>
           <label style="font-size:12px; color:var(--muted);">Base daily neurons / client — manual (0 = walang limit). Ginagamit lang kapag naka-OFF ang Base auto (divider)<input type="number" min="0" step="1" id="aiDefaultDaily" style="width:100%; margin-top:4px;"></label>
         </div>
+        <div id="aiDefaultPreview" class="meta" style="margin-top:8px;"></div>
         <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
           <button class="btn-primary" onclick="saveAiDefaultSettings()">💾 Save Default AI Credits</button>
           <span id="aiDefaultMeta" class="meta"></span>
@@ -306,45 +354,120 @@
           <button class="btn-ghost" onclick="resetAiInstallationSettings()">↩️ Use Default</button>
           <button class="btn-ghost" onclick="loadAiCreditSettings()">🔄 Refresh</button>
         </div>
+        <div class="ai-toolbar">
+          <input type="text" id="aiOverrideSearch" placeholder="🔎 Hanapin ang installation ID..." oninput="renderAiOverrideList()" autocomplete="off">
+          <select id="aiOverrideSort" onchange="renderAiOverrideList()" aria-label="Sort overrides">
+            <option value="recent">Pinakabagong binago</option>
+            <option value="used">Pinakamaraming nagamit</option>
+            <option value="remaining">Pinakakaunting natitira</option>
+            <option value="monthly">Pinakamataas na monthly</option>
+          </select>
+          <button class="btn-ghost" onclick="aiExportOverridesCsv()">⬇️ Export (CSV)</button>
+        </div>
         <div id="aiOverrideList" style="margin-top:12px;" class="empty">Loading...</div>
       </div>
     </div>
     <div class="tab-section ai-section" id="section-ai-plans">
       <div class="card" id="cardAiPlans" style="border:1px solid var(--accent-dim);">
-        <h2>⚡ Omni AI — Provider Status &amp; Upgrade Tiers</h2>
-        <div class="backup-note">
-          Ang <b>Provider status</b> ay awtomatikong nagla-lock kapag naubos ang Cloudflare daily quota (10k neurons) — agad na tatanggihan ang AI requests hanggang 00:00 UTC (8:00 AM PH), walang hintay at walang nasisingil na credits. I-<b>Clear</b> ito pagkatapos mag-upgrade sa Workers Paid. Ang daily limit ay <b>NEURONS kada araw</b> (hindi na bilang ng tanong). Tatlo ang tier: <b>Base</b> (libre, hati ng Total daily capacity sa <b>Max clients / divider</b>), <b>Plus</b> at <b>Pro</b> (binibili gamit ang Omni Tokens, ≈ ₱1 bawat token, valid hanggang katapusan ng buwan). Lalabas ang upgrade sa Help page ng client kapag naabot niya ang daily/monthly limit. Ang daily neurons ay <b>0 = walang limit</b>.
+        <div class="ai-head">
+          <h2 style="margin:0;">⚡ Omni AI — Control Center</h2>
+          <div class="ai-head-actions">
+            <span id="aiUpdatedStamp" class="meta">—</span>
+            <label class="ai-auto"><input type="checkbox" id="aiAutoRefresh" checked onchange="aiToggleAutoRefresh(this)"> Auto-refresh (60s)</label>
+            <button class="btn-ghost" onclick="aiRefreshAll()">🔄 Refresh all</button>
+          </div>
         </div>
-        <div id="aiProviderBox" style="margin-top:12px; padding:10px; border:1px solid var(--line); border-radius:10px;">Loading...</div>
-        <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
-          <button class="btn-primary" onclick="aiProviderAction('clear')">✅ Clear (provider OK na)</button>
-          <button class="btn-ghost" onclick="aiProviderAction('exhaust')">🚫 Lock hanggang 00:00 UTC</button>
-          <button class="btn-ghost" onclick="loadAiPlans()">🔄 Refresh</button>
+        <div id="aiOverview" class="ai-kpis"><div class="empty" style="grid-column:1/-1;">Loading...</div></div>
+        <div id="aiAlerts"></div>
+        <div class="ai-nav" id="aiNav">
+          <button type="button" class="ai-chip" onclick="aiNavGo('status')">🚦 Status</button>
+          <button type="button" class="ai-chip" onclick="aiNavGo('usage')">📊 Neurons Detector</button>
+          <button type="button" class="ai-chip" onclick="aiNavGo('tiers')">🏷️ Tiers</button>
+          <button type="button" class="ai-chip" onclick="aiNavGo('extra')">➕ Extra Credits</button>
+          <button type="button" class="ai-chip" onclick="aiNavGo('capacity')">🧮 Capacity</button>
+          <button type="button" class="ai-chip" onclick="aiNavGo('planner')">🧠 Planner</button>
+          <button type="button" class="ai-chip" onclick="aiNavGo('breakdown')">👥 Clients per Plan</button>
+          <button type="button" class="ai-chip" onclick="aiNavGo('provider')">🔌 Provider</button>
+          <span class="ai-nav-spacer"></span>
+          <button type="button" class="ai-chip ghost" onclick="aiToggleAllSections(true)">Expand all</button>
+          <button type="button" class="ai-chip ghost" onclick="aiToggleAllSections(false)">Collapse all</button>
         </div>
-        <hr style="border:0; border-top:1px solid var(--line); margin:14px 0;">
-        <div style="font-size:12px; font-weight:700; margin-bottom:6px;">AI Provider — Cloudflare / Google (Gemini)</div>
-        <div id="aiProviderCfgBox" style="padding:10px; border:1px solid var(--line); border-radius:10px; margin-bottom:12px;">Loading...</div>
-        <div style="font-size:12px; font-weight:700; margin:14px 0 6px;">Neurons Detector (Cloudflare) — live na gamit ngayong araw (UTC)</div>
-        <div id="aiUsageBox" style="padding:10px; border:1px solid var(--line); border-radius:10px;">Loading...</div>
-        <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-          <input type="number" id="aiUsageCalibrateInput" min="0" step="1" placeholder="Neurons used ayon sa Cloudflare dashboard" style="flex:1; min-width:200px;">
-          <button class="btn-primary" onclick="aiUsageCalibrate()">🎯 I-sync</button>
-          <button class="btn-ghost" onclick="aiUsageReset()">♻️ I-reset ang bilang</button>
-          <button class="btn-ghost" onclick="loadAiUsage()">🔄 Refresh</button>
-        </div>
-        <hr style="border:0; border-top:1px solid var(--line); margin:14px 0;">
-        <div style="font-size:12px; font-weight:700; margin-bottom:6px;">Clients per Plan &amp; Formula ng Extra Credit</div>
-        <div id="aiBreakdownBox" style="padding:10px; border:1px solid var(--line); border-radius:10px; margin-bottom:12px;">Loading...</div>
-        <div style="font-size:12px; font-weight:700; margin-bottom:6px;">Neurons Planner — hatian ng daily limit</div>
-        <div id="aiNeuronBox" style="padding:10px; border:1px solid var(--line); border-radius:10px; margin-bottom:12px;">Loading...</div>
-        <div style="font-size:12px; font-weight:700; margin-bottom:6px;">Total Daily Capacity (neurons), Divider at Auto-lock ng Plus/Pro</div>
-        <div id="aiCapacityBox" style="padding:10px; border:1px solid var(--line); border-radius:10px; margin-bottom:12px;">Loading...</div>
-        <div style="font-size:12px; font-weight:700; margin-bottom:6px;">Extra Credits (top-up gamit ang Omni Tokens)</div>
-        <div id="aiExtraBox" style="padding:10px; border:1px solid var(--line); border-radius:10px; margin-bottom:12px;">Loading...</div>
-        <div style="font-size:12px; font-weight:700; margin-bottom:6px;">Upgrade Tiers</div>
-        <div id="aiTierList" class="empty">Loading...</div>
-        <div style="font-size:12px; font-weight:700; margin:14px 0 6px;">Magdagdag ng bagong tier</div>
-        <div id="aiTierNew"></div>
+        <details class="ai-help">
+          <summary>ℹ️ Paano gumagana ang Omni AI limits</summary>
+          <div class="backup-note">
+            Ang <b>Provider status</b> ay awtomatikong nagla-lock kapag naubos ang Cloudflare daily quota (10k neurons) — agad na tatanggihan ang AI requests hanggang 00:00 UTC (8:00 AM PH), walang hintay at walang nasisingil na credits. I-<b>Clear</b> ito pagkatapos mag-upgrade sa Workers Paid. Ang daily limit ay <b>NEURONS kada araw</b> (hindi na bilang ng tanong). Tatlo ang tier: <b>Base</b> (libre, hati ng Total daily capacity sa <b>Max clients / divider</b>), <b>Plus</b> at <b>Pro</b> (binibili gamit ang Omni Tokens, ≈ ₱1 bawat token, valid hanggang katapusan ng buwan). Lalabas ang upgrade sa Help page ng client kapag naabot niya ang daily/monthly limit. Ang daily neurons ay <b>0 = walang limit</b>.
+          </div>
+        </details>
+
+        <details class="ai-sec" id="aisec-status" data-sec="status" data-default-open="1">
+          <summary><span class="ai-sec-title">🚦 Provider Status</span><span class="ai-sec-sub">Lock / unlock ng AI requests</span></summary>
+          <div class="ai-sec-body">
+            <div id="aiProviderBox" class="ai-box">Loading...</div>
+            <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
+              <button class="btn-primary" onclick="aiProviderAction('clear')">✅ Clear (provider OK na)</button>
+              <button class="btn-ghost" onclick="aiProviderAction('exhaust')">🚫 Lock hanggang 00:00 UTC</button>
+              <button class="btn-ghost" onclick="loadAiPlans()">🔄 Refresh</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="ai-sec" id="aisec-usage" data-sec="usage" data-default-open="1">
+          <summary><span class="ai-sec-title">📊 Neurons Detector (Cloudflare)</span><span class="ai-sec-sub">Live na gamit ngayong araw (UTC)</span></summary>
+          <div class="ai-sec-body">
+            <div id="aiUsageBox" class="ai-box">Loading...</div>
+            <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+              <input type="number" id="aiUsageCalibrateInput" min="0" step="1" placeholder="Neurons used ayon sa Cloudflare dashboard" style="flex:1; min-width:200px;">
+              <button class="btn-primary" onclick="aiUsageCalibrate()">🎯 I-sync</button>
+              <button class="btn-ghost" onclick="aiUsageReset()">♻️ I-reset ang bilang</button>
+              <button class="btn-ghost" onclick="loadAiUsage()">🔄 Refresh</button>
+              <button class="btn-ghost" onclick="aiExportUsageCsv()">⬇️ Export clients (CSV)</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="ai-sec" id="aisec-tiers" data-sec="tiers" data-default-open="1">
+          <summary><span class="ai-sec-title">🏷️ Upgrade Tiers</span><span class="ai-sec-sub">Base / Plus / Pro — presyo sa Omni Tokens</span></summary>
+          <div class="ai-sec-body">
+            <div id="aiTierList" class="empty">Loading...</div>
+            <div style="font-size:12px; font-weight:700; margin:14px 0 6px;">Magdagdag ng bagong tier</div>
+            <div id="aiTierNew"></div>
+          </div>
+        </details>
+
+        <details class="ai-sec" id="aisec-extra" data-sec="extra">
+          <summary><span class="ai-sec-title">➕ Extra Credits</span><span class="ai-sec-sub">Top-up gamit ang Omni Tokens</span></summary>
+          <div class="ai-sec-body">
+            <div id="aiExtraBox" class="ai-box">Loading...</div>
+          </div>
+        </details>
+
+        <details class="ai-sec" id="aisec-capacity" data-sec="capacity">
+          <summary><span class="ai-sec-title">🧮 Total Daily Capacity &amp; Divider</span><span class="ai-sec-sub">Auto-lock ng Plus/Pro, max clients</span></summary>
+          <div class="ai-sec-body">
+            <div id="aiCapacityBox" class="ai-box">Loading...</div>
+          </div>
+        </details>
+
+        <details class="ai-sec" id="aisec-planner" data-sec="planner">
+          <summary><span class="ai-sec-title">🧠 Neurons Planner</span><span class="ai-sec-sub">Hatian ng daily limit</span></summary>
+          <div class="ai-sec-body">
+            <div id="aiNeuronBox" class="ai-box">Loading...</div>
+          </div>
+        </details>
+
+        <details class="ai-sec" id="aisec-breakdown" data-sec="breakdown">
+          <summary><span class="ai-sec-title">👥 Clients per Plan &amp; Formula ng Extra Credit</span><span class="ai-sec-sub">Ilan ang nasa bawat plan</span></summary>
+          <div class="ai-sec-body">
+            <div id="aiBreakdownBox" class="ai-box">Loading...</div>
+          </div>
+        </details>
+
+        <details class="ai-sec" id="aisec-provider" data-sec="provider">
+          <summary><span class="ai-sec-title">🔌 AI Provider — Cloudflare / Google (Gemini)</span><span class="ai-sec-sub">Default, fallback, models, limits</span></summary>
+          <div class="ai-sec-body">
+            <div id="aiProviderCfgBox" class="ai-box">Loading...</div>
+          </div>
+        </details>
       </div>
     </div>
 </main>
@@ -399,6 +522,7 @@ function setTab(tab) {
   Object.entries(sections).forEach(([key, id]) => {
     document.getElementById(id).classList.toggle('hidden', !(tab === 'all' || tab === key));
   });
+  try { localStorage.setItem(AI_TAB_STORE_KEY, tab); } catch (e) { /* storage unavailable: tab just won't be remembered */ }
 }
 function toast(msg, type) {
   const el = document.getElementById('toast');
@@ -743,6 +867,8 @@ async function loadAiCreditSettings() {
   if (!data?.success) { toast(data?.message || 'Could not load AI credit settings.', 'error'); return; }
   relayAiCreditSettingsCache = data;
   fillAiSettingInputs('Default', data.defaults);
+  updateAiDefaultPreview();
+  renderAiOverview();
   // AYOS: dating blangko ang Override number fields (Monthly/Text/File/Image)
   // hangga't hindi pa pinipili ang isang existing override sa list. Kapag
   // nag-type ang admin ng BAGONG target installation ID at direktang pinindot
@@ -762,16 +888,7 @@ async function loadAiCreditSettings() {
       : `Base ngayon: ${Number(d.dailyCap) === 0 ? 'walang limit' : Number(d.dailyCap).toLocaleString() + ' neurons/araw bawat client'} (manual)`;
     meta.innerText = `Current month: ${data.month} · Default ${d.source || 'Relay'} · ${baseTxt}`;
   }
-  const list = document.getElementById('aiOverrideList');
-  if (!list) return;
-  if (!data.overrides?.length) { list.innerHTML = '<div class="empty">No customer overrides. Everyone uses the Default.</div>'; return; }
-  list.innerHTML = `<div style="font-size:11px;color:var(--muted);margin-bottom:6px;">Customer overrides (${data.overrides.length})</div>` + data.overrides.map(o => `
-    <div class="row" style="margin-bottom:6px; padding:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; cursor:pointer;" onclick="selectAiOverride('${escapeAttr(o.installationId)}')">
-      <code style="flex:1 1 240px;">${escapeHtml(o.installationId)}</code>
-      <span>${o.monthlyCredits}/mo</span><span>used ${o.used}</span><span>left ${o.remaining}</span>
-      <span class="meta">T${o.textCost} · F${o.fileCost} · I${o.imageCost}</span>
-      <span class="meta">${o.dailyCap === null || o.dailyCap === undefined ? 'daily: Base' : (o.dailyCap === 0 ? 'daily: ∞' : 'daily: ' + Number(o.dailyCap).toLocaleString() + ' neurons')}</span>
-    </div>`).join('');
+  renderAiOverrideList();
 }
 function escapeHtml(str) {
   return String(str).replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
@@ -831,15 +948,18 @@ async function resetAiInstallationSettings() {
 }
 // ===== OMNI AI: PROVIDER STATUS + UPGRADE TIERS (RELAY authority) =====
 function aiTierRowHtml(t, isNew) {
+  // escapeAttr is only for values placed inside inline JS strings (onclick); plain HTML attributes
+  // must use escapeHtml, otherwise a name like "Owner's" is saved back as "Owner\'s".
   const id = escapeAttr(t.id || '');
-  const v = (x) => escapeAttr(x === undefined || x === null ? '' : x);
+  const idHtml = escapeHtml(t.id || '');
+  const v = (x) => escapeHtml(x === undefined || x === null ? '' : x);
   const idField = isNew
-    ? `<label style="font-size:11px;color:var(--muted);">ID<input type="text" data-f="id" maxlength="30" placeholder="hal. starter" style="width:100%;"></label>`
-    : `<label style="font-size:11px;color:var(--muted);">ID<input type="text" data-f="id" value="${id}" readonly style="width:100%;opacity:.7;"></label>`;
-  const stats = isNew ? '' : `<span class="meta">${t.buyersThisMonth || 0} buyer(s) ngayong buwan · ${t.tokensThisMonth || 0} tokens</span>`;
+    ? `<label style="font-size:11px;color:var(--muted);">ID<input type="text" data-f="id" maxlength="30" value="${idHtml}" placeholder="hal. starter" style="width:100%;"></label>`
+    : `<label style="font-size:11px;color:var(--muted);">ID<input type="text" data-f="id" value="${idHtml}" readonly style="width:100%;opacity:.7;"></label>`;
+  const insight = isNew ? '' : `<span class="meta ai-tier-insight" data-price="${v(t.priceTokens)}" data-credits="${v(t.monthlyCredits)}" data-cap="${v(t.dailyCap)}" data-buyers="${v(t.buyersThisMonth || 0)}" data-tokens="${v(t.tokensThisMonth || 0)}"></span>`;
   return `
-    <div class="row" data-tier="${id}" style="margin-bottom:8px; padding:8px;">
-      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:8px; align-items:end;">
+    <div class="row" data-tier="${idHtml}" style="margin-bottom:8px; padding:8px;">
+      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:8px; align-items:end; width:100%;">
         ${idField}
         <label style="font-size:11px;color:var(--muted);">Pangalan<input type="text" data-f="name" maxlength="40" value="${v(t.name)}" style="width:100%;"></label>
         <label style="font-size:11px;color:var(--muted);">Presyo (Omni Tokens)<input type="number" min="0" step="1" data-f="priceTokens" value="${v(t.priceTokens)}" style="width:100%;"></label>
@@ -848,10 +968,11 @@ function aiTierRowHtml(t, isNew) {
         <label style="font-size:11px;color:var(--muted);">Order<input type="number" step="1" data-f="sortOrder" value="${v(t.sortOrder === undefined ? 0 : t.sortOrder)}" style="width:100%;"></label>
         <label style="font-size:12px;"><input type="checkbox" data-f="enabled" ${t.enabled === false ? '' : 'checked'}> Enabled</label>
       </div>
-      <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+      <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; width:100%;">
         <button class="btn-primary" onclick="saveAiTier(this)">💾 ${isNew ? 'Add tier' : 'Save'}</button>
+        ${isNew ? '' : `<button class="btn-ghost" onclick="aiDuplicateTier('${id}')">📄 Duplicate</button>`}
         ${isNew ? '' : `<button class="btn-ghost" onclick="deleteAiTier('${id}')">🗑️ Delete</button>`}
-        ${stats}
+        ${insight}
       </div>
     </div>`;
 }
@@ -959,6 +1080,8 @@ async function loadAiUsage() {
   }
   aiUsageState = d;
   renderAiUsageBox(d);
+  renderAiOverview();
+  aiRefreshTierInsights();
 }
 async function aiUsageCalibrate() {
   const inp = document.getElementById('aiUsageCalibrateInput');
@@ -971,6 +1094,7 @@ async function aiUsageCalibrate() {
     if (inp) inp.value = '';
     aiUsageState = data;
     renderAiUsageBox(data);
+    renderAiOverview();
   } else toast(data?.message || 'Sync failed.', 'error');
 }
 async function aiUsageReset() {
@@ -981,6 +1105,7 @@ async function aiUsageReset() {
     toast('Na-reset ang bilang ngayong araw.', 'success');
     aiUsageState = data;
     renderAiUsageBox(data);
+    renderAiOverview();
   } else toast(data?.message || 'Reset failed.', 'error');
 }
 function renderAiBreakdownBox(b, c) {
@@ -1413,6 +1538,8 @@ async function loadAiExtra() {
   let d;
   try { d = await aiApi('/relay/admin/api/ai-extra'); } catch (e) { return; }
   if (!d?.success) { box.textContent = d?.message || 'Could not load extra credits.'; return; }
+  aiExtraState = d;
+  renderAiOverview();
   const es = d.settings;
   const avail = d.availableCredits === null ? 'walang limit' : `${d.availableCredits} natitira`;
   box.innerHTML = `<div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
@@ -1458,7 +1585,9 @@ async function loadAiPlans(providerOnly) {
   let data;
   try { data = await aiApi('/relay/admin/api/ai-plans'); } catch (err) { return; }
   if (!data?.success) { if (!providerOnly) toast(data?.message || 'Could not load AI plans.', 'error'); return; }
+  aiPlansState = data;
   renderAiProviderBox(data.provider, data.providers);
+  renderAiOverview();
   loadAiUsage();
   if (providerOnly) return;
   loadAiProviderCfg();
@@ -1471,6 +1600,7 @@ async function loadAiPlans(providerOnly) {
   if (list) list.innerHTML = data.tiers.length ? data.tiers.map(t => aiTierRowHtml(t, false)).join('') : '<div class="empty">Walang tier. Magdagdag sa ibaba.</div>';
   const nw = document.getElementById('aiTierNew');
   if (nw && !nw.innerHTML.trim()) nw.innerHTML = aiTierRowHtml({ enabled: true, sortOrder: (data.tiers.length + 1) }, true);
+  aiRefreshTierInsights();
 }
 async function saveAiTier(btn) {
   const row = btn.closest('[data-tier]');
@@ -1514,6 +1644,7 @@ async function loadAiProviderCfg() {
   if (!data?.success) { box.textContent = data?.message || 'Could not load AI provider settings.'; return; }
   aiProviderCfgState = data;
   renderAiProviderCfg(data);
+  renderAiOverview();
   if (!aiGoogleModelList && !aiGoogleModelListLoading && data.status && data.status.google && data.status.google.configured) aiFetchGoogleModels(false);
 }
 let aiGoogleModelList = null;
@@ -1731,6 +1862,244 @@ async function aiProviderAction(action) {
   } catch (err) { toast(err.message || 'Could not update provider status.', 'error'); }
 }
 
+// ===== OMNI AI CONTROL CENTER (overview, alerts, navigation, exports) =====
+let aiPlansState = null;   // last /ai-plans response (tiers, capacity, provider, breakdown)
+let aiExtraState = null;   // last /ai-extra response (packs + sales)
+const AI_SEC_STORE_KEY = 'fpAiSecOpen';
+const AI_TAB_STORE_KEY = 'fpActiveTab';
+function aiReadSecState() {
+  try { return JSON.parse(localStorage.getItem(AI_SEC_STORE_KEY) || '{}') || {}; } catch (e) { return {}; }
+}
+function aiWriteSecState(o) {
+  try { localStorage.setItem(AI_SEC_STORE_KEY, JSON.stringify(o)); } catch (e) { /* storage unavailable: sections just won't be remembered */ }
+}
+// Restore each collapsible section's open/closed state (falls back to its data-default-open flag).
+function aiInitSections() {
+  const saved = aiReadSecState();
+  document.querySelectorAll('details.ai-sec').forEach((d) => {
+    const key = d.getAttribute('data-sec');
+    if (Object.prototype.hasOwnProperty.call(saved, key)) d.open = !!saved[key];
+    else d.open = d.getAttribute('data-default-open') === '1';
+    if (!d.__aiBound) {
+      d.__aiBound = true;
+      d.addEventListener('toggle', () => { const s = aiReadSecState(); s[key] = d.open; aiWriteSecState(s); });
+    }
+  });
+}
+function aiToggleAllSections(open) {
+  document.querySelectorAll('details.ai-sec').forEach((d) => { d.open = !!open; });
+}
+function aiNavGo(key) {
+  const d = document.getElementById('aisec-' + key);
+  if (!d) return;
+  d.open = true;
+  d.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+function aiToggleAutoRefresh(cb) {
+  if (cb && cb.checked) startAiPoll(); else stopAiPoll();
+}
+function aiRefreshAll() {
+  loadAiPlans();
+  loadAiCreditSettings();
+  toast('Nire-refresh ang Omni AI data...', 'info');
+}
+function aiDownloadText(filename, text, mime) {
+  const blob = new Blob([text], { type: mime || 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+// CSV cell: quote everything and neutralise spreadsheet formula injection for text values.
+function aiCsvCell(v) {
+  let s = (v === null || v === undefined) ? '' : String(v);
+  if (typeof v === 'string' && /^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return '"' + s.replace(/"/g, '""') + '"';
+}
+function aiCsv(header, rows) {
+  return [header.map(aiCsvCell).join(',')].concat(rows.map((r) => r.map(aiCsvCell).join(','))).join('\r\n');
+}
+function aiTodayStamp() { return new Date().toISOString().slice(0, 10); }
+function aiExportUsageCsv() {
+  const clients = (aiUsageState && Array.isArray(aiUsageState.clients)) ? aiUsageState.clients : [];
+  if (!clients.length) { toast('Walang client data na ie-export ngayong araw.', 'error'); return; }
+  aiDownloadText(`omniai-usage-${aiTodayStamp()}.csv`, aiCsv(['installationId', 'questions', 'neurons'], clients.map((c) => [c.installationId, c.questions, c.neurons])));
+}
+function aiExportOverridesCsv() {
+  const all = (relayAiCreditSettingsCache && relayAiCreditSettingsCache.overrides) || [];
+  if (!all.length) { toast('Walang customer override na ie-export.', 'error'); return; }
+  aiDownloadText(`omniai-overrides-${aiTodayStamp()}.csv`, aiCsv(
+    ['installationId', 'monthlyCredits', 'textCost', 'fileCost', 'imageCost', 'dailyNeurons', 'usedThisMonth', 'remaining'],
+    all.map((o) => [o.installationId, o.monthlyCredits, o.textCost, o.fileCost, o.imageCost, (o.dailyCap === null || o.dailyCap === undefined) ? 'base' : o.dailyCap, o.used, o.remaining])
+  ));
+}
+function aiKpiHtml(label, value, sub, tone, pct) {
+  const bar = (typeof pct === 'number' && Number.isFinite(pct))
+    ? `<div class="ai-kpi-bar"><span style="width:${Math.max(0, Math.min(100, pct))}%"></span></div>` : '';
+  return `<div class="ai-kpi ${tone || ''}"><div class="ai-kpi-label">${label}</div><div class="ai-kpi-value">${value}</div>${sub ? `<div class="ai-kpi-sub">${sub}</div>` : ''}${bar}</div>`;
+}
+function renderAiOverview() {
+  const kpiEl = document.getElementById('aiOverview');
+  const alertsEl = document.getElementById('aiAlerts');
+  if (!kpiEl || !aiPlansState) return;
+  const p = aiPlansState;
+  const u = (aiUsageState && aiUsageState.success) ? aiUsageState : null;
+  const cap = p.capacity || {};
+  const prov = p.provider || {};
+  const tiers = Array.isArray(p.tiers) ? p.tiers : [];
+  const n = aiUsageN;
+  const fmt = (ms) => ms ? new Date(ms).toLocaleString() : '—';
+  const maxClients = Number(cap.maxClients) || 0;
+  const slotsLeft = Number(cap.slotsLeft) || 0;
+  const tierTokens = tiers.reduce((s, t) => s + (Number(t.tokensThisMonth) || 0), 0);
+  const tierBuyers = tiers.reduce((s, t) => s + (Number(t.buyersThisMonth) || 0), 0);
+  const extraTokens = (aiExtraState && Array.isArray(aiExtraState.packs))
+    ? aiExtraState.packs.reduce((s, x) => s + (Number(x.tokensThisMonth) || 0), 0) : 0;
+  const totalTokens = tierTokens + extraTokens;
+  const chain = ((p.providers && p.providers.chain) || []).map((c) => c.provider === 'google' ? 'Google' : 'Cloudflare').join(' → ');
+  const cards = [];
+  cards.push(aiKpiHtml('Provider', prov.exhausted ? '🚫 Locked' : '✅ Online',
+    prov.exhausted ? `hanggang ${escapeHtml(fmt(prov.retryAt))}` : escapeHtml(chain || 'Cloudflare'), prov.exhausted ? 'danger' : 'ok'));
+  if (u) {
+    const lvlTone = { ok: 'ok', warning: 'warn', critical: 'danger', exhausted: 'danger' }[u.level] || 'ok';
+    cards.push(aiKpiHtml('Neurons ngayong araw', `${n(u.percentUsed, 1)}%`, `${n(u.usedNeurons)} / ${n(u.limitNeurons)} neurons`, lvlTone, Number(u.percentUsed) || 0));
+    cards.push(aiKpiHtml('Tanong ngayong araw', n(u.questions), `≈ ${n(u.remainingQuestions)} pa ang kayang sagutin`, 'neutral'));
+  } else {
+    cards.push(aiKpiHtml('Neurons ngayong araw', '—', 'naglo-load...', 'neutral'));
+    cards.push(aiKpiHtml('Tanong ngayong araw', '—', 'naglo-load...', 'neutral'));
+  }
+  cards.push(aiKpiHtml('Clients na may Omni AI', `${n(cap.liveClients)}${maxClients > 0 ? ' / ' + n(maxClients) : ''}`,
+    maxClients > 0 ? `${n(slotsLeft)} slot ang bakante` : 'walang limit', (maxClients > 0 && slotsLeft === 0) ? 'warn' : 'neutral'));
+  if (cap.enabled && Number(cap.capacity) > 0) {
+    const pct = (Number(cap.committed) / Number(cap.capacity)) * 100;
+    const tone = Number(cap.overCapacity) > 0 ? 'danger' : (pct >= 90 ? 'warn' : 'ok');
+    cards.push(aiKpiHtml('Committed capacity', `${n(pct, 0)}%`, `${n(cap.committed)} / ${n(cap.capacity)} neurons/araw`, tone, pct));
+  } else {
+    cards.push(aiKpiHtml('Committed capacity', 'OFF', 'i-set ang Total daily capacity', 'warn'));
+  }
+  cards.push(aiKpiHtml('Benta ngayong buwan', `${n(totalTokens)} tokens`, `≈ ₱${n(totalTokens)} · ${n(tierBuyers)} tier buyer(s)`, 'neutral'));
+  kpiEl.innerHTML = cards.join('');
+
+  // ---- Health checks / alerts ----
+  const alerts = [];
+  const add = (level, text, go) => alerts.push({ level, text, go });
+  if (prov.exhausted) add('danger', `Naka-lock ang AI provider hanggang ${fmt(prov.retryAt)} — tinatanggihan ang AI requests ng mga client.`, 'status');
+  if (u) {
+    if (u.level === 'exhausted') add('danger', 'Ubos na ang daily neurons ngayong araw.', 'usage');
+    else if (u.level === 'critical') add('danger', `Halos ubos na ang daily neurons (${n(u.percentUsed, 1)}% na ang nagamit).`, 'usage');
+    else if (u.level === 'warning') add('warn', `Malapit nang maubos ang daily neurons (${n(u.percentUsed, 1)}% na ang nagamit).`, 'usage');
+  }
+  if (!cap.enabled) add('warn', 'Naka-OFF ang Total daily capacity — hindi gagana ang formula ng extra credit at auto-lock ng tiers.', 'capacity');
+  else {
+    if (Number(cap.overCapacity) > 0) add('danger', `Lampas ng ${n(cap.overCapacity)} neurons/araw ang committed na daily kumpara sa Total daily capacity.`, 'capacity');
+    if (cap.locked) add('warn', `Naka-lock ang tiers ngayong buwan${cap.lockReason ? ' — ' + cap.lockReason : ''}.`, 'capacity');
+    if (maxClients > 0 && slotsLeft === 0) add('warn', 'Puno na ang slots ng Omni AI — walang bagong client na maa-activate hangga\'t walang nabakante.', 'capacity');
+  }
+  const enabledTiers = tiers.filter((t) => t.enabled !== false);
+  if (!enabledTiers.length) add('warn', 'Walang naka-enable na tier — walang upgrade na mabibili ang mga client.', 'tiers');
+  const byPrice = enabledTiers.slice().sort((a, b) => (Number(a.priceTokens) || 0) - (Number(b.priceTokens) || 0));
+  const effDaily = (t) => Number(t.dailyCap) === 0 ? Infinity : Number(t.dailyCap);
+  for (let i = 1; i < byPrice.length; i++) {
+    const lo = byPrice[i - 1], hi = byPrice[i];
+    if ((Number(hi.priceTokens) || 0) <= (Number(lo.priceTokens) || 0)) continue;
+    if ((Number(hi.monthlyCredits) || 0) < (Number(lo.monthlyCredits) || 0)) add('warn', `"${hi.name}" ay mas mahal pero mas kaunti ang monthly credits kaysa "${lo.name}".`, 'tiers');
+    if (effDaily(hi) < effDaily(lo)) add('warn', `"${hi.name}" ay mas mahal pero mas mababa ang daily neurons kaysa "${lo.name}".`, 'tiers');
+  }
+  if (aiExtraState && aiExtraState.cheapestTierRate !== null && aiExtraState.cheapestTierRate !== undefined && Array.isArray(aiExtraState.packs)) {
+    aiExtraState.packs.filter((x) => x.enabled !== false && Number(x.pricePerCredit) <= Number(aiExtraState.cheapestTierRate)).forEach((x) => {
+      add('warn', `Ang extra pack na "${x.name}" (${x.pricePerCredit} token/credit) ay mas mura o kasing-mura ng pinakamurang tier (${aiExtraState.cheapestTierRate} token/credit) — matatalo nito ang tiers.`, 'extra');
+    });
+  }
+  if (aiProviderCfgState && aiProviderCfgState.config) {
+    const c = aiProviderCfgState.config;
+    const gs = (aiProviderCfgState.status && aiProviderCfgState.status.google) || {};
+    if ((c.defaultProvider === 'google' || c.fallbackProvider === 'google') && !gs.configured) add('danger', 'Google ang default/fallback provider pero walang GOOGLE_AI_API_KEY sa RELAY.', 'provider');
+  }
+  if (relayAiCreditSettingsCache && relayAiCreditSettingsCache.defaults && Number(relayAiCreditSettingsCache.defaults.dailyCap) === 0) {
+    add('warn', 'Walang daily neurons limit ang Base clients (0 = unlimited) — puwede nilang ubusin ang buong Cloudflare quota.', 'capacity');
+  }
+  if (!alerts.length) add('ok', '✅ Walang nakitang problema sa kasalukuyang Omni AI settings.');
+  if (alertsEl) {
+    const icon = { danger: '🚨', warn: '⚠️', ok: '' };
+    alertsEl.innerHTML = alerts.map((a) => `<div class="ai-alert ${a.level}"><span>${icon[a.level] ? icon[a.level] + ' ' : ''}${escapeHtml(a.text)}</span>${a.go ? `<button type="button" class="ai-link" onclick="aiNavGo('${a.go}')">Buksan ›</button>` : ''}</div>`).join('');
+  }
+  const stamp = document.getElementById('aiUpdatedStamp');
+  if (stamp) stamp.textContent = 'Updated ' + new Date().toLocaleTimeString();
+}
+// Fill each tier row's computed insight line (needs the per-question neurons from the usage detector).
+function aiRefreshTierInsights() {
+  const perQ = (aiUsageState && Number(aiUsageState.perQuestionNeurons) > 0) ? Number(aiUsageState.perQuestionNeurons) : 0;
+  document.querySelectorAll('#aiTierList .ai-tier-insight').forEach((el) => {
+    const price = Number(el.dataset.price) || 0;
+    const credits = Number(el.dataset.credits) || 0;
+    const cap = Number(el.dataset.cap) || 0;
+    const buyers = Number(el.dataset.buyers) || 0;
+    const tokens = Number(el.dataset.tokens) || 0;
+    const parts = [];
+    parts.push(credits > 0 ? `${(price / credits).toLocaleString(undefined, { maximumFractionDigits: 2 })} token/credit` : '—');
+    parts.push(cap === 0 ? 'daily: ∞ neurons' : `daily: ${cap.toLocaleString()} neurons${perQ > 0 ? ` (≈ ${Math.floor(cap / perQ).toLocaleString()} tanong)` : ''}`);
+    parts.push(`${buyers} buyer(s) · ${tokens.toLocaleString()} tokens ngayong buwan`);
+    el.textContent = parts.join(' · ');
+  });
+}
+function aiDuplicateTier(id) {
+  const t = ((aiPlansState && aiPlansState.tiers) || []).find((x) => x.id === id);
+  const nw = document.getElementById('aiTierNew');
+  if (!t || !nw) return;
+  nw.innerHTML = aiTierRowHtml({ ...t, id: '', name: String(t.name || '').slice(0, 35) + ' copy', buyersThisMonth: 0, tokensThisMonth: 0, sortOrder: (Number(t.sortOrder) || 0) + 1 }, true);
+  aiOpenSecSafe('tiers');
+  nw.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  toast('Na-kopya sa form ng bagong tier. Maglagay ng bagong ID at i-save.', 'info');
+}
+function aiOpenSecSafe(key) {
+  const d = document.getElementById('aisec-' + key);
+  if (d) d.open = true;
+}
+// Live preview under the Default AI credit inputs.
+function updateAiDefaultPreview() {
+  const el = document.getElementById('aiDefaultPreview');
+  if (!el) return;
+  const g = (id) => Number(document.getElementById(id)?.value);
+  const m = g('aiDefaultMonthly'), t = g('aiDefaultText'), f = g('aiDefaultFile'), i = g('aiDefaultImage');
+  if (![m, t, f, i].every((x) => Number.isFinite(x) && x > 0)) { el.textContent = ''; return; }
+  const F = (x) => Math.floor(x).toLocaleString();
+  let html = `Sa ${m.toLocaleString()} credits/buwan: ≈ <b>${F(m / t)}</b> text na tanong, <b>${F(m / f)}</b> file, o <b>${F(m / i)}</b> larawan.`;
+  if (f < t || i < f) html += ' <span style="color:var(--red);">⚠️ Dapat file ≥ text at image ≥ file.</span>';
+  el.innerHTML = html;
+}
+// Customer override list with search, sort and usage bars.
+function renderAiOverrideList() {
+  const list = document.getElementById('aiOverrideList');
+  if (!list) return;
+  const all = (relayAiCreditSettingsCache && relayAiCreditSettingsCache.overrides) || [];
+  if (!all.length) { list.className = 'empty'; list.textContent = 'No customer overrides. Everyone uses the Default.'; return; }
+  const q = String(document.getElementById('aiOverrideSearch')?.value || '').trim().toLowerCase();
+  const sortKey = document.getElementById('aiOverrideSort')?.value || 'recent';
+  let rows = all.filter((o) => !q || String(o.installationId).toLowerCase().includes(q));
+  const sorters = {
+    used: (a, b) => b.used - a.used,
+    remaining: (a, b) => a.remaining - b.remaining,
+    monthly: (a, b) => b.monthlyCredits - a.monthlyCredits
+  };
+  if (sorters[sortKey]) rows = rows.slice().sort(sorters[sortKey]);
+  list.className = '';
+  const count = `${rows.length}${rows.length !== all.length ? ' of ' + all.length : ''}`;
+  if (!rows.length) { list.innerHTML = `<div style="font-size:11px;color:var(--muted);margin-bottom:6px;">Customer overrides (${count})</div><div class="empty">Walang tumugma sa hinahanap.</div>`; return; }
+  list.innerHTML = `<div style="font-size:11px;color:var(--muted);margin-bottom:6px;">Customer overrides (${count})</div>` + rows.map((o) => {
+    const pct = o.monthlyCredits > 0 ? Math.min(100, (o.used / o.monthlyCredits) * 100) : 0;
+    const color = pct >= 90 ? 'var(--red)' : (pct >= 70 ? 'var(--amber)' : 'var(--green)');
+    return `
+    <div class="row" style="margin-bottom:6px; padding:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; cursor:pointer;" onclick="selectAiOverride('${escapeAttr(o.installationId)}')">
+      <code style="flex:1 1 240px; word-break:break-all;">${escapeHtml(o.installationId)}</code>
+      <span>${o.monthlyCredits}/mo</span><span>used ${o.used}</span><span>left ${o.remaining}</span>
+      <span class="meta">T${o.textCost} · F${o.fileCost} · I${o.imageCost}</span>
+      <span class="meta">${o.dailyCap === null || o.dailyCap === undefined ? 'daily: Base' : (o.dailyCap === 0 ? 'daily: ∞' : 'daily: ' + Number(o.dailyCap).toLocaleString() + ' neurons')}</span>
+      <div class="ai-mini-bar"><span style="width:${pct}%;background:${color};"></span></div>
+    </div>`;
+  }).join('');
+}
+
 async function boot() {
   if (!adminKey) return;
   try {
@@ -1738,6 +2107,13 @@ async function boot() {
     await loadReceiptCreditPricing();
     document.getElementById('loginWrap').classList.add('hidden');
     document.getElementById('app').classList.remove('hidden');
+    aiInitSections();
+    try {
+      const savedTab = localStorage.getItem(AI_TAB_STORE_KEY);
+      if (['all', 'themes', 'modules', 'tiers', 'receiptCredits', 'aiCredits', 'aiPlans'].includes(savedTab)) setTab(savedTab);
+    } catch (e) { /* storage unavailable: stay on the default view */ }
+    const autoCb = document.getElementById('aiAutoRefresh');
+    if (autoCb) autoCb.checked = true;
     loadAiCreditSettings();
     loadAiPlans();
     startAiPoll();
