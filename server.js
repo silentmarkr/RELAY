@@ -6757,6 +6757,8 @@ app.post('/relay/admin/api/devices/:installationId/clear-history', requireAdminK
 app.post('/relay/admin/api/devices/:installationId/activate', requireAdminKey, async (req, res) => {
     const { installationId } = req.params;
     const { featureId, featureIds, tierId, note, durationDays, tier, billingCycle } = req.body;
+    // Optional Omni AI plan chosen in the admin "Confirm subscription plan" picker ('base' / '' = Base, otherwise a relay_ai_tiers id).
+    const aiTierId = String(req.body?.aiTierId || '').trim().toLowerCase();
     let idsToActivate = [];
     if (tierId) {
         const tier = UPGRADE_TIERS.find(t => t.id === tierId);
@@ -6811,6 +6813,17 @@ app.post('/relay/admin/api/devices/:installationId/activate', requireAdminKey, a
     // Puno na ang daily AI allowance: kahit developer, hindi makakapag-manual activate ng BAGONG Omni AI subscription.
     // (Renewal ng kasalukuyang subscriber ay pinapayagan pa rin.)
     let aiGuard = null;
+    let aiGrantTier = null;
+    if (idsToActivate.includes('ai_assistant') && aiTierId && aiTierId !== 'base' && aiTierId !== '__keep') {
+        try {
+            if (!pgPoolDevices) return res.status(503).json({ success: false, message: 'AI credit database is not configured on the RELAY.' });
+            const tr = await pgPoolDevices.query(`SELECT id, name, price_tokens, monthly_credits, daily_cap, sort_order, enabled FROM relay_ai_tiers WHERE id = $1`, [aiTierId]);
+            aiGrantTier = tr.rows[0] ? mapRelayAiTierRow(tr.rows[0]) : null;
+        } catch (err) { console.error('admin activate tier lookup error:', err.message); return res.status(500).json({ success: false, message: 'Could not load the selected AI plan. Please try again.' }); }
+        if (!aiGrantTier || !aiGrantTier.enabled) return res.status(400).json({ success: false, message: 'The selected Omni AI plan is not available (disabled or removed). Refresh and pick another plan.' });
+    } else if (idsToActivate.includes('ai_assistant') && aiTierId === 'base' && !(await getRelayAiBasePlanEnabled())) {
+        return res.status(400).json({ success: false, message: 'The Omni AI Base plan is disabled. Pick Plus/Pro/Business or enable Base first.' });
+    }
     if (idsToActivate.includes('ai_assistant')) {
         try { aiGuard = await acquireRelayAiBaseGuard(installationId); }
         catch (err) { console.error('admin activate guard error:', err); return res.status(500).json({ success: false, message: 'Could not verify AI capacity. Please try again.' }); }
@@ -6881,7 +6894,31 @@ app.post('/relay/admin/api/devices/:installationId/activate', requireAdminKey, a
             billingCycle: (isThisCloudBackup || isThisModuleSubscription) ? billingCycle : null
         });
     }
-    res.json({ success: true, message: `Na-activate ang ${idsToActivate.length} feature(s).`, tokens });
+    // Record the chosen paid Omni AI plan for this month (admin grant: 0 tokens spent). Never downgrades an existing higher plan.
+    let aiPlanNote = '';
+    if (aiGrantTier) {
+        try {
+            const monthKey = relayAiMonthKey();
+            const currentAi = await getRelayAiActiveTier(installationId, monthKey);
+            if (currentAi && currentAi.priceTokens >= aiGrantTier.priceTokens) {
+                aiPlanNote = ` The device already has the ${currentAi.name} plan this month, so it was kept.`;
+            } else {
+                await queryWithRetry(pgPoolDevices,
+                    `INSERT INTO relay_ai_tier_purchases (installation_id, month_key, tier_id, tier_name, monthly_credits, daily_cap, price_tokens, tokens_spent, purchased_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, 0, now())
+                     ON CONFLICT (installation_id, month_key) DO UPDATE SET
+                       tier_id = EXCLUDED.tier_id, tier_name = EXCLUDED.tier_name, monthly_credits = EXCLUDED.monthly_credits,
+                       daily_cap = EXCLUDED.daily_cap, price_tokens = EXCLUDED.price_tokens, purchased_at = now()`,
+                    [installationId, monthKey, aiGrantTier.id, aiGrantTier.name, aiGrantTier.monthlyCredits, aiGrantTier.dailyCap, aiGrantTier.priceTokens]);
+                logActivity(installationId, 'ai_plan_admin_granted', { tierId: aiGrantTier.id, tierName: aiGrantTier.name, via: 'admin_activate' });
+                aiPlanNote = ` Omni AI plan: ${aiGrantTier.name}.`;
+            }
+        } catch (grantErr) {
+            console.error('admin activate AI plan grant error:', grantErr.message);
+            aiPlanNote = ` The subscription was activated, but the ${aiGrantTier.name} plan could not be recorded — set it again.`;
+        }
+    }
+    res.json({ success: true, message: `Na-activate ang ${idsToActivate.length} feature(s).${aiPlanNote}`, tokens });
     } catch (err) {
         console.error('admin activate error:', err);
         if (!res.headersSent) res.status(500).json({ success: false, message: err.message || 'Hindi na-activate dahil sa internal error.' });
@@ -9121,6 +9158,26 @@ async function buildRelayAiExtraOffer(installationId, monthKey, dailyUnlimited =
         purchasedCredits: bought, maxPerClient: es.maxPerClient, packs
     };
 }
+// Base plan ON/OFF switch (admin-controlled, persisted). Default = enabled.
+// Disabled Base: the card is shown as "not available" in OMNIPOS, and it is not offered in the admin
+// "Confirm subscription plan" picker. Existing subscribers/renewals are NOT affected.
+let relayAiBaseEnabledCache = { at: 0, value: true };
+async function getRelayAiBasePlanEnabled() {
+    if (Date.now() - relayAiBaseEnabledCache.at < 15000) return relayAiBaseEnabledCache.value;
+    let value = true;
+    try {
+        const stored = await getPersistentJSON('ai-base-plan-enabled', null);
+        if (stored && typeof stored === 'object' && stored.enabled === false) value = false;
+    } catch (_) { value = relayAiBaseEnabledCache.value; }
+    relayAiBaseEnabledCache = { at: Date.now(), value };
+    return value;
+}
+function setRelayAiBasePlanEnabled(enabled) {
+    const value = enabled !== false;
+    setPersistentJSON('ai-base-plan-enabled', { enabled: value });
+    relayAiBaseEnabledCache = { at: Date.now(), value };
+    return value;
+}
 async function listRelayAiTiers(onlyEnabled = true) {
     const r = await pgPoolDevices.query(
         `SELECT id, name, price_tokens, monthly_credits, daily_cap, sort_order, enabled FROM relay_ai_tiers
@@ -9174,7 +9231,7 @@ app.get('/relay/ai-assistant/plans', requireApiKey, requireAllowedDevice, rateLi
             return res.json({
                 success: true, isFree: true, month: status.month, validUntil: relayAiNextMonthResetMs(),
                 freeTier: relayAiDecoratePlan({ id: 'free', name: 'Free', priceTokens: 0, monthlyCredits: freeCfg.monthlyCredits, dailyCap: freeCfg.dailyNeurons, isFree: true, isCurrent: true, canPurchase: false, costTokens: 0, locked: false, lockedReason: null, textOnly: true }, Number(baseSettings.monthlyCredits) || 0, await getRelayAiPerQuestionNeurons(true)),
-                baseTier: relayAiDecoratePlan({ id: 'base', name: 'Base', priceTokens: 0, monthlyCredits: Number(baseSettings.monthlyCredits) || 0, dailyCap: Number(baseSettings.dailyCap) || 0, isBase: true, isCurrent: false, canPurchase: false, needsSubscription: true, costTokens: 0, locked: false, lockedReason: null }, Number(baseSettings.monthlyCredits) || 0, await getRelayAiPerQuestionNeurons(false)),
+                baseTier: relayAiDecoratePlan({ id: 'base', name: 'Base', priceTokens: 0, monthlyCredits: Number(baseSettings.monthlyCredits) || 0, dailyCap: Number(baseSettings.dailyCap) || 0, isBase: true, isCurrent: false, canPurchase: false, needsSubscription: true, costTokens: 0, locked: false, lockedReason: null, disabled: !(await getRelayAiBasePlanEnabled()) }, Number(baseSettings.monthlyCredits) || 0, await getRelayAiPerQuestionNeurons(false)),
                 currentTier: null,
                 credits: status,
                 plans: await (async () => { const pq = await getRelayAiPerQuestionNeurons(false); return tiers.map((t) => relayAiDecoratePlan({ ...t, isCurrent: false, canPurchase: false, costTokens: 0, locked: true, lockedReason: subMsg, needsSubscription: true }, Number(baseSettings.monthlyCredits) || 0, pq)); })(),
@@ -9207,7 +9264,8 @@ app.get('/relay/ai-assistant/plans', requireApiKey, requireAllowedDevice, rateLi
         const baseSettings = await getRelayAiSettings(installationId);
         const baseTier = relayAiDecoratePlan({
             id: 'base', name: 'Base', priceTokens: 0, monthlyCredits: Number(baseSettings.monthlyCredits) || 0, dailyCap: Number(baseSettings.dailyCap) || 0,
-            isBase: true, isCurrent: !current, canPurchase: false, costTokens: 0, locked: false, lockedReason: null
+            isBase: true, isCurrent: !current, canPurchase: false, costTokens: 0, locked: false, lockedReason: null,
+            disabled: !(await getRelayAiBasePlanEnabled())
         }, decoBaseCredits, decoPq);
         // Ang tier/extra ay valid hanggang katapusan ng buwan, PERO titigil ito kapag nag-expire muna ang Omni AI subscription.
         const subEnt = (issuedUnlocks[installationId] || {}).ai_assistant || null;
@@ -9633,8 +9691,14 @@ app.get('/relay/admin/api/ai-plans', requireAdminKey, async (req, res) => {
         let breakdown = null;
         try { breakdown = await getRelayAiPlanBreakdown(monthKey, tiers, capState); }
         catch (bErr) { console.error('AI plan breakdown error:', bErr.message); }
+        let baseInfo = { enabled: await getRelayAiBasePlanEnabled(), monthlyCredits: null, dailyCap: null };
+        try {
+            const bs = await getRelayAiDefaultSettings();
+            baseInfo = { ...baseInfo, monthlyCredits: Number(bs.monthlyCredits) || 0, dailyCap: Number(bs.dailyCap) || 0 };
+        } catch (_) {}
         return res.json({
             success: true, month: monthKey,
+            base: baseInfo,
             tiers: tiers.map(t => ({ ...t, buyersThisMonth: (byTier[t.id] || {}).buyers || 0, tokensThisMonth: (byTier[t.id] || {}).tokens || 0 })),
             // Naka-SUBSCRIBE (Base/Plus/Pro) = Google. Ang FREE tier (Cloudflare) ay nasa `freeProvider`.
             provider: { exhausted: provider.exhausted, retryAt: provider.retryAt, reason: provider.reason, source: provider.source, detectedAt: provider.detectedAt, model: googleDefaultModelId(), configured: googleUsable(await getAiProviderConfig()) },
@@ -9693,6 +9757,15 @@ app.post('/relay/admin/api/ai-plans/unlock', requireAdminKey, async (req, res) =
     } catch (err) {
         return res.status(500).json({ success: false, message: 'Unable to unlock.' });
     }
+});
+app.get('/relay/admin/api/ai-plans/base', requireAdminKey, async (req, res) => {
+    return res.json({ success: true, enabled: await getRelayAiBasePlanEnabled() });
+});
+app.post('/relay/admin/api/ai-plans/base', requireAdminKey, async (req, res) => {
+    if (typeof req.body?.enabled !== 'boolean') return res.status(400).json({ success: false, message: 'enabled must be true or false.' });
+    const enabled = setRelayAiBasePlanEnabled(req.body.enabled);
+    console.log(`🤖 AI Base plan ${enabled ? 'ENABLED' : 'DISABLED'} via admin.`);
+    return res.json({ success: true, enabled });
 });
 app.post('/relay/admin/api/ai-plans/tier', requireAdminKey, async (req, res) => {
     if (!pgPoolDevices) return res.status(503).json({ success: false, message: 'Devices/License database is not configured.' });

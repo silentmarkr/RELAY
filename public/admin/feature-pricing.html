@@ -447,6 +447,8 @@
             <div id="aiTierMapBox" class="ai-box" style="margin-bottom:10px;">Loading...</div>
             <div style="font-size:12px; font-weight:700; margin:6px 0;">🆓 Free tier (Cloudflare) — settings</div>
             <div id="aiFreeTierBox" class="ai-box" style="margin-bottom:12px;">Loading...</div>
+            <div style="font-size:12px; font-weight:700; margin:6px 0;">✨ Base plan — on/off</div>
+            <div id="aiBasePlanBox" class="ai-box" style="margin-bottom:12px;">Loading...</div>
             <div style="font-size:12px; font-weight:700; margin:6px 0;">💳 Plus / Pro (Google) — mga mabibiling upgrade</div>
             <div id="aiTierList" class="empty">Loading...</div>
             <div style="font-size:12px; font-weight:700; margin:14px 0 6px;">Magdagdag ng bagong tier</div>
@@ -1619,6 +1621,7 @@ async function loadAiPlans(providerOnly) {
   try { data = await aiApi('/relay/admin/api/ai-plans'); } catch (err) { return; }
   if (!data?.success) { if (!providerOnly) toast(data?.message || 'Could not load AI plans.', 'error'); return; }
   aiPlansState = data;
+  renderAiBasePlanBox();
   renderAiProviderBox(data.provider, data.providers);
   renderAiSetupBox();
   renderAiTierMapBox();
@@ -1636,6 +1639,35 @@ async function loadAiPlans(providerOnly) {
   const nw = document.getElementById('aiTierNew');
   if (nw && !nw.innerHTML.trim()) nw.innerHTML = aiTierRowHtml({ enabled: true, sortOrder: (data.tiers.length + 1) }, true);
   aiRefreshTierInsights();
+}
+function renderAiBasePlanBox() {
+  const box = document.getElementById('aiBasePlanBox');
+  if (!box) return;
+  const b = aiPlansState && aiPlansState.base;
+  if (!b) { box.innerHTML = '<div class="meta">Loading...</div>'; return; }
+  const on = b.enabled !== false;
+  box.innerHTML = `
+    <label style="display:flex; gap:8px; align-items:flex-start; font-size:13px;">
+      <input type="checkbox" id="aiBasePlanToggle" ${on ? 'checked' : ''} onchange="saveAiBasePlanEnabled(this)" style="margin-top:3px;">
+      <span><b>Base plan enabled</b> — ${on ? '<span style="color:var(--success,#69db7c);">ON</span>' : '<span style="color:var(--danger,#ff6b6b);">OFF (disabled)</span>'}</span>
+    </label>
+    <div class="meta" style="margin-top:6px;">OFF = the Base card is shown as <b>not available</b> in OmniPOS, and Base is removed from the "Confirm subscription plan" picker when activating a device. Existing subscribers and renewals are not affected. The Plus / Pro / Business cards below (when enabled) are the ones shown in both places.</div>`;
+}
+async function saveAiBasePlanEnabled(el) {
+  const enabled = !!el.checked;
+  el.disabled = true;
+  try {
+    const data = await aiApi('/relay/admin/api/ai-plans/base', { method:'POST', body:JSON.stringify({ enabled }) });
+    if (!data?.success) throw new Error(data?.message || 'Save failed');
+    if (aiPlansState) aiPlansState.base = { ...(aiPlansState.base || {}), enabled: data.enabled };
+    toast(`Base plan ${data.enabled ? 'enabled' : 'disabled'}.`, 'success');
+  } catch (err) {
+    el.checked = !enabled;
+    toast(err.message || 'Could not save the Base plan setting.', 'error');
+  } finally {
+    el.disabled = false;
+    renderAiBasePlanBox();
+  }
 }
 async function saveAiTier(btn) {
   const row = btn.closest('[data-tier]');

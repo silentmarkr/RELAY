@@ -3862,7 +3862,7 @@ async function activateFeature(installationId, featureId, featureName, presetTie
   const isModuleSubscription = featureId === 'rbac_management' || featureId === 'multi_branch' || featureId === 'ai_assistant' || featureId === 'remote_operations';
   const note = await promptForNote(`Activate "${featureName}" for this device right now — no OTP needed. Only use this if you ALREADY HAVE A REFERENCE (already paid/previously unlocked).`);
   if (note === null) return; 
-  let tier = null, billingCycle = null, durationDays;
+  let tier = null, billingCycle = null, durationDays, aiTierId = null;
   if (isCloudBackup) {
     const plan = await promptForCloudBackupPlan(
       `Select the Cloud Backup plan + billing cycle to activate/renew for this device (pricing is pulled live from the current RELAY pricing):`,
@@ -3877,12 +3877,18 @@ async function activateFeature(installationId, featureId, featureName, presetTie
     // so they must go through the same billing-cycle-picker modal instead
     // of the plain duration prompt below — the server rejects activation
     // of these features without a billingCycle.
-    const plan = await promptForModuleSubscriptionPlan(
-      `Select the billing cycle to activate/renew for this device (pricing is pulled live from the current RELAY pricing):`,
-      featureId, presetBillingCycle
-    );
+    const plan = featureId === 'ai_assistant'
+      ? await promptForAiSubscriptionPlan(
+          `Select the Omni AI plan and billing cycle to activate/renew for this device (plans and pricing are pulled live from RELAY → Feature Pricing → Omni AI):`,
+          presetBillingCycle
+        )
+      : await promptForModuleSubscriptionPlan(
+          `Select the billing cycle to activate/renew for this device (pricing is pulled live from the current RELAY pricing):`,
+          featureId, presetBillingCycle
+        );
     if (plan === null) return;
     billingCycle = plan.billingCycle;
+    aiTierId = plan.aiTierId || null;
     durationDays = 0;
   } else {
     durationDays = await promptForDuration(`How long until "${featureName}" should expire? (Also use this to RENEW — just activate the same feature again with a new duration.)`);
@@ -3891,9 +3897,9 @@ async function activateFeature(installationId, featureId, featureName, presetTie
   try {
     const res = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/activate`, {
       method: 'POST',
-      body: JSON.stringify({ featureId, note: note || null, durationDays, tier, billingCycle })
+      body: JSON.stringify({ featureId, note: note || null, durationDays, tier, billingCycle, aiTierId })
     });
-    if (res.success) toast(`${featureName} activated.`, 'success');
+    if (res.success) toast(res.message && featureId === 'ai_assistant' ? `${featureName} activated.${(res.message.match(/ (Omni AI plan:.*|The device already.*|The subscription was activated.*)$/) || [''])[0]}` : `${featureName} activated.`, 'success');
     else toast(res.message || 'Could not activate.', 'error');
   } catch (err) {   }
   loadDeviceDetail();
@@ -3997,6 +4003,89 @@ async function promptForModuleSubscriptionPlan(message, featureId, presetBilling
       resolve(result);
     }
     okBtn.onclick = () => cleanup({ billingCycle: billingSelect.value });
+    cancelBtn.onclick = () => cleanup(null);
+  });
+}
+// Omni AI per-device activation picker. The plan cards are the SAME ones configured in
+// Feature Pricing → Omni AI (Base on/off switch + enabled tiers), so both screens always match.
+async function promptForAiSubscriptionPlan(message, presetBillingCycle) {
+  let plans, aiData;
+  try {
+    const data = await api('/relay/admin/api/pricing');
+    plans = data.moduleSubscriptionPlans;
+    aiData = await api('/relay/admin/api/ai-plans');
+  } catch (err) {
+    toast('Could not load Omni AI pricing — try again.', 'error');
+    return null;
+  }
+  const plan = plans && plans.ai_assistant;
+  if (!plan || !aiData || !aiData.success) {
+    toast('Could not load Omni AI plans — try again.', 'error');
+    return null;
+  }
+  const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const fmt = (n) => Number(n).toLocaleString();
+  const cards = [];
+  const base = aiData.base || { enabled: true };
+  if (base.enabled === false) {
+    // Base is OFF: still allow renewing a device without changing its current plan.
+    cards.push({ id: '__keep', name: 'Keep current plan (renew only)', sub: 'Renews the subscription without changing the device\'s Omni AI plan', extra: 'Base is disabled in Feature Pricing' });
+  }
+  if (base.enabled !== false) {
+    cards.push({ id: 'base', name: 'Base', sub: `${base.monthlyCredits ? fmt(base.monthlyCredits) + ' credits / month' : 'Included with subscription'}${base.dailyCap ? ' · ' + fmt(base.dailyCap) + ' neurons / day' : ''}`, extra: 'Included with subscription' });
+  }
+  (aiData.tiers || []).filter((t) => t.enabled).forEach((t) => {
+    cards.push({ id: t.id, name: t.name, sub: `${fmt(t.monthlyCredits)} credits / month · ${Number(t.dailyCap) === 0 ? 'unlimited' : fmt(t.dailyCap) + ' neurons'} / day`, extra: `${fmt(t.priceTokens)} Omni Tokens value` });
+  });
+  if (!cards.length) {
+    toast('No Omni AI plans are enabled. Enable Base or a tier in Feature Pricing → Omni AI first.', 'error');
+    return null;
+  }
+  return new Promise((resolve) => {
+    const backdrop = document.getElementById('confirmBackdrop');
+    const okBtn = document.getElementById('confirmActionBtn');
+    const cancelBtn = document.getElementById('confirmCancelBtn');
+    document.getElementById('confirmTitle').innerText = 'Confirm subscription plan';
+    document.getElementById('confirmMessage').innerHTML = `${message}<br><br>` +
+      `<div id="aiPlanCards" style="display:flex; flex-direction:column; gap:8px; max-height:40vh; overflow:auto;">` +
+      cards.map((c) => `<button type="button" class="ai-plan-pick" data-plan="${esc(c.id)}" style="text-align:left; padding:10px 12px; border-radius:8px; border:1px solid var(--border-soft); background:var(--bg); color:var(--text); cursor:pointer;">` +
+        `<strong>${esc(c.name)}</strong><br><span style="color:var(--muted); font-size:.8rem;">${esc(c.sub)}</span><br><span style="color:var(--muted); font-size:.75rem;">${esc(c.extra)}</span></button>`).join('') +
+      `</div>` +
+      `<select id="aiBillingSelect" style="width:100%; padding:10px; border-radius:8px; border:1px solid var(--border-soft); background:var(--bg); color:var(--text); margin-top:10px;">` +
+      `<option value="monthly">Monthly</option>` +
+      `<option value="yearly">Yearly</option>` +
+      `</select>` +
+      `<div id="aiPlanPriceLine" style="margin-top:8px; color:var(--muted); font-size:.85rem;"></div>`;
+    okBtn.innerText = '✓ Continue';
+    okBtn.className = 'btn-allow';
+    backdrop.style.display = 'flex';
+    const billingSelect = document.getElementById('aiBillingSelect');
+    const priceLine = document.getElementById('aiPlanPriceLine');
+    const pickBtns = Array.from(document.querySelectorAll('#aiPlanCards .ai-plan-pick'));
+    if (presetBillingCycle) billingSelect.value = presetBillingCycle;
+    let selected = cards[0].id;
+    function paint() {
+      pickBtns.forEach((b) => {
+        const on = b.dataset.plan === selected;
+        b.style.borderColor = on ? 'var(--accent, #2ea043)' : 'var(--border-soft)';
+        b.style.boxShadow = on ? '0 0 0 1px var(--accent, #2ea043)' : 'none';
+      });
+      const price = plan.price[billingSelect.value];
+      const chosen = cards.find((c) => c.id === selected);
+      priceLine.innerText = `${chosen ? chosen.name + ' · ' : ''}₱${price} / ${billingSelect.value === 'yearly' ? 'year' : 'month'}`;
+    }
+    pickBtns.forEach((b) => { b.onclick = () => { selected = b.dataset.plan; paint(); }; });
+    billingSelect.onchange = paint;
+    paint();
+    function cleanup(result) {
+      backdrop.style.display = 'none';
+      okBtn.onclick = null;
+      cancelBtn.onclick = null;
+      billingSelect.onchange = null;
+      pickBtns.forEach((b) => { b.onclick = null; });
+      resolve(result);
+    }
+    okBtn.onclick = () => cleanup({ billingCycle: billingSelect.value, aiTierId: selected });
     cancelBtn.onclick = () => cleanup(null);
   });
 }
