@@ -1169,7 +1169,7 @@ function renderAiGoogleUsageBox(u) {
   const models = Array.isArray(u.models) ? u.models : [];
   const modelsHtml = models.length ? `<div style="font-size:12px; font-weight:700; margin:10px 0 4px;">Per model today</div>
     <div style="overflow-x:auto;"><table style="border-collapse:collapse; width:100%; font-size:12px;">
-      <thead><tr><th style="${tdL} color:var(--muted);">Model</th><th style="${tdR} color:var(--muted);">Tanong</th><th style="${tdR} color:var(--muted);">Neurons</th><th style="${tdR} color:var(--muted);">RPD</th><th style="${tdR} color:var(--muted);">Status</th></tr></thead>
+      <thead><tr><th style="${tdL} color:var(--muted);">Model</th><th style="${tdR} color:var(--muted);">Questions</th><th style="${tdR} color:var(--muted);">Neurons</th><th style="${tdR} color:var(--muted);">RPD</th><th style="${tdR} color:var(--muted);">Status</th></tr></thead>
       <tbody>${models.map((m) => `<tr><td style="${tdL}">${escapeHtml(m.label || m.key)}<div class="meta" style="font-size:10px;">${escapeHtml(m.modelId || '')}</div></td><td style="${tdR}">${n(m.questions)}</td><td style="${tdR}">${n(m.neurons, 1)}</td><td style="${tdR}">${n(m.rpdUsed)}${m.rpdLimit ? ' / ' + n(m.rpdLimit) : ''}</td><td style="${tdR}">${m.enabled === false ? '⚪ OFF' : (m.blocked ? (m.blockKind === 'minute' ? '⏳ rate-limited' : '🚫 daily limit') : '✅ OK')}</td></tr>`).join('')}</tbody>
     </table></div>` : '';
   let notReadyHtml = '';
@@ -1185,25 +1185,37 @@ function renderAiGoogleUsageBox(u) {
       <div style="font-size:12px; margin-top:4px; word-break:break-word;">${escapeHtml(u.lastError.message)}</div>
     </div>`;
   }
+  let projHtml = '';
+  if (u.projectedNeurons !== null && u.projectedNeurons !== undefined) {
+    projHtml = `<div class="meta" style="margin-top:8px;">Pace: ≈ <b>${n(u.ratePerHour, 1)}</b> neurons/hour → projected <b>${n(u.projectedNeurons)}</b> by the next reset${u.projectedPercent !== null && u.projectedPercent !== undefined ? ` (≈${n(u.projectedPercent, 0)}% of today's limit)` : ''}.${u.runOutAt ? ` <span style="color:${colors.critical}; font-weight:700;">At this pace the limit runs out around ${escapeHtml(fmt(u.runOutAt))}.</span>` : (hasLimit ? (Number(u.projectedPercent) >= 95 ? ` <span style="color:#ffa94d; font-weight:700;">Projected to end the day right at the limit.</span>` : ' On track to stay within today\'s limit.') : '')}</div>`;
+  }
+  const hist = Array.isArray(u.history) ? u.history : [];
+  let histHtml = '';
+  if (hist.length) {
+    const rows = hist.map((r) => ({ ...r, today: false })).concat([{ day: u.day || 'today', neurons: u.usedNeurons, requests: u.requests, today: true }]);
+    const mx = Math.max(1, ...rows.map((r) => Number(r.neurons) || 0), hasLimit ? Number(u.limitNeurons) : 0);
+    histHtml = `<div style="font-size:12px; font-weight:700; margin:10px 0 4px;">Last days (Pacific)</div>` + rows.map((r) => `<div style="display:flex; align-items:center; gap:6px; font-size:11px; margin:3px 0;"><span class="meta" style="width:92px; flex:none;">${escapeHtml(r.day)}${r.today ? ' ★' : ''}</span><div style="flex:1; height:8px; border-radius:4px; background:var(--line); overflow:hidden;"><div style="width:${Math.min(100, (Number(r.neurons) || 0) / mx * 100)}%; height:100%; background:${r.today ? color : 'var(--muted)'};"></div></div><span style="width:118px; flex:none; text-align:right;">${n(r.neurons, 1)} · ${n(r.requests)} req</span></div>`).join('');
+  }
   const mainHtml = hasLimit
     ? `<div style="margin:8px 0 4px; height:12px; border-radius:6px; background:var(--line); overflow:hidden;">
         <div style="width:${pct}%; height:100%; background:${color};"></div>
       </div>
-      <div class="meta">Nagamit: <b>${n(u.usedNeurons, 1)}</b> / ${n(u.limitNeurons)} neurons (${n(u.percentUsed, 1)}%) · Natitira: <b>${n(u.remainingNeurons, 1)}</b></div>
+      <div class="meta">Used: <b>${n(u.usedNeurons, 1)}</b> / ${n(u.limitNeurons)} neurons (${n(u.percentUsed, 1)}%) · Remaining: <b>${n(u.remainingNeurons, 1)}</b></div>
       <div class="meta">Limit basis: ${basisTxt}.</div>`
-    : `<div class="meta" style="margin-top:8px;">Nagamit ngayong araw: <b>${n(u.usedNeurons, 1)}</b> neurons-equiv. Hindi makalkula ang <b>natitira</b> dahil walang daily limit na naka-set — ilagay ang Google daily neurons, daily requests o ang RPD ng mga model sa 🔌 Providers.</div>`;
+    : `<div class="meta" style="margin-top:8px;">Used today: <b>${n(u.usedNeurons, 1)}</b> neurons-equiv. The <b>remaining</b> amount cannot be computed because no daily limit is set — enter the Google daily neurons, daily requests or the models' RPD in 🔌 Providers.</div>`;
   box.innerHTML = `<div style="color:${color}; font-weight:700;">${labels[u.level] || labels.ok} · ${planTxt}</div>
     ${mainHtml}
     <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;">
-      ${stat('Natitirang neurons', hasLimit ? n(u.remainingNeurons, 1) : '—', hasLimit ? `of ${n(u.limitNeurons)} today` : 'walang limit na naka-set')}
+      ${stat('Remaining neurons', hasLimit ? n(u.remainingNeurons, 1) : '—', hasLimit ? `of ${n(u.limitNeurons)} today` : 'no limit set')}
       ${stat('Questions that can still be answered', u.remainingQuestions === null || u.remainingQuestions === undefined ? '—' : n(u.remainingQuestions), hasLimit ? `≈ ${n(u.perQuestionNeurons, 1)} neurons/question` : '')}
-      ${stat('Requests today', n(u.requests), u.requestsLimit ? `limit ${n(u.requestsLimit)} · natitira ${n(u.remainingRequests)}` : 'walang request limit')}
+      ${stat('Requests today', n(u.requests), u.requestsLimit ? `limit ${n(u.requestsLimit)} · remaining ${n(u.remainingRequests)}` : 'no request limit')}
       ${stat('Failed calls', n(u.failed), '')}
     </div>
     ${hasLimit ? `<div class="meta" style="margin-top:8px;">The remaining questions are based on the ${perQTxt}. Full day (at 100%): ≈ ${n(u.capacityQuestions)} questions.</div>` : ''}
+    ${projHtml}
     <div class="meta">Tokens today: ${n(u.inputTokens)} input · ${n(u.outputTokens)} output. Next reset: <b>${escapeHtml(fmt(u.resetsAt))}</b> (00:00 Pacific time). Counting day: ${escapeHtml(u.day || '')} (Pacific).</div>
-    ${notReadyHtml}${exhaustedHtml}${lastErrHtml}${modelsHtml}
-    <div class="meta" style="margin-top:8px;">Hindi nagbibigay ang Google ng API para sa natitirang quota, kaya ang bilang na ito ay galing sa RELAY: ang totoong token usage ng bawat sagot na dumaan sa RELAY, ginawang neurons-equivalent (cost-parity: $0.011 / 1,000 neurons), kontra sa daily limit na itinakda mo. Ang gamit na hindi dumaan sa RELAY (hal. AI Studio o ibang app na gamit ang parehong API key) ay hindi nakikita.</div>`;
+    ${notReadyHtml}${exhaustedHtml}${lastErrHtml}${modelsHtml}${histHtml}
+    <div class="meta" style="margin-top:8px;">Google has no API for the remaining quota, so this number comes from RELAY: the real token usage of every answer that passed through RELAY, converted to neurons-equivalent (cost-parity: $0.011 / 1,000 neurons), against the daily limit you set. Usage that did not pass through RELAY (e.g. AI Studio or another app using the same API key) is not visible.</div>`;
 }
 async function loadAiGoogleUsage() {
   let d;
@@ -1904,7 +1916,7 @@ let aiGoogleModelListLoading = false;
 // Ang re-render ng AI Provider box ay nagbubura ng mga hindi pa na-save na input; kunin at ibalik ang mga ito.
 function aiSnapCfgForm() {
   const o = {};
-  document.querySelectorAll('#aiProviderCfgBox input[id^="aiPv"], #aiProviderCfgBox select[id^="aiPv"]').forEach((e) => { o[e.id] = e.type === 'checkbox' ? e.checked : e.value; });
+  document.querySelectorAll('#aiProviderCfgBox input[id^="aiPv"], #aiProviderCfgBox select[id^="aiPv"], #aiProviderCfgBox textarea[id^="aiPv"]').forEach((e) => { o[e.id] = e.type === 'checkbox' ? e.checked : e.value; });
   return o;
 }
 function aiRestoreCfgForm(o) {
@@ -2205,7 +2217,98 @@ async function aiPickGoogleModel(key) {
   const info = (aiGoogleModelList || []).find((x) => x.id === sel.value);
   const idEl = document.getElementById(`aiPv_${key}_modelId`);
   if (idEl) idEl.value = sel.value;
+  aiFillLimitsForModel(key, sel.value);
   await aiAutoFillRates(key, info);
+}
+// Google's API does NOT publish RPM/RPD/TPM (they only exist in AI Studio). RELAY learns them from Google's 429 responses,
+// so when the model changes we fill the three boxes with what was learned for THAT model, and clear the old model's numbers.
+function aiFillLimitsForModel(key, modelId) {
+  const cfgState = aiProviderCfgState;
+  const g = cfgState && cfgState.config && cfgState.config.google;
+  if (!g || !g.models || !g.models[key]) return;
+  const env = (cfgState.envDefaults || {})[key] || '';
+  const id = String(modelId || '').trim() || env;
+  const savedId = g.models[key].modelId || env;
+  const note = document.getElementById(`aiPv_${key}_limNote`);
+  const setNote = (t, color) => { if (note) { note.style.display = ''; note.style.color = color || 'var(--muted)'; note.textContent = t; } };
+  const els = { rpm: document.getElementById(`aiPv_${key}_rpm`), rpd: document.getElementById(`aiPv_${key}_rpd`), tpm: document.getElementById(`aiPv_${key}_tpm`) };
+  if (id === savedId) {
+    // Back to the saved model: restore ITS saved limits (the boxes may still hold the previous pick's numbers).
+    const sv = g.models[key];
+    ['rpm', 'rpd', 'tpm'].forEach((k) => { if (els[k]) els[k].value = Number(sv[k]) || 0; });
+    setNote('Same model as the saved one — its saved limits were restored.');
+    return;
+  }
+  const learned = ((cfgState.status && cfgState.status.google && cfgState.status.google.learnedById) || {})[id];
+  ['rpm', 'rpd', 'tpm'].forEach((k) => { if (els[k]) els[k].value = (learned && learned[k]) ? learned[k] : 0; });
+  if (learned) setNote(`RPM/RPD/TPM filled from the limits Google reported for ${id} (learned from its 429 responses). Press "I-save ang AI Provider" to keep them.`, '#16a34a');
+  else setNote(`The previous model's limits were cleared. Google has no API for RPM/RPD/TPM and RELAY has not seen a 429 for ${id} yet, so they stay 0 (RELAY will learn them automatically at the first 429). You can also type the values from AI Studio > Rate limit.`, '#d97706');
+}
+// ---- Paste from AI Studio > Rate limit (the only place where Google shows RPM / TPM / RPD) ----
+function aiStudioNum(v) {
+  if (/^unlimited$/i.test(String(v).trim())) return Infinity;
+  const m = String(v).replace(/,/g, '').trim().match(/^(\d+(?:\.\d+)?)\s*([KkMm])?$/);
+  if (!m) return null;
+  let x = parseFloat(m[1]);
+  if (m[2]) x *= /k/i.test(m[2]) ? 1e3 : 1e6;
+  return Math.round(x);
+}
+// Each row = model name + category + 3 pairs "used / limit" in the order RPM, TPM, RPD (e.g. "2 / 15", "18.66K / 250K", "36 / 500").
+function aiParseStudioRows(text) {
+  const t = String(text || '').replace(/\r/g, '\n');
+  const re = /(\d[\d.,]*[KkMm]?)(?![A-Za-z0-9])\s*\/\s*(\d[\d.,]*[KkMm]?(?![A-Za-z0-9])|Unlimited)/gi;
+  const cats = /(text-out\s+models|multi-?modal\s+generative\s+models|live\s+api|agents|other\s+models)/ig;
+  // Column order comes from the pasted header when present (RPM / TPM / RPD can be re-ordered in AI Studio); default RPM, TPM, RPD.
+  const firstPair = t.search(/\d[\d.,]*[KkMm]?\s*\/\s*(?:\d|Unlimited)/i);
+  const found = [];
+  (firstPair > 0 ? t.slice(0, firstPair) : '').replace(/\b(RPM|TPM|RPD)\b/gi, (x) => { const k = x.toLowerCase(); if (!found.includes(k)) found.push(k); return x; });
+  const order = found.length === 3 ? found : ['rpm', 'tpm', 'rpd'];
+  const rows = [];
+  let last = 0, m, cur = null;
+  while ((m = re.exec(t))) {
+    const gap = t.slice(last, m.index);
+    last = m.index + m[0].length;
+    if (!cur || /[A-Za-z]/.test(gap)) {
+      cur = { name: gap.replace(cats, ' ').replace(/\s+/g, ' ').trim().replace(/^.*\b(?:RPM|TPM|RPD)\b\s*/i, ''), pairs: [] };
+      rows.push(cur);
+    }
+    cur.pairs.push([aiStudioNum(m[1]), aiStudioNum(m[2])]);
+  }
+  return rows.filter((r) => r.pairs.length >= 3 && r.pairs.slice(0, 3).every((p) => p[0] !== null && p[1] !== null))
+    .map((r) => { r.by = {}; order.forEach((k, i) => { r.by[k] = r.pairs[i]; }); return r; });
+}
+function aiApplyStudioLimits() {
+  const ta = document.getElementById('aiPvStudioPaste');
+  const out = document.getElementById('aiPvStudioResult');
+  const show = (html, color) => { if (out) { out.style.display = ''; out.style.color = color || 'var(--muted)'; out.innerHTML = html; } };
+  const rows = aiParseStudioRows(ta ? ta.value : '');
+  if (!rows.length) { show('No rows found. Copy the table from AI Studio > Rate limit (Model, Category, RPM, TPM, RPD) and paste it here.', 'var(--danger,#ff6b6b)'); return; }
+  const norm = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const env = (aiProviderCfgState && aiProviderCfgState.envDefaults) || {};
+  const lines = [];
+  let okAny = false;
+  [['flashLite', 'Flash-Lite'], ['flash', 'Flash']].forEach(([key, label]) => {
+    const idEl = document.getElementById(`aiPv_${key}_modelId`);
+    if (!idEl) return;
+    const id = String(idEl.value || env[key] || '').trim();
+    if (!id) return;
+    const info = (aiGoogleModelList || []).find((x) => x.id === id);
+    const cands = [id.replace(/-(preview.*|latest|exp.*|\d{3})$/i, ''), info && info.displayName].filter(Boolean).map(norm);
+    let row = rows.find((r) => cands.includes(norm(r.name)));
+    if (!row) row = rows.find((r) => cands.some((c) => norm(r.name).endsWith(c)));
+    if (!row) { lines.push(`⚠️ ${label} (${escapeHtml(id)}): not found in the pasted table. Check that the Model ID matches a model name in AI Studio. Rows read (${rows.length}): ${escapeHtml(rows.slice(0, 8).map((r) => r.name).join(', '))}${rows.length > 8 ? ', …' : ''}`); return; }
+    const raw = [row.by.rpm[1], row.by.tpm[1], row.by.rpd[1]];
+    const [rpm, tpm, rpd] = raw.map((x) => (isFinite(x) ? x : 0)); // Unlimited -> 0 (= no limit in RELAY)
+    const txt = raw.map((x) => (x === Infinity ? 'Unlimited' : x.toLocaleString()));
+    if (raw.every((x) => x === 0)) { lines.push(`🚫 ${label} (${escapeHtml(id)}) = "${escapeHtml(row.name)}": Google shows 0 / 0 / 0 — this model has no quota in this project, so it cannot be used. Nothing was filled.`); return; }
+    const set = (k, v) => { const e = document.getElementById(`aiPv_${key}_${k}`); if (e) e.value = v; };
+    set('rpm', rpm); set('rpd', rpd); set('tpm', tpm);
+    okAny = true;
+    const hit = row.by.rpd[0] >= row.by.rpd[1] && row.by.rpd[1] > 0 ? ' — ⚠️ it already hit its daily limit in the last 28 days' : '';
+    lines.push(`✅ ${label} (${escapeHtml(id)}) = "${escapeHtml(row.name)}": RPM ${txt[0]} · TPM ${txt[1]} · RPD ${txt[2]}${hit}`);
+  });
+  if (okAny) lines.push('Press "I-save ang AI Provider" to keep them.');
+  show(lines.join('<br>') || 'No model is selected.', okAny ? '#16a34a' : '#d97706');
 }
 async function aiGoogleClearLearned() {
   const data = await aiApi('/relay/admin/api/ai-provider', { method: 'POST', body: JSON.stringify({ action: 'google-clear-learned' }) });
@@ -2243,7 +2346,7 @@ function renderAiProviderCfg(d) {
       <label style="font-size:12px; font-weight:700;"><input type="checkbox" id="aiPv_${key}_enabled" ${m.enabled ? 'checked' : ''}> ${label} — available sa OmniAI (client)</label>
       <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; margin-top:6px;">
         ${pickHtml}
-        <label style="font-size:11px; color:var(--muted);">Model ID (blangko = ${escapeHtml(envDefault)})<input type="text" id="aiPv_${key}_modelId" value="${escapeHtml(m.modelId || '')}" placeholder="${escapeHtml(envDefault)}" style="width:100%; margin-top:4px;" onchange="aiAutoFillRates('${key}')"></label>
+        <label style="font-size:11px; color:var(--muted);">Model ID (blangko = ${escapeHtml(envDefault)})<input type="text" id="aiPv_${key}_modelId" value="${escapeHtml(m.modelId || '')}" placeholder="${escapeHtml(envDefault)}" style="width:100%; margin-top:4px;" onchange="aiFillLimitsForModel('${key}', this.value); aiAutoFillRates('${key}')"></label>
         <label style="font-size:11px; color:var(--muted);">Kailangang plan ng client${sel('aiPv_' + key + '_tier', m.requiredTier || '', tierOpts)}</label>
         <label style="font-size:11px; color:var(--muted);">Neurons / 1M input tokens<input type="number" min="0" step="1" id="aiPv_${key}_in" value="${m.inputNeuronsPerM}" style="width:100%; margin-top:4px;"></label>
         <label style="font-size:11px; color:var(--muted);">Neurons / 1M output tokens<input type="number" min="0" step="1" id="aiPv_${key}_out" value="${m.outputNeuronsPerM}" style="width:100%; margin-top:4px;"></label>
@@ -2251,6 +2354,7 @@ function renderAiProviderCfg(d) {
       <div id="aiPv_${key}_rateNote" class="meta" style="margin-top:4px; display:none;"></div>
       <div id="aiPv_${key}_econ" class="meta" style="margin-top:6px;"></div>
       <div style="font-size:11px; color:var(--muted); margin:8px 0 2px;">Limits of this model (get them from AI Studio &gt; Rate limit). When 0, RELAY automatically takes the value from Google 429 response if it is included.</div>
+      <div id="aiPv_${key}_limNote" class="meta" style="margin-bottom:4px; display:none;"></div>
       <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:8px;">
         ${lim('rpm', 'RPM (requests/minuto)')}
         ${lim('rpd', 'RPD (requests/araw)')}
@@ -2285,6 +2389,13 @@ function renderAiProviderCfg(d) {
         <label style="font-size:11px; color:var(--muted);">Paid: requests / araw<input type="number" min="0" step="1" id="aiPvPaidRpd" value="${g.paidDailyRequests}" style="width:100%; margin-top:4px;"></label>
         <label style="font-size:11px; color:var(--muted);">Paid: neurons-equiv / araw<input type="number" min="0" step="1" id="aiPvPaidNeu" value="${g.paidDailyNeurons}" style="width:100%; margin-top:4px;"></label>
       </div>
+      <details style="margin-top:8px; border:1px solid var(--line); border-radius:8px; padding:8px;">
+        <summary style="cursor:pointer; font-size:12px; font-weight:700;">📋 Fill RPM / RPD / TPM from AI Studio (paste)</summary>
+        <div class="meta" style="margin:6px 0;">Google's API does not give these numbers. Open aistudio.google.com/rate-limit, select the table (Model … RPM, TPM, RPD), copy it and paste it below. RELAY reads the row of each model's current Model ID and fills its 3 boxes.</div>
+        <textarea id="aiPvStudioPaste" rows="5" placeholder="Gemini 3.1 Flash Lite  Text-out models  2 / 15  18.66K / 250K  36 / 500" style="width:100%;"></textarea>
+        <div style="margin-top:6px;"><button class="btn-ghost" onclick="aiApplyStudioLimits()">📥 Read the limits</button></div>
+        <div id="aiPvStudioResult" class="meta" style="margin-top:6px; display:none; word-break:break-word;"></div>
+      </details>
       ${modelRow('flashLite', 'Gemini Flash-Lite')}
       ${modelRow('flash', 'Gemini Flash')}
       ${(() => {
@@ -2650,10 +2761,10 @@ function renderAiOverview() {
   }
   if (gu) {
     const gTone = { ok: 'ok', warning: 'warn', critical: 'danger', exhausted: 'danger', unavailable: 'danger', nolimit: 'neutral' }[gu.level] || 'ok';
-    if (Number(gu.limitNeurons) > 0) cards.push(aiKpiHtml('Google neurons natitira', n(gu.remainingNeurons), `${n(gu.usedNeurons)} / ${n(gu.limitNeurons)} nagamit · ≈ ${n(gu.remainingQuestions)} tanong`, gTone, Number(gu.percentUsed) || 0));
-    else cards.push(aiKpiHtml('Google neurons natitira', '—', `${n(gu.usedNeurons)} nagamit · walang limit na naka-set`, 'neutral'));
+    if (Number(gu.limitNeurons) > 0) cards.push(aiKpiHtml('Google neurons natitira', n(gu.remainingNeurons), `${n(gu.usedNeurons)} / ${n(gu.limitNeurons)} used · ≈ ${n(gu.remainingQuestions)} questions`, gTone, Number(gu.percentUsed) || 0));
+    else cards.push(aiKpiHtml('Google neurons natitira', '—', `${n(gu.usedNeurons)} used · no limit set`, 'neutral'));
   } else {
-    cards.push(aiKpiHtml('Google neurons natitira', '—', 'naglo-load...', 'neutral'));
+    cards.push(aiKpiHtml('Google neurons natitira', '—', 'loading...', 'neutral'));
   }
   cards.push(aiKpiHtml('Clients na may Omni AI', `${n(cap.liveClients)}${maxClients > 0 ? ' / ' + n(maxClients) : ''}`,
     maxClients > 0 ? `${n(slotsLeft)} slot(s) free` : 'no limit', (maxClients > 0 && slotsLeft === 0) ? 'warn' : 'neutral'));

@@ -7552,6 +7552,7 @@ let googleLearnedLimits = {};
 let googleMinuteLog = {};
 const GOOGLE_LEARNED_LIMIT_TTL_MS = 30 * 24 * 3600 * 1000;
 let googleUsageStats = null;
+let googleUsageHistory = [];   // mga nakaraang araw (Pacific): { day, requests, neurons, inputTokens, outputTokens, failed } — max 14
 let lastGoogleError = null;
 let googleUsageSaveTimer = null;
 function googleDayInfo(now = Date.now()) {
@@ -7565,9 +7566,21 @@ function googleDayInfo(now = Date.now()) {
         return { day: new Date(now).toISOString().slice(0, 10), nextResetMs: relayAiNextUtcMidnightMs(now) };
     }
 }
+function archiveGoogleUsageDay(s) {
+    try {
+        const row = { day: String(s.day), requests: Number(s.requests) || 0, neurons: Math.round((Number(s.neurons) || 0) * 10) / 10,
+            inputTokens: Number(s.inputTokens) || 0, outputTokens: Number(s.outputTokens) || 0, failed: Number(s.failed) || 0 };
+        googleUsageHistory = googleUsageHistory.filter((h) => h.day !== row.day);
+        googleUsageHistory.push(row);
+        googleUsageHistory.sort((a, b) => (a.day < b.day ? -1 : 1));
+        if (googleUsageHistory.length > 14) googleUsageHistory = googleUsageHistory.slice(-14);
+        try { setPersistentJSON('ai-usage-google-history', googleUsageHistory); } catch (_) {}
+    } catch (_) {}
+}
 function ensureGoogleUsageDay() {
     const di = googleDayInfo();
     if (!googleUsageStats || googleUsageStats.day !== di.day) {
+        if (googleUsageStats && googleUsageStats.day && googleUsageStats.day < di.day && (googleUsageStats.requests > 0 || googleUsageStats.failed > 0)) archiveGoogleUsageDay(googleUsageStats);
         googleUsageStats = { day: di.day, requests: 0, neurons: 0, inputTokens: 0, outputTokens: 0, failed: 0, byModel: {}, byId: {} };
     }
     return googleUsageStats;
@@ -7582,6 +7595,15 @@ function scheduleGoogleUsageSave() {
 }
 async function loadAiGoogleState() {
     try { await getAiProviderConfig(); } catch (_) {}
+    try {
+        const h = await getPersistentJSON('ai-usage-google-history', null);
+        if (Array.isArray(h)) {
+            googleUsageHistory = h.filter((x) => x && typeof x === 'object' && x.day).map((x) => ({
+                day: String(x.day), requests: Number(x.requests) || 0, neurons: Number(x.neurons) || 0,
+                inputTokens: Number(x.inputTokens) || 0, outputTokens: Number(x.outputTokens) || 0, failed: Number(x.failed) || 0
+            })).slice(-14);
+        }
+    } catch (_) {}
     try {
         const v = await getPersistentJSON('ai-provider-state-google', null);
         if (v && typeof v === 'object') {
@@ -9911,6 +9933,7 @@ app.post('/relay/admin/api/ai-provider', requireAdminKey, async (req, res) => {
     } else if (action === 'google-reset-usage') {
         googleUsageStats = null; ensureGoogleUsageDay(); scheduleGoogleUsageSave();
         googleMinuteLog = {};
+        lastGoogleError = null;
     } else if (action === 'google-clear-learned') {
         googleLearnedLimits = {};
         saveGoogleLearnedLimits();
@@ -9953,6 +9976,14 @@ async function buildAiProvidersStatus() {
             limits: lim, resetsAt: googleDayInfo().nextResetMs,
             usage: { day: gu.day, requests: gu.requests, neurons: Math.round(gu.neurons * 10) / 10, inputTokens: gu.inputTokens, outputTokens: gu.outputTokens, failed: gu.failed, byModel: gu.byModel },
             lastError: lastGoogleError ? { ...lastGoogleError } : null,
+            // Mga limit na natutunan mula sa 429 ng Google, bawat modelId (para ma-auto-fill ang RPM/RPD/TPM kapag nagpalit ng model).
+            learnedById: Object.keys(googleLearnedLimits).reduce((o, id) => {
+                const L = googleLearnedLimits[id];
+                if (L && (Date.now() - (Number(L.at) || 0)) < GOOGLE_LEARNED_LIMIT_TTL_MS && (L.rpm > 0 || L.rpd > 0 || L.tpm > 0)) {
+                    o[id] = { rpm: Number(L.rpm) || 0, rpd: Number(L.rpd) || 0, tpm: Number(L.tpm) || 0, at: Number(L.at) || 0 };
+                }
+                return o;
+            }, {}),
             models
         },
         chain: aiDefaultProviderChain(cfg).map((a) => ({ provider: a.provider, modelKey: a.modelKey, modelId: a.modelId })),
@@ -11283,6 +11314,19 @@ async function buildGoogleUsagePayload() {
         remainingQuestions = gx.exhausted ? 0 : remainingRequests;
     }
     const capacityQuestions = hasLimit && perQuestion > 0 ? Math.floor(limit / perQuestion) : null;
+    // PACE / PROJECTION: bilis ng paggamit mula 00:00 Pacific; kailan aabot sa limit kung ganito ang takbo.
+    const nowMs = Date.now();
+    const nextResetMs = googleDayInfo(nowMs).nextResetMs;
+    const elapsedMs = Math.min(86400000, Math.max(0, 86400000 - (nextResetMs - nowMs)));
+    let ratePerHour = null, projectedNeurons = null, runOutAt = null;
+    if (elapsedMs >= 1800000 && used > 0) {
+        ratePerHour = used / (elapsedMs / 3600000);
+        projectedNeurons = ratePerHour * 24;
+        if (hasLimit && !gx.exhausted && used < limit) {
+            const t = nowMs + ((limit - used) / ratePerHour) * 3600000;
+            if (t <= nextResetMs) runOutAt = Math.round(t);
+        }
+    }
     const percentUsed = hasLimit ? Math.min(100, (used / limit) * 100) : 0;
     const usable = googleUsable(cfg);
     let level = 'ok';
@@ -11324,6 +11368,11 @@ async function buildGoogleUsagePayload() {
         perQuestionNeurons: Math.round(perQuestion * 10) / 10,
         perQuestionBasis: useObserved ? 'observed' : 'estimate',
         remainingQuestions, capacityQuestions,
+        ratePerHour: ratePerHour === null ? null : Math.round(ratePerHour * 10) / 10,
+        projectedNeurons: projectedNeurons === null ? null : Math.round(projectedNeurons),
+        runOutAt,
+        projectedPercent: (hasLimit && projectedNeurons !== null) ? Math.round((projectedNeurons / limit) * 1000) / 10 : null,
+        history: googleUsageHistory.filter((h) => h.day !== u.day).slice(-7),
         models,
         lastError: lastGoogleError ? { ...lastGoogleError } : null
     };
