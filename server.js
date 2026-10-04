@@ -8179,7 +8179,7 @@ async function getRelayAiDailyStatus(installationId, dailyCap, clientOrPool = pg
         day: dayKey, unit: 'neurons', used: Math.floor(usedExact), questions, cap,
         unlimited: cap === 0,
         remaining: cap === 0 ? null : Math.max(0, Math.ceil(cap - usedExact)),
-        resetsAt: relayAiNextDayResetMs()
+        resetsAt: relayAiNextDayResetMs(), resetsInMs: Math.max(0, relayAiNextDayResetMs() - Date.now())
     };
 }
 async function getRelayAiCreditStatus(installationId, clientOrPool = pgPoolDevices) {
@@ -8335,7 +8335,7 @@ async function reserveRelayAiCredits(installationId, requestId, body, opts = {})
                 month: monthKey, used, limit: settings.monthlyCredits,
                 remaining: Math.max(0, settings.monthlyCredits - used), settings,
                 tier: settings.tier, ...planInfo,
-                daily: { day: dayKey, unit: 'neurons', used: Math.floor(dNeurons), questions: dQuestions, cap: settings.dailyCap, unlimited: false, remaining: 0, resetsAt: relayAiNextDayResetMs() }
+                daily: { day: dayKey, unit: 'neurons', used: Math.floor(dNeurons), questions: dQuestions, cap: settings.dailyCap, unlimited: false, remaining: 0, resetsAt: relayAiNextDayResetMs(), resetsInMs: Math.max(0, relayAiNextDayResetMs() - Date.now()) }
             } };
         }
         const dailyNeuronsUsed = Number(dailyUp.rows[0].used_neurons) || 0;
@@ -8343,7 +8343,7 @@ async function reserveRelayAiCredits(installationId, requestId, body, opts = {})
             day: dayKey, unit: 'neurons', used: Math.floor(dailyNeuronsUsed), questions: Number(dailyUp.rows[0].used_count) || 0,
             cap: settings.dailyCap, unlimited: settings.dailyCap === 0,
             remaining: settings.dailyCap === 0 ? null : Math.max(0, Math.ceil(settings.dailyCap - dailyNeuronsUsed)),
-            resetsAt: relayAiNextDayResetMs()
+            resetsAt: relayAiNextDayResetMs(), resetsInMs: Math.max(0, relayAiNextDayResetMs() - Date.now())
         };
         const upsert = await client.query(
             `INSERT INTO relay_ai_credit_usage (installation_id, month_key, used_credits)\n             VALUES ($1, $2, $3)\n             ON CONFLICT (installation_id, month_key) DO UPDATE\n             SET used_credits = relay_ai_credit_usage.used_credits + EXCLUDED.used_credits, updated_at = now()\n             WHERE relay_ai_credit_usage.used_credits + EXCLUDED.used_credits <= $4\n             RETURNING used_credits`,
@@ -8563,7 +8563,7 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
                 } catch (_) { /* optional */ }
                 return res.status(402).json({
                     success: false, dailyLimitReached: true, creditsExhausted: false, creditCost: 0, ...reservation.status, daily: dailyOut,
-                    message: `You have reached the Omni AI daily limit (${relayAiFmtNeurons(cap)} neurons per day). It resets at midnight tonight. You can also buy a One-day Boost to keep going now, or upgrade your plan for a higher daily limit.`
+                    message: `You have reached the Omni AI daily limit (${relayAiFmtNeurons(cap)} neurons per day). It resets at ${relayAiResetPhrase(relayAiNextDayResetMs()) || 'midnight tonight'}. You can also buy a One-day Boost to keep going now, or upgrade your plan for a higher daily limit.`
                 });
             }
             if (reservation.reason === 'exhausted') {
