@@ -11244,6 +11244,98 @@ app.post('/relay/admin/api/ai-usage/calibrate', requireAdminKey, async (req, res
         return res.status(503).json({ success: false, message: 'Unable to update AI usage detector.' });
     }
 });
+// ---- ADMIN: Google (Gemini) Neurons Detector — natitirang neurons-equivalent ng Base/Plus/Pro ngayong araw ----
+// Walang API ang Google para sa "natitirang quota", kaya ang numerong ito ay bilang ng RELAY mismo: ang totoong token usage
+// ng bawat sagot × neurons rates ng model (recordGoogleUsage), laban sa daily limit na itinakda ng admin.
+// Limit: (1) Google daily neurons-equiv ng aktibong plan; kung 0 -> (2) Total daily capacity na kinukuha sa requests × neurons/tanong
+// o sa RPD ng mga model. Kung wala pa ring limit, hindi makakalkula ang "natitira" (ipinapakita lang ang nagamit).
+// Ang "araw" ay Pacific time (doon nagre-reset ang Google quota).
+async function buildGoogleUsagePayload() {
+    const cfg = await getAiProviderConfig();
+    try { await getAiNeuronSettings(); } catch (_) {}
+    const u = ensureGoogleUsageDay();
+    const lim = googleActiveLimits(cfg);
+    const gx = getGoogleProviderExhaustion(cfg);
+    const mk = googleDefaultModelKey(cfg) || 'flashLite';
+    const estPerQuestion = computeGoogleCallNeurons(null, mk, cfg).neurons;
+    let limit = 0;
+    let basis = 'none';
+    if (lim.neurons > 0) {
+        limit = lim.neurons; basis = 'neurons';
+    } else {
+        try {
+            const auto = await getRelayAiAutoCapacity();
+            if (auto && auto.capacity > 0) { limit = auto.capacity; basis = auto.basis; }
+        } catch (_) {}
+    }
+    const used = Number(u.neurons) || 0;
+    const hasLimit = limit > 0;
+    const remainingNeurons = hasLimit ? (gx.exhausted ? 0 : Math.max(0, limit - used)) : null;
+    const observedPerQuestion = u.requests > 0 ? used / u.requests : null;
+    const useObserved = u.requests >= 3 && observedPerQuestion !== null && observedPerQuestion > 0;
+    const perQuestion = useObserved ? observedPerQuestion : estPerQuestion;
+    const remainingRequests = lim.requests > 0 ? Math.max(0, lim.requests - u.requests) : null;
+    let remainingQuestions = null;
+    if (hasLimit && perQuestion > 0) {
+        remainingQuestions = Math.floor(remainingNeurons / perQuestion);
+        if (remainingRequests !== null) remainingQuestions = Math.min(remainingQuestions, remainingRequests);
+    } else if (remainingRequests !== null) {
+        remainingQuestions = gx.exhausted ? 0 : remainingRequests;
+    }
+    const capacityQuestions = hasLimit && perQuestion > 0 ? Math.floor(limit / perQuestion) : null;
+    const percentUsed = hasLimit ? Math.min(100, (used / limit) * 100) : 0;
+    const usable = googleUsable(cfg);
+    let level = 'ok';
+    if (!usable) level = 'unavailable';
+    else if (gx.exhausted || (hasLimit && used >= limit)) level = 'exhausted';
+    else if (!hasLimit) level = 'nolimit';
+    else if (percentUsed >= 95) level = 'critical';
+    else if (percentUsed >= 80) level = 'warning';
+    const models = AI_GOOGLE_MODEL_KEYS.map((k) => {
+        const st = googleModelStatus(cfg, k);
+        const row = (u.byModel && u.byModel[k]) || { q: 0, n: 0 };
+        return {
+            key: k, label: st.label, modelId: st.modelId, enabled: st.enabled,
+            questions: Number(row.q) || 0, neurons: Math.round((Number(row.n) || 0) * 10) / 10,
+            rpdUsed: st.used.rpd, rpdLimit: st.effective.rpd, rpmUsed: st.used.rpm, rpmLimit: st.effective.rpm,
+            blocked: !!st.blocked, blockKind: st.blockKind || null, blockUntil: st.blockUntil || null
+        };
+    });
+    return {
+        success: true,
+        day: u.day,
+        timezone: 'America/Los_Angeles',
+        resetsAt: googleDayInfo().nextResetMs,
+        configured: isGoogleAiConfigured(), enabled: !!cfg.google.enabled, usable,
+        plan: cfg.google.plan,
+        limitNeurons: limit,
+        limitBasis: basis,
+        usedNeurons: Math.round(used * 10) / 10,
+        remainingNeurons: remainingNeurons === null ? null : Math.round(remainingNeurons * 10) / 10,
+        percentUsed: Math.round(percentUsed * 10) / 10,
+        level,
+        providerExhausted: !!gx.exhausted,
+        exhaustedReason: gx.exhausted ? gx.reason : '',
+        exhaustedUntil: gx.exhausted ? gx.retryAt : null,
+        exhaustedSource: gx.exhausted ? gx.source : '',
+        requests: u.requests, requestsLimit: lim.requests, remainingRequests,
+        failed: u.failed,
+        inputTokens: u.inputTokens, outputTokens: u.outputTokens,
+        perQuestionNeurons: Math.round(perQuestion * 10) / 10,
+        perQuestionBasis: useObserved ? 'observed' : 'estimate',
+        remainingQuestions, capacityQuestions,
+        models,
+        lastError: lastGoogleError ? { ...lastGoogleError } : null
+    };
+}
+app.get('/relay/admin/api/ai-usage-google', requireAdminKey, async (req, res) => {
+    try {
+        return res.json(await buildGoogleUsagePayload());
+    } catch (err) {
+        console.error('AI Google usage GET error:', err.message);
+        return res.status(503).json({ success: false, message: 'Unable to load Google AI usage detector.' });
+    }
+});
 // ===================================================================
 // SUPPORT TICKETS (OMNIPOS -> RELAY inbox)
 // ===================================================================

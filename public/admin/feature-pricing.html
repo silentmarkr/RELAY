@@ -384,6 +384,7 @@
           <button type="button" class="ai-chip" onclick="aiNavGo('status')">🚦 Status</button>
           <button type="button" class="ai-chip" onclick="aiNavGo('tiers')">🏷️ Tiers</button>
           <button type="button" class="ai-chip" onclick="aiNavGo('usage')">📊 Free pool (Cloudflare)</button>
+          <button type="button" class="ai-chip" onclick="aiNavGo('gusage')">✨ Google neurons</button>
           <button type="button" class="ai-chip" onclick="aiNavGo('extra')">➕ Extra Credits</button>
           <button type="button" class="ai-chip" onclick="aiNavGo('capacity')">🧮 Capacity</button>
           <button type="button" class="ai-chip" onclick="aiNavGo('planner')">🧠 Free Planner</button>
@@ -437,6 +438,18 @@
               <button class="btn-ghost" onclick="aiUsageReset()">♻️ Reset the count</button>
               <button class="btn-ghost" onclick="loadAiUsage()">🔄 Refresh</button>
               <button class="btn-ghost" onclick="aiExportUsageCsv()">⬇️ Export clients (CSV)</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="ai-sec" id="aisec-gusage" data-sec="gusage" data-default-open="1">
+          <summary><span class="ai-sec-title">✨ Base/Plus/Pro — Neurons Detector (Google)</span><span class="ai-sec-sub">Remaining Google neurons today (Pacific time)</span></summary>
+          <div class="ai-sec-body">
+            <div id="aiGoogleUsageBox" class="ai-box">Loading...</div>
+            <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+              <button class="btn-ghost" onclick="loadAiGoogleUsage()">🔄 Refresh</button>
+              <button class="btn-ghost" onclick="aiGoogleResetUsage()">♻️ Reset the Google count</button>
+              <button class="btn-ghost" onclick="aiNavGo('provider')">🔌 Set the Google limit</button>
             </div>
           </div>
         </details>
@@ -1134,6 +1147,76 @@ async function loadAiUsage() {
   renderAiOverview();
   aiRefreshTierInsights();
 }
+let aiGoogleUsageState = null;   // sagot ng /ai-usage-google (Google neurons detector)
+function renderAiGoogleUsageBox(u) {
+  const box = document.getElementById('aiGoogleUsageBox');
+  if (!box) return;
+  if (!u || !u.success) { box.innerHTML = '<div class="meta">Could not load the Google neurons detector. Press Refresh.</div>'; return; }
+  const n = aiUsageN;
+  const colors = { ok: 'var(--success,#69db7c)', warning: '#ffa94d', critical: 'var(--danger,#ff6b6b)', exhausted: 'var(--danger,#ff6b6b)', unavailable: 'var(--danger,#ff6b6b)', nolimit: 'var(--muted)' };
+  const labels = { ok: '✅ OK', warning: '⚠️ Almost used up (80%+)', critical: '🔴 Nearly exhausted (95%+)', exhausted: '🚫 Google EXHAUSTED / locked', unavailable: '⚠️ Google is not available', nolimit: 'ℹ️ No daily limit is set' };
+  const color = colors[u.level] || colors.ok;
+  const hasLimit = Number(u.limitNeurons) > 0;
+  const pct = Math.max(0, Math.min(100, Number(u.percentUsed) || 0));
+  const fmt = (ms) => ms ? new Date(ms).toLocaleString() : '—';
+  const planTxt = u.plan === 'paid' ? '💳 Google Paid' : '🆓 Google Free';
+  const basisTxt = { neurons: 'the Google daily neurons-equiv limit', requests: 'Total daily capacity (daily requests × neurons per question)', 'model-rpd': 'Total daily capacity (RPD of the models × neurons per question)', none: '—' }[u.limitBasis] || '—';
+  const perQTxt = u.perQuestionBasis === 'observed' ? 'average of the real answers today' : 'estimate from the Neurons Planner (not enough answers today yet)';
+  const stat = (label, value, sub) => `<div style="padding:8px; border:1px solid var(--line); border-radius:8px; min-width:120px; flex:1;">
+      <div class="meta" style="font-size:11px;">${label}</div><div style="font-size:18px; font-weight:700;">${value}</div>${sub ? `<div class="meta" style="font-size:11px;">${sub}</div>` : ''}</div>`;
+  const tdL = 'padding:5px 8px; border-bottom:1px solid var(--line); text-align:left; word-break:break-all;';
+  const tdR = 'padding:5px 8px; border-bottom:1px solid var(--line); text-align:right; white-space:nowrap;';
+  const models = Array.isArray(u.models) ? u.models : [];
+  const modelsHtml = models.length ? `<div style="font-size:12px; font-weight:700; margin:10px 0 4px;">Per model today</div>
+    <div style="overflow-x:auto;"><table style="border-collapse:collapse; width:100%; font-size:12px;">
+      <thead><tr><th style="${tdL} color:var(--muted);">Model</th><th style="${tdR} color:var(--muted);">Tanong</th><th style="${tdR} color:var(--muted);">Neurons</th><th style="${tdR} color:var(--muted);">RPD</th><th style="${tdR} color:var(--muted);">Status</th></tr></thead>
+      <tbody>${models.map((m) => `<tr><td style="${tdL}">${escapeHtml(m.label || m.key)}<div class="meta" style="font-size:10px;">${escapeHtml(m.modelId || '')}</div></td><td style="${tdR}">${n(m.questions)}</td><td style="${tdR}">${n(m.neurons, 1)}</td><td style="${tdR}">${n(m.rpdUsed)}${m.rpdLimit ? ' / ' + n(m.rpdLimit) : ''}</td><td style="${tdR}">${m.enabled === false ? '⚪ OFF' : (m.blocked ? (m.blockKind === 'minute' ? '⏳ rate-limited' : '🚫 daily limit') : '✅ OK')}</td></tr>`).join('')}</tbody>
+    </table></div>` : '';
+  let notReadyHtml = '';
+  if (!u.configured) notReadyHtml = '<div class="meta" style="margin-top:8px; color:var(--danger,#ff6b6b);">GOOGLE_AI_API_KEY is missing in RELAY/.env — Google is not in use yet.</div>';
+  else if (!u.usable) notReadyHtml = '<div class="meta" style="margin-top:8px; color:var(--danger,#ff6b6b);">Google AI is OFF (or no Gemini model is enabled) in 🔌 Providers — Base/Plus/Pro cannot use it yet.</div>';
+  let exhaustedHtml = '';
+  if (u.providerExhausted) exhaustedHtml = `<div class="meta" style="margin-top:8px; color:var(--danger,#ff6b6b);">${escapeHtml(u.exhaustedReason || 'Google is exhausted.')}${u.exhaustedUntil ? ' Requests are rejected until ' + escapeHtml(fmt(u.exhaustedUntil)) + '.' : ''}</div>`;
+  let lastErrHtml = '';
+  if (u.lastError && u.lastError.message) {
+    lastErrHtml = `<div style="margin-top:10px; padding:8px; border:1px solid var(--line); border-radius:8px;">
+      <div style="font-size:12px; font-weight:700;">Last error from Google</div>
+      <div class="meta" style="margin-top:2px;">${escapeHtml(fmt(u.lastError.at))}</div>
+      <div style="font-size:12px; margin-top:4px; word-break:break-word;">${escapeHtml(u.lastError.message)}</div>
+    </div>`;
+  }
+  const mainHtml = hasLimit
+    ? `<div style="margin:8px 0 4px; height:12px; border-radius:6px; background:var(--line); overflow:hidden;">
+        <div style="width:${pct}%; height:100%; background:${color};"></div>
+      </div>
+      <div class="meta">Nagamit: <b>${n(u.usedNeurons, 1)}</b> / ${n(u.limitNeurons)} neurons (${n(u.percentUsed, 1)}%) · Natitira: <b>${n(u.remainingNeurons, 1)}</b></div>
+      <div class="meta">Limit basis: ${basisTxt}.</div>`
+    : `<div class="meta" style="margin-top:8px;">Nagamit ngayong araw: <b>${n(u.usedNeurons, 1)}</b> neurons-equiv. Hindi makalkula ang <b>natitira</b> dahil walang daily limit na naka-set — ilagay ang Google daily neurons, daily requests o ang RPD ng mga model sa 🔌 Providers.</div>`;
+  box.innerHTML = `<div style="color:${color}; font-weight:700;">${labels[u.level] || labels.ok} · ${planTxt}</div>
+    ${mainHtml}
+    <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;">
+      ${stat('Natitirang neurons', hasLimit ? n(u.remainingNeurons, 1) : '—', hasLimit ? `of ${n(u.limitNeurons)} today` : 'walang limit na naka-set')}
+      ${stat('Questions that can still be answered', u.remainingQuestions === null || u.remainingQuestions === undefined ? '—' : n(u.remainingQuestions), hasLimit ? `≈ ${n(u.perQuestionNeurons, 1)} neurons/question` : '')}
+      ${stat('Requests today', n(u.requests), u.requestsLimit ? `limit ${n(u.requestsLimit)} · natitira ${n(u.remainingRequests)}` : 'walang request limit')}
+      ${stat('Failed calls', n(u.failed), '')}
+    </div>
+    ${hasLimit ? `<div class="meta" style="margin-top:8px;">The remaining questions are based on the ${perQTxt}. Full day (at 100%): ≈ ${n(u.capacityQuestions)} questions.</div>` : ''}
+    <div class="meta">Tokens today: ${n(u.inputTokens)} input · ${n(u.outputTokens)} output. Next reset: <b>${escapeHtml(fmt(u.resetsAt))}</b> (00:00 Pacific time). Counting day: ${escapeHtml(u.day || '')} (Pacific).</div>
+    ${notReadyHtml}${exhaustedHtml}${lastErrHtml}${modelsHtml}
+    <div class="meta" style="margin-top:8px;">Hindi nagbibigay ang Google ng API para sa natitirang quota, kaya ang bilang na ito ay galing sa RELAY: ang totoong token usage ng bawat sagot na dumaan sa RELAY, ginawang neurons-equivalent (cost-parity: $0.011 / 1,000 neurons), kontra sa daily limit na itinakda mo. Ang gamit na hindi dumaan sa RELAY (hal. AI Studio o ibang app na gamit ang parehong API key) ay hindi nakikita.</div>`;
+}
+async function loadAiGoogleUsage() {
+  let d;
+  try { d = await aiApi('/relay/admin/api/ai-usage-google'); } catch (e) { d = null; }
+  if (!d || !d.success) {
+    const box = document.getElementById('aiGoogleUsageBox');
+    if (box && !aiGoogleUsageState) box.innerHTML = `<div class="meta">${escapeHtml((d && d.message) || 'Could not load the Google neurons detector.')}</div>`;
+    return;
+  }
+  aiGoogleUsageState = d;
+  renderAiGoogleUsageBox(d);
+  renderAiOverview();
+}
 async function aiUsageCalibrate() {
   const inp = document.getElementById('aiUsageCalibrateInput');
   const raw = String(inp ? inp.value : '').trim();
@@ -1627,6 +1710,7 @@ async function loadAiPlans(providerOnly) {
   renderAiTierMapBox();
   renderAiOverview();
   loadAiUsage();
+  loadAiGoogleUsage();
   if (providerOnly) return;
   loadAiProviderCfg();
   renderAiBreakdownBox(data.breakdown ? { ...data.breakdown, month: data.month } : null, data.capacity);
@@ -2345,6 +2429,7 @@ async function aiGoogleResetUsage() {
   if (!data?.success) { toast(data?.message || 'Could not reset Google usage.', 'error'); return; }
   toast('The Google count for today has been reset.', 'success');
   loadAiProviderCfg();
+  loadAiGoogleUsage();
 }
 async function aiProviderAction(action, provider) {
   try {
@@ -2549,6 +2634,7 @@ function renderAiOverview() {
     ? aiExtraState.packs.reduce((s, x) => s + (Number(x.tokensThisMonth) || 0), 0) : 0;
   const totalTokens = tierTokens + extraTokens;
   const fp = p.freeProvider || {};
+  const gu = (aiGoogleUsageState && aiGoogleUsageState.success) ? aiGoogleUsageState : null;
   const cards = [];
   cards.push(aiKpiHtml('Base/Plus/Pro (Google)', prov.exhausted ? (prov.source === 'not-configured' ? '⚠️ Not set up' : '🚫 Locked') : '✅ Online',
     prov.exhausted ? (prov.retryAt ? `hanggang ${escapeHtml(fmt(prov.retryAt))}` : escapeHtml(prov.reason || '')) : escapeHtml(prov.model || 'Google'), prov.exhausted ? 'danger' : 'ok'));
@@ -2561,6 +2647,13 @@ function renderAiOverview() {
   } else {
     cards.push(aiKpiHtml('Free pool ngayong araw', '—', 'naglo-load...', 'neutral'));
     cards.push(aiKpiHtml('Free questions today', '—', 'loading...', 'neutral'));
+  }
+  if (gu) {
+    const gTone = { ok: 'ok', warning: 'warn', critical: 'danger', exhausted: 'danger', unavailable: 'danger', nolimit: 'neutral' }[gu.level] || 'ok';
+    if (Number(gu.limitNeurons) > 0) cards.push(aiKpiHtml('Google neurons natitira', n(gu.remainingNeurons), `${n(gu.usedNeurons)} / ${n(gu.limitNeurons)} nagamit · ≈ ${n(gu.remainingQuestions)} tanong`, gTone, Number(gu.percentUsed) || 0));
+    else cards.push(aiKpiHtml('Google neurons natitira', '—', `${n(gu.usedNeurons)} nagamit · walang limit na naka-set`, 'neutral'));
+  } else {
+    cards.push(aiKpiHtml('Google neurons natitira', '—', 'naglo-load...', 'neutral'));
   }
   cards.push(aiKpiHtml('Clients na may Omni AI', `${n(cap.liveClients)}${maxClients > 0 ? ' / ' + n(maxClients) : ''}`,
     maxClients > 0 ? `${n(slotsLeft)} slot(s) free` : 'no limit', (maxClients > 0 && slotsLeft === 0) ? 'warn' : 'neutral'));
@@ -2583,6 +2676,10 @@ function renderAiOverview() {
     if (u.level === 'exhausted') add('danger', 'The daily neurons of the Free pool are used up for today.', 'usage');
     else if (u.level === 'critical') add('danger', `The Free pool is almost used up (${n(u.percentUsed, 1)}% used).`, 'usage');
     else if (u.level === 'warning') add('warn', `The Free pool is nearly used up (${n(u.percentUsed, 1)}% used).`, 'usage');
+  }
+  if (gu && Number(gu.limitNeurons) > 0) {
+    if (gu.level === 'critical') add('danger', `Google (Base/Plus/Pro) is almost used up (${n(gu.percentUsed, 1)}% used) — ${n(gu.remainingNeurons)} neurons left today.`, 'gusage');
+    else if (gu.level === 'warning') add('warn', `Google (Base/Plus/Pro) is nearly used up (${n(gu.percentUsed, 1)}% used) — ${n(gu.remainingNeurons)} neurons left today.`, 'gusage');
   }
   if (!cap.enabled) add('warn', 'The Google Total daily capacity is OFF — the extra credit formula and tier auto-lock will not work. Set the Google requests/neurons or RPD in 🔌 Providers.', 'capacity');
   else {
