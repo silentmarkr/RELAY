@@ -1862,7 +1862,9 @@ const AI_ECON_FIELDS = [
   ['avgInputTokens', 'aiPvEc_in'], ['avgOutputTokens', 'aiPvEc_out'], ['heavyInputTokens', 'aiPvEc_hin'],
   ['heavyOutputTokens', 'aiPvEc_hout'], ['creditsPerQuestion', 'aiPvEc_cpq'],
   ['antiLossEnabled', 'aiPvEc_al_on'], ['antiLossFloorRates', 'aiPvEc_al_floor'], ['antiLossBlockSales', 'aiPvEc_al_block'],
-  ['antiLossAutoCaps', 'aiPvEc_al_auto'], ['antiLossMinProfitPercent', 'aiPvEc_al_min']
+  ['antiLossAutoCaps', 'aiPvEc_al_auto'], ['antiLossMinProfitPercent', 'aiPvEc_al_min'],
+  ['antiLossClientBudget', 'aiPvEc_al_budget'], ['antiLossClientBudgetPercent', 'aiPvEc_al_budgetpct'],
+  ['autoPriceEnabled', 'aiPvEc_ap_on'], ['autoPriceStep', 'aiPvEc_ap_step'], ['autoPriceCharm', 'aiPvEc_ap_charm'], ['autoPriceMaxStepPercent', 'aiPvEc_ap_max']
 ];
 function aiEconReadSettings() {
   const o = {};
@@ -1959,7 +1961,57 @@ function aiEconSlotHtml(s, data) {
     <div style="margin-top:2px;">Recommended neurons / 1M tokens: <b>in ${n(s.recommended.in)}</b> · <b>out ${n(s.recommended.out)}</b> <span style="color:var(--muted);">(${escapeHtml(basisNote)})</span></div>
     <div style="margin-top:4px;">${rateLine}</div>${table}${addons}</div>`;
 }
+function aiRenderAutoPrice(data) {
+  const box = document.getElementById('aiAutoPrice');
+  if (!box) return;
+  const a = data && data.autoPrice;
+  if (!a) { box.innerHTML = ''; return; }
+  const n = (x) => Number(x || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+  const tg = (data.settings && data.settings.targetMarginPercent) || 50;
+  const label = (it) => it.kind === 'tier' ? `<b>${escapeHtml(it.name)}</b> plan` : (it.kind === 'pack' ? `<b>${escapeHtml(it.name)}</b> pack` : `<b>${escapeHtml(it.name)}</b>`);
+  const rows = (a.items || []).map((it) => {
+    const act = it.action === 'raise' ? `<span style="color:#d97706; font-weight:700;">↑ raise</span>` : (it.action === 'lower' ? `<span style="color:var(--muted);">↓ could lower</span>` : '<span style="color:#16a34a;">✅ ok</span>');
+    return `<tr><td>${label(it)}</td><td style="text-align:right;">${n(it.currentPrice)}</td><td style="text-align:right;">${n(it.profitPct)}%</td><td style="text-align:right;">${n(it.recommendedPrice)}</td><td>${act}</td></tr>`;
+  }).join('');
+  const hasRaise = (a.items || []).some((it) => it.action === 'raise');
+  const hasLower = (a.items || []).some((it) => it.action === 'lower');
+  const log = (data.autoPriceLog || []).map((l) => `<div>${new Date(l.at).toLocaleString()} · ${escapeHtml(l.name)}: ${n(l.from)} → <b>${n(l.to)}</b> tokens (₱${n(l.fx)}/$1, ${escapeHtml(l.mode)})</div>`).join('');
+  box.innerHTML = `<div>Rate ₱${n(a.fx)}/$1 · target ${n(tg)}% · auto ${a.enabled ? '<b style="color:#16a34a;">ON</b> (raise only, max ' + n(a.maxStepPercent) + '%/hour)' : '<b>OFF</b>'}</div>
+    ${rows ? `<div style="overflow-x:auto; margin-top:4px;"><table style="width:100%; border-collapse:collapse; font-size:11px;"><thead><tr style="text-align:left; color:var(--muted);"><th>Item</th><th style="text-align:right;">Now</th><th style="text-align:right;">Profit</th><th style="text-align:right;">Suggested</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div style="margin-top:4px;">No items to price yet.</div>'}
+    <div style="margin-top:6px; display:flex; gap:8px; flex-wrap:wrap;">${hasRaise ? '<button class="btn-ghost" onclick="aiApplyAutoPrices(\'raise\')">Raise prices</button>' : ''}${hasLower ? '<button class="btn-ghost" onclick="aiApplyAutoPrices(\'all\')">Apply all</button>' : ''}</div>
+    ${log ? `<div style="margin-top:6px;"><b>Recent changes</b>${log}</div>` : ''}
+    <div style="margin-top:4px;">Applies to new purchases only.</div>`;
+}
+async function aiApplyAutoPrices(mode) {
+  const msg = mode === 'all' ? 'Apply all suggested prices (may lower some)?' : 'Raise prices below the target profit?';
+  if (!confirm(msg)) return;
+  const data = await aiApi('/relay/admin/api/ai-providers/economics/auto-price', { method: 'POST', body: JSON.stringify({ mode }) });
+  if (!data?.success) { toast(data?.message || 'Could not update prices.', 'error'); return; }
+  const c = data.changes || [];
+  toast(c.length ? 'Updated: ' + c.map((x) => `${x.name} ${Number(x.from).toLocaleString()} → ${Number(x.to).toLocaleString()}`).join(', ') : 'No changes needed.', 'success');
+  if (typeof loadAiPlans === 'function') loadAiPlans(true);
+  aiScheduleEconomics(0);
+}
+let aiLedgerAt = 0;
+async function aiLoadClientLedger(force) {
+  const box = document.getElementById('aiClientLedger');
+  if (!box) return;
+  if (!force && Date.now() - aiLedgerAt < 30000) return;
+  aiLedgerAt = Date.now();
+  const d = await aiApi('/relay/admin/api/ai-providers/client-ledger');
+  if (!d || !d.success) { box.textContent = (d && d.message) || 'Could not load the ledger.'; return; }
+  const n = (x) => Number(x || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+  const badge = (st) => st === 'blocked' ? '<span style="color:var(--danger,#ff6b6b); font-weight:700;">⛔ BLOCKED</span>' : (st === 'warn' ? '<span style="color:#d97706; font-weight:700;">⚠️ near limit</span>' : (st === 'no-revenue' ? '<span style="color:var(--muted);">no payment</span>' : '<span style="color:#16a34a; font-weight:700;">✅ ok</span>'));
+  if (!d.clients.length) { box.innerHTML = `No usage recorded yet for ${escapeHtml(d.month)}.`; return; }
+  const t = d.totals || {};
+  const rows = d.clients.map((c) => `<tr><td>${escapeHtml(String(c.installationId).slice(0, 8))}…</td><td>${escapeHtml(c.tier || '—')}</td><td style="text-align:right;">${n(c.questions)}</td><td style="text-align:right;">₱${n(c.costPhp)}</td><td style="text-align:right;">₱${n(c.netPhp)}</td><td style="text-align:right;">${c.usedBudgetPct === null ? '—' : n(c.usedBudgetPct) + '%'}</td><td style="text-align:right;">${c.profitPct === null ? '—' : n(c.profitPct) + '%'}</td><td>${badge(c.status)}</td></tr>`).join('');
+  box.innerHTML = `<div>₱${n(d.fx)}/$1 · budget ${n(d.budgetPercent)}% · cap ${d.enabled ? '<b style="color:#16a34a;">ON</b>' : '<b>OFF</b>'} · total cost <b>₱${n(t.costPhp)}</b> of <b>₱${n(t.netPhp)}</b>${t.profitPct === null || t.profitPct === undefined ? '' : ` (${n(t.profitPct)}% profit)`}${t.blocked ? ` · <b style="color:var(--danger,#ff6b6b);">${t.blocked} blocked</b>` : ''}${t.warn ? ` · ${t.warn} near limit` : ''}</div>
+    <div style="overflow-x:auto; margin-top:4px;"><table style="width:100%; border-collapse:collapse; font-size:11px;"><thead><tr style="text-align:left; color:var(--muted);"><th>Client</th><th>Plan</th><th style="text-align:right;">Qs</th><th style="text-align:right;">Cost</th><th style="text-align:right;">Paid</th><th style="text-align:right;">Budget</th><th style="text-align:right;">Profit</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div style="margin-top:4px;">Blocked clients see "temporarily unavailable" until renewal or a new purchase. Clients with no recorded payment are never blocked.</div>`;
+}
 function aiRenderGuard(data) {
+  try { aiLoadClientLedger(false); } catch (_) {}
+  try { aiRenderAutoPrice(data); } catch (_) {}
   const box = document.getElementById('aiEconGuard');
   if (!box) return;
   const g = data && data.antiLoss;
@@ -1981,7 +2033,7 @@ function aiRenderGuard(data) {
   const anyBlocked = [].concat(g.tiers || [], g.packs || [], g.boosts || []).some((x) => x.blocked);
   const anyTierBlocked = (g.tiers || []).some((t) => t.blocked && t.safeDailyCap >= 1);
   box.innerHTML = `<div style="border-top:1px dashed var(--line); padding-top:6px; margin-top:6px;">
-    <div style="font-weight:700;">🛡️ Anti-loss status <span style="color:var(--muted); font-weight:400;">(saved settings) · rate floor ${on(g.floorRates)} · block unsafe sales ${on(g.blockSales)} · auto-lower plans ${on(g.autoCaps)} · minimum profit ${g.minProfitPercent}%</span></div>
+    <div style="font-weight:700;">🛡️ Anti-loss status <span style="color:var(--muted); font-weight:400;">(saved settings) · rate floor ${on(g.floorRates)} · block unsafe sales ${on(g.blockSales)} · auto-lower plans ${on(g.autoCaps)} · budget cap ${on(g.clientBudget)} (${g.clientBudgetPercent}%) · min profit ${g.minProfitPercent}%</span></div>
     <div style="margin-top:4px; display:grid; gap:3px;">${tiers}${packs}${boosts}</div>
     ${anyTierBlocked ? `<div style="margin-top:6px; display:flex; gap:8px; flex-wrap:wrap;"><button class="btn-ghost" onclick="aiLowerUnsafeCaps('anti')">Lower ALL unsafe plans to the safe daily neurons</button><button class="btn-ghost" onclick="aiLowerUnsafeCaps('target')">Lower them to the ${data.settings.targetMarginPercent}% target profit instead</button></div>` : ''}
     ${anyBlocked ? '<div style="margin-top:4px; color:var(--muted);">Customers see unsafe items as "temporarily unavailable". Plans that were already sold keep the daily neurons they were sold with until they renew.</div>' : ''}
@@ -2166,6 +2218,22 @@ function renderAiProviderCfg(d) {
             <label style="font-size:11px; color:var(--muted);">Do not sell plans / packs / boosts that lose money<select id="aiPvEc_al_block" style="width:100%; margin-top:4px;"><option value="1" ${val('antiLossBlockSales', true) ? 'selected' : ''}>ON (recommended)</option><option value="0" ${val('antiLossBlockSales', true) ? '' : 'selected'}>OFF</option></select></label>
             <label style="font-size:11px; color:var(--muted);">Automatically lower unsafe plans' daily neurons<select id="aiPvEc_al_auto" style="width:100%; margin-top:4px;"><option value="0" ${val('antiLossAutoCaps', false) ? '' : 'selected'}>OFF (use the button)</option><option value="1" ${val('antiLossAutoCaps', false) ? 'selected' : ''}>ON</option></select></label>
             ${inp('aiPvEc_al_min', 'Minimum profit % (below this, an item is unsafe)', 'antiLossMinProfitPercent', 10, 1)}
+            <label style="font-size:11px; color:var(--muted);">Client budget cap<select id="aiPvEc_al_budget" style="width:100%; margin-top:4px;"><option value="1" ${val('antiLossClientBudget', true) ? 'selected' : ''}>ON (recommended)</option><option value="0" ${val('antiLossClientBudget', true) ? '' : 'selected'}>OFF</option></select></label>
+            ${inp('aiPvEc_al_budgetpct', 'Budget % of net paid', 'antiLossClientBudgetPercent', 80, 1)}
+          </div>
+          <div style="margin-top:8px; padding-top:6px; border-top:1px dashed var(--line);">
+            <b style="font-size:12px;">💱 Auto price (live PHP per USD)</b>
+            <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:8px; margin-top:6px;">
+              <label style="font-size:11px; color:var(--muted);">Auto-raise prices<select id="aiPvEc_ap_on" style="width:100%; margin-top:4px;"><option value="0" ${val('autoPriceEnabled', false) ? '' : 'selected'}>OFF (use the button)</option><option value="1" ${val('autoPriceEnabled', false) ? 'selected' : ''}>ON</option></select></label>
+              ${inp('aiPvEc_ap_step', 'Round up to nearest', 'autoPriceStep', 10, 1)}
+              <label style="font-size:11px; color:var(--muted);">Price ending<select id="aiPvEc_ap_charm" style="width:100%; margin-top:4px;"><option value="1" ${val('autoPriceCharm', true) ? 'selected' : ''}>Ends in 9 (249)</option><option value="0" ${val('autoPriceCharm', true) ? '' : 'selected'}>Exact (250)</option></select></label>
+              ${inp('aiPvEc_ap_max', 'Max raise per run %', 'autoPriceMaxStepPercent', 30, 1)}
+            </div>
+            <div id="aiAutoPrice" class="meta" style="margin-top:6px;"></div>
+          </div>
+          <div style="margin-top:8px;">
+            <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;"><b style="font-size:12px;">📒 Client cost ledger (this month)</b><button class="btn-ghost" onclick="aiLoadClientLedger(true)">Refresh</button></div>
+            <div id="aiClientLedger" class="meta" style="margin-top:4px;">Loading…</div>
           </div>
           <div class="meta" style="margin-top:4px;">The protection works from the SAVED calculator settings — press "Save calculator settings" after changing it. Worst case = a customer uses every credit and the full daily neurons for 30 days.</div>
         </details>
@@ -2173,7 +2241,7 @@ function renderAiProviderCfg(d) {
         <details style="margin-top:6px;"><summary style="cursor:pointer; font-size:12px;">Calculator settings</summary>
           <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; margin-top:6px;">
             <label style="font-size:11px; color:var(--muted);">PHP per USD source<select id="aiPvEc_fx" style="width:100%; margin-top:4px;"><option value="auto" ${val('fxMode', 'auto') === 'auto' ? 'selected' : ''}>Live rate (auto)</option><option value="manual" ${val('fxMode', 'auto') === 'manual' ? 'selected' : ''}>Manual</option></select></label>
-            ${inp('aiPvEc_php', 'PHP per USD (manual / fallback)', 'phpPerUsd', 58, 0.01)}
+            ${inp('aiPvEc_php', 'PHP per USD (manual / fallback)', 'phpPerUsd', 62.6, 0.01)}
             ${inp('aiPvEc_ptok', 'PHP per Omni Token', 'phpPerToken', 1, 0.01)}
             ${inp('aiPvEc_fee', 'Payment fee % (taken from price)', 'feePercent', 3, 0.1)}
             ${inp('aiPvEc_target', 'Target profit %', 'targetMarginPercent', 50, 1)}

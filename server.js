@@ -394,6 +394,19 @@ async function ensureDeviceLicenseSchema() {
     // used_count = bilang ng tanong (info lang); used_neurons = ang TOTOONG neurons na nagamit ng client
     // ngayong araw — ito na ang binabantayan ng daily cap.
     await pgPoolDevices.query(`ALTER TABLE relay_ai_daily_usage ADD COLUMN IF NOT EXISTS used_neurons DOUBLE PRECISION NOT NULL DEFAULT 0`);
+    // Cost ledger: real Google cost (USD) per client per month, from actual token usage.
+    await pgPoolDevices.query(`
+        CREATE TABLE IF NOT EXISTS relay_ai_cost_ledger (
+            installation_id TEXT NOT NULL,
+            month_key       TEXT NOT NULL,
+            cost_usd        DOUBLE PRECISION NOT NULL DEFAULT 0,
+            questions       INTEGER NOT NULL DEFAULT 0,
+            input_tokens    BIGINT NOT NULL DEFAULT 0,
+            output_tokens   BIGINT NOT NULL DEFAULT 0,
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (installation_id, month_key)
+        );
+    `);
     await pgPoolDevices.query(`
         CREATE TABLE IF NOT EXISTS relay_ai_tiers (
             id              TEXT PRIMARY KEY,
@@ -4091,8 +4104,8 @@ function getCloudBackupTierPricePHP(tier) {
 // sa UI kung "live" o "fallback" ang rate na ginamit, kasama ang oras
 // noong huling successful fetch.
 // UPDATED 2026-09-28: mid-market USD->PHP ~62.4-62.5 (Wise/Xe/Pluang). Fallback lang ito kapag pumalya ang live fetch.
-const EXCHANGE_RATE_FALLBACK_USD_TO_PHP = 62.5;
-const EXCHANGE_RATE_FALLBACK_NOTE_DATE = '2026-09';
+const EXCHANGE_RATE_FALLBACK_USD_TO_PHP = 62.6;
+const EXCHANGE_RATE_FALLBACK_NOTE_DATE = '2026-10';
 const EXCHANGE_RATE_CACHE_MS = 6 * 60 * 60 * 1000;
 let exchangeRateCache = { at: 0, rate: null, source: null, fetchedAt: null };
 async function getUsdToPhpRate() {
@@ -8529,6 +8542,16 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
         console.log(`⏹️ Omni AI request cancelled by client (${installationId.slice(0, 8)}…): provider call stopped, credits refunded, no neurons charged.`);
     };
     try {
+        // Anti-loss: stop answering a client whose real Google cost reached his budget.
+        if (!isFree) {
+            const bg = await relayAiClientBudgetCheck(installationId);
+            if (bg && bg.status === 'blocked') {
+                return res.status(503).json({
+                    success: false, budgetLimitReached: true, creditCost: 0,
+                    message: 'Omni AI is temporarily unavailable. Please try again later.'
+                });
+            }
+        }
         const reservation = await reserveRelayAiCredits(installationId, requestId, req.body, { free: isFree });
         if (!reservation.ok) {
             if (reservation.reason === 'daily_cap') {
@@ -8627,6 +8650,8 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
             const gCalc = computeGoogleCallNeurons(result.cfUsage, usedAttempt.modelKey, providerCfg);
             recordGoogleUsage(usedAttempt.modelKey, gCalc);
             answerNeurons = gCalc.neurons;
+            // Record the real cost of this answer in the client ledger.
+            if (!isFree) await recordRelayAiClientCost(installationId, relayAiActualCostUsd(usedAttempt.modelId, result.cfUsage, gCalc.neurons));
         } else {
             recordAiQuestionUsage(installationId, result.cfUsage, !!req.body?.vision);
             answerNeurons = computeAiCallNeurons(result.cfUsage, !!req.body?.vision).neurons;
@@ -10174,10 +10199,12 @@ function suggestGoogleRates(modelId) {
 }
 // ---- Profit calculator settings + FX ----
 const AI_ECON_DEFAULTS = {
-    fxMode: 'auto', phpPerUsd: 58, phpPerToken: 1, feePercent: 3, targetMarginPercent: 50, expectedUsagePercent: 50,
+    fxMode: 'auto', phpPerUsd: 62.6, phpPerToken: 1, feePercent: 3, targetMarginPercent: 50, expectedUsagePercent: 50,
     priceBasis: 'safe', avgInputTokens: 4000, avgOutputTokens: 350, heavyInputTokens: 10000, heavyOutputTokens: 650,
     creditsPerQuestion: 1, daysPerMonth: 30,
-    antiLossEnabled: true, antiLossFloorRates: true, antiLossBlockSales: true, antiLossAutoCaps: false, antiLossMinProfitPercent: 10
+    antiLossEnabled: true, antiLossFloorRates: true, antiLossBlockSales: true, antiLossAutoCaps: false, antiLossMinProfitPercent: 10,
+    antiLossClientBudget: true, antiLossClientBudgetPercent: 80,
+    autoPriceEnabled: false, autoPriceStep: 10, autoPriceCharm: true, autoPriceMaxStepPercent: 30
 };
 function normalizeAiEconSettings(src) {
     const s = (src && typeof src === 'object') ? src : {};
@@ -10186,7 +10213,8 @@ function normalizeAiEconSettings(src) {
     const bool = (v, d) => (v === true || v === 1 || v === '1' || v === 'true') ? true : ((v === false || v === 0 || v === '0' || v === 'false') ? false : d);
     return {
         fxMode: s.fxMode === 'manual' ? 'manual' : 'auto',
-        phpPerUsd: n(s.phpPerUsd, D.phpPerUsd, 1, 1000),
+        // The old default 58 is outdated; it is replaced by the new default.
+        phpPerUsd: (Number(s.phpPerUsd) === 58) ? D.phpPerUsd : n(s.phpPerUsd, D.phpPerUsd, 1, 1000),
         phpPerToken: n(s.phpPerToken, D.phpPerToken, 0.01, 1000),
         feePercent: n(s.feePercent, D.feePercent, 0, 60),
         targetMarginPercent: n(s.targetMarginPercent, D.targetMarginPercent, 0, 95),
@@ -10202,7 +10230,13 @@ function normalizeAiEconSettings(src) {
         antiLossFloorRates: bool(s.antiLossFloorRates, D.antiLossFloorRates),
         antiLossBlockSales: bool(s.antiLossBlockSales, D.antiLossBlockSales),
         antiLossAutoCaps: bool(s.antiLossAutoCaps, D.antiLossAutoCaps),
-        antiLossMinProfitPercent: n(s.antiLossMinProfitPercent, D.antiLossMinProfitPercent, 0, 90)
+        antiLossMinProfitPercent: n(s.antiLossMinProfitPercent, D.antiLossMinProfitPercent, 0, 90),
+        antiLossClientBudget: bool(s.antiLossClientBudget, D.antiLossClientBudget),
+        antiLossClientBudgetPercent: n(s.antiLossClientBudgetPercent, D.antiLossClientBudgetPercent, 10, 100),
+        autoPriceEnabled: bool(s.autoPriceEnabled, D.autoPriceEnabled),
+        autoPriceStep: Math.round(n(s.autoPriceStep, D.autoPriceStep, 1, 1000)),
+        autoPriceCharm: bool(s.autoPriceCharm, D.autoPriceCharm),
+        autoPriceMaxStepPercent: n(s.autoPriceMaxStepPercent, D.autoPriceMaxStepPercent, 1, 300)
     };
 }
 let aiEconSettingsCache = null;
@@ -10435,12 +10469,90 @@ async function applyAntiLossCaps(mode, onlyIds) {
     if (changes.length) { try { await releaseRelayAiLockIfFreed(relayAiMonthKey(), true); } catch (_) { /* ignore */ } }
     return changes;
 }
+// ===== AUTO PRICE: plan / pack / boost prices computed from the live PHP per USD =====
+// Price (Omni Tokens) = worst-case Google cost (PHP, live rate) / (1 - target profit) / (1 - fee) / PHP per token, rounded up (e.g. 249).
+// Auto mode only RAISES prices (max step per run); lowering is manual. Already-sold plans keep their price until renewal.
+function autoPriceRound(raw, st) {
+    let step = Math.max(1, Math.round(st.autoPriceStep || 1));
+    if (!(raw > 0)) return 1;
+    // Small prices (boosts, small packs) use a smaller step so they do not jump.
+    if (raw < 50) step = 1; else if (raw < 200) step = Math.min(step, 5);
+    if (st.autoPriceCharm && step >= 5) return Math.max(1, Math.ceil((raw + 1) / step) * step - 1);
+    return Math.max(1, Math.ceil(raw / step) * step);
+}
+function buildAutoPriceItems(st, cfg, tiers, packs, boosts) {
+    const items = [];
+    const fx = antiLossFxRate(st);
+    const add = (kind, id, name, price, ev) => {
+        if (!ev || !ev.checked || !(price > 0) || !(ev.costPhp > 0)) return;
+        const raw = ev.costPhp / (1 - st.targetMarginPercent / 100) / (1 - st.feePercent / 100) / st.phpPerToken;
+        const rec = autoPriceRound(raw, st);
+        items.push({ kind, id, name, currentPrice: price, recommendedPrice: rec, profitPct: ev.projectedProfitPct, costPhp: ev.costPhp, action: rec > price ? 'raise' : (rec < price ? 'lower' : 'ok') });
+    };
+    (tiers || []).forEach((t) => add('tier', t.id, t.name, t.priceTokens, antiLossEvaluate('tier', { id: t.id, priceTokens: t.priceTokens, credits: t.monthlyCredits, dailyCap: t.dailyCap }, st, cfg)));
+    (packs || []).forEach((p) => add('pack', p.id, p.name, p.priceTokens, antiLossEvaluate('pack', { id: p.id, priceTokens: p.priceTokens, credits: p.credits, dailyBonus: p.dailyBonus }, st, cfg)));
+    (boosts || []).forEach((b) => add('boost', b.id, `Boost ${b.neurons} neurons`, b.priceTokens, antiLossEvaluate('boost', { id: b.id, priceTokens: b.priceTokens, neurons: b.neurons }, st, cfg)));
+    return { fx, items };
+}
+async function loadBoostPriceOverrides() {
+    try {
+        const ov = await getPersistentJSON('ai-boost-prices', null);
+        if (ov && typeof ov === 'object') RELAY_AI_DAY_BOOST_OPTIONS.forEach((o) => { const v = Math.round(Number(ov[o.id])); if (v > 0 && v < 100000) o.priceTokens = v; });
+    } catch (_) { /* keep env prices */ }
+}
+async function applyAutoPrices(mode, auto) {
+    const changes = [];
+    if (!pgPoolDevices) return changes;
+    const st = antiLossSettings(), cfg = await getAiProviderConfig();
+    if (!st) return changes;
+    const tiers = (await listRelayAiTiers(false)).filter((t) => t.enabled !== false && t.priceTokens > 0);
+    let packs = [];
+    try { packs = (await pgPoolDevices.query(`SELECT id, name, credits, daily_bonus, price_tokens, sort_order, enabled FROM relay_ai_extra_packs WHERE enabled = TRUE`)).rows.map(mapRelayAiExtraPackRow).filter((x) => x.credits > 0 && x.priceTokens > 0); } catch (_) { packs = []; }
+    const boosts = RELAY_AI_DAY_BOOST_ENABLED ? RELAY_AI_DAY_BOOST_OPTIONS.map((o) => ({ id: o.id, neurons: o.neurons, priceTokens: o.priceTokens })) : [];
+    const { fx, items } = buildAutoPriceItems(st, cfg, tiers, packs, boosts);
+    let boostChanged = false;
+    for (const it of items) {
+        if (it.action === 'ok' || (it.action === 'lower' && mode !== 'all')) continue;
+        let to = it.recommendedPrice;
+        if (auto && it.action === 'raise') {
+            const cap = Math.floor(it.currentPrice * (1 + st.autoPriceMaxStepPercent / 100));
+            if (cap <= it.currentPrice) continue;
+            to = Math.min(to, cap);
+        }
+        if (!(to >= 1) || to === it.currentPrice) continue;
+        if (it.kind === 'tier') await pgPoolDevices.query(`UPDATE relay_ai_tiers SET price_tokens = $2, updated_at = now() WHERE id = $1`, [it.id, to]);
+        else if (it.kind === 'pack') await pgPoolDevices.query(`UPDATE relay_ai_extra_packs SET price_tokens = $2, updated_at = now() WHERE id = $1`, [it.id, to]);
+        else { const o = RELAY_AI_DAY_BOOST_OPTIONS.find((x) => x.id === it.id); if (!o) continue; o.priceTokens = to; boostChanged = true; }
+        changes.push({ at: Date.now(), kind: it.kind, id: it.id, name: it.name, from: it.currentPrice, to, fx: Math.round(fx * 100) / 100, mode: auto ? 'auto' : 'manual' });
+        console.log(`💱 Auto price (${auto ? 'auto' : 'manual'}): ${it.kind} "${it.id}" ${it.currentPrice} -> ${to} (₱${fx.toFixed(2)}/$1).`);
+    }
+    if (boostChanged) { const m = {}; RELAY_AI_DAY_BOOST_OPTIONS.forEach((o) => { m[o.id] = o.priceTokens; }); try { setPersistentJSON('ai-boost-prices', m); } catch (_) { /* ignore */ } }
+    if (changes.length) {
+        try { const old = (await getPersistentJSON('ai-autoprice-log', [])) || []; setPersistentJSON('ai-autoprice-log', changes.concat(Array.isArray(old) ? old : []).slice(0, 50)); } catch (_) { /* ignore */ }
+        try { await releaseRelayAiLockIfFreed(relayAiMonthKey(), true); } catch (_) { /* ignore */ }
+    }
+    return changes;
+}
+app.post('/relay/admin/api/ai-providers/economics/auto-price', requireAdminKey, async (req, res) => {
+    try {
+        if (!pgPoolDevices) return res.status(503).json({ success: false, message: 'Devices/License database is not configured.' });
+        await getAiEconSettings();
+        await getAiFx(aiEconSettingsCache || normalizeAiEconSettings({}), false);
+        const changes = await applyAutoPrices(req.body && req.body.mode === 'all' ? 'all' : 'raise', false);
+        return res.json({ success: true, changes, note: 'Applies to new purchases only.' });
+    } catch (err) {
+        console.error('Auto price error:', err.message);
+        return res.status(503).json({ success: false, message: 'Could not update prices: ' + err.message });
+    }
+});
 async function antiLossWarmup() {
     try {
         const st = await getAiEconSettings();
         await getAiProviderConfig();
         await getGooglePriceTableBounded(false);
         await getAiFx(st, false);
+        await loadBoostPriceOverrides();
+        if (st.autoPriceEnabled && pgPoolDevices) await applyAutoPrices('raise', true);
         if (st.antiLossEnabled && st.antiLossAutoCaps && pgPoolDevices) await applyAntiLossCaps('anti');
     } catch (err) { console.warn('⚠️ Anti-loss warm-up failed:', err && err.message); }
 }
@@ -10448,8 +10560,116 @@ async function antiLossWarmup() {
     const t0 = setTimeout(antiLossWarmup, 5000); if (t0.unref) t0.unref();
     const t1 = setInterval(antiLossWarmup, 60 * 60 * 1000); if (t1.unref) t1.unref();
 }
+// ===== ANTI-LOSS: CLIENT COST LEDGER + HARD BUDGET CAP =====
+// Records the real Google cost (USD, from actual token usage) per client per month.
+// When a client's cost reaches the set % of what he paid this month (plan + Extra Credits + Boosts, minus fee),
+// answers stop until renewal or a new purchase. Fail-open: on errors, or with no recorded payment
+// (e.g. manual activation), nothing is blocked.
+function relayAiActualCostUsd(modelId, usage, neurons) {
+    try {
+        const st = antiLossSettings();
+        const inTok = usage ? Number(usage.promptTokens) || 0 : 0;
+        const outTok = usage ? Number(usage.completionTokens) || 0 : 0;
+        const e = modelId ? findGooglePriceEntry(modelId, googlePriceTableNow()) : null;
+        if (e && (inTok + outTok) > 0) {
+            const bp = googleBasisPrice(e, (st && st.priceBasis) || 'safe');
+            return { usd: (inTok * bp.inUsd + outTok * bp.outUsd) / 1e6, inTok, outTok };
+        }
+        return { usd: (Number(neurons) || 0) * AI_USD_PER_NEURON, inTok, outTok };
+    } catch (_) { return { usd: 0, inTok: 0, outTok: 0 }; }
+}
+const relayAiBudgetCache = new Map();
+async function recordRelayAiClientCost(installationId, calc) {
+    if (!pgPoolDevices || !installationId || !calc || !(calc.usd > 0)) return;
+    try {
+        await queryWithRetry(pgPoolDevices,
+            `INSERT INTO relay_ai_cost_ledger (installation_id, month_key, cost_usd, questions, input_tokens, output_tokens)
+             VALUES ($1, $2, $3, 1, $4, $5)
+             ON CONFLICT (installation_id, month_key) DO UPDATE
+             SET cost_usd = relay_ai_cost_ledger.cost_usd + EXCLUDED.cost_usd,
+                 questions = relay_ai_cost_ledger.questions + 1,
+                 input_tokens = relay_ai_cost_ledger.input_tokens + EXCLUDED.input_tokens,
+                 output_tokens = relay_ai_cost_ledger.output_tokens + EXCLUDED.output_tokens,
+                 updated_at = now()`,
+            [installationId, relayAiMonthKey(), calc.usd, Math.round(calc.inTok || 0), Math.round(calc.outTok || 0)]);
+        relayAiBudgetCache.delete(installationId);
+    } catch (err) { console.error('⚠️ RELAY AI cost ledger error:', err.message); }
+}
+const RELAY_AI_LEDGER_SQL = `
+    SELECT l.installation_id, l.questions, l.cost_usd, l.input_tokens, l.output_tokens,
+           (COALESCE((SELECT SUM(p.tokens_spent) FROM relay_ai_tier_purchases p WHERE p.installation_id = l.installation_id AND p.month_key = l.month_key), 0)
+          + COALESCE((SELECT SUM(e.price_tokens) FROM relay_ai_extra_purchases e WHERE e.installation_id = l.installation_id AND e.month_key = l.month_key), 0)
+          + COALESCE((SELECT SUM(b.price_tokens) FROM relay_ai_day_boosts b WHERE b.installation_id = l.installation_id AND b.day_key LIKE l.month_key || '-%'), 0))::int AS tokens,
+           (SELECT p2.tier_name FROM relay_ai_tier_purchases p2 WHERE p2.installation_id = l.installation_id AND p2.month_key = l.month_key LIMIT 1) AS tier_name
+    FROM relay_ai_cost_ledger l`;
+function relayAiLedgerEval(row, st, fx) {
+    const tokens = Number(row.tokens) || 0;
+    const costPhp = (Number(row.cost_usd) || 0) * fx;
+    const netPhp = tokens * st.phpPerToken * (1 - st.feePercent / 100);
+    const budgetPhp = netPhp * st.antiLossClientBudgetPercent / 100;
+    const hasRevenue = netPhp > 0;
+    let status = 'no-revenue';
+    if (hasRevenue) status = costPhp >= budgetPhp ? 'blocked' : (costPhp >= budgetPhp * 0.8 ? 'warn' : 'ok');
+    return {
+        installationId: row.installation_id, tier: row.tier_name || null, questions: Number(row.questions) || 0,
+        inputTokens: Number(row.input_tokens) || 0, outputTokens: Number(row.output_tokens) || 0,
+        costUsd: Math.round((Number(row.cost_usd) || 0) * 1e6) / 1e6, costPhp: Math.round(costPhp * 100) / 100,
+        paidTokens: tokens, netPhp: Math.round(netPhp * 100) / 100, budgetPhp: Math.round(budgetPhp * 100) / 100,
+        usedBudgetPct: hasRevenue && budgetPhp > 0 ? Math.round(costPhp / budgetPhp * 1000) / 10 : null,
+        profitPct: hasRevenue ? Math.round((netPhp - costPhp) / netPhp * 1000) / 10 : null,
+        status
+    };
+}
+async function relayAiClientBudgetCheck(installationId) {
+    try {
+        const st = antiLossSettings();
+        if (!pgPoolDevices || !st || !st.antiLossEnabled || !st.antiLossClientBudget) return null;
+        const hit = relayAiBudgetCache.get(installationId);
+        if (hit && Date.now() - hit.at < 15000) return hit.ev;
+        const r = await pgPoolDevices.query(RELAY_AI_LEDGER_SQL + ` WHERE l.installation_id = $1 AND l.month_key = $2`, [installationId, relayAiMonthKey()]);
+        const ev = r.rows[0] ? relayAiLedgerEval(r.rows[0], st, antiLossFxRate(st)) : null;
+        relayAiBudgetCache.set(installationId, { at: Date.now(), ev });
+        if (ev && ev.status === 'blocked') {
+            const k = 'budget:' + installationId;
+            if (Date.now() - (antiLossLogTimes.get(k) || 0) > 10 * 60 * 1000) {
+                antiLossLogTimes.set(k, Date.now());
+                console.warn(`🛡️ Anti-loss: client ${installationId.slice(0, 8)}… hit its budget (cost ₱${ev.costPhp} / ₱${ev.budgetPhp}). Blocked until renewal.`);
+            }
+        }
+        return ev;
+    } catch (_) { return null; }
+}
+async function buildClientLedgerReport(monthKey) {
+    const st = antiLossSettings() || normalizeAiEconSettings({});
+    const fx = antiLossFxRate(st);
+    const out = { month: monthKey, fx, enabled: !!(st.antiLossEnabled && st.antiLossClientBudget), budgetPercent: st.antiLossClientBudgetPercent, clients: [], totals: { costPhp: 0, netPhp: 0, questions: 0, blocked: 0, warn: 0 } };
+    if (!pgPoolDevices) return out;
+    const r = await pgPoolDevices.query(RELAY_AI_LEDGER_SQL + ` WHERE l.month_key = $1 ORDER BY l.cost_usd DESC LIMIT 300`, [monthKey]);
+    r.rows.forEach((row) => {
+        const c = relayAiLedgerEval(row, st, fx);
+        out.clients.push(c);
+        out.totals.costPhp += c.costPhp; out.totals.netPhp += c.netPhp; out.totals.questions += c.questions;
+        if (c.status === 'blocked') out.totals.blocked++;
+        if (c.status === 'warn') out.totals.warn++;
+    });
+    out.totals.costPhp = Math.round(out.totals.costPhp * 100) / 100;
+    out.totals.netPhp = Math.round(out.totals.netPhp * 100) / 100;
+    out.totals.profitPct = out.totals.netPhp > 0 ? Math.round((out.totals.netPhp - out.totals.costPhp) / out.totals.netPhp * 1000) / 10 : null;
+    return out;
+}
+app.get('/relay/admin/api/ai-providers/client-ledger', requireAdminKey, async (req, res) => {
+    try {
+        await getAiEconSettings();
+        const m = String(req.query?.month || '').trim();
+        const monthKey = /^\d{4}-(0[1-9]|1[0-2])$/.test(m) ? m : relayAiMonthKey();
+        return res.json({ success: true, ...(await buildClientLedgerReport(monthKey)) });
+    } catch (err) {
+        console.error('Client ledger error:', err.message);
+        return res.status(503).json({ success: false, message: 'Could not load the client cost ledger: ' + err.message });
+    }
+});
 async function buildAntiLossReport(cfg, st, tiers, packs, boosts) {
-    const rep = { enabled: !!st.antiLossEnabled, floorRates: !!st.antiLossFloorRates, blockSales: !!st.antiLossBlockSales, autoCaps: !!st.antiLossAutoCaps, minProfitPercent: st.antiLossMinProfitPercent, fx: antiLossFxRate(st), tiers: [], packs: [], boosts: [] };
+    const rep = { enabled: !!st.antiLossEnabled, floorRates: !!st.antiLossFloorRates, blockSales: !!st.antiLossBlockSales, autoCaps: !!st.antiLossAutoCaps, minProfitPercent: st.antiLossMinProfitPercent, clientBudget: !!st.antiLossClientBudget, clientBudgetPercent: st.antiLossClientBudgetPercent, fx: antiLossFxRate(st), tiers: [], packs: [], boosts: [] };
     tiers.forEach((t) => rep.tiers.push({ id: t.id, name: t.name, dailyCap: t.dailyCap, ...antiLossEvaluate('tier', { id: t.id, priceTokens: t.priceTokens, credits: t.monthlyCredits, dailyCap: t.dailyCap }, st, cfg) }));
     packs.forEach((p) => rep.packs.push({ id: p.id, name: p.name, ...antiLossEvaluate('pack', { id: p.id, priceTokens: p.priceTokens, credits: p.credits, dailyBonus: p.dailyBonus }, st, cfg) }));
     boosts.forEach((b) => rep.boosts.push({ id: b.id, neurons: b.neurons, ...antiLossEvaluate('boost', { id: b.id, priceTokens: b.priceTokens, neurons: b.neurons }, st, cfg) }));
@@ -10510,6 +10730,8 @@ app.post('/relay/admin/api/ai-providers/economics', requireAdminKey, async (req,
         return res.json({
             success: true, prices: priceMeta, fx, settings, slots,
             antiLoss: await buildAntiLossReport(cfg, antiLossSettings() || settings, tiers, packs, boosts),
+            autoPrice: (() => { const r = buildAutoPriceItems(antiLossSettings() || settings, cfg, tiers, packs, boosts); return { enabled: !!(antiLossSettings() || settings).autoPriceEnabled, fx: r.fx, items: r.items, maxStepPercent: (antiLossSettings() || settings).autoPriceMaxStepPercent }; })(),
+            autoPriceLog: await (async () => { try { const l = await getPersistentJSON('ai-autoprice-log', []); return Array.isArray(l) ? l.slice(0, 10) : []; } catch (_) { return []; } })(),
             observed: (() => {
                 const dk = googleDefaultModelKey(cfg) || 'flashLite';
                 const pr = slots[dk] && slots[dk].price;
