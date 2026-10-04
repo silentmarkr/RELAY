@@ -9178,6 +9178,37 @@ function setRelayAiBasePlanEnabled(enabled) {
     relayAiBaseEnabledCache = { at: Date.now(), value };
     return value;
 }
+// ---- Omni AI subscription WITH a chosen plan (Base / Plus / Pro / Business) -------------
+// Price rule: Base = the Omni AI module subscription price (monthly/yearly). A paid plan costs exactly the price on
+// its card (priceTokens, 1 Omni Token = PHP 1) and is MONTHLY only. Returns { ok, tier|null, price, billingCycle } or { ok:false, status, message }.
+async function resolveRelayAiSubscriptionPlan(aiTierIdRaw, billingCycle) {
+    const aiTierId = String(aiTierIdRaw || '').trim().toLowerCase();
+    if (!aiTierId || aiTierId === 'base') {
+        if (aiTierId === 'base' && !(await getRelayAiBasePlanEnabled())) {
+            return { ok: false, status: 400, message: 'The Omni AI Base plan is not available right now. Please pick another plan.' };
+        }
+        const price = getModuleSubscriptionPrice('ai_assistant', billingCycle);
+        if (price === null) return { ok: false, status: 400, message: 'Invalid billing cycle (monthly/yearly) for this subscription module.' };
+        return { ok: true, tier: null, price, billingCycle };
+    }
+    if (!pgPoolDevices) return { ok: false, status: 503, message: 'AI plan database is not configured on the RELAY.' };
+    if (billingCycle !== 'monthly') return { ok: false, status: 400, message: 'Plus, Pro and Business are monthly plans. Please choose Monthly.' };
+    const tr = await pgPoolDevices.query(`SELECT id, name, price_tokens, monthly_credits, daily_cap, sort_order, enabled FROM relay_ai_tiers WHERE id = $1`, [aiTierId]);
+    const tier = tr.rows[0] ? mapRelayAiTierRow(tr.rows[0]) : null;
+    if (!tier || !tier.enabled) return { ok: false, status: 400, message: 'The selected Omni AI plan is not available. Please refresh and pick another plan.' };
+    return { ok: true, tier, price: tier.priceTokens, billingCycle: 'monthly' };
+}
+// Records the chosen paid plan for the current month (upsert; tokens_spent accumulates like a normal plan purchase).
+async function grantRelayAiTierToInstallation(installationId, tier, tokensSpent, clientOrPool = pgPoolDevices) {
+    await queryWithRetry(clientOrPool,
+        `INSERT INTO relay_ai_tier_purchases (installation_id, month_key, tier_id, tier_name, monthly_credits, daily_cap, price_tokens, tokens_spent, purchased_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+         ON CONFLICT (installation_id, month_key) DO UPDATE SET
+           tier_id = EXCLUDED.tier_id, tier_name = EXCLUDED.tier_name, monthly_credits = EXCLUDED.monthly_credits,
+           daily_cap = EXCLUDED.daily_cap, price_tokens = EXCLUDED.price_tokens,
+           tokens_spent = relay_ai_tier_purchases.tokens_spent + EXCLUDED.tokens_spent, purchased_at = now()`,
+        [installationId, relayAiMonthKey(), tier.id, tier.name, tier.monthlyCredits, tier.dailyCap, tier.priceTokens, tokensSpent]);
+}
 async function listRelayAiTiers(onlyEnabled = true) {
     const r = await pgPoolDevices.query(
         `SELECT id, name, price_tokens, monthly_credits, daily_cap, sort_order, enabled FROM relay_ai_tiers
@@ -10983,6 +11014,18 @@ app.post('/relay/admin/api/ai-credits/installation/reset', requireAdminKey, asyn
         if (releaseGlobalLock) releaseGlobalLock();
     }
 });
+async function buildRelayAiSubscriptionPlansForCatalog() {
+    const out = { baseEnabled: true, base: null, tiers: [] };
+    try {
+        out.baseEnabled = await getRelayAiBasePlanEnabled();
+        if (pgPoolDevices) {
+            const bs = await getRelayAiDefaultSettings();
+            out.base = { monthlyCredits: Number(bs.monthlyCredits) || 0, dailyCap: Number(bs.dailyCap) || 0 };
+            out.tiers = (await listRelayAiTiers(true)).map((t) => ({ id: t.id, name: t.name, priceTokens: t.priceTokens, monthlyCredits: t.monthlyCredits, dailyCap: t.dailyCap }));
+        }
+    } catch (err) { console.error('⚠️ AI subscription plans (pricing) error:', err.message); }
+    return out;
+}
 app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 1000), async (req, res) => {
     const featureCatalog = {};
     for (const [featureId, entry] of Object.entries(FEATURE_CATALOG)) {
@@ -11036,6 +11079,8 @@ app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 100
         moduleSubscriptions: MODULE_SUBSCRIPTION_PLANS,
         moduleSubscriptionBillingDays: MODULE_SUBSCRIPTION_BILLING_DAYS,
         moduleSubscriptionGracePeriodDays: MODULE_SUBSCRIPTION_GRACE_PERIOD_DAYS,
+        // Omni AI plan cards for the subscribe modal (same data as Feature Pricing -> Omni AI). Base uses the module price.
+        aiSubscriptionPlans: await buildRelayAiSubscriptionPlansForCatalog(),
         // BAGO: para malaman ng OMNIPOS client kung ilang araw pa bago
         // PERMANENTENG mabura ang Cloud Backup data ng isang expired na
         // installation sa Neon (runCloudBackupRetentionAutoPurgeSweep sa
@@ -13171,6 +13216,7 @@ app.post('/relay/cloud-tokens/activate-purchase', requireApiKey, requireAllowedD
     }
     let requiredTokens;
     let durationMs = null;
+    let aiPlanGrantTier = null; // paid Omni AI plan chosen together with the subscription (null = Base)
     if (isModuleSubscriptionPurchase) {
         if (!MODULE_SUBSCRIPTION_BILLING_DAYS[billingCycle]) {
             return res.status(400).json({ success: false, message: 'Please choose a valid billing cycle (monthly/yearly).' });
@@ -13178,6 +13224,26 @@ app.post('/relay/cloud-tokens/activate-purchase', requireApiKey, requireAllowedD
         requiredTokens = getModuleSubscriptionPrice(moduleSubIds[0], billingCycle);
         if (requiredTokens === null) {
             return res.status(400).json({ success: false, message: 'Invalid subscription module.' });
+        }
+        if (moduleSubIds[0] === 'ai_assistant' && req.body?.aiTierId) {
+            let choice;
+            try { choice = await resolveRelayAiSubscriptionPlan(req.body.aiTierId, billingCycle); }
+            catch (err) { console.error('omni-token AI plan error:', err.message); return res.status(500).json({ success: false, message: 'Could not verify the selected Omni AI plan. Please try again.' }); }
+            if (!choice.ok) return res.status(choice.status).json({ success: false, message: choice.message });
+            requiredTokens = choice.price;
+            aiPlanGrantTier = choice.tier;
+            if (aiPlanGrantTier) {
+                try {
+                    const monthKeyNow = relayAiMonthKey();
+                    const curAi = await getRelayAiActiveTier(installationId, monthKeyNow);
+                    if (curAi && curAi.priceTokens >= aiPlanGrantTier.priceTokens) {
+                        return res.status(409).json({ success: false, message: `You already have the ${curAi.name} plan this month — pick a higher plan.` });
+                    }
+                    const capState = await getRelayAiCapacityState(monthKeyNow);
+                    const capVerdict = relayAiTierCapacityVerdict(capState, aiPlanGrantTier, curAi, curAi ? 0 : await getRelayAiBaseCapForClient(installationId, capState));
+                    if (capVerdict.blocked) return res.status(423).json({ success: false, locked: true, message: relayAiTierBlockMessage(capVerdict) });
+                } catch (err) { console.error('omni-token AI plan capacity error:', err.message); return res.status(500).json({ success: false, message: 'Could not verify AI plan capacity. Please try again.' }); }
+            }
         }
         durationMs = MODULE_SUBSCRIPTION_BILLING_DAYS[billingCycle] * 24 * 60 * 60 * 1000;
     } else {
@@ -13252,8 +13318,24 @@ app.post('/relay/cloud-tokens/activate-purchase', requireApiKey, requireAllowedD
         await queryWithRetry(
             pgPool,
             `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note, category) VALUES ($1, 'consume', $2, $3, $4, 'ADDON_PURCHASE')`,
-            [installationId, -requiredTokens, balanceAfter, `Purchase — ${featureNames.join(', ')}`]
+            [installationId, -requiredTokens, balanceAfter, `Purchase — ${featureNames.join(', ')}${aiPlanGrantTier ? ` (${aiPlanGrantTier.name} plan)` : ''}`]
         );
+        if (aiPlanGrantTier) {
+            try {
+                await grantRelayAiTierToInstallation(installationId, aiPlanGrantTier, requiredTokens);
+                logActivity(installationId, 'ai_plan_purchased', { tierId: aiPlanGrantTier.id, tierName: aiPlanGrantTier.name, tokensSpent: requiredTokens, via: 'subscribe_with_plan' });
+            } catch (grantErr) {
+                // Could not record the plan: give the tokens back so the customer is not charged for something they did not get.
+                console.error('omni-token AI plan grant error:', grantErr.message);
+                try {
+                    const back = await queryWithRetry(pgPool, `UPDATE cloud_token_wallets SET balance_tokens = balance_tokens + $2, updated_at = now() WHERE installation_id = $1 RETURNING balance_tokens`, [installationId, requiredTokens]);
+                    invalidateWalletCache(installationId);
+                    await queryWithRetry(pgPool, `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note, category) VALUES ($1, 'consume', $2, $3, $4, 'ADDON_PURCHASE')`,
+                        [installationId, requiredTokens, Number(back.rows[0].balance_tokens), `Reversal: Omni AI ${aiPlanGrantTier.name} plan could not be activated`]);
+                } catch (revErr) { console.error('⚠️ AI plan subscribe reversal failed:', revErr.message); }
+                return res.status(500).json({ success: false, message: 'Could not activate the Omni AI plan. You were not charged. Please try again.' });
+            }
+        }
         // Split requiredTokens across items proportionally to their à la
         // carte price (same allocation approach as /relay/confirm-unlock-bulk),
         // so per-item records/reporting stay meaningful even when a
@@ -14734,6 +14816,13 @@ app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit
     }
     const isCloudBackup = featureId === 'cloud_backup';
     const isModuleSubscription = isModuleSubscriptionFeature(featureId);
+    // Omni AI: optional chosen plan (Base / Plus / Pro / Business). The price is decided HERE, never by the client.
+    let aiPlanChoice = null;
+    if (featureId === 'ai_assistant' && req.body.aiTierId) {
+        try { aiPlanChoice = await resolveRelayAiSubscriptionPlan(req.body.aiTierId, billingCycle); }
+        catch (err) { console.error('request-unlock AI plan error:', err.message); return res.status(500).json({ success: false, message: 'Could not verify the selected Omni AI plan. Please try again.' }); }
+        if (!aiPlanChoice.ok) return res.status(aiPlanChoice.status).json({ success: false, message: aiPlanChoice.message });
+    }
     if (featureId === 'ai_assistant') {
         const baseVerdict = await getRelayAiBaseSubscriptionBlock(installationId);
         if (baseVerdict.blocked) {
@@ -14748,11 +14837,12 @@ app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit
             return res.status(400).json({ success: false, message: 'Invalid Cloud Backup tier/billingCycle.' });
         }
     } else if (isModuleSubscription) {
-        groundTruthPrice = getModuleSubscriptionPrice(featureId, billingCycle);
+        groundTruthPrice = aiPlanChoice ? aiPlanChoice.price : getModuleSubscriptionPrice(featureId, billingCycle);
         if (groundTruthPrice === null) {
             return res.status(400).json({ success: false, message: 'Invalid billing cycle (monthly/yearly) for this subscription module.' });
         }
     }
+    const aiPlanTier = aiPlanChoice && aiPlanChoice.tier ? aiPlanChoice.tier : null; // null = Base
     const otpCode = String(Math.floor(100000 + Math.random() * 900000));
     const key = `${installationId}:${featureId}`;
     pendingOtps.set(key, {
@@ -14765,7 +14855,8 @@ app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit
         otpVerified: false,
         installationId,
         featureId,
-        featureName: isCloudBackup ? CLOUD_BACKUP_PLANS[tier].name : isModuleSubscription ? MODULE_SUBSCRIPTION_PLANS[featureId].name : (featureName || featureId),
+        featureName: isCloudBackup ? CLOUD_BACKUP_PLANS[tier].name : isModuleSubscription ? (MODULE_SUBSCRIPTION_PLANS[featureId].name + (aiPlanTier ? ` — ${aiPlanTier.name}` : '')) : (featureName || featureId),
+        aiTierId: aiPlanTier ? aiPlanTier.id : null,
         price: (isCloudBackup || isModuleSubscription) ? groundTruthPrice : (price || null),
         tier: isCloudBackup ? tier : null,
         billingCycle: (isCloudBackup || isModuleSubscription) ? billingCycle : null,
@@ -14775,7 +14866,7 @@ app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit
         const catalogEntry = FEATURE_CATALOG[featureId] || null;
         const isAnySubscription = isCloudBackup || isModuleSubscription;
         const displayPrice = isAnySubscription ? groundTruthPrice : price;
-        const displayName = isCloudBackup ? CLOUD_BACKUP_PLANS[tier].name : isModuleSubscription ? MODULE_SUBSCRIPTION_PLANS[featureId].name : (featureName || featureId);
+        const displayName = isCloudBackup ? CLOUD_BACKUP_PLANS[tier].name : isModuleSubscription ? (MODULE_SUBSCRIPTION_PLANS[featureId].name + (aiPlanTier ? ` — ${aiPlanTier.name}` : '')) : (featureName || featureId);
         const priceMismatch = !isAnySubscription && catalogEntry && typeof price === 'number' && price !== catalogEntry.price;
         const nameMismatch = !isAnySubscription && catalogEntry && featureName && featureName !== catalogEntry.name;
         await notifyUnlockRequest({
@@ -14871,6 +14962,18 @@ app.post('/relay/confirm-unlock', requireApiKey, requireAllowedDevice, rateLimit
         markMaintenanceFeePaidUntil(installationId, token.payload.expiresAt);
     }
     logActivity(installationId, 'unlock_issued', { featureId, featureName: pending.featureName, source: 'otp', tier: pending.tier || null, billingCycle: pending.billingCycle || null });
+    // Omni AI subscribed together with a paid plan: record the plan for this month (payment was verified by the admin: 0 tokens).
+    if (featureId === 'ai_assistant' && pending.aiTierId) {
+        try {
+            const trg = await pgPoolDevices.query(`SELECT id, name, price_tokens, monthly_credits, daily_cap, sort_order, enabled FROM relay_ai_tiers WHERE id = $1`, [pending.aiTierId]);
+            const grantTier = trg.rows[0] ? mapRelayAiTierRow(trg.rows[0]) : null;
+            const curAi = await getRelayAiActiveTier(installationId, relayAiMonthKey());
+            if (grantTier && !(curAi && curAi.priceTokens >= grantTier.priceTokens)) {
+                await grantRelayAiTierToInstallation(installationId, grantTier, 0);
+                logActivity(installationId, 'ai_plan_otp_granted', { tierId: grantTier.id, tierName: grantTier.name });
+            }
+        } catch (grantErr) { console.error('confirm-unlock AI plan grant error:', grantErr.message); logActivity(installationId, 'ai_plan_grant_failed', { tierId: pending.aiTierId, via: 'otp_confirm' }); }
+    }
     pendingOtps.delete(key);
     res.json({
         success: true,
