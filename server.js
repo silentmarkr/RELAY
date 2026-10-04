@@ -994,7 +994,7 @@ function googleReasoningLadder(modelId) {
     return [null];
 }
 const googleReasoningStep = {};
-async function callGoogleGeminiAI(messages, vision, modelId, stepIdx) {
+async function callGoogleGeminiAI(messages, vision, modelId, stepIdx, extSignal) {
     const url = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
     const ladder = googleReasoningLadder(modelId);
     let step = Number.isInteger(stepIdx) ? stepIdx : (googleReasoningStep[modelId] || 0);
@@ -1003,6 +1003,12 @@ async function callGoogleGeminiAI(messages, vision, modelId, stepIdx) {
     const effort = ladder[step];
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), vision ? 45000 : 40000);
+    // Kapag itinigil ng client ang tanong (Stop), itigil din agad ang tawag sa Google.
+    let extAbortListener = null;
+    if (extSignal) {
+        if (extSignal.aborted) controller.abort();
+        else { extAbortListener = () => controller.abort(); extSignal.addEventListener('abort', extAbortListener, { once: true }); }
+    }
     try {
         const body = { model: modelId, messages: prepareGeminiMessages(messages), max_tokens: 650, temperature: 0.3 };
         if (effort) body.reasoning_effort = effort;
@@ -1019,7 +1025,7 @@ async function callGoogleGeminiAI(messages, vision, modelId, stepIdx) {
             const eo = Array.isArray(data) ? data[0] : data;
             let errMsg = (eo && eo.error && eo.error.message) || `Google AI request failed (HTTP ${gRes.status}).`;
             if (effort && step < ladder.length - 1 && gRes.status === 400 && /reasoning|thinking/i.test(errMsg + ' ' + raw.slice(0, 400))) {
-                return callGoogleGeminiAI(messages, vision, modelId, step + 1);
+                return callGoogleGeminiAI(messages, vision, modelId, step + 1, extSignal);
             }
             if (gRes.status === 400 && /api key|API_KEY_INVALID/i.test(errMsg + ' ' + raw.slice(0, 300))) errMsg = `Google AI: hindi tanggap ang GOOGLE_AI_API_KEY (HTTP 400). ${errMsg}`;
             if ((gRes.status === 401 || gRes.status === 403) && !/api key|permission|key/i.test(errMsg)) errMsg = `Google AI: tinanggihan ang API key (HTTP ${gRes.status}). ${errMsg}`;
@@ -1051,9 +1057,11 @@ async function callGoogleGeminiAI(messages, vision, modelId, stepIdx) {
         return { success: true, answer: String(answer).trim(), cfUsage: usage, reasoningEffort: effort || 'default' };
     } catch (err) {
         console.error(`⚠️ Google AI request error (${modelId}): ${err && err.message}${err && err.cause ? ' / ' + (err.cause.code || err.cause.message) : ''}`);
+        if (extSignal && extSignal.aborted) return { success: false, cancelled: true, message: 'AI request was cancelled.' };
         return { success: false, message: err.name === 'AbortError' ? 'AI request timed out.' : `Google AI: ${err.message || 'request failed.'}${err && err.cause && (err.cause.code || err.cause.message) ? ' (' + (err.cause.code || err.cause.message) + ')' : ''}`, fallbackOk: true };
     } finally {
         clearTimeout(timeout);
+        if (extSignal && extAbortListener) extSignal.removeEventListener('abort', extAbortListener);
     }
 }
 // Kinukuha ang totoong token usage na ibinabalik ng Cloudflare sa bawat sagot
@@ -1068,12 +1076,17 @@ function extractCfUsage(u) {
         completionTokens: Number.isFinite(c) && c > 0 ? c : 0
     };
 }
-async function callCloudflareWorkersAI(messages, vision) {
+async function callCloudflareWorkersAI(messages, vision, extSignal) {
     if (vision) return callCloudflareVisionAI(messages);
     const model = CF_AI_MODEL;
     const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/v1/chat/completions`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 40000);
+    let extAbortListener = null;
+    if (extSignal) {
+        if (extSignal.aborted) controller.abort();
+        else { extAbortListener = () => controller.abort(); extSignal.addEventListener('abort', extAbortListener, { once: true }); }
+    }
     try {
         const cfRes = await fetch(url, {
             method: 'POST',
@@ -1094,9 +1107,11 @@ async function callCloudflareWorkersAI(messages, vision) {
         }
         return { success: true, answer: answer.trim(), cfUsage: extractCfUsage(data.usage) };
     } catch (err) {
+        if (extSignal && extSignal.aborted) return { success: false, cancelled: true, message: 'AI request was cancelled.' };
         return { success: false, message: err.name === 'AbortError' ? 'AI request timed out.' : (err.message || 'AI request failed.') };
     } finally {
         clearTimeout(timeout);
+        if (extSignal && extAbortListener) extSignal.removeEventListener('abort', extAbortListener);
     }
 }
 // Meta's Llama 3.2 vision model on Cloudflare Workers AI requires a
@@ -8502,6 +8517,14 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
                 : `The daily AI capacity is used up for today. Please try again later${relayAiResetPhrase(exhaustRetryAt) ? ` (it resets ~${relayAiResetPhrase(exhaustRetryAt)})` : ''}. You were not charged any credits.`
         });
     }
+    // STOP: kapag nag-disconnect ang OMNIPOS client bago matapos ang sagot (pinindot ang Stop), itigil ang tawag sa provider,
+    // ibalik ang credits at HUWAG idagdag ang neurons sa daily usage ng client.
+    const clientAbort = new AbortController();
+    res.on('close', () => { if (!res.writableFinished) clientAbort.abort(); });
+    const relayAiCancelRefund = async () => {
+        try { await refundRelayAiCredits(installationId, requestId); } catch (_) {}
+        console.log(`⏹️ Omni AI request cancelled by client (${installationId.slice(0, 8)}…): provider call stopped, credits refunded, no neurons charged.`);
+    };
     try {
         const reservation = await reserveRelayAiCredits(installationId, requestId, req.body, { free: isFree });
         if (!reservation.ok) {
@@ -8534,9 +8557,11 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
         let usedAttempt = null;
         for (let ai = 0; ai < usableAttempts.length; ai++) {
             const att = usableAttempts[ai];
+            if (clientAbort.signal.aborted) { await relayAiCancelRefund(); return; }
             const attResult = att.provider === 'google'
-                ? await callGoogleGeminiAI(messages, !!req.body?.vision, att.modelId)
-                : await callCloudflareWorkersAI(messages, !!req.body?.vision);
+                ? await callGoogleGeminiAI(messages, !!req.body?.vision, att.modelId, undefined, clientAbort.signal)
+                : await callCloudflareWorkersAI(messages, !!req.body?.vision, clientAbort.signal);
+            if (attResult.cancelled || clientAbort.signal.aborted) { await relayAiCancelRefund(); return; }
             if (attResult.success) { result = attResult; usedAttempt = att; break; }
             result = attResult;
             if (att.provider === 'google') {
@@ -8590,6 +8615,8 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
                 credits: creditsNow
             });
         }
+        // Huling bantay: kung nag-Stop ang client habang tinatapos ang sagot, huwag singilin.
+        if (clientAbort.signal.aborted) { await relayAiCancelRefund(); return; }
         // NEURONS DETECTOR: bilangin ang matagumpay na sagot at ang totoong neurons na nagamit nito.
         let answerNeurons;
         if (usedAttempt && usedAttempt.provider === 'google') {
