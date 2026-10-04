@@ -1024,7 +1024,7 @@ async function callGoogleGeminiAI(messages, vision, modelId, stepIdx, extSignal)
         if (!gRes.ok || !data) {
             const eo = Array.isArray(data) ? data[0] : data;
             let errMsg = (eo && eo.error && eo.error.message) || `Google AI request failed (HTTP ${gRes.status}).`;
-            if (effort && step < ladder.length - 1 && gRes.status === 400 && /reasoning|thinking/i.test(errMsg + ' ' + raw.slice(0, 400))) {
+            if (effort && step < ladder.length - 1 && gRes.status === 400 && /reasoning|thinking|invalid argument|INVALID_ARGUMENT/i.test(errMsg + ' ' + raw.slice(0, 400))) {
                 return callGoogleGeminiAI(messages, vision, modelId, step + 1, extSignal);
             }
             if (gRes.status === 400 && /api key|API_KEY_INVALID/i.test(errMsg + ' ' + raw.slice(0, 300))) errMsg = `Google AI: hindi tanggap ang GOOGLE_AI_API_KEY (HTTP 400). ${errMsg}`;
