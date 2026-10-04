@@ -7831,7 +7831,10 @@ function handleGoogleQuotaError(modelId, raw, data, errMsg) {
     return { kind, retryDelayMs: q.retryDelayMs, limits: q.limits, zero: q.zero };
 }
 function computeGoogleCallNeurons(usage, modelKey, cfg) {
-    const m = (cfg && cfg.google.models[modelKey]) || AI_PROVIDER_CFG_DEFAULTS.google.models[modelKey] || AI_PROVIDER_CFG_DEFAULTS.google.models.flashLite;
+    let m = (cfg && cfg.google.models[modelKey]) || AI_PROVIDER_CFG_DEFAULTS.google.models[modelKey] || AI_PROVIDER_CFG_DEFAULTS.google.models.flashLite;
+    // Anti-loss rate floor: never count fewer neurons than the real Google price of this model.
+    const flo = cfg ? antiLossFloorRates(googleModelId(cfg, modelKey)) : null;
+    if (flo) m = { ...m, inputNeuronsPerM: Math.max(m.inputNeuronsPerM, flo.in), outputNeuronsPerM: Math.max(m.outputNeuronsPerM, flo.out) };
     const inTok = usage ? usage.promptTokens : 0;
     const outTok = usage ? usage.completionTokens : 0;
     if (usage && (inTok + outTok) > 0) {
@@ -8897,11 +8900,13 @@ async function lockRelayAiTiers(monthKey, state, reason) {
 // Ibinabalik ang { blocked, reason } para sa isang tier na gustong bilhin/i-upgrade.
 // baseCap = daily cap na nakabilang na ngayon para sa client bilang Base (kapag wala pa siyang tier);
 // papalitan ito ng tier niya, kaya ibinabawas sa delta para hindi madoble.
-function relayAiTierCapacityVerdict(state, tier, current, baseCap = 0) {
+function relayAiTierCapacityVerdict(state, tier, current, baseCap = 0, opts = null) {
     // Kung ubos na ang daily quota ng AI provider, walang customer ang makakagamit ng daily cap
     // (o credits) ngayon, kaya walang sinoman ang dapat makabili ng plan hanggang mag-reset.
     const px = getAiProviderExhaustion();
     if (px.exhausted) return { blocked: true, reason: 'provider_exhausted', retryAt: px.retryAt, source: px.source };
+    // Anti-loss: do not sell a plan whose worst-case Google cost would leave less than the minimum profit.
+    if (!(opts && opts.skipAntiLoss) && antiLossBlocks('tier', { id: tier.id, priceTokens: tier.priceTokens, credits: tier.monthlyCredits, dailyCap: tier.dailyCap })) return { blocked: true, reason: 'unprofitable' };
     if (!state.enabled || !state.lockedTierIds.includes(tier.id)) return { blocked: false };
     if (state.locked) return { blocked: true, reason: 'locked' };
     const delta = relayAiEffectiveCap(tier.dailyCap, state.capacity) - (current ? relayAiEffectiveCap(current.dailyCap, state.capacity) : (Number(baseCap) || 0));
@@ -8921,6 +8926,7 @@ function relayAiProviderExhaustedBuyMessage(retryAt, source) {
     return `Buying AI plans and extra credits is unavailable for now because the daily AI capacity is used up for today. Please try again after the reset${t ? ` (~${t})` : ''}.`;
 }
 function relayAiTierBlockMessage(verdict) {
+    if (verdict && verdict.reason === 'unprofitable') return RELAY_AI_UNPROFITABLE_MESSAGE;
     return verdict && verdict.reason === 'provider_exhausted' ? relayAiProviderExhaustedBuyMessage(verdict.retryAt, verdict.source) : RELAY_AI_TIER_LOCK_MESSAGE;
 }
 // ---- AUTO-LOCK NG BASE SUBSCRIPTION (Omni AI) -----------------------------
@@ -9127,6 +9133,7 @@ async function getRelayAiPerQuestionNeurons(isFree) {
 }
 function relayAiDayBoostVerdict(opt, status, boughtToday, capState) {
     if (!RELAY_AI_DAY_BOOST_ENABLED) return { ok: false, reason: 'One-day Boost is not available right now.' };
+    if (antiLossBlocks('boost', { id: opt.id, priceTokens: opt.priceTokens, neurons: opt.neurons })) return { ok: false, reason: RELAY_AI_UNPROFITABLE_MESSAGE };
     const px = getAiProviderExhaustion();
     if (px.exhausted) return { ok: false, reason: relayAiProviderExhaustedBuyMessage(px.retryAt, px.source) };
     if (!status || !status.daily || status.daily.unlimited) return { ok: false, reason: 'Your plan has no daily limit, so you do not need a Boost.' };
@@ -9156,6 +9163,7 @@ function mapRelayAiExtraPackRow(r) {
 function relayAiExtraPackVerdict(pack, es, sold, clientBought, capState) {
     const pxBuy = getAiProviderExhaustion();
     if (pxBuy.exhausted) return { ok: false, reason: relayAiProviderExhaustedBuyMessage(pxBuy.retryAt, pxBuy.source) };
+    if (antiLossBlocks('pack', { id: pack.id, priceTokens: pack.priceTokens, credits: pack.credits, dailyBonus: pack.dailyBonus })) return { ok: false, reason: RELAY_AI_UNPROFITABLE_MESSAGE };
     if (!es.enabled) return { ok: false, reason: 'Extra credits are not available right now.' };
     if (!pack.enabled) return { ok: false, reason: 'This pack is not available.' };
     if (es.monthlyPool > 0 && sold + pack.credits > es.monthlyPool) return { ok: false, reason: 'The remaining extra credits for this month are not enough for this pack.' };
@@ -9992,28 +10000,532 @@ app.post('/relay/admin/api/ai-providers/settings', requireAdminKey, async (req, 
     }
 });
 // ---- ADMIN: listahan ng Gemini model mula sa Google (GET /v1beta/models, parehong GOOGLE_AI_API_KEY) ----
-// Presyo (USD / 1M tokens, input/output) para sa default na neurons rate. TANTYA lang ito — nagbabago ang presyo ng Google,
-// kaya puwedeng baguhin ng admin ang mga numero. Ang neurons/1M = presyo * 1000 / 0.011 (parehong cost-parity sa Cloudflare).
-const GOOGLE_MODEL_PRICE_TABLE = [
-    [/^gemini-3\.6-flash(?!-lite)/, 1.50, 7.50],
-    [/^gemini-3\.5-flash-lite/, 0.30, 2.50],
-    [/^gemini-3\.5-flash/, 1.50, 9.00],
-    [/^gemini-3\.1-flash-lite/, 0.25, 1.50],
-    [/^gemini-3-flash/, 0.50, 3.00],
-    [/^gemini-2\.5-flash-lite/, 0.10, 0.40],
-    [/^gemini-2\.5-flash/, 0.30, 2.50],
-    [/^gemini-2\.0-flash-lite/, 0.075, 0.30],
-    [/^gemini-2\.0-flash/, 0.10, 0.40]
+// ===== LIVE GOOGLE PRICES + AUTO NEURON RATES + PROFIT CALCULATOR ==================================
+// Google does NOT expose prices through the Gemini API key (models.list has no price fields), so RELAY reads the
+// official pricing page (raw markdown version) and keeps a cached copy (6 hours, also saved in the KV store).
+// Fallback order: live page -> last good cached copy -> built-in table below (flagged as "estimate" in the admin panel).
+// Neurons / 1M tokens = price in USD / 0.000011 (same cost-parity as Cloudflare: $0.011 per 1,000 neurons).
+const GOOGLE_PRICING_URL = cleanEnvValue(process.env.GOOGLE_PRICING_URL) || 'https://ai.google.dev/gemini-api/docs/pricing.md.txt';
+const GOOGLE_PRICE_TTL_MS = 6 * 60 * 60 * 1000;
+const GOOGLE_PRICE_RETRY_MS = 10 * 60 * 1000;
+const AI_USD_PER_NEURON = 0.011 / 1000;
+const GOOGLE_PROMO_END = '2026-12-31T23:59:59.000Z';
+const GOOGLE_BUILTIN_PRICES = [
+    { codes: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash'], inNow: 0.75, outNow: 3.75, inNext: 1.50, outNext: 7.50, switchAt: GOOGLE_PROMO_END },
+    { codes: ['gemini-3.5-flash-lite'], inNow: 0.30, outNow: 2.50, inNext: 0.30, outNext: 2.50, switchAt: null },
+    { codes: ['gemini-3.5-flash'], inNow: 1.50, outNow: 9.00, inNext: 1.50, outNext: 9.00, switchAt: null },
+    { codes: ['gemini-3.1-flash-lite'], inNow: 0.25, outNow: 1.50, inNext: 0.25, outNext: 1.50, switchAt: null },
+    { codes: ['gemini-3.1-pro-preview'], inNow: 2.00, outNow: 12.00, inNext: 2.00, outNext: 12.00, switchAt: null },
+    { codes: ['gemini-3-flash'], inNow: 0.50, outNow: 3.00, inNext: 0.50, outNext: 3.00, switchAt: null },
+    { codes: ['gemini-2.5-pro'], inNow: 1.25, outNow: 10.00, inNext: 1.25, outNext: 10.00, switchAt: null },
+    { codes: ['gemini-2.5-flash-lite'], inNow: 0.10, outNow: 0.40, inNext: 0.10, outNext: 0.40, switchAt: null },
+    { codes: ['gemini-2.5-flash'], inNow: 0.30, outNow: 2.50, inNext: 0.30, outNext: 2.50, switchAt: null },
+    { codes: ['gemini-2.0-flash-lite'], inNow: 0.075, outNow: 0.30, inNext: 0.075, outNext: 0.30, switchAt: null },
+    { codes: ['gemini-2.0-flash'], inNow: 0.10, outNow: 0.40, inNext: 0.10, outNext: 0.40, switchAt: null }
 ];
-function suggestGoogleRates(modelId) {
+// Parse the "Paid Tier" cell of a pricing row. Handles "$0.30 (text / image)" and
+// "$0.75 through December 31, 2026. $1.50 starting January 1, 2027."
+function parseGooglePriceCell(cell) {
+    const s = String(cell || '').replace(/\*\*/g, '');
+    const money = (x) => { const n = parseFloat(x); return Number.isFinite(n) ? n : null; };
+    const promo = s.match(/\$\s*([0-9]*\.?[0-9]+)[^$]*?\bthrough\b\s+([A-Za-z]+\s+\d{1,2},\s*\d{4})[^$]*?\$\s*([0-9]*\.?[0-9]+)[^$]*?\bstarting\b/i);
+    if (promo) {
+        const t = Date.parse(promo[2] + ' 23:59:59 UTC');
+        const a = money(promo[1]), b = money(promo[3]);
+        if (a !== null && b !== null) return { now: a, next: b, switchAt: Number.isFinite(t) ? new Date(t).toISOString() : null };
+    }
+    const m = s.match(/\$\s*([0-9]*\.?[0-9]+)/);
+    if (!m) return null;
+    const v = money(m[1]);
+    return v === null ? null : { now: v, next: v, switchAt: null };
+}
+// If the page ever comes back as HTML instead of markdown, flatten it into the same "## title / `code` / | row |" shape.
+function googlePricingHtmlToMarkdown(html) {
+    let t = String(html || '');
+    t = t.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '');
+    t = t.replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, '\n## $1\n');
+    t = t.replace(/<h3[^>]*>([\s\S]*?)<\/h3>/gi, '\n### $1\n');
+    t = t.replace(/<code[^>]*>([\s\S]*?)<\/code>/gi, '`$1`');
+    t = t.replace(/<\/tr>/gi, ' |\n').replace(/<t[dh][^>]*>/gi, '| ').replace(/<\/p>|<br\s*\/?>|<\/li>|<\/div>/gi, '\n');
+    t = t.replace(/<[^>]+>/g, '');
+    t = t.replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;|&apos;/g, "'").replace(/&quot;/g, '"');
+    return t.split('\n').map((l) => l.replace(/[ \t]+/g, ' ').trim()).join('\n');
+}
+function parseGooglePricingText(text) {
+    let md = String(text || '');
+    if (/<\/?(html|body|table|h2)\b/i.test(md.slice(0, 20000))) md = googlePricingHtmlToMarkdown(md);
+    const out = [];
+    md.split(/^##\s+/m).slice(1).forEach((sec) => {
+        const lines = sec.split('\n').map((l) => l.trim());
+        const title = (lines[0] || '').replace(/[\[\]`*]/g, '').trim();
+        const stop = lines.findIndex((l, i) => i > 0 && /^(###|\|)/.test(l));
+        const head = lines.slice(1, stop === -1 ? lines.length : stop);
+        const codes = [];
+        head.filter((l) => /^\*\s*\[?`/.test(l)).forEach((l) => {
+            (l.match(/`([a-z][a-z0-9]*(?:-[a-z0-9.]+)+)`/g) || []).forEach((c) => { const id = c.replace(/`/g, ''); if (!codes.includes(id)) codes.push(id); });
+        });
+        if (!codes.length && /^gemini/i.test(title)) {
+            const slug = title.toLowerCase().replace(/[^a-z0-9. -]/g, '').trim().replace(/\s+/g, '-');
+            if (slug) codes.push(slug);
+        }
+        if (!codes.length) return;
+        const stdIdx = lines.findIndex((l) => /^###\s*Standard\b/i.test(l));
+        const rowsFrom = stdIdx >= 0 ? lines.slice(stdIdx) : lines;
+        const inRow = rowsFrom.find((l) => /^\|\s*Input price/i.test(l));
+        const outRow = rowsFrom.find((l) => /^\|\s*Output price/i.test(l));
+        if (!inRow || !outRow) return;
+        const lastCell = (row) => { const c = row.split('|').map((x) => x.trim()).filter(Boolean); return c.length >= 2 ? c[c.length - 1] : ''; };
+        const pi = parseGooglePriceCell(lastCell(inRow));
+        const po = parseGooglePriceCell(lastCell(outRow));
+        if (!pi || !po) return;
+        if (!(pi.now > 0 && pi.now < 100 && po.now > 0 && po.now < 500 && pi.next > 0 && po.next > 0)) return;
+        out.push({ codes, inNow: pi.now, outNow: po.now, inNext: pi.next, outNext: po.next, switchAt: pi.switchAt || po.switchAt || null });
+    });
+    return out;
+}
+let googlePriceState = { at: 0, table: null, error: '', lastTryAt: 0, loaded: false };
+let googlePriceInflight = null;
+async function loadGooglePriceCacheOnce() {
+    if (googlePriceState.loaded) return;
+    googlePriceState.loaded = true;
+    try {
+        const s = await getPersistentJSON('google-price-cache', null);
+        if (s && Array.isArray(s.table) && s.table.length) { googlePriceState.table = s.table; googlePriceState.at = Number(s.at) || 0; }
+    } catch (_) { /* use built-in */ }
+}
+function googlePriceTableNow() { return (googlePriceState.table && googlePriceState.table.length) ? googlePriceState.table : GOOGLE_BUILTIN_PRICES; }
+function googlePriceMeta() {
+    const hasTable = !!(googlePriceState.table && googlePriceState.table.length);
+    const age = hasTable ? Date.now() - googlePriceState.at : 0;
+    return {
+        source: !hasTable ? 'builtin' : (age < GOOGLE_PRICE_TTL_MS ? 'live' : 'stale'),
+        fetchedAt: hasTable ? googlePriceState.at : 0,
+        count: googlePriceTableNow().length,
+        error: googlePriceState.error || '',
+        url: GOOGLE_PRICING_URL
+    };
+}
+async function getGooglePriceTable(force) {
+    await loadGooglePriceCacheOnce();
+    const hasTable = !!(googlePriceState.table && googlePriceState.table.length);
+    const fresh = hasTable && (Date.now() - googlePriceState.at < GOOGLE_PRICE_TTL_MS);
+    if (!force && fresh) return googlePriceMeta();
+    if (!force && googlePriceState.lastTryAt && Date.now() - googlePriceState.lastTryAt < GOOGLE_PRICE_RETRY_MS) return googlePriceMeta();
+    if (googlePriceInflight) return googlePriceInflight;
+    googlePriceInflight = (async () => {
+        googlePriceState.lastTryAt = Date.now();
+        try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 20000);
+            let txt = '';
+            try {
+                const r = await fetch(GOOGLE_PRICING_URL, { headers: { 'User-Agent': 'RELAY-price-check/1.0', 'Accept': 'text/markdown,text/plain,text/html;q=0.8,*/*;q=0.5' }, signal: controller.signal });
+                if (!r.ok) throw new Error(`Google pricing page returned HTTP ${r.status}.`);
+                txt = await r.text();
+            } finally { clearTimeout(timeout); }
+            const table = parseGooglePricingText(txt);
+            if (table.length < 3) throw new Error(`Only ${table.length} model price(s) could be read from the Google pricing page (its layout may have changed).`);
+            googlePriceState.table = table;
+            googlePriceState.at = Date.now();
+            googlePriceState.error = '';
+            setPersistentJSON('google-price-cache', { at: googlePriceState.at, table });
+            console.log(`💲 Google prices refreshed from the pricing page: ${table.length} model entries.`);
+        } catch (err) {
+            googlePriceState.error = String((err && err.name === 'AbortError') ? 'Timed out reading the Google pricing page.' : (err && err.message) || err).slice(0, 240);
+            console.warn('⚠️ Could not refresh Google prices:', googlePriceState.error);
+        } finally {
+            googlePriceInflight = null;
+        }
+        return googlePriceMeta();
+    })();
+    return googlePriceInflight;
+}
+// Never make the admin page wait on a slow Google page: the fetch keeps running in the background, the answer uses what we already have.
+async function getGooglePriceTableBounded(force) {
+    let timer = null;
+    const wait = new Promise((resolve) => { timer = setTimeout(() => resolve(googlePriceMeta()), force ? 25000 : 6000); if (timer.unref) timer.unref(); });
+    try { return await Promise.race([getGooglePriceTable(force), wait]); } finally { clearTimeout(timer); }
+}
+// Find the price entry of a model id: exact code first, then the longest code that the id extends with -preview / -exp / -latest / -<digit>.
+function findGooglePriceEntry(modelId, table) {
     const id = String(modelId || '').toLowerCase().replace(/^models\//, '');
-    for (const row of GOOGLE_MODEL_PRICE_TABLE) {
-        if (row[0].test(id)) {
-            return { inputNeuronsPerM: Math.round(row[1] * 1000 / 0.011), outputNeuronsPerM: Math.round(row[2] * 1000 / 0.011), priceInUsd: row[1], priceOutUsd: row[2], estimated: true };
+    if (!id) return null;
+    let best = null, bestScore = -1;
+    (table || []).forEach((e) => {
+        (e.codes || []).forEach((code) => {
+            let score = -1;
+            if (id === code) score = 10000 + code.length;
+            else if (id.startsWith(code) && /^-(preview|exp|latest|\d)/.test(id.slice(code.length))) score = code.length;
+            if (score > bestScore) { bestScore = score; best = e; }
+        });
+    });
+    return best;
+}
+function googlePriceAt(entry, atMs) {
+    const after = entry.switchAt && atMs > Date.parse(entry.switchAt);
+    return after ? { inUsd: entry.inNext, outUsd: entry.outNext } : { inUsd: entry.inNow, outUsd: entry.outNow };
+}
+// Used by the model dropdown ("suggested" rates). Uses the higher of today's and the scheduled price, so the daily cap stays safe.
+function suggestGoogleRates(modelId) {
+    const entry = findGooglePriceEntry(modelId, googlePriceTableNow());
+    if (!entry) return null;
+    const inUsd = Math.max(entry.inNow, entry.inNext), outUsd = Math.max(entry.outNow, entry.outNext);
+    return { inputNeuronsPerM: Math.round(inUsd / AI_USD_PER_NEURON), outputNeuronsPerM: Math.round(outUsd / AI_USD_PER_NEURON), priceInUsd: inUsd, priceOutUsd: outUsd, estimated: googlePriceMeta().source !== 'live' };
+}
+// ---- Profit calculator settings + FX ----
+const AI_ECON_DEFAULTS = {
+    fxMode: 'auto', phpPerUsd: 58, phpPerToken: 1, feePercent: 3, targetMarginPercent: 50, expectedUsagePercent: 50,
+    priceBasis: 'safe', avgInputTokens: 4000, avgOutputTokens: 350, heavyInputTokens: 10000, heavyOutputTokens: 650,
+    creditsPerQuestion: 1, daysPerMonth: 30,
+    antiLossEnabled: true, antiLossFloorRates: true, antiLossBlockSales: true, antiLossAutoCaps: false, antiLossMinProfitPercent: 10
+};
+function normalizeAiEconSettings(src) {
+    const s = (src && typeof src === 'object') ? src : {};
+    const D = AI_ECON_DEFAULTS;
+    const n = (v, d, min, max) => { const x = Number(v); return (v !== null && v !== undefined && v !== '' && Number.isFinite(x) && x >= min && x <= max) ? x : d; };
+    const bool = (v, d) => (v === true || v === 1 || v === '1' || v === 'true') ? true : ((v === false || v === 0 || v === '0' || v === 'false') ? false : d);
+    return {
+        fxMode: s.fxMode === 'manual' ? 'manual' : 'auto',
+        phpPerUsd: n(s.phpPerUsd, D.phpPerUsd, 1, 1000),
+        phpPerToken: n(s.phpPerToken, D.phpPerToken, 0.01, 1000),
+        feePercent: n(s.feePercent, D.feePercent, 0, 60),
+        targetMarginPercent: n(s.targetMarginPercent, D.targetMarginPercent, 0, 95),
+        expectedUsagePercent: n(s.expectedUsagePercent, D.expectedUsagePercent, 1, 100),
+        priceBasis: s.priceBasis === 'current' ? 'current' : 'safe',
+        avgInputTokens: Math.round(n(s.avgInputTokens, D.avgInputTokens, 1, 2000000)),
+        avgOutputTokens: Math.round(n(s.avgOutputTokens, D.avgOutputTokens, 1, 2000000)),
+        heavyInputTokens: Math.round(n(s.heavyInputTokens, D.heavyInputTokens, 1, 2000000)),
+        heavyOutputTokens: Math.round(n(s.heavyOutputTokens, D.heavyOutputTokens, 1, 2000000)),
+        creditsPerQuestion: Math.round(n(s.creditsPerQuestion, D.creditsPerQuestion, 1, 1000)),
+        daysPerMonth: D.daysPerMonth,
+        antiLossEnabled: bool(s.antiLossEnabled, D.antiLossEnabled),
+        antiLossFloorRates: bool(s.antiLossFloorRates, D.antiLossFloorRates),
+        antiLossBlockSales: bool(s.antiLossBlockSales, D.antiLossBlockSales),
+        antiLossAutoCaps: bool(s.antiLossAutoCaps, D.antiLossAutoCaps),
+        antiLossMinProfitPercent: n(s.antiLossMinProfitPercent, D.antiLossMinProfitPercent, 0, 90)
+    };
+}
+let aiEconSettingsCache = null;
+async function getAiEconSettings() {
+    if (aiEconSettingsCache) return aiEconSettingsCache;
+    let stored = null;
+    try { stored = await getPersistentJSON('ai-econ-settings', null); } catch (_) { stored = null; }
+    aiEconSettingsCache = normalizeAiEconSettings(stored);
+    return aiEconSettingsCache;
+}
+let aiFxState = { rate: 0, at: 0, lastTryAt: 0, error: '' };
+const AI_FX_TTL_MS = 12 * 60 * 60 * 1000;
+async function getAiFx(settings, force) {
+    if (settings.fxMode === 'manual') return { rate: settings.phpPerUsd, source: 'manual', at: 0 };
+    const fresh = aiFxState.rate > 0 && Date.now() - aiFxState.at < AI_FX_TTL_MS;
+    const canTry = force || !aiFxState.lastTryAt || Date.now() - aiFxState.lastTryAt > GOOGLE_PRICE_RETRY_MS;
+    if ((!fresh || force) && canTry) {
+        aiFxState.lastTryAt = Date.now();
+        try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 8000);
+            try {
+                const r = await fetch('https://open.er-api.com/v6/latest/USD', { signal: controller.signal });
+                const data = await r.json();
+                const php = Number(data && data.rates && data.rates.PHP);
+                if (!r.ok || !(php > 1 && php < 1000)) throw new Error('No PHP rate in the response.');
+                aiFxState.rate = php; aiFxState.at = Date.now(); aiFxState.error = '';
+            } finally { clearTimeout(timeout); }
+        } catch (err) { aiFxState.error = String((err && err.message) || err).slice(0, 160); }
+    }
+    if (aiFxState.rate > 0) return { rate: aiFxState.rate, source: Date.now() - aiFxState.at < AI_FX_TTL_MS ? 'auto' : 'auto-stale', at: aiFxState.at };
+    return { rate: settings.phpPerUsd, source: 'manual-fallback', at: 0, error: aiFxState.error };
+}
+// Economics of ONE model slot (Flash-Lite or Flash) for every enabled paid tier.
+function buildSlotEconomics(slot, settings, fx, tiers, addons) {
+    const entry = findGooglePriceEntry(slot.modelId, googlePriceTableNow());
+    const base = { key: slot.key, modelId: slot.modelId, enabled: slot.enabled };
+    if (!entry) {
+        return { ...base, price: null, current: { in: slot.inRate, out: slot.outRate }, message: 'No Google price found for this model ID. Enter the neurons / 1M tokens by hand, or press "Refresh prices from Google".' };
+    }
+    const nowP = googlePriceAt(entry, Date.now());
+    const scheduled = !!(entry.switchAt && Date.now() <= Date.parse(entry.switchAt) && (entry.inNext !== entry.inNow || entry.outNext !== entry.outNow));
+    const priceIn = settings.priceBasis === 'safe' ? Math.max(entry.inNow, entry.inNext) : nowP.inUsd;
+    const priceOut = settings.priceBasis === 'safe' ? Math.max(entry.outNow, entry.outNext) : nowP.outUsd;
+    const rec = { in: Math.round(priceIn / AI_USD_PER_NEURON), out: Math.round(priceOut / AI_USD_PER_NEURON) };
+    const cur = slot.autoFill ? rec : { in: slot.inRate, out: slot.outRate };
+    const fee = settings.feePercent / 100, target = settings.targetMarginPercent / 100, usage = settings.expectedUsagePercent / 100;
+    const days = settings.daysPerMonth;
+    const unit = (inTok, outTok) => ({ costUsd: (inTok * priceIn + outTok * priceOut) / 1e6, neuronsPerQ: (inTok * cur.in + outTok * cur.out) / 1e6 });
+    const profile = (tier, inTok, outTok) => {
+        const { costUsd, neuronsPerQ } = unit(inTok, outTok);
+        const net = tier.priceTokens * settings.phpPerToken * (1 - fee);
+        const creditQ = Math.floor(tier.monthlyCredits / settings.creditsPerQuestion);
+        const qDay = (tier.dailyCap > 0 && neuronsPerQ > 0) ? Math.floor(tier.dailyCap / neuronsPerQ) : null;
+        const monthlyQ = qDay === null ? creditQ : Math.min(creditQ, qDay * days);
+        const costPhp = monthlyQ * costUsd * fx;
+        const pct = (c) => net > 0 ? Math.round((net - c) / net * 1000) / 10 : 0;
+        return {
+            costPerQuestionPhp: Math.round(costUsd * fx * 10000) / 10000,
+            neuronsPerQuestion: Math.round(neuronsPerQ * 10) / 10,
+            questionsPerDay: qDay, monthlyQuestions: monthlyQ,
+            maxCostPhp: Math.round(costPhp * 100) / 100,
+            profitPctMax: pct(costPhp), profitPctExpected: pct(costPhp * usage)
+        };
+    };
+    const tierRows = tiers.map((t) => {
+        const net = t.priceTokens * settings.phpPerToken * (1 - fee);
+        const typical = profile(t, settings.avgInputTokens, settings.avgOutputTokens);
+        const heavy = profile(t, settings.heavyInputTokens, settings.heavyOutputTokens);
+        const recDailyCap = Math.max(0, Math.floor(net * (1 - target) / fx / days / AI_USD_PER_NEURON));
+        const recNeuronsPerQ = ((settings.avgInputTokens * rec.in + settings.avgOutputTokens * rec.out) / 1e6) || 1;
+        const worst = Math.min(typical.profitPctMax, heavy.profitPctMax);
+        return {
+            id: t.id, name: t.name, priceTokens: t.priceTokens, netPhp: Math.round(net * 100) / 100,
+            credits: t.monthlyCredits, dailyCap: t.dailyCap,
+            typical, heavy, recommendedDailyCap: recDailyCap, recommendedQuestionsPerDay: Math.floor(recDailyCap / recNeuronsPerQ),
+            status: typical.profitPctMax >= settings.targetMarginPercent ? 'ok' : (typical.profitPctMax >= 0 ? 'low' : 'loss'),
+            worstCasePct: worst
+        };
+    });
+    // Extra Credit packs: every credit is one question, so the cost is bounded by the credits sold.
+    // Day Boosts: extra neurons for one day; the real cost of a neuron = true cost per question / neurons counted per question.
+    const ad = addons || {};
+    const pctOf = (net, cost) => net > 0 ? Math.round((net - cost) / net * 1000) / 10 : 0;
+    const uT = unit(settings.avgInputTokens, settings.avgOutputTokens), uH = unit(settings.heavyInputTokens, settings.heavyOutputTokens);
+    const packs = (ad.packs || []).map((pk) => {
+        const net = pk.priceTokens * settings.phpPerToken * (1 - fee);
+        const q = Math.floor(pk.credits / settings.creditsPerQuestion);
+        const pnT = uT.neuronsPerQ > 0 ? uT.costUsd / uT.neuronsPerQ : AI_USD_PER_NEURON;
+        const pnH = uH.neuronsPerQ > 0 ? uH.costUsd / uH.neuronsPerQ : AI_USD_PER_NEURON;
+        // With extra daily neurons the cost can never exceed those neurons x days; without them, it is bounded by the credits.
+        const cT = (pk.dailyBonus > 0 ? Math.min(q * uT.costUsd, pk.dailyBonus * days * pnT) : q * uT.costUsd) * fx;
+        const cH = (pk.dailyBonus > 0 ? Math.min(q * uH.costUsd, pk.dailyBonus * days * pnH) : q * uH.costUsd) * fx;
+        return { id: pk.id, name: pk.name, credits: pk.credits, dailyBonus: pk.dailyBonus || 0, priceTokens: pk.priceTokens, netPhp: Math.round(net * 100) / 100, profitPctMax: pctOf(net, cT), profitPctExpected: pctOf(net, cT * usage), heavyPct: pctOf(net, cH) };
+    });
+    const boosts = (ad.boosts || []).map((bo) => {
+        const net = bo.priceTokens * settings.phpPerToken * (1 - fee);
+        const rT = uT.neuronsPerQ > 0 ? uT.costUsd / uT.neuronsPerQ : AI_USD_PER_NEURON;
+        const rH = uH.neuronsPerQ > 0 ? uH.costUsd / uH.neuronsPerQ : AI_USD_PER_NEURON;
+        return { id: bo.id, neurons: bo.neurons, priceTokens: bo.priceTokens, netPhp: Math.round(net * 100) / 100, profitPctMax: pctOf(net, bo.neurons * rT * fx), profitPctExpected: pctOf(net, bo.neurons * rT * fx * usage), heavyPct: pctOf(net, bo.neurons * rH * fx) };
+    });
+    const pctIn = rec.in > 0 ? Math.round((cur.in / rec.in - 1) * 1000) / 10 : 0;
+    const pctOut = rec.out > 0 ? Math.round((cur.out / rec.out - 1) * 1000) / 10 : 0;
+    const rateStatus = (pctIn < -5 || pctOut < -5) ? 'under' : ((pctIn > 25 || pctOut > 25) ? 'over' : 'ok');
+    return {
+        ...base,
+        price: { inUsd: priceIn, outUsd: priceOut, nowInUsd: nowP.inUsd, nowOutUsd: nowP.outUsd, nextInUsd: entry.inNext, nextOutUsd: entry.outNext, switchAt: entry.switchAt, scheduledChange: scheduled, basis: settings.priceBasis, matchedCodes: entry.codes },
+        recommended: rec, current: cur, rateDiffPct: { in: pctIn, out: pctOut }, rateStatus, tiers: tierRows, packs, boosts
+    };
+}
+// ===== ANTI-LOSS PROTECTION ======================================================================
+// 1) RATE FLOOR: the neurons counted per question can never be lower than the real Google price (so the daily neuron cap
+//    really limits the Google bill, even if the admin forgot to update the rates after a model or price change).
+// 2) SALES GUARD: a plan / Extra Credit pack / Day Boost whose worst-case Google cost would leave less than the minimum
+//    profit is NOT sold until it is fixed (price, credits or daily neurons).
+// 3) SAFE CAPS: one click (or automatic, if turned on) lowers the daily neurons of unsafe plans to the safe value.
+// Everything here is synchronous and fail-open: if a price or setting is unknown, nothing is blocked.
+function antiLossSettings() {
+    try { return aiEconSettingsCache || normalizeAiEconSettings({}); } catch (_) { return null; }
+}
+function antiLossFxRate(st) {
+    return (st.fxMode === 'auto' && aiFxState.rate > 0) ? aiFxState.rate : st.phpPerUsd;
+}
+function googleBasisPrice(entry, basis) {
+    if (basis === 'safe') return { inUsd: Math.max(entry.inNow, entry.inNext), outUsd: Math.max(entry.outNow, entry.outNext) };
+    return googlePriceAt(entry, Date.now());
+}
+function antiLossFloorRates(modelId) {
+    try {
+        const st = antiLossSettings();
+        if (!st || !st.antiLossEnabled || !st.antiLossFloorRates) return null;
+        const e = findGooglePriceEntry(modelId, googlePriceTableNow());
+        if (!e) return null;
+        const p = googleBasisPrice(e, st.priceBasis);
+        return { in: Math.round(p.inUsd / AI_USD_PER_NEURON), out: Math.round(p.outUsd / AI_USD_PER_NEURON) };
+    } catch (_) { return null; }
+}
+function antiLossUnits(st, cfg) {
+    const units = [];
+    if (!cfg || !cfg.google) return { units, fx: antiLossFxRate(st) };
+    AI_GOOGLE_MODEL_KEYS.forEach((key) => {
+        const m = cfg.google.models[key];
+        if (!m || !m.enabled) return;
+        const modelId = googleModelId(cfg, key);
+        const e = findGooglePriceEntry(modelId, googlePriceTableNow());
+        if (!e) return;
+        const bp = googleBasisPrice(e, st.priceBasis);
+        const fl = st.antiLossFloorRates ? { in: Math.round(bp.inUsd / AI_USD_PER_NEURON), out: Math.round(bp.outUsd / AI_USD_PER_NEURON) } : { in: 0, out: 0 };
+        const rin = Math.max(m.inputNeuronsPerM, fl.in), rout = Math.max(m.outputNeuronsPerM, fl.out);
+        const mk = (inTok, outTok) => {
+            const usdQ = (inTok * bp.inUsd + outTok * bp.outUsd) / 1e6;
+            const nq = (inTok * rin + outTok * rout) / 1e6;
+            return { usdQ, usdPerNeuron: nq > 0 ? usdQ / nq : AI_USD_PER_NEURON };
+        };
+        units.push({ key, modelId, typical: mk(st.avgInputTokens, st.avgOutputTokens), heavy: mk(st.heavyInputTokens, st.heavyOutputTokens) });
+    });
+    return { units, fx: antiLossFxRate(st) };
+}
+// Worst-case Google cost (PHP per month) of one sellable item, over every enabled model, vs. what the item earns.
+// tier: min(credits x cost of a heavy question, daily neurons x 30 x real cost of a neuron)
+// pack: credits x cost of a typical question, but with extra daily neurons it can never exceed those neurons x days
+// boost: neurons x real cost of a neuron
+function antiLossEvaluate(kind, item, st, cfg) {
+    const ctx = antiLossUnits(st, cfg);
+    if (!ctx.units.length || !(item.priceTokens > 0)) return { checked: false, blocked: false };
+    const days = st.daysPerMonth, fx = ctx.fx;
+    const net = item.priceTokens * st.phpPerToken * (1 - st.feePercent / 100);
+    const allowed = net * (1 - st.antiLossMinProfitPercent / 100);
+    const allowedTarget = net * (1 - st.targetMarginPercent / 100);
+    let worstUsd = 0, worstPn = 0;
+    ctx.units.forEach((u) => {
+        const pn = Math.max(u.typical.usdPerNeuron, u.heavy.usdPerNeuron);
+        const creditQ = Math.floor((item.credits || 0) / st.creditsPerQuestion);
+        let usd;
+        if (kind === 'tier') {
+            const capBound = item.dailyCap > 0 ? item.dailyCap * days * pn : Infinity;
+            usd = Math.min(capBound, creditQ * u.heavy.usdQ);
+        } else if (kind === 'pack') {
+            usd = item.dailyBonus > 0 ? Math.min(creditQ * u.heavy.usdQ, item.dailyBonus * days * pn) : creditQ * u.typical.usdQ;
+        } else {
+            usd = (item.neurons || 0) * pn;
+        }
+        if (usd > worstUsd) worstUsd = usd;
+        if (pn > worstPn) worstPn = pn;
+    });
+    const costPhp = worstUsd * fx;
+    const safeNeurons = (php) => (worstPn > 0 ? Math.max(0, Math.floor(php / fx / days / worstPn)) : 0);
+    return {
+        checked: true, blocked: costPhp > allowed + 1e-9,
+        costPhp: Math.round(costPhp * 100) / 100, netPhp: Math.round(net * 100) / 100, allowedPhp: Math.round(allowed * 100) / 100,
+        projectedProfitPct: net > 0 ? Math.round((net - costPhp) / net * 1000) / 10 : 0,
+        safeDailyCap: kind === 'tier' ? safeNeurons(allowed) : null,
+        targetDailyCap: kind === 'tier' ? safeNeurons(allowedTarget) : null,
+        safeBoostNeurons: kind === 'boost' && worstPn > 0 ? Math.floor(allowed / fx / worstPn) : null
+    };
+}
+const RELAY_AI_UNPROFITABLE_MESSAGE = 'This item is temporarily unavailable. Please try again later.';
+const antiLossLogTimes = new Map();
+function antiLossBlocks(kind, item) {
+    try {
+        const st = antiLossSettings();
+        if (!st || !st.antiLossEnabled || !st.antiLossBlockSales) return null;
+        const ev = antiLossEvaluate(kind, item, st, aiProviderConfigCache);
+        if (!ev.blocked) return null;
+        const k = kind + ':' + (item.id || '');
+        if (Date.now() - (antiLossLogTimes.get(k) || 0) > 10 * 60 * 1000) {
+            antiLossLogTimes.set(k, Date.now());
+            console.warn(`🛡️ Anti-loss: ${kind} "${item.id || ''}" is not being sold — worst-case Google cost ₱${ev.costPhp} vs ₱${ev.allowedPhp} allowed (profit ${ev.projectedProfitPct}%, minimum ${st.antiLossMinProfitPercent}%).`);
+        }
+        return ev;
+    } catch (_) { return null; }
+}
+// Lower the daily neurons of unsafe plans (never raises). mode 'anti' = down to the minimum-profit value, 'target' = down to the target-profit value.
+async function applyAntiLossCaps(mode, onlyIds) {
+    const changes = [];
+    if (!pgPoolDevices) return changes;
+    const st = antiLossSettings(), cfg = await getAiProviderConfig();
+    const tiers = (await listRelayAiTiers(false)).filter((t) => t.enabled !== false && t.priceTokens > 0 && (!onlyIds || onlyIds.includes(t.id)));
+    for (const t of tiers) {
+        const ev = antiLossEvaluate('tier', { id: t.id, priceTokens: t.priceTokens, credits: t.monthlyCredits, dailyCap: t.dailyCap }, st, cfg);
+        if (!ev.checked) continue;
+        const safe = mode === 'target' ? ev.targetDailyCap : ev.safeDailyCap;
+        if (!(safe >= 1)) continue;
+        if (t.dailyCap === 0 || t.dailyCap > safe) {
+            await pgPoolDevices.query(`UPDATE relay_ai_tiers SET daily_cap = $2, updated_at = now() WHERE id = $1`, [t.id, safe]);
+            changes.push({ id: t.id, name: t.name, from: t.dailyCap, to: safe });
+            console.log(`🛡️ Anti-loss lowered ${t.name} daily neurons ${t.dailyCap} -> ${safe} (${mode}).`);
         }
     }
-    return null;
+    if (changes.length) { try { await releaseRelayAiLockIfFreed(relayAiMonthKey(), true); } catch (_) { /* ignore */ } }
+    return changes;
 }
+async function antiLossWarmup() {
+    try {
+        const st = await getAiEconSettings();
+        await getAiProviderConfig();
+        await getGooglePriceTableBounded(false);
+        await getAiFx(st, false);
+        if (st.antiLossEnabled && st.antiLossAutoCaps && pgPoolDevices) await applyAntiLossCaps('anti');
+    } catch (err) { console.warn('⚠️ Anti-loss warm-up failed:', err && err.message); }
+}
+{
+    const t0 = setTimeout(antiLossWarmup, 5000); if (t0.unref) t0.unref();
+    const t1 = setInterval(antiLossWarmup, 60 * 60 * 1000); if (t1.unref) t1.unref();
+}
+async function buildAntiLossReport(cfg, st, tiers, packs, boosts) {
+    const rep = { enabled: !!st.antiLossEnabled, floorRates: !!st.antiLossFloorRates, blockSales: !!st.antiLossBlockSales, autoCaps: !!st.antiLossAutoCaps, minProfitPercent: st.antiLossMinProfitPercent, fx: antiLossFxRate(st), tiers: [], packs: [], boosts: [] };
+    tiers.forEach((t) => rep.tiers.push({ id: t.id, name: t.name, dailyCap: t.dailyCap, ...antiLossEvaluate('tier', { id: t.id, priceTokens: t.priceTokens, credits: t.monthlyCredits, dailyCap: t.dailyCap }, st, cfg) }));
+    packs.forEach((p) => rep.packs.push({ id: p.id, name: p.name, ...antiLossEvaluate('pack', { id: p.id, priceTokens: p.priceTokens, credits: p.credits, dailyBonus: p.dailyBonus }, st, cfg) }));
+    boosts.forEach((b) => rep.boosts.push({ id: b.id, neurons: b.neurons, ...antiLossEvaluate('boost', { id: b.id, priceTokens: b.priceTokens, neurons: b.neurons }, st, cfg) }));
+    return rep;
+}
+app.post('/relay/admin/api/ai-providers/economics/safe-caps', requireAdminKey, async (req, res) => {
+    try {
+        if (!pgPoolDevices) return res.status(503).json({ success: false, message: 'Devices/License database is not configured.' });
+        const b = (req.body && typeof req.body === 'object') ? req.body : {};
+        await getAiEconSettings();
+        const ids = Array.isArray(b.tierIds) ? b.tierIds.map((x) => String(x).trim().toLowerCase()).filter(Boolean) : null;
+        const changes = await applyAntiLossCaps(b.mode === 'target' ? 'target' : 'anti', ids);
+        return res.json({ success: true, changes, note: 'Plans that were already sold keep the daily neurons they were sold with until they renew.' });
+    } catch (err) {
+        console.error('Anti-loss safe caps error:', err.message);
+        return res.status(503).json({ success: false, message: 'Could not lower the daily neurons: ' + err.message });
+    }
+});
+app.get('/relay/admin/api/ai-providers/prices', requireAdminKey, async (req, res) => {
+    try {
+        const meta = await getGooglePriceTableBounded(req.query?.refresh === '1');
+        return res.json({ success: true, ...meta, models: googlePriceTableNow() });
+    } catch (err) {
+        console.error('AI prices error:', err.message);
+        return res.status(503).json({ success: false, message: 'Could not load Google prices: ' + err.message });
+    }
+});
+app.post('/relay/admin/api/ai-providers/economics', requireAdminKey, async (req, res) => {
+    try {
+        const b = (req.body && typeof req.body === 'object') ? req.body : {};
+        const cfg = await getAiProviderConfig();
+        const stored = await getAiEconSettings();
+        const settings = normalizeAiEconSettings({ ...stored, ...((b.settings && typeof b.settings === 'object') ? b.settings : {}) });
+        if (b.save === true) { aiEconSettingsCache = settings; setPersistentJSON('ai-econ-settings', settings); }
+        const refresh = b.refreshPrices === true;
+        const priceMeta = await getGooglePriceTableBounded(refresh);
+        const fx = await getAiFx(settings, refresh);
+        let tiers = [];
+        try { tiers = pgPoolDevices ? (await listRelayAiTiers(false)).filter((t) => t.enabled !== false && Number(t.priceTokens) > 0) : []; } catch (_) { tiers = []; }
+        let packs = [];
+        try { packs = pgPoolDevices ? (await pgPoolDevices.query(`SELECT id, name, credits, daily_bonus, price_tokens, sort_order, enabled FROM relay_ai_extra_packs WHERE enabled = TRUE ORDER BY sort_order ASC, price_tokens ASC`)).rows.map(mapRelayAiExtraPackRow).filter((x) => x.credits > 0 && x.priceTokens > 0) : []; } catch (_) { packs = []; }
+        const boosts = RELAY_AI_DAY_BOOST_ENABLED ? RELAY_AI_DAY_BOOST_OPTIONS.map((o) => ({ id: o.id, neurons: o.neurons, priceTokens: o.priceTokens })) : [];
+        const autoFill = Array.isArray(b.autoFill) ? b.autoFill.map(String) : [];
+        const bs = (b.slots && typeof b.slots === 'object') ? b.slots : {};
+        const numOr = (v, dflt) => { const x = Number(v); return (v !== '' && v !== null && v !== undefined && Number.isFinite(x) && x >= 0) ? x : dflt; };
+        const slots = {};
+        AI_GOOGLE_MODEL_KEYS.forEach((key) => {
+            const d = (bs[key] && typeof bs[key] === 'object') ? bs[key] : {};
+            const m = cfg.google.models[key];
+            const typed = typeof d.modelId === 'string' ? d.modelId.trim().slice(0, 80).replace(/[^A-Za-z0-9._\-\/]/g, '') : '';
+            slots[key] = buildSlotEconomics({
+                key, modelId: typed || googleModelId(cfg, key),
+                inRate: numOr(d.inRate, m.inputNeuronsPerM), outRate: numOr(d.outRate, m.outputNeuronsPerM),
+                enabled: d.enabled !== undefined ? !!d.enabled : !!m.enabled, autoFill: autoFill.includes(key)
+            }, settings, fx.rate, tiers, { packs, boosts });
+        });
+        const u = ensureGoogleUsageDay();
+        return res.json({
+            success: true, prices: priceMeta, fx, settings, slots,
+            antiLoss: await buildAntiLossReport(cfg, antiLossSettings() || settings, tiers, packs, boosts),
+            observed: (() => {
+                const dk = googleDefaultModelKey(cfg) || 'flashLite';
+                const pr = slots[dk] && slots[dk].price;
+                const usd = pr ? (u.inputTokens * pr.nowInUsd + u.outputTokens * pr.nowOutUsd) / 1e6 : null;
+                return {
+                    requests: u.requests, avgInputTokens: u.requests ? Math.round(u.inputTokens / u.requests) : 0, avgOutputTokens: u.requests ? Math.round(u.outputTokens / u.requests) : 0,
+                    spendTodayUsd: usd === null ? null : Math.round(usd * 10000) / 10000, spendTodayPhp: usd === null ? null : Math.round(usd * fx.rate * 100) / 100, spendModel: pr ? slots[dk].modelId : ''
+                };
+            })(),
+            assumptions: { usdPerNeuron: AI_USD_PER_NEURON, note: 'Cost = tokens x Google price. Profit % = (price in Omni Tokens x PHP per token x (1 - fee) - Google cost) / that revenue. Cap-bound: questions per month = min(credits, questions per day at the daily neuron cap x 30).' }
+        });
+    } catch (err) {
+        console.error('AI economics error:', err.message);
+        return res.status(503).json({ success: false, message: 'Could not compute the profit table: ' + err.message });
+    }
+});
 let googleModelListCache = { at: 0, models: null };
 // Chat/text models lang: dapat may generateContent; itinatago ang TTS, Live, Image, Embedding, audio, robotics, computer-use, atbp.
 function isGoogleChatModel(m) {
@@ -10047,6 +10559,7 @@ async function fetchGoogleModelList(force) {
         }
         if (!pageToken) break;
     }
+    try { await getGooglePriceTableBounded(false); } catch (_) { /* built-in estimate is used */ }
     const seen = new Set();
     const models = [];
     out.forEach((m) => {
@@ -13267,7 +13780,7 @@ app.post('/relay/cloud-tokens/activate-purchase', requireApiKey, requireAllowedD
                         return res.status(409).json({ success: false, message: `You already have the ${curAi.name} plan this month — pick a higher plan.` });
                     }
                     const capState = await getRelayAiCapacityState(monthKeyNow);
-                    const capVerdict = relayAiTierCapacityVerdict(capState, aiPlanGrantTier, curAi, curAi ? 0 : await getRelayAiBaseCapForClient(installationId, capState));
+                    const capVerdict = relayAiTierCapacityVerdict(capState, aiPlanGrantTier, curAi, curAi ? 0 : await getRelayAiBaseCapForClient(installationId, capState), { skipAntiLoss: true });
                     if (capVerdict.blocked) return res.status(423).json({ success: false, locked: true, message: relayAiTierBlockMessage(capVerdict) });
                 } catch (err) { console.error('omni-token AI plan capacity error:', err.message); return res.status(500).json({ success: false, message: 'Could not verify AI plan capacity. Please try again.' }); }
             }

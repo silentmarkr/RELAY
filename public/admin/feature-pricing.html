@@ -1852,22 +1852,224 @@ async function aiFetchGoogleModels(force) {
     }
   } finally { aiGoogleModelListLoading = false; }
 }
-function aiPickGoogleModel(key) {
+// ---- Live Google price + auto neuron rates + profit table ----
+let aiEconState = null;
+let aiEconTimer = null;
+let aiEconSeq = 0;
+const AI_ECON_FIELDS = [
+  ['fxMode', 'aiPvEc_fx'], ['phpPerUsd', 'aiPvEc_php'], ['phpPerToken', 'aiPvEc_ptok'], ['feePercent', 'aiPvEc_fee'],
+  ['targetMarginPercent', 'aiPvEc_target'], ['expectedUsagePercent', 'aiPvEc_usage'], ['priceBasis', 'aiPvEc_basis'],
+  ['avgInputTokens', 'aiPvEc_in'], ['avgOutputTokens', 'aiPvEc_out'], ['heavyInputTokens', 'aiPvEc_hin'],
+  ['heavyOutputTokens', 'aiPvEc_hout'], ['creditsPerQuestion', 'aiPvEc_cpq'],
+  ['antiLossEnabled', 'aiPvEc_al_on'], ['antiLossFloorRates', 'aiPvEc_al_floor'], ['antiLossBlockSales', 'aiPvEc_al_block'],
+  ['antiLossAutoCaps', 'aiPvEc_al_auto'], ['antiLossMinProfitPercent', 'aiPvEc_al_min']
+];
+function aiEconReadSettings() {
+  const o = {};
+  AI_ECON_FIELDS.forEach(([k, id]) => { const e = document.getElementById(id); if (e && e.value !== '') o[k] = e.value; });
+  return o;
+}
+function aiEconWriteSettings(s) {
+  if (!s) return;
+  AI_ECON_FIELDS.forEach(([k, id]) => { const e = document.getElementById(id); if (e && s[k] !== undefined) e.value = (typeof s[k] === 'boolean') ? (s[k] ? '1' : '0') : s[k]; });
+}
+function aiEconBody(extra) {
+  const v = (id) => document.getElementById(id);
+  const slot = (key) => ({ modelId: v(`aiPv_${key}_modelId`)?.value || '', inRate: v(`aiPv_${key}_in`)?.value, outRate: v(`aiPv_${key}_out`)?.value, enabled: !!v(`aiPv_${key}_enabled`)?.checked });
+  const body = { slots: { flashLite: slot('flashLite'), flash: slot('flash') } };
+  // Before the first answer, the inputs only hold placeholders, so let the server use the saved settings.
+  if (aiEconState) body.settings = aiEconReadSettings();
+  return JSON.stringify(Object.assign(body, extra || {}));
+}
+function aiScheduleEconomics(delay) {
+  clearTimeout(aiEconTimer);
+  aiEconTimer = setTimeout(() => { aiRefreshEconomics(); }, delay || 0);
+}
+async function aiRefreshEconomics(extra) {
+  const mySeq = ++aiEconSeq;
+  const data = await aiApi('/relay/admin/api/ai-providers/economics', { method: 'POST', body: aiEconBody(extra) });
+  if (mySeq !== aiEconSeq) return data; // a newer request was sent meanwhile; do not draw this older answer over it
+  const sum = document.getElementById('aiEconSummary');
+  if (!data?.success) { if (sum) { sum.style.color = 'var(--danger,#ff6b6b)'; sum.textContent = '⚠️ ' + ((data && data.message) || 'Could not compute the profit table.'); } return null; }
+  const first = !aiEconState;
+  aiEconState = data;
+  if (first || (extra && extra.save)) aiEconWriteSettings(data.settings);
+  aiRenderEconomics(data);
+  return data;
+}
+function aiEconSourceLabel(p) {
+  if (!p) return { text: '', color: 'var(--muted)' };
+  if (p.source === 'live') return { text: `LIVE from the Google pricing page · fetched ${new Date(p.fetchedAt).toLocaleString()}`, color: '#16a34a' };
+  if (p.source === 'stale') return { text: `Saved copy from ${new Date(p.fetchedAt).toLocaleString()} (could not refresh${p.error ? ': ' + p.error : ''})`, color: '#d97706' };
+  return { text: `Built-in ESTIMATE — could not read the Google pricing page${p.error ? ' (' + p.error + ')' : ''}. Verify prices before saving.`, color: 'var(--danger,#ff6b6b)' };
+}
+function aiEconUsd(x) {
+  const t = Number(x);
+  if (!Number.isFinite(t)) return '—';
+  return '$' + (Math.abs(t * 100 - Math.round(t * 100)) < 1e-9 ? t.toFixed(2) : String(+t.toFixed(4)));
+}
+function aiEconPctCell(pct, target) {
+  const color = pct >= target ? '#16a34a' : (pct >= 0 ? '#d97706' : 'var(--danger,#ff6b6b)');
+  return `<td style="padding:3px 6px; text-align:right; font-weight:700; color:${color}; white-space:nowrap;">${Number(pct).toFixed(1)}%</td>`;
+}
+function aiEconSlotHtml(s, data) {
+  if (!s) return '';
+  if (!s.price) return `<div style="color:#d97706;">${escapeHtml(s.message || 'No price found for this model.')}</div>`;
+  const p = s.price, st = data.settings, n = (x) => Number(x || 0).toLocaleString();
+  const target = st.targetMarginPercent;
+  let priceLine = `Google price per 1M tokens (${escapeHtml(p.matchedCodes[0])}): <b>${aiEconUsd(p.nowInUsd)} in / ${aiEconUsd(p.nowOutUsd)} out</b>`;
+  if (p.scheduledChange) {
+    const when = p.switchAt ? new Date(p.switchAt).toLocaleDateString() : '';
+    priceLine += ` · price goes up after ${escapeHtml(when)} to <b>${aiEconUsd(p.nextInUsd)} / ${aiEconUsd(p.nextOutUsd)}</b>`;
+  }
+  const basisNote = st.priceBasis === 'safe' ? 'Recommended rates use the higher (safer) price.' : 'Recommended rates use today\'s price only.';
+  let rateLine = '';
+  if (s.rateStatus === 'under') {
+    rateLine = `<span style="color:var(--danger,#ff6b6b); font-weight:700;">⚠️ Your neurons are ${Math.abs(Math.min(s.rateDiffPct.in, s.rateDiffPct.out))}% too LOW</span> — the daily cap lets in more Google cost than it should. <button class="btn-ghost" onclick="aiApplyRecommended('${s.key}')">Apply recommended</button>`;
+  } else if (s.rateStatus === 'over') {
+    rateLine = `<span style="color:#d97706; font-weight:700;">ℹ️ Your neurons are higher than the price needs</span> — customers get fewer questions per day than necessary. <button class="btn-ghost" onclick="aiApplyRecommended('${s.key}')">Apply recommended</button>`;
+  } else {
+    rateLine = '<span style="color:#16a34a; font-weight:700;">✅ Your neurons match the Google price.</span>';
+  }
+  const rows = (s.tiers || []).map((t) => `<tr>
+      <td style="padding:3px 6px; white-space:nowrap; font-weight:700;">${escapeHtml(t.name)}</td>
+      <td style="padding:3px 6px; text-align:right; white-space:nowrap;">₱${n(t.priceTokens)} <span style="color:var(--muted);">(₱${n(Math.round(t.netPhp))} net)</span></td>
+      <td style="padding:3px 6px; text-align:right; white-space:nowrap;">${n(t.credits)}</td>
+      <td style="padding:3px 6px; text-align:right; white-space:nowrap;">${t.dailyCap > 0 ? n(t.dailyCap) : '∞'}</td>
+      <td style="padding:3px 6px; text-align:right; white-space:nowrap;">${t.typical.questionsPerDay === null ? '—' : n(t.typical.questionsPerDay)}</td>
+      ${aiEconPctCell(t.typical.profitPctMax, target)}
+      ${aiEconPctCell(t.typical.profitPctExpected, target)}
+      ${aiEconPctCell(t.heavy.profitPctMax, target)}
+      <td style="padding:3px 6px; text-align:right; white-space:nowrap;">${n(t.recommendedDailyCap)} <span style="color:var(--muted);">(~${n(t.recommendedQuestionsPerDay)} q/day)</span></td>
+    </tr>`).join('');
+  const table = rows ? `<div style="overflow-x:auto; margin-top:6px;"><table style="border-collapse:collapse; font-size:11px; min-width:620px; width:100%;">
+      <thead><tr style="color:var(--muted); text-align:right;">
+        <th style="padding:3px 6px; text-align:left;">Plan</th><th style="padding:3px 6px;">Price</th><th style="padding:3px 6px;">Credits</th><th style="padding:3px 6px;">Daily neurons</th>
+        <th style="padding:3px 6px;">Questions/day</th><th style="padding:3px 6px;">Profit (all credits used)</th><th style="padding:3px 6px;">Profit (${st.expectedUsagePercent}% used)</th><th style="padding:3px 6px;">Profit (heavy questions)</th><th style="padding:3px 6px;">Daily neurons for ${target}% profit</th>
+      </tr></thead><tbody>${rows}</tbody></table></div>
+    <div style="margin-top:4px; color:var(--muted);">Profit % = (price after ${st.feePercent}% fee − Google cost) ÷ price after fee. Typical question = ${n(st.avgInputTokens)} in / ${n(st.avgOutputTokens)} out tokens; heavy = ${n(st.heavyInputTokens)} / ${n(st.heavyOutputTokens)}. Green = at or above your ${target}% target, orange = below target, red = a loss.</div>` : '<div style="color:var(--muted); margin-top:4px;">No enabled paid plans were found, so there is no profit table yet.</div>';
+  const pr = (x) => aiEconPctCell(x, target);
+  const packRows = (s.packs || []).map((k) => `<tr><td style="padding:3px 6px; font-weight:700; white-space:nowrap;">${escapeHtml(k.name)}</td><td style="padding:3px 6px; text-align:right; white-space:nowrap;">₱${n(k.priceTokens)} · ${n(k.credits)} credits</td>${pr(k.profitPctMax)}${pr(k.profitPctExpected)}${pr(k.heavyPct)}</tr>`).join('');
+  const boostRows = (s.boosts || []).map((k) => `<tr><td style="padding:3px 6px; font-weight:700; white-space:nowrap;">Boost ${n(k.neurons)} neurons</td><td style="padding:3px 6px; text-align:right; white-space:nowrap;">₱${n(k.priceTokens)}</td>${pr(k.profitPctMax)}${pr(k.profitPctExpected)}${pr(k.heavyPct)}</tr>`).join('');
+  const addons = (packRows || boostRows) ? `<div style="overflow-x:auto; margin-top:8px;"><table style="border-collapse:collapse; font-size:11px; min-width:420px; width:100%;">
+      <thead><tr style="color:var(--muted); text-align:right;"><th style="padding:3px 6px; text-align:left;">Extra Credits / Boosts</th><th style="padding:3px 6px;">Price</th><th style="padding:3px 6px;">Profit (all used)</th><th style="padding:3px 6px;">Profit (${st.expectedUsagePercent}% used)</th><th style="padding:3px 6px;">Profit (heavy)</th></tr></thead>
+      <tbody>${packRows}${boostRows}</tbody></table></div>` : '';
+  return `<div style="border-top:1px dashed var(--line); padding-top:6px;">
+    <div>${priceLine}</div>
+    <div style="margin-top:2px;">Recommended neurons / 1M tokens: <b>in ${n(s.recommended.in)}</b> · <b>out ${n(s.recommended.out)}</b> <span style="color:var(--muted);">(${escapeHtml(basisNote)})</span></div>
+    <div style="margin-top:4px;">${rateLine}</div>${table}${addons}</div>`;
+}
+function aiRenderGuard(data) {
+  const box = document.getElementById('aiEconGuard');
+  if (!box) return;
+  const g = data && data.antiLoss;
+  if (!g) { box.innerHTML = ''; return; }
+  const n = (x) => Number(x || 0).toLocaleString();
+  if (!g.enabled) {
+    box.innerHTML = '<div style="color:var(--danger,#ff6b6b); font-weight:700;">🛡️ Anti-loss is OFF — nothing stops a plan, pack or boost from selling at a loss.</div>';
+    return;
+  }
+  const on = (b) => b ? '<span style="color:#16a34a;">ON</span>' : '<span style="color:var(--muted);">OFF</span>';
+  const line = (label, ev, extra) => {
+    if (!ev.checked) return `<div>${label} — <span style="color:#d97706;">not checked (no Google price for the enabled models)</span></div>`;
+    if (!ev.blocked) return `<div>${label} — <span style="color:#16a34a; font-weight:700;">✅ safe</span> · worst-case profit ${ev.projectedProfitPct}% (cost ≤ ₱${n(ev.costPhp)} of ₱${n(ev.netPhp)})</div>`;
+    return `<div>${label} — <span style="color:var(--danger,#ff6b6b); font-weight:700;">⛔ ${g.blockSales ? 'NOT SOLD' : 'would lose money'}</span> · worst-case profit ${ev.projectedProfitPct}% (cost up to ₱${n(ev.costPhp)} vs ₱${n(ev.allowedPhp)} allowed) ${extra || ''}</div>`;
+  };
+  const tiers = (g.tiers || []).map((t) => line(`<b>${escapeHtml(t.name)}</b> plan`, t, (t.blocked && t.safeDailyCap >= 1) ? `<button class="btn-ghost" onclick="aiLowerUnsafeCaps('anti',['${escapeHtml(t.id)}'])">Lower daily neurons ${n(t.dailyCap)} → ${n(t.safeDailyCap)}</button>` : '')).join('');
+  const packs = (g.packs || []).map((p) => line(`<b>${escapeHtml(p.name)}</b>`, p, '')).join('');
+  const boosts = (g.boosts || []).map((b) => line(`<b>Boost ${n(b.neurons)} neurons</b>`, b, '')).join('');
+  const anyBlocked = [].concat(g.tiers || [], g.packs || [], g.boosts || []).some((x) => x.blocked);
+  const anyTierBlocked = (g.tiers || []).some((t) => t.blocked && t.safeDailyCap >= 1);
+  box.innerHTML = `<div style="border-top:1px dashed var(--line); padding-top:6px; margin-top:6px;">
+    <div style="font-weight:700;">🛡️ Anti-loss status <span style="color:var(--muted); font-weight:400;">(saved settings) · rate floor ${on(g.floorRates)} · block unsafe sales ${on(g.blockSales)} · auto-lower plans ${on(g.autoCaps)} · minimum profit ${g.minProfitPercent}%</span></div>
+    <div style="margin-top:4px; display:grid; gap:3px;">${tiers}${packs}${boosts}</div>
+    ${anyTierBlocked ? `<div style="margin-top:6px; display:flex; gap:8px; flex-wrap:wrap;"><button class="btn-ghost" onclick="aiLowerUnsafeCaps('anti')">Lower ALL unsafe plans to the safe daily neurons</button><button class="btn-ghost" onclick="aiLowerUnsafeCaps('target')">Lower them to the ${data.settings.targetMarginPercent}% target profit instead</button></div>` : ''}
+    ${anyBlocked ? '<div style="margin-top:4px; color:var(--muted);">Customers see unsafe items as "temporarily unavailable". Plans that were already sold keep the daily neurons they were sold with until they renew.</div>' : ''}
+  </div>`;
+}
+async function aiLowerUnsafeCaps(mode, ids) {
+  const data = await aiApi('/relay/admin/api/ai-providers/economics/safe-caps', { method: 'POST', body: JSON.stringify({ mode, tierIds: ids || null }) });
+  if (!data?.success) { toast(data?.message || 'Could not lower the daily neurons.', 'error'); return; }
+  const c = data.changes || [];
+  toast(c.length ? 'Lowered: ' + c.map((x) => `${x.name} ${Number(x.from).toLocaleString()} → ${Number(x.to).toLocaleString()}`).join(', ') : 'Nothing needed lowering.', 'success');
+  if (typeof loadAiPlans === 'function') loadAiPlans(true);
+  aiScheduleEconomics(0);
+}
+function aiRenderEconomics(data) {
+  aiRenderGuard(data);
+  const sum = document.getElementById('aiEconSummary');
+  if (sum) {
+    const src = aiEconSourceLabel(data.prices);
+    const fx = data.fx || {};
+    const fxTxt = fx.source === 'auto' ? 'live' : (fx.source === 'auto-stale' ? 'live, older copy' : (fx.source === 'manual-fallback' ? 'manual — live rate unavailable' : 'manual'));
+    const o = data.observed || {};
+    sum.style.color = 'var(--muted)';
+    sum.innerHTML = `<span style="color:${src.color}; font-weight:700;">Prices: ${escapeHtml(src.text)}</span><br>PHP per USD: <b>${Number(fx.rate || 0).toFixed(2)}</b> (${escapeHtml(fxTxt)})${o.requests ? ` · Observed today: avg <b>${Number(o.avgInputTokens).toLocaleString()}</b> in / <b>${Number(o.avgOutputTokens).toLocaleString()}</b> out tokens per request (${Number(o.requests).toLocaleString()} requests) <button class="btn-ghost" onclick="aiEconUseObserved()">Use these tokens</button>${o.spendTodayPhp !== null && o.spendTodayPhp !== undefined ? `<br>Estimated Google spend today: <b>${aiEconUsd(o.spendTodayUsd)}</b> (≈ ₱${Number(o.spendTodayPhp).toLocaleString()}, tokens × the price of ${escapeHtml(o.spendModel || 'the default model')})` : ''}` : ''}`;
+  }
+  Object.keys(data.slots || {}).forEach((key) => {
+    const el = document.getElementById(`aiPv_${key}_econ`);
+    if (el) el.innerHTML = aiEconSlotHtml(data.slots[key], data);
+  });
+}
+async function aiAutoFillRates(key, info) {
+  const note = document.getElementById(`aiPv_${key}_rateNote`);
+  const setNote = (t, color) => { if (note) { note.style.display = ''; note.style.color = color || 'var(--muted)'; note.textContent = t; } };
+  setNote('Reading the Google price for this model...');
+  const data = await aiRefreshEconomics({ autoFill: [key] });
+  const s = data && data.slots && data.slots[key];
+  const inEl = document.getElementById(`aiPv_${key}_in`), outEl = document.getElementById(`aiPv_${key}_out`);
+  if (s && s.price) {
+    if (inEl) inEl.value = s.current.in;
+    if (outEl) outEl.value = s.current.out;
+    const lbl = aiEconSourceLabel(data.prices);
+    setNote(`Neurons auto-filled from the Google price (${aiEconUsd(s.price.inUsd)} in / ${aiEconUsd(s.price.outUsd)} out per 1M tokens). ${lbl.text}. Press "I-save ang AI Provider" to keep them.`, lbl.color);
+    aiScheduleEconomics(0);
+    return;
+  }
+  if (info && info.suggested) {
+    if (inEl) inEl.value = info.suggested.inputNeuronsPerM;
+    if (outEl) outEl.value = info.suggested.outputNeuronsPerM;
+    setNote(`Estimated rate filled in from the price ($${info.suggested.priceInUsd} in / $${info.suggested.priceOutUsd} out per 1M tokens). Confirm on the Google pricing page before saving.`, '#d97706');
+    aiScheduleEconomics(0);
+    return;
+  }
+  setNote((s && s.message) || 'No known price for this model — enter the Neurons / 1M tokens by hand.', '#d97706');
+}
+function aiApplyRecommended(key) {
+  const s = aiEconState && aiEconState.slots && aiEconState.slots[key];
+  if (!s || !s.recommended) return;
+  const inEl = document.getElementById(`aiPv_${key}_in`), outEl = document.getElementById(`aiPv_${key}_out`);
+  if (inEl) inEl.value = s.recommended.in;
+  if (outEl) outEl.value = s.recommended.out;
+  const note = document.getElementById(`aiPv_${key}_rateNote`);
+  if (note) { note.style.display = ''; note.style.color = 'var(--muted)'; note.textContent = 'Recommended neurons applied. Press "I-save ang AI Provider" to keep them.'; }
+  aiScheduleEconomics(0);
+}
+function aiEconUseObserved() {
+  const o = aiEconState && aiEconState.observed;
+  if (!o || !o.requests) return;
+  const a = document.getElementById('aiPvEc_in'), b = document.getElementById('aiPvEc_out');
+  if (a) a.value = o.avgInputTokens;
+  if (b) b.value = o.avgOutputTokens;
+  aiScheduleEconomics(0);
+}
+async function aiEconRefreshPrices() {
+  const sum = document.getElementById('aiEconSummary');
+  if (sum) { sum.style.color = 'var(--muted)'; sum.textContent = 'Reading the Google pricing page...'; }
+  const data = await aiRefreshEconomics({ refreshPrices: true });
+  if (data) toast(data.prices && data.prices.source === 'live' ? 'Prices refreshed from Google.' : 'Could not read the Google pricing page — using the saved/built-in prices.', data.prices && data.prices.source === 'live' ? 'success' : 'error');
+}
+async function aiEconSaveSettings() {
+  const data = await aiRefreshEconomics({ save: true });
+  if (data) toast('Calculator settings saved.', 'success');
+}
+async function aiPickGoogleModel(key) {
   const sel = document.getElementById(`aiPv_${key}_pick`);
   if (!sel || !sel.value) return;
   const info = (aiGoogleModelList || []).find((x) => x.id === sel.value);
   const idEl = document.getElementById(`aiPv_${key}_modelId`);
   if (idEl) idEl.value = sel.value;
-  const note = document.getElementById(`aiPv_${key}_rateNote`);
-  if (info && info.suggested) {
-    const inEl = document.getElementById(`aiPv_${key}_in`), outEl = document.getElementById(`aiPv_${key}_out`);
-    if (inEl) inEl.value = info.suggested.inputNeuronsPerM;
-    if (outEl) outEl.value = info.suggested.outputNeuronsPerM;
-    if (note) { note.style.display = ''; note.textContent = `Estimated rate filled in from the price ($${info.suggested.priceInUsd} in / $${info.suggested.priceOutUsd} out per 1M tokens). Confirm on the Google pricing page before saving.`; }
-  } else if (note) {
-    note.style.display = '';
-    note.textContent = 'No known price for this model — enter the Neurons / 1M tokens by hand.';
-  }
+  await aiAutoFillRates(key, info);
 }
 async function aiGoogleClearLearned() {
   const data = await aiApi('/relay/admin/api/ai-provider', { method: 'POST', body: JSON.stringify({ action: 'google-clear-learned' }) });
@@ -1905,12 +2107,13 @@ function renderAiProviderCfg(d) {
       <label style="font-size:12px; font-weight:700;"><input type="checkbox" id="aiPv_${key}_enabled" ${m.enabled ? 'checked' : ''}> ${label} — available sa OmniAI (client)</label>
       <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; margin-top:6px;">
         ${pickHtml}
-        <label style="font-size:11px; color:var(--muted);">Model ID (blangko = ${escapeHtml(envDefault)})<input type="text" id="aiPv_${key}_modelId" value="${escapeHtml(m.modelId || '')}" placeholder="${escapeHtml(envDefault)}" style="width:100%; margin-top:4px;"></label>
+        <label style="font-size:11px; color:var(--muted);">Model ID (blangko = ${escapeHtml(envDefault)})<input type="text" id="aiPv_${key}_modelId" value="${escapeHtml(m.modelId || '')}" placeholder="${escapeHtml(envDefault)}" style="width:100%; margin-top:4px;" onchange="aiAutoFillRates('${key}')"></label>
         <label style="font-size:11px; color:var(--muted);">Kailangang plan ng client${sel('aiPv_' + key + '_tier', m.requiredTier || '', tierOpts)}</label>
         <label style="font-size:11px; color:var(--muted);">Neurons / 1M input tokens<input type="number" min="0" step="1" id="aiPv_${key}_in" value="${m.inputNeuronsPerM}" style="width:100%; margin-top:4px;"></label>
         <label style="font-size:11px; color:var(--muted);">Neurons / 1M output tokens<input type="number" min="0" step="1" id="aiPv_${key}_out" value="${m.outputNeuronsPerM}" style="width:100%; margin-top:4px;"></label>
       </div>
       <div id="aiPv_${key}_rateNote" class="meta" style="margin-top:4px; display:none;"></div>
+      <div id="aiPv_${key}_econ" class="meta" style="margin-top:6px;"></div>
       <div style="font-size:11px; color:var(--muted); margin:8px 0 2px;">Limits of this model (get them from AI Studio &gt; Rate limit). When 0, RELAY automatically takes the value from Google 429 response if it is included.</div>
       <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:8px;">
         ${lim('rpm', 'RPM (requests/minuto)')}
@@ -1948,6 +2151,48 @@ function renderAiProviderCfg(d) {
       </div>
       ${modelRow('flashLite', 'Gemini Flash-Lite')}
       ${modelRow('flash', 'Gemini Flash')}
+      ${(() => {
+        const es = (aiEconState && aiEconState.settings) || {};
+        const val = (k, d) => (es[k] !== undefined ? es[k] : d);
+        const inp = (id, label, k, d, step) => `<label style="font-size:11px; color:var(--muted);">${label}<input type="number" min="0" step="${step || 1}" id="${id}" value="${val(k, d)}" style="width:100%; margin-top:4px;"></label>`;
+        return `<div style="margin-top:10px; padding:8px; border:1px solid var(--line); border-radius:8px;">
+        <div style="font-size:12px; font-weight:700;">📈 Google price &amp; profit calculator</div>
+        <div id="aiEconSummary" class="meta" style="margin-top:4px;">Reading Google prices...</div>
+        <div id="aiEconGuard" class="meta" style="margin-top:4px;"></div>
+        <details open style="margin-top:6px;"><summary style="cursor:pointer; font-size:12px; font-weight:700;">🛡️ Anti-loss protection</summary>
+          <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:8px; margin-top:6px;">
+            <label style="font-size:11px; color:var(--muted);">Anti-loss<select id="aiPvEc_al_on" style="width:100%; margin-top:4px;"><option value="1" ${val('antiLossEnabled', true) ? 'selected' : ''}>ON</option><option value="0" ${val('antiLossEnabled', true) ? '' : 'selected'}>OFF</option></select></label>
+            <label style="font-size:11px; color:var(--muted);">Never count fewer neurons than the Google price<select id="aiPvEc_al_floor" style="width:100%; margin-top:4px;"><option value="1" ${val('antiLossFloorRates', true) ? 'selected' : ''}>ON (recommended)</option><option value="0" ${val('antiLossFloorRates', true) ? '' : 'selected'}>OFF</option></select></label>
+            <label style="font-size:11px; color:var(--muted);">Do not sell plans / packs / boosts that lose money<select id="aiPvEc_al_block" style="width:100%; margin-top:4px;"><option value="1" ${val('antiLossBlockSales', true) ? 'selected' : ''}>ON (recommended)</option><option value="0" ${val('antiLossBlockSales', true) ? '' : 'selected'}>OFF</option></select></label>
+            <label style="font-size:11px; color:var(--muted);">Automatically lower unsafe plans' daily neurons<select id="aiPvEc_al_auto" style="width:100%; margin-top:4px;"><option value="0" ${val('antiLossAutoCaps', false) ? '' : 'selected'}>OFF (use the button)</option><option value="1" ${val('antiLossAutoCaps', false) ? 'selected' : ''}>ON</option></select></label>
+            ${inp('aiPvEc_al_min', 'Minimum profit % (below this, an item is unsafe)', 'antiLossMinProfitPercent', 10, 1)}
+          </div>
+          <div class="meta" style="margin-top:4px;">The protection works from the SAVED calculator settings — press "Save calculator settings" after changing it. Worst case = a customer uses every credit and the full daily neurons for 30 days.</div>
+        </details>
+        <div class="meta" style="margin-top:4px;">Pick or type a Model ID above and the neurons fill in by themselves from the live Google price. The tables show your profit per plan.</div>
+        <details style="margin-top:6px;"><summary style="cursor:pointer; font-size:12px;">Calculator settings</summary>
+          <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; margin-top:6px;">
+            <label style="font-size:11px; color:var(--muted);">PHP per USD source<select id="aiPvEc_fx" style="width:100%; margin-top:4px;"><option value="auto" ${val('fxMode', 'auto') === 'auto' ? 'selected' : ''}>Live rate (auto)</option><option value="manual" ${val('fxMode', 'auto') === 'manual' ? 'selected' : ''}>Manual</option></select></label>
+            ${inp('aiPvEc_php', 'PHP per USD (manual / fallback)', 'phpPerUsd', 58, 0.01)}
+            ${inp('aiPvEc_ptok', 'PHP per Omni Token', 'phpPerToken', 1, 0.01)}
+            ${inp('aiPvEc_fee', 'Payment fee % (taken from price)', 'feePercent', 3, 0.1)}
+            ${inp('aiPvEc_target', 'Target profit %', 'targetMarginPercent', 50, 1)}
+            ${inp('aiPvEc_usage', 'Expected usage % of credits', 'expectedUsagePercent', 50, 1)}
+            <label style="font-size:11px; color:var(--muted);">Price used for recommended neurons<select id="aiPvEc_basis" style="width:100%; margin-top:4px;"><option value="safe" ${val('priceBasis', 'safe') === 'safe' ? 'selected' : ''}>Higher of today / upcoming (safe)</option><option value="current" ${val('priceBasis', 'safe') === 'current' ? 'selected' : ''}>Today's price only</option></select></label>
+            ${inp('aiPvEc_in', 'Typical question: input tokens', 'avgInputTokens', 4000)}
+            ${inp('aiPvEc_out', 'Typical question: output tokens', 'avgOutputTokens', 350)}
+            ${inp('aiPvEc_hin', 'Heavy question: input tokens', 'heavyInputTokens', 10000)}
+            ${inp('aiPvEc_hout', 'Heavy question: output tokens', 'heavyOutputTokens', 650)}
+            ${inp('aiPvEc_cpq', 'Credits per question', 'creditsPerQuestion', 1)}
+          </div>
+        </details>
+        <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="btn-ghost" onclick="aiEconRefreshPrices()">🔄 Refresh prices from Google</button>
+          <button class="btn-ghost" onclick="aiScheduleEconomics(0)">🧮 Recalculate</button>
+          <button class="btn-ghost" onclick="aiEconSaveSettings()">💾 Save calculator settings</button>
+        </div>
+      </div>`;
+      })()}
       <div class="meta" style="margin-top:6px;">"Neurons / 1M tokens" is the conversion that lets Base/Plus/Pro use the same daily neurons on Google. Default = equivalent to the price ($0.011 / 1,000 neurons). Change it when the Google price changes.</div>
       ${usageHtml}
     </div>
@@ -1959,6 +2204,8 @@ function renderAiProviderCfg(d) {
     </div>`;
   const planEl = document.getElementById('aiPvGPlan');
   if (planEl) planEl.onchange = () => { const w = document.getElementById('aiPvPrivacy'); if (w) w.style.display = planEl.value === 'free' ? '' : 'none'; };
+  if (aiEconState) aiRenderEconomics(aiEconState);
+  aiScheduleEconomics(0);
 }
 async function saveAiProviderCfg() {
   const v = (id) => document.getElementById(id);
