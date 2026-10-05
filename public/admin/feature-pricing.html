@@ -2239,10 +2239,60 @@ function aiFillLimitsForModel(key, modelId) {
     setNote('Same model as the saved one — its saved limits were restored.');
     return;
   }
-  const learned = ((cfgState.status && cfgState.status.google && cfgState.status.google.learnedById) || {})[id];
-  ['rpm', 'rpd', 'tpm'].forEach((k) => { if (els[k]) els[k].value = (learned && learned[k]) ? learned[k] : 0; });
-  if (learned) setNote(`RPM/RPD/TPM filled from the limits Google reported for ${id} (learned from its 429 responses). Press "I-save ang AI Provider" to keep them.`, '#16a34a');
-  else setNote(`The previous model's limits were cleared. Google has no API for RPM/RPD/TPM and RELAY has not seen a 429 for ${id} yet, so they stay 0 (RELAY will learn them automatically at the first 429). You can also type the values from AI Studio > Rate limit.`, '#d97706');
+  const fill = (v) => ['rpm', 'rpd', 'tpm'].forEach((k) => { if (els[k]) els[k].value = Number(v && v[k]) || 0; });
+  const info = (aiGoogleModelList || []).find((x) => x.id === id);
+  // Priority: 1) the AI Studio table pasted before (saved on the server)  2) limits learned from Google's 429  3) built-in Free-tier table.
+  const gs = (cfgState.status && cfgState.status.google) || {};
+  const studioRow = aiFindStudioRow((gs.studioLimits && gs.studioLimits.rows) || [], id, info);
+  if (studioRow) {
+    fill(studioRow);
+    if (!studioRow.rpm && !studioRow.rpd && !studioRow.tpm) setNote(`AI Studio shows 0 / 0 / 0 for "${studioRow.name}" — this model has no quota in this project, so it cannot be used. Pick another model.`, '#dc2626');
+    else setNote(`RPM ${studioRow.rpm.toLocaleString()} · TPM ${studioRow.tpm.toLocaleString()} · RPD ${studioRow.rpd.toLocaleString()} filled from your saved AI Studio table ("${studioRow.name}"). Press "I-save ang AI Provider" to keep them.`, '#16a34a');
+    return;
+  }
+  const learned = (gs.learnedById || {})[id];
+  if (learned && (learned.rpm || learned.rpd || learned.tpm)) {
+    fill(learned);
+    setNote(`RPM/RPD/TPM filled from the limits Google reported for ${id} (learned from its 429 responses). Press "I-save ang AI Provider" to keep them.`, '#16a34a');
+    return;
+  }
+  const planEl = document.getElementById('aiPvGPlan');
+  const isFree = !planEl || planEl.value === 'free';
+  const builtin = isFree ? aiBuiltinFreeLimits(id) : null;
+  if (builtin) {
+    fill(builtin);
+    setNote(`RPM ${builtin.rpm.toLocaleString()} · TPM ${builtin.tpm.toLocaleString()} · RPD ${builtin.rpd.toLocaleString()} filled from the built-in Free-tier table (as seen in AI Studio on ${AI_BUILTIN_FREE_LIMITS_DATE}). Google changes these per project, so paste your AI Studio table below once to make them exact. Press "I-save ang AI Provider" to keep them.`, '#16a34a');
+    return;
+  }
+  fill(null);
+  setNote(`The previous model's limits were cleared. Google has no API for RPM/RPD/TPM, ${id} is not in the saved AI Studio table or the built-in table, and RELAY has not seen a 429 for it yet, so they stay 0. Paste your AI Studio > Rate limit table below (it is remembered) or type the values by hand.`, '#d97706');
+}
+// Free-tier limits seen in AI Studio > Rate limit (Free tier, project "OmniAI"). Fallback only — Google changes these per project
+// and does not publish them, so a pasted AI Studio table (saved on the server) always wins over this list.
+const AI_BUILTIN_FREE_LIMITS_DATE = '2026-10-05';
+const AI_BUILTIN_FREE_LIMITS = {
+  'gemini-3.5-flash-lite': { rpm: 15, tpm: 250000, rpd: 500 },
+  'gemini-3.1-flash-lite': { rpm: 15, tpm: 250000, rpd: 500 },
+  'gemini-3.5-flash': { rpm: 5, tpm: 250000, rpd: 20 },
+  'gemini-3.8-flash': { rpm: 5, tpm: 250000, rpd: 20 },
+  'gemini-3.7-flash': { rpm: 5, tpm: 250000, rpd: 20 },
+  'gemini-3.6-flash': { rpm: 5, tpm: 250000, rpd: 20 },
+  'gemini-3-flash': { rpm: 5, tpm: 250000, rpd: 20 },
+  'gemini-2.5-flash-lite': { rpm: 10, tpm: 250000, rpd: 20 },
+  'gemini-2.5-flash': { rpm: 5, tpm: 250000, rpd: 20 }
+};
+function aiBuiltinFreeLimits(modelId) {
+  const id = String(modelId || '').trim().toLowerCase().replace(/^models\//, '');
+  if (AI_BUILTIN_FREE_LIMITS[id]) return AI_BUILTIN_FREE_LIMITS[id];
+  const base = id.replace(/-(preview.*|latest|exp.*|\d{3})$/i, ''); // e.g. gemini-3.1-flash-lite-preview-09-2026 -> gemini-3.1-flash-lite
+  return AI_BUILTIN_FREE_LIMITS[base] || null;
+}
+// Find the row of a model in an AI Studio table (rows = [{ name, ... }]) by its Model ID or display name.
+function aiFindStudioRow(rows, id, info) {
+  const norm = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const cands = [String(id || '').replace(/^models\//, '').replace(/-(preview.*|latest|exp.*|\d{3})$/i, ''), info && info.displayName].filter(Boolean).map(norm);
+  if (!cands.length) return null;
+  return (rows || []).find((r) => cands.includes(norm(r.name))) || (rows || []).find((r) => cands.some((c) => norm(r.name).endsWith(c))) || null;
 }
 // ---- Paste from AI Studio > Rate limit (the only place where Google shows RPM / TPM / RPD) ----
 function aiStudioNum(v) {
@@ -2293,9 +2343,7 @@ function aiApplyStudioLimits() {
     const id = String(idEl.value || env[key] || '').trim();
     if (!id) return;
     const info = (aiGoogleModelList || []).find((x) => x.id === id);
-    const cands = [id.replace(/-(preview.*|latest|exp.*|\d{3})$/i, ''), info && info.displayName].filter(Boolean).map(norm);
-    let row = rows.find((r) => cands.includes(norm(r.name)));
-    if (!row) row = rows.find((r) => cands.some((c) => norm(r.name).endsWith(c)));
+    const row = aiFindStudioRow(rows, id, info);
     if (!row) { lines.push(`⚠️ ${label} (${escapeHtml(id)}): not found in the pasted table. Check that the Model ID matches a model name in AI Studio. Rows read (${rows.length}): ${escapeHtml(rows.slice(0, 8).map((r) => r.name).join(', '))}${rows.length > 8 ? ', …' : ''}`); return; }
     const raw = [row.by.rpm[1], row.by.tpm[1], row.by.rpd[1]];
     const [rpm, tpm, rpd] = raw.map((x) => (isFinite(x) ? x : 0)); // Unlimited -> 0 (= no limit in RELAY)
@@ -2308,6 +2356,15 @@ function aiApplyStudioLimits() {
     lines.push(`✅ ${label} (${escapeHtml(id)}) = "${escapeHtml(row.name)}": RPM ${txt[0]} · TPM ${txt[1]} · RPD ${txt[2]}${hit}`);
   });
   if (okAny) lines.push('Press "I-save ang AI Provider" to keep them.');
+  // Remember the whole table on the server: from now on, picking ANY model in the dropdown auto-fills its RPM / TPM / RPD.
+  const saveRows = rows.map((r) => ({ name: r.name, rpm: isFinite(r.by.rpm[1]) ? r.by.rpm[1] : 0, tpm: isFinite(r.by.tpm[1]) ? r.by.tpm[1] : 0, rpd: isFinite(r.by.rpd[1]) ? r.by.rpd[1] : 0 }));
+  aiApi('/relay/admin/api/ai-provider', { method: 'POST', body: JSON.stringify({ action: 'google-save-studio-limits', rows: saveRows }) }).then((data) => {
+    if (data && data.success) {
+      const gst = aiProviderCfgState && aiProviderCfgState.status && aiProviderCfgState.status.google;
+      if (gst) gst.studioLimits = { rows: saveRows, at: Date.now() };
+      show(lines.concat([`💾 Saved ${saveRows.length} models from the AI Studio table — choosing a model now auto-fills its RPM / TPM / RPD.`]).join('<br>'), okAny ? '#16a34a' : '#d97706');
+    }
+  }).catch(() => {});
   show(lines.join('<br>') || 'No model is selected.', okAny ? '#16a34a' : '#d97706');
 }
 async function aiGoogleClearLearned() {

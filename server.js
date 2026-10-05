@@ -7549,6 +7549,9 @@ let googleProviderState = { exhaustedUntil: 0, reason: '', detectedAt: 0, source
 //  googleMinuteLog     = { [modelId]: [{ t, tok }] }                                  — mga tagumpay na tawag sa huling 60 segundo
 let googleModelBlocks = {};
 let googleLearnedLimits = {};
+// Snapshot of the AI Studio > Rate limit table the admin pasted: [{ name, rpm, tpm, rpd }] (0 = Unlimited / none).
+// It is kept so that picking a model in the admin page can auto-fill its RPM / TPM / RPD (Google has no API for these numbers).
+let googleStudioLimits = { rows: [], at: 0 };
 let googleMinuteLog = {};
 const GOOGLE_LEARNED_LIMIT_TTL_MS = 30 * 24 * 3600 * 1000;
 let googleUsageStats = null;
@@ -7642,6 +7645,10 @@ async function loadAiGoogleState() {
             });
         }
     } catch (_) {}
+    try {
+        const s = await getPersistentJSON('ai-google-studio-limits', null);
+        if (s && typeof s === 'object') googleStudioLimits = { rows: sanitizeGoogleStudioRows(s.rows), at: Number(s.at) || 0 };
+    } catch (_) {}
 }
 function saveGoogleProviderState() {
     try { setPersistentJSON('ai-provider-state-google', googleProviderState); } catch (_) {}
@@ -7698,6 +7705,21 @@ function saveGoogleModelBlocks() {
 }
 function saveGoogleLearnedLimits() {
     try { setPersistentJSON('ai-google-learned-limits', googleLearnedLimits); } catch (_) {}
+}
+function saveGoogleStudioLimits() {
+    try { setPersistentJSON('ai-google-studio-limits', googleStudioLimits); } catch (_) {}
+}
+// Validate rows coming from the admin page (never trust the body): max 300 rows, bounded numbers, short names.
+function sanitizeGoogleStudioRows(rows) {
+    const out = [];
+    (Array.isArray(rows) ? rows : []).slice(0, 300).forEach((r) => {
+        if (!r || typeof r !== 'object') return;
+        const name = String(r.name || '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 80);
+        if (!name) return;
+        const n = (v) => { const x = Number(v); return Number.isFinite(x) && x >= 0 ? Math.min(Math.round(x), 1000000000) : 0; };
+        out.push({ name, rpm: n(r.rpm), tpm: n(r.tpm), rpd: n(r.rpd) });
+    });
+    return out;
 }
 // ---- Per-model limit detector (RPM / RPD / TPM) ----------------------------------------------
 function googleMinuteWindow(modelId, now = Date.now()) {
@@ -9937,8 +9959,18 @@ app.post('/relay/admin/api/ai-provider', requireAdminKey, async (req, res) => {
     } else if (action === 'google-clear-learned') {
         googleLearnedLimits = {};
         saveGoogleLearnedLimits();
+    } else if (action === 'google-save-studio-limits') {
+        // Remember the pasted AI Studio rate-limit table so the admin page can auto-fill RPM/TPM/RPD when a model is picked.
+        const rows = sanitizeGoogleStudioRows(req.body?.rows);
+        if (!rows.length) return res.status(400).json({ success: false, message: 'No valid rows to save.' });
+        googleStudioLimits = { rows, at: Date.now() };
+        saveGoogleStudioLimits();
+        console.log(`📏 AI Studio rate-limit table saved via admin (${rows.length} models).`);
+    } else if (action === 'google-clear-studio-limits') {
+        googleStudioLimits = { rows: [], at: 0 };
+        saveGoogleStudioLimits();
     } else {
-        return res.status(400).json({ success: false, message: 'action must be "clear", "exhaust", "google-reset-usage" or "google-clear-learned".' });
+        return res.status(400).json({ success: false, message: 'action must be "clear", "exhaust", "google-reset-usage", "google-clear-learned", "google-save-studio-limits" or "google-clear-studio-limits".' });
     }
     const p = getAiProviderExhaustion();
     return res.json({ success: true, provider: { exhausted: p.exhausted, retryAt: p.retryAt, reason: p.reason, source: p.source, detectedAt: p.detectedAt }, freeProvider: buildFreeProviderStatus(await getAiProviderConfig()) });
@@ -9984,6 +10016,8 @@ async function buildAiProvidersStatus() {
                 }
                 return o;
             }, {}),
+            // Last pasted AI Studio > Rate limit table (used by the admin page to auto-fill RPM/TPM/RPD on model select).
+            studioLimits: { rows: googleStudioLimits.rows, at: googleStudioLimits.at },
             models
         },
         chain: aiDefaultProviderChain(cfg).map((a) => ({ provider: a.provider, modelKey: a.modelKey, modelId: a.modelId })),
