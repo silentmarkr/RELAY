@@ -2222,7 +2222,36 @@ async function aiPickGoogleModel(key) {
 }
 // Google's API does NOT publish RPM/RPD/TPM (they only exist in AI Studio). RELAY learns them from Google's 429 responses,
 // so when the model changes we fill the three boxes with what was learned for THAT model, and clear the old model's numbers.
+// Total daily capacity = "requests / araw" x neurons per question, so keep that box in step with the DEFAULT model's RPD.
+// Only when the model's RPM, TPM and RPD are all filled in (> 0). Writes the Free box on the Free plan, the Paid box on the Paid plan.
+// Returns the value written, or 0 when nothing was changed.
+function aiSyncDailyRequests(key) {
+  const dm = document.getElementById('aiPvGDefaultModel');
+  if (!dm || dm.value !== key) return 0;
+  const num = (n) => Number(document.getElementById(`aiPv_${key}_${n}`)?.value) || 0;
+  const rpm = num('rpm'), tpm = num('tpm'), rpd = num('rpd');
+  if (!(rpm > 0 && tpm > 0 && rpd > 0)) return 0;
+  const plan = document.getElementById('aiPvGPlan');
+  const el = document.getElementById(plan && plan.value === 'paid' ? 'aiPvPaidRpd' : 'aiPvFreeRpd');
+  if (!el) return 0;
+  el.value = rpd;
+  return rpd;
+}
+// Called when the Google plan or the Default Gemini model dropdown changes.
+function aiSyncDailyRequestsFromDefault() {
+  const dm = document.getElementById('aiPvGDefaultModel');
+  if (!dm) return;
+  const done = aiSyncDailyRequests(dm.value);
+  const note = document.getElementById(`aiPv_${dm.value}_limNote`);
+  if (done && note) { note.style.display = ''; note.style.color = '#16a34a'; note.textContent = `"Requests / araw" was set to ${done.toLocaleString()} (this default model's RPD). Press "I-save ang AI Provider" to keep it.`; }
+}
 function aiFillLimitsForModel(key, modelId) {
+  aiFillLimitsForModelCore(key, modelId);
+  const done = aiSyncDailyRequests(key);
+  const note = document.getElementById(`aiPv_${key}_limNote`);
+  if (done && note) { note.style.display = ''; note.textContent += ` "Requests / araw" was also set to ${done.toLocaleString()}.`; }
+}
+function aiFillLimitsForModelCore(key, modelId) {
   const cfgState = aiProviderCfgState;
   const g = cfgState && cfgState.config && cfgState.config.google;
   if (!g || !g.models || !g.models[key]) return;
@@ -2352,6 +2381,8 @@ function aiApplyStudioLimits() {
     const set = (k, v) => { const e = document.getElementById(`aiPv_${key}_${k}`); if (e) e.value = v; };
     set('rpm', rpm); set('rpd', rpd); set('tpm', tpm);
     okAny = true;
+    const syncedRpd = aiSyncDailyRequests(key);
+    if (syncedRpd) lines.push(`🔁 "Requests / araw" was set to ${syncedRpd.toLocaleString()} (RPD of the default model, ${label}).`);
     const hit = row.by.rpd[0] >= row.by.rpd[1] && row.by.rpd[1] > 0 ? ' — ⚠️ it already hit its daily limit in the last 28 days' : '';
     lines.push(`✅ ${label} (${escapeHtml(id)}) = "${escapeHtml(row.name)}": RPM ${txt[0]} · TPM ${txt[1]} · RPD ${txt[2]}${hit}`);
   });
@@ -2396,7 +2427,7 @@ function renderAiProviderCfg(d) {
       : '';
     const lim = (k, name) => {
       const learnedTxt = lrn && lrn[k] ? ` · natutunan: ${n(lrn[k])}` : '';
-      return `<label style="font-size:11px; color:var(--muted);">${name} (0 = ${lrn && lrn[k] ? 'use the learned value' : 'no limit'})<input type="number" min="0" step="1" id="aiPv_${key}_${k}" value="${m[k] || 0}" style="width:100%; margin-top:4px;"><span style="display:block; margin-top:2px;">today: ${n((used[k]) || 0)}${eff[k] ? ' / ' + n(eff[k]) : ''}${learnedTxt}</span></label>`;
+      return `<label style="font-size:11px; color:var(--muted);">${name} (0 = ${lrn && lrn[k] ? 'use the learned value' : 'no limit'})<input type="number" min="0" step="1" id="aiPv_${key}_${k}" value="${m[k] || 0}" style="width:100%; margin-top:4px;" onchange="aiSyncDailyRequests('${key}')"><span style="display:block; margin-top:2px;">today: ${n((used[k]) || 0)}${eff[k] ? ' / ' + n(eff[k]) : ''}${learnedTxt}</span></label>`;
     };
     const blockHtml = st.blocked ? `<div class="meta" style="margin-top:6px; color:var(--danger,#ff6b6b); font-weight:700;">🚫 ${st.blockKind === 'daily' ? 'Daily limit exhausted' : 'Per-minute limit reached'} until ${escapeHtml(fmt(st.blockUntil))} — ${escapeHtml(st.blockReason || '')}</div>` : '';
     return `<div style="border:1px solid var(--line); border-radius:8px; padding:8px; margin-top:8px;">
@@ -2523,7 +2554,9 @@ function renderAiProviderCfg(d) {
       <button class="btn-ghost" onclick="loadAiProviderCfg()">🔄 Refresh</button>
     </div>`;
   const planEl = document.getElementById('aiPvGPlan');
-  if (planEl) planEl.onchange = () => { const w = document.getElementById('aiPvPrivacy'); if (w) w.style.display = planEl.value === 'free' ? '' : 'none'; };
+  if (planEl) planEl.onchange = () => { const w = document.getElementById('aiPvPrivacy'); if (w) w.style.display = planEl.value === 'free' ? '' : 'none'; aiSyncDailyRequestsFromDefault(); };
+  const defEl = document.getElementById('aiPvGDefaultModel');
+  if (defEl) defEl.onchange = () => aiSyncDailyRequestsFromDefault();
   if (aiEconState) aiRenderEconomics(aiEconState);
   aiScheduleEconomics(0);
 }
