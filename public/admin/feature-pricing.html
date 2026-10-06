@@ -2356,7 +2356,18 @@ const AI_BUILTIN_FREE_LIMITS = {
   'gemini-3.6-flash': { rpm: 5, tpm: 250000, rpd: 20 },
   'gemini-3-flash': { rpm: 5, tpm: 250000, rpd: 20 },
   'gemini-2.5-flash-lite': { rpm: 10, tpm: 250000, rpd: 20 },
-  'gemini-2.5-flash': { rpm: 5, tpm: 250000, rpd: 20 }
+  'gemini-2.5-flash': { rpm: 5, tpm: 250000, rpd: 20 },
+  'gemini-3.5-transcribe': { rpm: 3, tpm: 10000, rpd: 25 },
+  'gemini-3.1-flash-tts': { rpm: 3, tpm: 10000, rpd: 10 },
+  'gemini-3.8-flash-tts': { rpm: 3, tpm: 10000, rpd: 10 },
+  'gemini-3.8-flash-lite-tts': { rpm: 3, tpm: 10000, rpd: 10 },
+  'gemini-2.5-flash-tts': { rpm: 3, tpm: 10000, rpd: 10 },
+  'gemini-embedding-1': { rpm: 100, tpm: 30000, rpd: 1000 },
+  'gemini-embedding-2': { rpm: 100, tpm: 30000, rpd: 1000 },
+  'gemini-robotics-er-2-preview': { rpm: 5, tpm: 250000, rpd: 20 },
+  'gemma-4-26b': { rpm: 30, tpm: 16000, rpd: 14400 },
+  'gemma-4-31b': { rpm: 30, tpm: 16000, rpd: 14400 },
+  'antigravity': { rpm: 60, tpm: 100000, rpd: 100 }
 };
 function aiBuiltinFreeLimits(modelId) {
   const id = String(modelId || '').trim().toLowerCase().replace(/^models\//, '');
