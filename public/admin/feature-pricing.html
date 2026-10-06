@@ -2211,54 +2211,6 @@ async function aiEconSaveSettings() {
   const data = await aiRefreshEconomics({ save: true });
   if (data) toast('Calculator settings saved.', 'success');
 }
-function aiGoogleModelKeyForId(modelId, existingModels) {
-  const base = 'gm_' + String(modelId || '').trim().replace(/^models\//, '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 42);
-  const models = existingModels || {};
-  let key = base || 'gm_model';
-  let i = 2;
-  while (models[key]) key = `${base || 'gm_model'}_${i++}`;
-  return key;
-}
-function aiAddGoogleModel() {
-  const picker = document.getElementById('aiPvGoogleModelPicker');
-  const modelId = picker?.value || '';
-  const info = (aiGoogleModelList || []).find((x) => x.id === modelId);
-  if (!info || !modelId) {
-    toast('Fetch the Google model list first, then select a model.', 'error');
-    return;
-  }
-  const snap = aiSnapCfgForm();
-  const cfg = aiProviderCfgState?.config?.google;
-  if (!cfg) {
-    toast('Google provider settings are not loaded yet.', 'error');
-    return;
-  }
-  if (!cfg.models || typeof cfg.models !== 'object') cfg.models = {};
-  const existing = Object.values(cfg.models).find((m) => m && m.modelId === modelId);
-  if (existing) {
-    toast('That Google model is already added.', 'info');
-    return;
-  }
-  const key = aiGoogleModelKeyForId(modelId, cfg.models);
-  const suggested = info.suggested || {};
-  cfg.models[key] = {
-    enabled: true,
-    displayName: info.displayName || modelId,
-    modelId,
-    requiredTier: '',
-    inputNeuronsPerM: Number(suggested.inputNeuronsPerM) || 0,
-    outputNeuronsPerM: Number(suggested.outputNeuronsPerM) || 0,
-    rpm: 0,
-    rpd: 0,
-    tpm: 0
-  };
-  if (!cfg.defaultModel || !cfg.models[cfg.defaultModel]) cfg.defaultModel = key;
-  const fresh = { ...aiProviderCfgState, config: { ...aiProviderCfgState.config, google: { ...cfg, models: cfg.models, defaultModel: cfg.defaultModel } } };
-  aiProviderCfgState = fresh;
-  renderAiProviderCfg(fresh);
-  aiRestoreCfgForm(snap);
-  toast(`Added ${info.displayName || modelId}. Press "I-save ang AI Provider" to save it.`, 'success');
-}
 async function aiPickGoogleModel(key) {
   const sel = document.getElementById(`aiPv_${key}_pick`);
   if (!sel || !sel.value) return;
@@ -2356,18 +2308,7 @@ const AI_BUILTIN_FREE_LIMITS = {
   'gemini-3.6-flash': { rpm: 5, tpm: 250000, rpd: 20 },
   'gemini-3-flash': { rpm: 5, tpm: 250000, rpd: 20 },
   'gemini-2.5-flash-lite': { rpm: 10, tpm: 250000, rpd: 20 },
-  'gemini-2.5-flash': { rpm: 5, tpm: 250000, rpd: 20 },
-  'gemini-3.5-transcribe': { rpm: 3, tpm: 10000, rpd: 25 },
-  'gemini-3.1-flash-tts': { rpm: 3, tpm: 10000, rpd: 10 },
-  'gemini-3.8-flash-tts': { rpm: 3, tpm: 10000, rpd: 10 },
-  'gemini-3.8-flash-lite-tts': { rpm: 3, tpm: 10000, rpd: 10 },
-  'gemini-2.5-flash-tts': { rpm: 3, tpm: 10000, rpd: 10 },
-  'gemini-embedding-1': { rpm: 100, tpm: 30000, rpd: 1000 },
-  'gemini-embedding-2': { rpm: 100, tpm: 30000, rpd: 1000 },
-  'gemini-robotics-er-2-preview': { rpm: 5, tpm: 250000, rpd: 20 },
-  'gemma-4-26b': { rpm: 30, tpm: 16000, rpd: 14400 },
-  'gemma-4-31b': { rpm: 30, tpm: 16000, rpd: 14400 },
-  'antigravity': { rpm: 60, tpm: 100000, rpd: 100 }
+  'gemini-2.5-flash': { rpm: 5, tpm: 250000, rpd: 20 }
 };
 function aiBuiltinFreeLimits(modelId) {
   const id = String(modelId || '').trim().toLowerCase().replace(/^models\//, '');
@@ -2474,25 +2415,31 @@ function renderAiProviderCfg(d) {
     const tierOpts = [['', 'Lahat ng naka-subscribe (Base pataas)']].concat((d.tiers || []).map((t) => [t.id, `${t.name} pataas (${t.priceTokens} tokens)`]));
   const ml = aiGoogleModelList;
   const mst = (gs.models || {});
-  const modelEntries = Object.entries(g.models || {});
-  const modelRow = (key, m) => {
+  const legacyGoogleModelKeys = ['flashLite', 'flash'];
+  const customGoogleModelKeys = Object.keys(g.models || {}).filter((key) => !legacyGoogleModelKeys.includes(key));
+  const modelRow = (key, label) => {
+    const m = g.models[key];
     const st = mst[key] || {};
     const used = st.used || {}, eff = st.effective || {}, lrn = st.learned;
-    const curId = m.modelId || '';
-    const label = m.displayName || curId || key;
+    const envDefault = (d.envDefaults || {})[key] || '';
+    const curId = m.modelId || envDefault;
+    const listOpts = ml ? [['', '— pick from the Google list —']].concat(ml.map((x) => [x.id, `${x.displayName} (${x.id})`])) : null;
+    const pickHtml = listOpts
+      ? `<label style="font-size:11px; color:var(--muted);">Available models from Google (${ml.length})<select id="aiPv_${key}_pick" onchange="aiPickGoogleModel('${key}')" style="width:100%; margin-top:4px;">${listOpts.map((o) => `<option value="${escapeHtml(o[0])}" ${o[0] && o[0] === curId ? 'selected' : ''}>${escapeHtml(o[1])}</option>`).join('')}</select></label>`
+      : '';
     const lim = (k, name) => {
       const learnedTxt = lrn && lrn[k] ? ` · natutunan: ${n(lrn[k])}` : '';
       return `<label style="font-size:11px; color:var(--muted);">${name} (0 = ${lrn && lrn[k] ? 'use the learned value' : 'no limit'})<input type="number" min="0" step="1" id="aiPv_${key}_${k}" value="${m[k] || 0}" style="width:100%; margin-top:4px;" onchange="aiSyncDailyRequests('${key}')"><span style="display:block; margin-top:2px;">today: ${n((used[k]) || 0)}${eff[k] ? ' / ' + n(eff[k]) : ''}${learnedTxt}</span></label>`;
     };
     const blockHtml = st.blocked ? `<div class="meta" style="margin-top:6px; color:var(--danger,#ff6b6b); font-weight:700;">🚫 ${st.blockKind === 'daily' ? 'Daily limit exhausted' : 'Per-minute limit reached'} until ${escapeHtml(fmt(st.blockUntil))} — ${escapeHtml(st.blockReason || '')}</div>` : '';
     return `<div style="border:1px solid var(--line); border-radius:8px; padding:8px; margin-top:8px;">
-      <label style="font-size:12px; font-weight:700;"><input type="checkbox" id="aiPv_${key}_enabled" ${m.enabled ? 'checked' : ''}> ${escapeHtml(label)} — available sa OmniAI (client)</label>
+      <label style="font-size:12px; font-weight:700;"><input type="checkbox" id="aiPv_${key}_enabled" ${m.enabled ? 'checked' : ''}> ${label} — available sa OmniAI (client)</label>
       <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; margin-top:6px;">
-        <label style="font-size:11px; color:var(--muted);">Model ID<input type="text" id="aiPv_${key}_modelId" value="${escapeHtml(curId)}" placeholder="models/..." style="width:100%; margin-top:4px;" onchange="aiFillLimitsForModel('${key}', this.value); aiAutoFillRates('${key}')"></label>
-        <label style="font-size:11px; color:var(--muted);">Display name<input type="text" id="aiPv_${key}_displayName" value="${escapeHtml(label)}" style="width:100%; margin-top:4px;"></label>
+        ${pickHtml}
+        <label style="font-size:11px; color:var(--muted);">Model ID (blangko = ${escapeHtml(envDefault)})<input type="text" id="aiPv_${key}_modelId" value="${escapeHtml(m.modelId || '')}" placeholder="${escapeHtml(envDefault)}" style="width:100%; margin-top:4px;" onchange="aiFillLimitsForModel('${key}', this.value); aiAutoFillRates('${key}')"></label>
         <label style="font-size:11px; color:var(--muted);">Kailangang plan ng client${sel('aiPv_' + key + '_tier', m.requiredTier || '', tierOpts)}</label>
-        <label style="font-size:11px; color:var(--muted);">Neurons / 1M input tokens<input type="number" min="0" step="1" id="aiPv_${key}_in" value="${m.inputNeuronsPerM || 0}" style="width:100%; margin-top:4px;"></label>
-        <label style="font-size:11px; color:var(--muted);">Neurons / 1M output tokens<input type="number" min="0" step="1" id="aiPv_${key}_out" value="${m.outputNeuronsPerM || 0}" style="width:100%; margin-top:4px;"></label>
+        <label style="font-size:11px; color:var(--muted);">Neurons / 1M input tokens<input type="number" min="0" step="1" id="aiPv_${key}_in" value="${m.inputNeuronsPerM}" style="width:100%; margin-top:4px;"></label>
+        <label style="font-size:11px; color:var(--muted);">Neurons / 1M output tokens<input type="number" min="0" step="1" id="aiPv_${key}_out" value="${m.outputNeuronsPerM}" style="width:100%; margin-top:4px;"></label>
       </div>
       <div id="aiPv_${key}_rateNote" class="meta" style="margin-top:4px; display:none;"></div>
       <div id="aiPv_${key}_econ" class="meta" style="margin-top:6px;"></div>
@@ -2507,14 +2454,26 @@ function renderAiProviderCfg(d) {
       ${keyOk ? `<div style="margin-top:8px;"><button class="btn-ghost" onclick="aiGoogleTest('${key}')">🧪 Test this model</button></div>` : ''}
     </div>`;
   };
-  const modelPickerHtml = ml ? `<div style="display:flex; gap:8px; align-items:end; flex-wrap:wrap; margin-bottom:8px;">
-      <label style="font-size:11px; color:var(--muted); flex:1; min-width:240px;">Available Google AI models (${ml.length})
-        <select id="aiPvGoogleModelPicker" style="width:100%; margin-top:4px;">
-          ${ml.map((x) => `<option value="${escapeAttr(x.id)}">${escapeHtml(x.displayName)} (${escapeHtml(x.id)})</option>`).join('')}
-        </select>
-      </label>
-      <button type="button" class="btn-primary" onclick="aiAddGoogleModel()">➕ Add Model</button>
-    </div>` : '';
+  const customModelRow = (key) => {
+    const m = g.models[key] || {};
+    const st = mst[key] || {};
+    const used = st.used || {}, eff = st.effective || {}, lrn = st.learned;
+    const lim = (k, name) => `<label style="font-size:11px; color:var(--muted);">${name} (0 = ${lrn && lrn[k] ? 'use the learned value' : 'no limit'})<input type="number" min="0" step="1" id="aiPv_${key}_${k}" value="${m[k] || 0}" style="width:100%; margin-top:4px;" onchange="aiSyncDailyRequests('${key}')"><span style="display:block; margin-top:2px;">today: ${n((used[k]) || 0)}${eff[k] ? ' / ' + n(eff[k]) : ''}${lrn && lrn[k] ? ' · natutunan: ' + n(lrn[k]) : ''}</span></label>`;
+    const blockHtml = st.blocked ? `<div class="meta" style="margin-top:6px; color:var(--danger,#ff6b6b); font-weight:700;">🚫 ${st.blockKind === 'daily' ? 'Daily limit exhausted' : 'Per-minute limit reached'} until ${escapeHtml(fmt(st.blockUntil))} — ${escapeHtml(st.blockReason || '')}</div>` : '';
+    return `<div style="border:1px solid var(--line); border-radius:8px; padding:8px; margin-top:8px;">
+      <label style="font-size:12px; font-weight:700;"><input type="checkbox" id="aiPv_${key}_enabled" ${m.enabled ? 'checked' : ''}> ${escapeHtml(m.displayName || m.modelId || key)} — available sa OmniAI (client)</label>
+      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; margin-top:6px;">
+        <label style="font-size:11px; color:var(--muted);">Model ID<input type="text" id="aiPv_${key}_modelId" value="${escapeHtml(m.modelId || '')}" style="width:100%; margin-top:4px;"></label>
+        <label style="font-size:11px; color:var(--muted);">Display name<input type="text" id="aiPv_${key}_displayName" value="${escapeHtml(m.displayName || m.modelId || key)}" style="width:100%; margin-top:4px;"></label>
+        <label style="font-size:11px; color:var(--muted);">Kailangang plan ng client${sel('aiPv_' + key + '_tier', m.requiredTier || '', tierOpts)}</label>
+        <label style="font-size:11px; color:var(--muted);">Neurons / 1M input tokens<input type="number" min="0" step="1" id="aiPv_${key}_in" value="${m.inputNeuronsPerM || 0}" style="width:100%; margin-top:4px;"></label>
+        <label style="font-size:11px; color:var(--muted);">Neurons / 1M output tokens<input type="number" min="0" step="1" id="aiPv_${key}_out" value="${m.outputNeuronsPerM || 0}" style="width:100%; margin-top:4px;"></label>
+      </div>
+      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:8px; margin-top:6px;">${lim('rpm','RPM (requests/minuto)')}${lim('rpd','RPD (requests/araw)')}${lim('tpm','TPM (input tokens/minuto)')}</div>
+      ${blockHtml}
+      ${keyOk ? `<div style="margin-top:8px;"><button class="btn-ghost" onclick="aiGoogleTest('${key}')">🧪 Test this model</button></div>` : ''}
+    </div>`;
+  };
   const u = gs.usage || {};
   const lim = gs.limits || {};
   const usageHtml = keyOk ? `<div class="meta" style="margin-top:8px;">Google ngayong araw (${escapeHtml(u.day || '—')}, Pacific time): <b>${n(u.requests)}</b> requests${lim.requests ? ' / ' + n(lim.requests) : ''} · <b>${n(u.neurons)}</b> neurons-equiv${lim.neurons ? ' / ' + n(lim.neurons) : ''} · tokens in/out: ${n(u.inputTokens)}/${n(u.outputTokens)} · palpak: ${n(u.failed)} · mag-reset: ${escapeHtml(fmt(gs.resetsAt))}${gs.lastError ? `<br>Huling error: ${escapeHtml(gs.lastError.message)}` : ''}</div>` : '';
@@ -2530,7 +2489,7 @@ function renderAiProviderCfg(d) {
       <label style="font-size:12px; font-weight:700;"><input type="checkbox" id="aiPvGEnabled" ${g.enabled ? 'checked' : ''} ${keyOk ? '' : 'disabled'}> Google AI enabled (OFF = it will not be used and will not be shown to clients)</label>
       <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:8px; margin-top:8px;">
         <label style="font-size:12px; color:var(--muted);">Google plan${sel('aiPvGPlan', g.plan, [['free', 'Free'], ['paid', 'Paid (billing naka-enable)']])}</label>
-        <label style="font-size:12px; color:var(--muted);">Default Gemini model (for Base and everyone who has not chosen one)${sel('aiPvGDefaultModel', g.defaultModel, modelEntries.map(([key, model]) => [key, model.displayName || model.modelId || key]))}</label>
+        <label style="font-size:12px; color:var(--muted);">Default Gemini model (for Base and everyone who has not chosen one)${sel('aiPvGDefaultModel', g.defaultModel, Object.keys(g.models || {}).map((key) => [key, (g.models[key] && (g.models[key].displayName || g.models[key].modelId)) || key]))}</label>
       </div>
       <div id="aiPvPrivacy" class="meta" style="margin-top:6px; color:var(--danger,#ff6b6b); ${g.plan === 'free' ? '' : 'display:none;'}">⚠️ Free tier: Google may use the data for training (per their terms). Live store data (sales, inventory) is passed to the AI — Paid is safer.</div>
       <div style="font-size:11px; color:var(--muted); margin:8px 0 2px;">Daily limit per plan (0 = no limit). Google numbers are per-project and change — confirm in their rate-limits docs before setting them.</div>
@@ -2547,10 +2506,13 @@ function renderAiProviderCfg(d) {
         <div style="margin-top:6px;"><button class="btn-ghost" onclick="aiApplyStudioLimits()">📥 Read the limits</button></div>
         <div id="aiPvStudioResult" class="meta" style="margin-top:6px; display:none; word-break:break-word;"></div>
       </details>
-      <div style="font-size:12px; font-weight:700; margin-top:10px;">Google AI models</div>
-      <div class="meta" style="margin-top:3px;">Add any chat-capable model returned by Google AI. Existing models remain compatible; disabled models are hidden from clients.</div>
-      ${modelPickerHtml}
-      ${modelEntries.map(([key, model]) => modelRow(key, model)).join('') || '<div class="meta" style="margin-top:8px;">No Google models configured yet. Fetch the model list, then add one.</div>'}
+      ${modelRow('flashLite', 'Gemini Flash-Lite')}
+      ${modelRow('flash', 'Gemini Flash')}
+      <div style="margin-top:10px; padding-top:8px; border-top:1px dashed var(--line);">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;"><b style="font-size:12px;">Additional Google AI models</b><button type="button" class="btn-primary" onclick="aiAddGoogleModel()">➕ Add Model</button></div>
+        <div class="meta" style="margin-top:4px;">Add any model returned by the Google model list. Existing Flash / Flash-Lite controls above are unchanged.</div>
+        ${customGoogleModelKeys.map((key) => customModelRow(key)).join('')}
+      </div>
       ${(() => {
         const es = (aiEconState && aiEconState.settings) || {};
         const val = (k, d) => (es[k] !== undefined ? es[k] : d);
@@ -2625,11 +2587,25 @@ function renderAiProviderCfg(d) {
   if (aiEconState) aiRenderEconomics(aiEconState);
   aiScheduleEconomics(0);
 }
+function aiAddGoogleModel() {
+  const list = Array.isArray(aiGoogleModelList) ? aiGoogleModelList : [];
+  if (!list.length) { toast('Fetch the Google model list first.', 'error'); return; }
+  const pick = window.prompt('Enter the Google model ID to add (example: gemini-2.5-pro):', list[0].id);
+  const id = String(pick || '').trim();
+  if (!id) return;
+  const info = list.find((x) => String(x.id) === id) || { id, displayName: id };
+  const base = id.replace(/^models\//, '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 45) || 'model';
+  let key = `custom_${base}`;
+  let i = 2;
+  while (aiProviderCfgState.config.google.models[key]) key = `custom_${base}_${i++}`;
+  aiProviderCfgState.config.google.models[key] = { enabled: true, displayName: String(info.displayName || id).slice(0,80), modelId: id, requiredTier: '', inputNeuronsPerM: 0, outputNeuronsPerM: 0, rpm: 0, rpd: 0, tpm: 0 };
+  renderAiProviderCfg(aiProviderCfgState);
+  toast(`Added ${info.displayName || id}. Press Save AI Provider to keep it.`, 'success');
+}
 async function saveAiProviderCfg() {
   const v = (id) => document.getElementById(id);
   const model = (key) => ({
     enabled: !!v(`aiPv_${key}_enabled`)?.checked,
-    displayName: v(`aiPv_${key}_displayName`)?.value || '',
     modelId: v(`aiPv_${key}_modelId`)?.value || '',
     requiredTier: v(`aiPv_${key}_tier`)?.value || '',
     inputNeuronsPerM: v(`aiPv_${key}_in`)?.value,
@@ -2638,11 +2614,12 @@ async function saveAiProviderCfg() {
     rpd: v(`aiPv_${key}_rpd`)?.value,
     tpm: v(`aiPv_${key}_tpm`)?.value
   });
-  const modelKeys = Array.from(document.querySelectorAll('#aiProviderCfgBox input[id^="aiPv_"][id$="_enabled"]'))
-    .map((el) => el.id.slice('aiPv_'.length, -'_enabled'.length))
-    .filter((key, i, arr) => key && arr.indexOf(key) === i);
-  const models = {};
-  modelKeys.forEach((key) => { models[key] = model(key); });
+  const models = { flashLite: model('flashLite'), flash: model('flash') };
+  document.querySelectorAll('#aiProviderCfgBox input[id^="aiPv_"][id$="_enabled"]').forEach((el) => {
+    const key = el.id.slice('aiPv_'.length, -'_enabled'.length);
+    if (!key || models[key]) return;
+    models[key] = { ...model(key), displayName: v(`aiPv_${key}_displayName`)?.value || '' };
+  });
   const body = {
     google: {
       enabled: !!v('aiPvGEnabled')?.checked,
