@@ -7400,17 +7400,22 @@ function clearAiProviderExhausted() {
 }
 // ===== PROVIDER CONFIG (Cloudflare / Google) + GOOGLE STATE ===================================
 const AI_PROVIDER_IDS = ['cloudflare', 'google'];
-const AI_GOOGLE_MODEL_KEYS = ['flashLite', 'flash'];
+// Legacy keys are kept so existing saved configs continue to work.
+// New Google AI models are stored under generated keys and are handled dynamically.
+const AI_GOOGLE_MODEL_KEYS_LEGACY = ['flashLite', 'flash'];
 const AI_GOOGLE_MODEL_LABELS = { flash: 'Gemini Flash', flashLite: 'Gemini Flash-Lite' };
-// Additional Google models are additive: the two legacy slots above keep their
-// original keys/behavior, while this helper exposes any admin-added models.
-function getGoogleModelKeys(cfg) {
-    const models = cfg && cfg.google && cfg.google.models && typeof cfg.google.models === 'object' ? cfg.google.models : {};
-    return AI_GOOGLE_MODEL_KEYS.concat(Object.keys(models).filter((k) => !AI_GOOGLE_MODEL_KEYS.includes(k)));
+function googleModelKeyList(models) {
+    const obj = (models && typeof models === 'object' && !Array.isArray(models)) ? models : {};
+    const legacy = AI_GOOGLE_MODEL_KEYS_LEGACY.filter((k) => Object.prototype.hasOwnProperty.call(obj, k));
+    const custom = Object.keys(obj).filter((k) => !AI_GOOGLE_MODEL_KEYS_LEGACY.includes(k));
+    return legacy.concat(custom);
 }
-function sanitizeGoogleModelKey(v) {
-    const raw = String(v || '').trim().replace(/[^A-Za-z0-9_-]/g, '_').replace(/^_+|_+$/g, '').slice(0, 60);
-    return raw || 'googleModel';
+function googleModelDisplayName(model) {
+    if (!model || typeof model !== 'object') return 'Google Gemini model';
+    return String(model.displayName || model.modelId || model.id || 'Google Gemini model').trim().slice(0, 80);
+}
+function googleModelKeys(cfg) {
+    return googleModelKeyList(cfg && cfg.google && cfg.google.models);
 }
 // Ang neurons-per-1M-token ng Google ay "cost-parity" sa Cloudflare ($0.011 / 1,000 neurons) base sa public na presyo
 // (Flash: $0.30 in / $2.50 out; Flash-Lite: $0.10 in / $0.40 out per 1M). Puwedeng baguhin ng admin kapag nagbago ang presyo.
@@ -7437,8 +7442,8 @@ const AI_PROVIDER_CFG_DEFAULTS = {
         defaultModel: 'flashLite',
         models: {
             // rpm/rpd/tpm = limit ng modelong ito sa Google AI Studio (0 = walang itinakda; gagamitin ang natutunan mula sa 429 kung meron).
-            flashLite: { enabled: true, modelId: '', requiredTier: '', inputNeuronsPerM: 9091, outputNeuronsPerM: 36364, rpm: 0, rpd: 0, tpm: 0 },
-            flash: { enabled: true, modelId: '', requiredTier: '', inputNeuronsPerM: 27273, outputNeuronsPerM: 227273, rpm: 0, rpd: 0, tpm: 0 }
+            flashLite: { enabled: true, displayName: 'Gemini Flash-Lite', modelId: '', requiredTier: '', inputNeuronsPerM: 9091, outputNeuronsPerM: 36364, rpm: 0, rpd: 0, tpm: 0 },
+            flash: { enabled: true, displayName: 'Gemini Flash', modelId: '', requiredTier: '', inputNeuronsPerM: 27273, outputNeuronsPerM: 227273, rpm: 0, rpd: 0, tpm: 0 }
         }
     }
 };
@@ -7449,42 +7454,35 @@ function normalizeAiProviderConfig(src) {
     const D = AI_PROVIDER_CFG_DEFAULTS;
     const num = (v, d, min, max) => { const x = Number(v); return (v !== null && v !== undefined && Number.isFinite(x) && x >= min && x <= max) ? Math.round(x) : d; };
     const pick = (v, list, d) => list.includes(String(v)) ? String(v) : d;
+    const sourceModels = (g.models && typeof g.models === 'object' && !Array.isArray(g.models)) ? g.models : {};
+    // The two legacy models only seed a brand-new config. Once models are saved, only those exist, so a deleted model stays deleted.
+    const modelKeys = Object.keys(sourceModels).length ? Object.keys(sourceModels) : AI_GOOGLE_MODEL_KEYS_LEGACY.slice();
     const models = {};
-    AI_GOOGLE_MODEL_KEYS.forEach((k) => {
-        const m = (g.models && typeof g.models === 'object' && g.models[k] && typeof g.models[k] === 'object') ? g.models[k] : {};
-        const dm = D.google.models[k];
+    modelKeys.forEach((k) => {
+        if (!/^[A-Za-z0-9_-]{1,60}$/.test(String(k))) return;
+        const m = (sourceModels[k] && typeof sourceModels[k] === 'object') ? sourceModels[k] : {};
+        const dm = (D.google.models && D.google.models[k]) || {};
+        const modelIdDefault = typeof dm.modelId === 'string' ? dm.modelId : '';
+        const defaultDisplay = AI_GOOGLE_MODEL_LABELS[k] || dm.displayName || (typeof m.modelId === 'string' && m.modelId ? m.modelId : k);
         models[k] = {
-            enabled: typeof m.enabled === 'boolean' ? m.enabled : dm.enabled,
-            modelId: typeof m.modelId === 'string' ? m.modelId.trim().slice(0, 80).replace(/[^A-Za-z0-9._\-\/]/g, '') : dm.modelId,
-            requiredTier: typeof m.requiredTier === 'string' ? m.requiredTier.trim().slice(0, 40).replace(/[^A-Za-z0-9_\-]/g, '') : dm.requiredTier,
-            inputNeuronsPerM: num(m.inputNeuronsPerM, dm.inputNeuronsPerM, 0, 100000000),
-            outputNeuronsPerM: num(m.outputNeuronsPerM, dm.outputNeuronsPerM, 0, 100000000),
-            rpm: num(m.rpm, dm.rpm, 0, 100000000),
-            rpd: num(m.rpd, dm.rpd, 0, 100000000),
-            tpm: num(m.tpm, dm.tpm, 0, 100000000)
-        };
-    });
-    Object.keys(g.models && typeof g.models === 'object' ? g.models : {}).filter((k) => !AI_GOOGLE_MODEL_KEYS.includes(k)).slice(0, 100).forEach((k) => {
-        const m = g.models[k];
-        if (!m || typeof m !== 'object') return;
-        const id = typeof m.modelId === 'string' ? m.modelId.trim().slice(0, 120).replace(/[^A-Za-z0-9._\-\/]/g, '') : '';
-        if (!id) return;
-        const dm = { enabled: false, modelId: id, requiredTier: '', inputNeuronsPerM: 0, outputNeuronsPerM: 0, rpm: 0, rpd: 0, tpm: 0 };
-        models[sanitizeGoogleModelKey(k)] = {
-            enabled: typeof m.enabled === 'boolean' ? m.enabled : dm.enabled,
-            displayName: typeof m.displayName === 'string' && m.displayName.trim() ? m.displayName.trim().slice(0, 80) : id.slice(0, 80),
-            modelId: id,
-            requiredTier: typeof m.requiredTier === 'string' ? m.requiredTier.trim().slice(0, 40).replace(/[^A-Za-z0-9_-]/g, '') : '',
-            inputNeuronsPerM: num(m.inputNeuronsPerM, 0, 0, 100000000),
-            outputNeuronsPerM: num(m.outputNeuronsPerM, 0, 0, 100000000),
-            rpm: num(m.rpm, 0, 0, 100000000),
-            rpd: num(m.rpd, 0, 0, 100000000),
-            tpm: num(m.tpm, 0, 0, 100000000)
+            enabled: typeof m.enabled === 'boolean' ? m.enabled : (typeof dm.enabled === 'boolean' ? dm.enabled : false),
+            displayName: googleModelDisplayName({ displayName: m.displayName || defaultDisplay, modelId: m.modelId || modelIdDefault }),
+            modelId: typeof m.modelId === 'string' ? m.modelId.trim().slice(0, 120).replace(/[^A-Za-z0-9._\-\/]/g, '') : modelIdDefault,
+            requiredTier: typeof m.requiredTier === 'string' ? m.requiredTier.trim().slice(0, 40).replace(/[^A-Za-z0-9_\-]/g, '') : (dm.requiredTier || ''),
+            inputNeuronsPerM: num(m.inputNeuronsPerM, dm.inputNeuronsPerM || 0, 0, 100000000),
+            outputNeuronsPerM: num(m.outputNeuronsPerM, dm.outputNeuronsPerM || 0, 0, 100000000),
+            rpm: num(m.rpm, dm.rpm || 0, 0, 100000000),
+            rpd: num(m.rpd, dm.rpd || 0, 0, 100000000),
+            tpm: num(m.tpm, dm.tpm || 0, 0, 100000000)
         };
     });
     const f = (s.free && typeof s.free === 'object') ? s.free : {};
+    const normalizedKeys = googleModelKeyList(models);
+    const requestedDefault = String(g.defaultModel || '');
+    const defaultModel = normalizedKeys.includes(requestedDefault)
+        ? requestedDefault
+        : (normalizedKeys.find((k) => models[k] && models[k].enabled) || normalizedKeys[0] || 'flashLite');
     return {
-        // Fixed (tingnan ang tier map): ang naka-save na halaga ng dating "default/fallback provider" ay hindi na ginagamit.
         defaultProvider: 'google',
         fallbackProvider: 'none',
         free: {
@@ -7500,7 +7498,7 @@ function normalizeAiProviderConfig(src) {
             paidDailyRequests: num(g.paidDailyRequests, D.google.paidDailyRequests, 0, 100000000),
             freeDailyNeurons: num(g.freeDailyNeurons, D.google.freeDailyNeurons, 0, 1000000000),
             paidDailyNeurons: num(g.paidDailyNeurons, D.google.paidDailyNeurons, 0, 1000000000),
-            defaultModel: pick(g.defaultModel, Object.keys(models), D.google.defaultModel),
+            defaultModel,
             models
         }
     };
@@ -7514,15 +7512,18 @@ async function getAiProviderConfig() {
 }
 function googleModelId(cfg, key) {
     const m = cfg.google.models[key];
-    return (m && m.modelId) || (key === 'flash' ? GOOGLE_AI_MODEL_FLASH : GOOGLE_AI_MODEL_FLASH_LITE);
+    if (m && m.modelId) return m.modelId;
+    if (key === 'flash') return GOOGLE_AI_MODEL_FLASH;
+    if (key === 'flashLite') return GOOGLE_AI_MODEL_FLASH_LITE;
+    return '';
 }
 // Magagamit lang ang Google kapag: naka-ON sa admin + may GOOGLE_AI_API_KEY + may kahit isang naka-enable na model.
 function googleUsable(cfg) {
-    return !!(cfg && cfg.google.enabled && isGoogleAiConfigured() && getGoogleModelKeys(cfg).some((k) => cfg.google.models[k] && cfg.google.models[k].enabled));
+    return !!(cfg && cfg.google.enabled && isGoogleAiConfigured() && googleModelKeys(cfg).some((k) => cfg.google.models[k].enabled));
 }
 function googleDefaultModelKey(cfg) {
     if (cfg.google.models[cfg.google.defaultModel] && cfg.google.models[cfg.google.defaultModel].enabled) return cfg.google.defaultModel;
-    return getGoogleModelKeys(cfg).find((k) => cfg.google.models[k] && cfg.google.models[k].enabled) || null;
+    return googleModelKeys(cfg).find((k) => cfg.google.models[k].enabled) || null;
 }
 function googleActiveLimits(cfg) {
     const paid = cfg.google.plan === 'paid';
@@ -7552,9 +7553,9 @@ async function relayAiClientMeetsTier(installationId, requiredTierId) {
     const cur = await getRelayAiActiveTier(installationId, relayAiMonthKey());
     return !!cur && cur.priceTokens >= req.priceTokens;
 }
-function normalizeAiModelChoice(v) {
+function normalizeAiModelChoice(v, cfg) {
     const s = String(v || '').trim();
-    return s && /^[A-Za-z0-9_-]{1,60}$/.test(s) ? s : '';
+    return googleModelKeys(cfg).includes(s) ? s : '';
 }
 // Hanay ng mga subok para sa isang request: (1) pinili ng client na Gemini model kung pinapayagan ng tier, (2) default/fallback ng admin.
 async function buildAiAttemptPlan(cfg, installationId, modelChoice) {
@@ -7705,7 +7706,7 @@ function getGoogleProviderExhaustion(cfg) {
         return { exhausted: true, retryAt: resetAt, reason: `Naabot na ang itinakdang Google daily neurons-equivalent (${Math.round(u.neurons)}/${lim.neurons}).`, source: 'limit', detectedAt: 0 };
     }
     // Per-model: UBOS na ang provider kapag LAHAT ng naka-enable na Gemini model ay naabot na ang daily limit (RPD o daily 429).
-    const enabledKeys = getGoogleModelKeys(c).filter((k) => c.google.models[k] && c.google.models[k].enabled);
+    const enabledKeys = googleModelKeys(c).filter((k) => c.google.models[k].enabled);
     if (enabledKeys.length) {
         const avs = enabledKeys.map((k) => googleModelAvailability(c, k));
         if (avs.every((a) => a.blocked && a.kind === 'daily')) {
@@ -7821,7 +7822,7 @@ function googleModelStatus(cfg, key) {
     const w = googleMinuteWindow(modelId);
     const av = googleModelAvailability(cfg, key);
     return {
-        key, modelId, label: m.displayName || AI_GOOGLE_MODEL_LABELS[key] || modelId, enabled: m.enabled,
+        key, modelId, label: googleModelDisplayName(m), enabled: m.enabled,
         manual: { rpm: m.rpm, rpd: m.rpd, tpm: m.tpm },
         learned: eff.learned,
         effective: { rpm: eff.rpm, rpd: eff.rpd, tpm: eff.tpm },
@@ -8556,7 +8557,7 @@ app.post('/relay/ai-assistant/complete', requireApiKey, requireAllowedDevice, ra
     // PROVIDER PLAN: Free = Cloudflare lang. Naka-subscribe = pinili ng client na Gemini model (kung pinapayagan ng tier) + default ng admin (Google).
     const attemptPlan = isFree
         ? aiFreeProviderChain()
-        : await buildAiAttemptPlan(providerCfg, installationId, normalizeAiModelChoice(req.body?.modelChoice));
+        : await buildAiAttemptPlan(providerCfg, installationId, normalizeAiModelChoice(req.body?.modelChoice, providerCfg));
     // Per-attempt na estado: ang Google ay per-MODEL (RPM/RPD/TPM + 429 ng modelong iyon), ang Cloudflare (Free) ay per-provider + shared pool.
     const attemptStatus = (a) => {
         if (a.provider === 'google') {
@@ -8899,8 +8900,8 @@ async function getRelayAiAutoCapacity() {
         capacity = lim.requests * perQuestion; basis = 'requests';
     } else {
         let total = 0;
-        getGoogleModelKeys(cfg).forEach((k) => {
-            if (!cfg.google.models[k] || !cfg.google.models[k].enabled) return;
+        googleModelKeys(cfg).forEach((k) => {
+            if (!cfg.google.models[k].enabled) return;
             const eff = googleEffectiveLimits(cfg, k);
             if (eff.rpd > 0) total += eff.rpd * computeGoogleCallNeurons(null, k, cfg).neurons;
         });
@@ -9355,13 +9356,13 @@ async function buildRelayAiModelOffer(current) {
     const allTiers = await listRelayAiTiers(false);
     const gx = getGoogleProviderExhaustion(cfg);
     const options = [];
-    getGoogleModelKeys(cfg).slice().reverse().forEach((k) => { // Flash-Lite muna, saka Flash
+    googleModelKeys(cfg).slice().reverse().forEach((k) => { // Flash-Lite muna, saka Flash
         const m = cfg.google.models[k];
         if (!m.enabled) return;
         const req = m.requiredTier ? allTiers.find((t) => t.id === m.requiredTier) : null;
         const locked = !!(req && (!current || current.priceTokens < req.priceTokens));
         const av = googleModelAvailability(cfg, k);
-        options.push({ key: k, name: AI_GOOGLE_MODEL_LABELS[k], requiredTierId: req ? req.id : null, requiredTierName: req ? req.name : null, locked, unavailable: gx.exhausted || (av.blocked && av.kind === 'daily') });
+        options.push({ key: k, name: googleModelDisplayName(m), requiredTierId: req ? req.id : null, requiredTierName: req ? req.name : null, locked, unavailable: gx.exhausted || (av.blocked && av.kind === 'daily') });
     });
     if (!options.length) return null;
     return { enabled: true, options };
@@ -10027,7 +10028,7 @@ async function buildAiProvidersStatus() {
     const gu = ensureGoogleUsageDay();
     const lim = googleActiveLimits(cfg);
     const models = {};
-    getGoogleModelKeys(cfg).forEach((k) => { models[k] = googleModelStatus(cfg, k); });
+    googleModelKeys(cfg).forEach((k) => { models[k] = googleModelStatus(cfg, k); });
     return {
         cloudflare: { configured: isCfAiConfigured(), model: CF_AI_MODEL, exhausted: cf.exhausted, retryAt: cf.retryAt, reason: cf.reason, source: cf.source },
         google: {
@@ -10077,25 +10078,33 @@ app.post('/relay/admin/api/ai-providers/settings', requireAdminKey, async (req, 
         const cur = await getAiProviderConfig();
         const b = (req.body && typeof req.body === 'object') ? req.body : {};
         const bg = (b.google && typeof b.google === 'object') ? b.google : {};
-        const bm = (bg.models && typeof bg.models === 'object') ? bg.models : {};
+        const bm = (bg.models && typeof bg.models === 'object' && !Array.isArray(bg.models)) ? bg.models : {};
         const bf = (b.free && typeof b.free === 'object') ? b.free : {};
+        const mergedGoogleModels = { ...(cur.google && cur.google.models ? cur.google.models : {}) };
+        Object.entries(bm).forEach(([key, value]) => {
+            if (!/^[A-Za-z0-9_-]{1,60}$/.test(String(key)) || !value || typeof value !== 'object' || Array.isArray(value)) return;
+            mergedGoogleModels[key] = { ...(mergedGoogleModels[key] || {}), ...value };
+        });
+        // Delete model(s): the admin page sends the keys in google.removeModels.
+        const removeKeys = Array.isArray(bg.removeModels) ? bg.removeModels.map(String) : [];
+        removeKeys.forEach((key) => { if (Object.prototype.hasOwnProperty.call(mergedGoogleModels, key)) delete mergedGoogleModels[key]; });
+        if (!Object.keys(mergedGoogleModels).length) {
+            return res.status(400).json({ success: false, message: 'At least one Google model must remain. Add another model before deleting this one.' });
+        }
         const next = normalizeAiProviderConfig({
             ...cur, ...b,
             free: { ...cur.free, ...bf },
             google: {
                 ...cur.google, ...bg,
-                models: Object.keys({ ...cur.google.models, ...bm }).reduce((o, key) => {
-                    o[key] = { ...(cur.google.models[key] || {}), ...(bm[key] || {}) };
-                    return o;
-                }, {})
+                models: mergedGoogleModels
             }
         });
         // Google = Base/Plus/Pro. Kapag ino-ON ito, kailangan ng API key at kahit isang model.
         if (next.google.enabled && !isGoogleAiConfigured()) {
             return res.status(400).json({ success: false, message: 'GOOGLE_AI_API_KEY is missing in RELAY/.env — add it and restart RELAY before turning Google AI (Base/Plus/Pro) ON.' });
         }
-        if (next.google.enabled && !getGoogleModelKeys(next).some((k) => next.google.models[k] && next.google.models[k].enabled)) {
-            return res.status(400).json({ success: false, message: 'Mag-enable ng kahit isang Gemini model.' });
+        if (next.google.enabled && !googleModelKeys(next).some((k) => next.google.models[k].enabled)) {
+            return res.status(400).json({ success: false, message: 'Mag-enable ng kahit isang Gemini model sa Google AI Providers.' });
         }
         // Free = Cloudflare. Kapag ino-ON ito, kailangan ng CF_ACCOUNT_ID at CF_AI_API_TOKEN.
         if (next.free.enabled && !cur.free.enabled && !isCfAiConfigured()) {
@@ -10470,7 +10479,7 @@ function antiLossFloorRates(modelId) {
 function antiLossUnits(st, cfg) {
     const units = [];
     if (!cfg || !cfg.google) return { units, fx: antiLossFxRate(st) };
-    getGoogleModelKeys(cfg).forEach((key) => {
+    googleModelKeys(cfg).forEach((key) => {
         const m = cfg.google.models[key];
         if (!m || !m.enabled) return;
         const modelId = googleModelId(cfg, key);
@@ -10761,6 +10770,76 @@ app.get('/relay/admin/api/ai-providers/client-ledger', requireAdminKey, async (r
         return res.status(503).json({ success: false, message: 'Could not load the client cost ledger: ' + err.message });
     }
 });
+// ===== PROFIT / INCOME OF OMNI AI THIS MONTH =====
+// Income = everything the clients paid this month (plan + Extra Credits + One-day Boosts, in Omni Tokens) x PHP per token, minus the payment fee.
+// Cost = the real Google cost of the answers those clients used (the same cost ledger as the Anti-loss budget cap, from actual tokens x Google price).
+// Profit = Income - Cost. It is grouped by the plan each client subscribed to this month. Free (Cloudflare) clients cost nothing and pay nothing, so they are not counted.
+async function buildAiProfitSummary(monthKey) {
+    const st = antiLossSettings() || normalizeAiEconSettings({});
+    const fx = antiLossFxRate(st);
+    const phpPerToken = Number(st.phpPerToken) || 0;
+    const feePct = Number(st.feePercent) || 0;
+    const out = {
+        month: monthKey, fx, phpPerToken, feePercent: feePct, targetMarginPercent: Number(st.targetMarginPercent) || 0,
+        totals: { clients: 0, payingClients: 0, paidTokens: 0, grossPhp: 0, netPhp: 0, costPhp: 0, profitPhp: 0, marginPct: null, neurons: 0, questions: 0, losingClients: 0 },
+        byTier: []
+    };
+    if (!pgPoolDevices) return out;
+    const r = await pgPoolDevices.query(`
+        WITH ids AS (
+            SELECT installation_id FROM relay_ai_tier_purchases WHERE month_key = $1::text
+            UNION SELECT installation_id FROM relay_ai_extra_purchases WHERE month_key = $1::text
+            UNION SELECT installation_id FROM relay_ai_day_boosts WHERE day_key LIKE $1::text || '-%'
+            UNION SELECT installation_id FROM relay_ai_cost_ledger WHERE month_key = $1::text
+        )
+        SELECT i.installation_id,
+               (SELECT p.tier_id FROM relay_ai_tier_purchases p WHERE p.installation_id = i.installation_id AND p.month_key = $1::text LIMIT 1) AS tier_id,
+               (SELECT p.tier_name FROM relay_ai_tier_purchases p WHERE p.installation_id = i.installation_id AND p.month_key = $1::text LIMIT 1) AS tier_name,
+               COALESCE((SELECT SUM(p.tokens_spent) FROM relay_ai_tier_purchases p WHERE p.installation_id = i.installation_id AND p.month_key = $1::text), 0)::int AS tier_tokens,
+               COALESCE((SELECT SUM(e.price_tokens) FROM relay_ai_extra_purchases e WHERE e.installation_id = i.installation_id AND e.month_key = $1::text), 0)::int AS extra_tokens,
+               COALESCE((SELECT SUM(b.price_tokens) FROM relay_ai_day_boosts b WHERE b.installation_id = i.installation_id AND b.day_key LIKE $1::text || '-%'), 0)::int AS boost_tokens,
+               COALESCE(l.cost_usd, 0)::float8 AS cost_usd,
+               COALESCE(l.questions, 0)::int AS questions,
+               COALESCE((SELECT SUM(u.used_neurons) FROM relay_ai_daily_usage u WHERE u.installation_id = i.installation_id AND u.day_key LIKE $1::text || '-%'), 0)::float8 AS neurons
+        FROM ids i
+        LEFT JOIN relay_ai_cost_ledger l ON l.installation_id = i.installation_id AND l.month_key = $1::text`, [monthKey]);
+    const groups = new Map();
+    r.rows.forEach((row) => {
+        const tokens = (Number(row.tier_tokens) || 0) + (Number(row.extra_tokens) || 0) + (Number(row.boost_tokens) || 0);
+        const grossPhp = tokens * phpPerToken;
+        const netPhp = grossPhp * (1 - feePct / 100);
+        const costPhp = (Number(row.cost_usd) || 0) * fx;
+        const neurons = Number(row.neurons) || 0;
+        const key = row.tier_id || '_none';
+        let g = groups.get(key);
+        if (!g) { g = { tierId: row.tier_id || null, tier: row.tier_name || 'No plan this month', clients: 0, payingClients: 0, paidTokens: 0, grossPhp: 0, netPhp: 0, costPhp: 0, neurons: 0, questions: 0, losingClients: 0 }; groups.set(key, g); }
+        g.clients++; if (tokens > 0) g.payingClients++;
+        g.paidTokens += tokens; g.grossPhp += grossPhp; g.netPhp += netPhp; g.costPhp += costPhp; g.neurons += neurons; g.questions += Number(row.questions) || 0;
+        if (netPhp - costPhp < 0) g.losingClients++;
+    });
+    const r2 = (x) => Math.round(x * 100) / 100;
+    const fin = (g) => {
+        const profit = g.netPhp - g.costPhp;
+        return { ...g, grossPhp: r2(g.grossPhp), netPhp: r2(g.netPhp), costPhp: r2(g.costPhp), profitPhp: r2(profit), neurons: Math.round(g.neurons), marginPct: g.netPhp > 0 ? Math.round(profit / g.netPhp * 1000) / 10 : null };
+    };
+    const list = Array.from(groups.values()).map(fin).sort((a, b) => b.netPhp - a.netPhp);
+    const t = { clients: 0, payingClients: 0, paidTokens: 0, grossPhp: 0, netPhp: 0, costPhp: 0, neurons: 0, questions: 0, losingClients: 0 };
+    groups.forEach((g) => { Object.keys(t).forEach((k) => { t[k] += g[k]; }); });
+    out.totals = { ...fin({ ...t }), };
+    out.byTier = list;
+    return out;
+}
+app.get('/relay/admin/api/ai-profit', requireAdminKey, async (req, res) => {
+    try {
+        await getAiEconSettings();
+        const m = String(req.query?.month || '').trim();
+        const monthKey = /^\d{4}-(0[1-9]|1[0-2])$/.test(m) ? m : relayAiMonthKey();
+        return res.json({ success: true, ...(await buildAiProfitSummary(monthKey)) });
+    } catch (err) {
+        console.error('AI profit summary error:', err.message);
+        return res.status(503).json({ success: false, message: 'Could not compute the profit of Omni AI: ' + err.message });
+    }
+});
 async function buildAntiLossReport(cfg, st, tiers, packs, boosts) {
     const rep = { enabled: !!st.antiLossEnabled, floorRates: !!st.antiLossFloorRates, blockSales: !!st.antiLossBlockSales, autoCaps: !!st.antiLossAutoCaps, minProfitPercent: st.antiLossMinProfitPercent, clientBudget: !!st.antiLossClientBudget, clientBudgetPercent: st.antiLossClientBudgetPercent, fx: antiLossFxRate(st), tiers: [], packs: [], boosts: [] };
     tiers.forEach((t) => rep.tiers.push({ id: t.id, name: t.name, dailyCap: t.dailyCap, ...antiLossEvaluate('tier', { id: t.id, priceTokens: t.priceTokens, credits: t.monthlyCredits, dailyCap: t.dailyCap }, st, cfg) }));
@@ -10809,13 +10888,20 @@ app.post('/relay/admin/api/ai-providers/economics', requireAdminKey, async (req,
         const bs = (b.slots && typeof b.slots === 'object') ? b.slots : {};
         const numOr = (v, dflt) => { const x = Number(v); return (v !== '' && v !== null && v !== undefined && Number.isFinite(x) && x >= 0) ? x : dflt; };
         const slots = {};
-        getGoogleModelKeys(cfg).forEach((key) => {
+        // Saved models + models just added in the admin page that are not saved yet (so their price / auto-fill works before saving).
+        const slotKeys = googleModelKeys(cfg).slice();
+        Object.keys(bs).slice(0, 40).forEach((key) => {
+            if (slotKeys.includes(key) || !/^[A-Za-z0-9_-]{1,60}$/.test(key)) return;
             const d = (bs[key] && typeof bs[key] === 'object') ? bs[key] : {};
-            const m = cfg.google.models[key];
+            if (typeof d.modelId === 'string' && d.modelId.trim()) slotKeys.push(key);
+        });
+        slotKeys.forEach((key) => {
+            const d = (bs[key] && typeof bs[key] === 'object') ? bs[key] : {};
+            const m = cfg.google.models[key] || {};
             const typed = typeof d.modelId === 'string' ? d.modelId.trim().slice(0, 80).replace(/[^A-Za-z0-9._\-\/]/g, '') : '';
             slots[key] = buildSlotEconomics({
                 key, modelId: typed || googleModelId(cfg, key),
-                inRate: numOr(d.inRate, m.inputNeuronsPerM), outRate: numOr(d.outRate, m.outputNeuronsPerM),
+                inRate: numOr(d.inRate, m.inputNeuronsPerM || 0), outRate: numOr(d.outRate, m.outputNeuronsPerM || 0),
                 enabled: d.enabled !== undefined ? !!d.enabled : !!m.enabled, autoFill: autoFill.includes(key)
             }, settings, fx.rate, tiers, { packs, boosts });
         });
@@ -10928,8 +11014,7 @@ app.post('/relay/admin/api/ai-providers/test', requireAdminKey, async (req, res)
     try {
         if (!isGoogleAiConfigured()) return res.json({ success: false, message: 'GOOGLE_AI_API_KEY is missing in the RELAY environment. Add it in Render > Environment, then redeploy.' });
         const cfg = await getAiProviderConfig();
-        const requestedKey = String(req.body?.model || '');
-        const key = getGoogleModelKeys(cfg).includes(requestedKey) ? requestedKey : googleDefaultModelKey(cfg) || 'flashLite';
+        const key = googleModelKeys(cfg).includes(String(req.body?.model || '')) ? String(req.body.model) : googleDefaultModelKey(cfg) || 'flashLite';
         // Puwedeng ipasa ang eksaktong modelId (ang nasa input box, kahit hindi pa na-save).
         const typedId = typeof req.body?.modelId === 'string' ? req.body.modelId.trim().slice(0, 80).replace(/[^A-Za-z0-9._\-\/]/g, '') : '';
         const modelId = typedId || googleModelId(cfg, key);
@@ -11398,7 +11483,7 @@ async function buildGoogleUsagePayload() {
     else if (!hasLimit) level = 'nolimit';
     else if (percentUsed >= 95) level = 'critical';
     else if (percentUsed >= 80) level = 'warning';
-    const models = getGoogleModelKeys(cfg).map((k) => {
+    const models = googleModelKeys(cfg).map((k) => {
         const st = googleModelStatus(cfg, k);
         const row = (u.byModel && u.byModel[k]) || { q: 0, n: 0 };
         return {
@@ -11981,23 +12066,46 @@ app.post('/relay/admin/api/ai-credits/installation/reset', requireAdminKey, asyn
     }
 });
 async function buildRelayAiSubscriptionPlansForCatalog() {
-    const out = { baseEnabled: true, base: null, tiers: [] };
+    const out = { baseEnabled: true, base: null, tiers: [], models: [] };
     try {
         out.baseEnabled = await getRelayAiBasePlanEnabled();
+        const cfg = await getAiProviderConfig();
+        const allTiers = pgPoolDevices ? await listRelayAiTiers(true) : [];
+        const modelEntries = googleUsable(cfg) ? googleModelKeys(cfg)
+            .map((key) => {
+                const m = cfg.google.models[key];
+                if (!m || !m.enabled || !googleModelId(cfg, key)) return null;
+                const requiredTier = m.requiredTier ? allTiers.find((t) => t.id === m.requiredTier) : null;
+                return {
+                    key,
+                    modelId: googleModelId(cfg, key),
+                    displayName: googleModelDisplayName(m),
+                    requiredTierId: requiredTier ? requiredTier.id : null,
+                    requiredTierName: requiredTier ? requiredTier.name : null,
+                    requiredTierPriceTokens: requiredTier ? Number(requiredTier.priceTokens) || 0 : 0
+                };
+            })
+            .filter(Boolean) : [];
+        const visibleForPrice = (priceTokens) => modelEntries
+            .filter((m) => !m.requiredTierPriceTokens || Number(priceTokens) >= m.requiredTierPriceTokens)
+            .map(({ key, modelId, displayName, requiredTierId, requiredTierName }) => ({ key, modelId, displayName, requiredTierId, requiredTierName }));
+        out.models = modelEntries.map(({ key, modelId, displayName, requiredTierId, requiredTierName }) => ({ key, modelId, displayName, requiredTierId, requiredTierName }));
         if (pgPoolDevices) {
             const bs = await getRelayAiDefaultSettings();
-            out.base = { monthlyCredits: Number(bs.monthlyCredits) || 0, dailyCap: Number(bs.dailyCap) || 0 };
-            out.tiers = (await listRelayAiTiers(true)).map((t) => ({ id: t.id, name: t.name, priceTokens: t.priceTokens, monthlyCredits: t.monthlyCredits, dailyCap: t.dailyCap }));
+            out.base = {
+                monthlyCredits: Number(bs.monthlyCredits) || 0,
+                dailyCap: Number(bs.dailyCap) || 0,
+                models: visibleForPrice(0)
+            };
+            out.tiers = allTiers.map((t) => ({
+                id: t.id,
+                name: t.name,
+                priceTokens: t.priceTokens,
+                monthlyCredits: t.monthlyCredits,
+                dailyCap: t.dailyCap,
+                models: visibleForPrice(Number(t.priceTokens) || 0)
+            }));
         }
-        const cfg = await getAiProviderConfig();
-        const models = getGoogleModelKeys(cfg).filter((k) => cfg.google.models[k] && cfg.google.models[k].enabled).map((k) => {
-            const m = cfg.google.models[k];
-            return { key: k, modelId: googleModelId(cfg, k), displayName: m.displayName || AI_GOOGLE_MODEL_LABELS[k] || googleModelId(cfg, k), requiredTierId: m.requiredTier || '', requiredTierName: '' };
-        });
-        if (out.base) out.base.models = models.filter((m) => !m.requiredTierId);
-        const tierNames = Object.fromEntries(out.tiers.map((t) => [t.id, t.name]));
-        out.tiers.forEach((t) => { t.models = models.filter((m) => m.requiredTierId === t.id).map((m) => ({ ...m, requiredTierName: tierNames[t.id] || '' })); });
-        out.models = models;
     } catch (err) { console.error('⚠️ AI subscription plans (pricing) error:', err.message); }
     return out;
 }
