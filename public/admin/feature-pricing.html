@@ -216,6 +216,28 @@
   .ai-box { padding:10px; border:1px solid var(--line); border-radius:10px; }
   .ai-mini-bar { flex:1 1 100%; height:5px; border-radius:3px; background:var(--line); overflow:hidden; }
   .ai-mini-bar > span { display:block; height:100%; }
+  #toast { z-index: 3000; }
+  .ovs-backdrop { position:fixed; inset:0; z-index:2000; background:rgba(2,4,10,.74); display:none; align-items:flex-end; justify-content:center; }
+  .ovs-sheet { width:100%; max-width:580px; max-height:94vh; overflow-y:auto; overscroll-behavior:contain; background:var(--bg-raise); border:1px solid var(--accent-dim); border-radius:14px 14px 0 0; padding:14px 14px calc(16px + env(safe-area-inset-bottom, 0px)); box-shadow:0 -10px 40px rgba(0,0,0,.55); }
+  @media (min-width:721px) { .ovs-backdrop { align-items:center; padding:20px; } .ovs-sheet { border-radius:var(--radius-lg); } }
+  .ovs-head { display:flex; gap:8px; align-items:flex-start; }
+  .ovs-title { font-size:1.05rem; font-weight:700; word-break:break-word; }
+  .ovs-x { margin-left:auto; flex:0 0 auto; }
+  .ovs-sec { border:1px solid var(--line); border-radius:var(--radius-lg); padding:10px 12px; margin-top:10px; background:var(--card); }
+  .ovs-sec h3 { margin:0 0 8px; font-size:.82rem; letter-spacing:.02em; color:var(--accent); }
+  .ovs-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:8px; }
+  .ovs-grid label { font-size:11px; color:var(--muted); }
+  .ovs-grid input { width:100%; margin-top:4px; }
+  .ovs-chips { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+  .ovs-chip { border:1px solid var(--border); background:transparent; color:var(--text); border-radius:999px; padding:4px 10px; font-size:12px; cursor:pointer; font-family:var(--font-ui); }
+  .ovs-chip:hover { border-color:var(--accent); color:var(--accent); }
+  .ovs-note { font-size:12px; margin-top:8px; line-height:1.5; }
+  .ovs-warn { color:var(--amber); }
+  .ovs-bad { color:var(--red); }
+  .ovs-ok { color:var(--green); }
+  .ovs-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+  .ovs-actions button:disabled, .ovs-chip:disabled { opacity:.45; cursor:not-allowed; }
+  .ovs-danger { border-color:var(--red-line) !important; color:var(--red) !important; }
   .ai-toolbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; }
   .ai-toolbar input[type="text"] { flex:1 1 200px; min-width:160px; }
   .ai-toolbar select { background:var(--bg-raise); color:var(--text); border:1.5px solid var(--border); border-radius:var(--radius); padding:8px 10px; font-family:var(--font-ui); font-size:.85rem; }
@@ -2943,12 +2965,316 @@ function renderAiClients() {
     </div>`;
   }).join('');
 }
+// ===== ADVANCED OVERRIDE SHEET (per installation) =====
+// Bubukas mismo sa harap ng Client Usage list (dati ay naglalagay lang ito ng ID sa form na nasa ibang tab, kaya parang walang nangyayari).
+// Laman: live na status, custom limits na may preview ng magiging epekto, quick presets, at maintenance (remove override / reset used credits / reset today's neurons / full reset).
+let aiOvCtx = null;
+let aiOvPrevOverflow = '';
+const aiOvFmt = (n) => Number(n || 0).toLocaleString('en-US');
+function aiOvEnsureDom() {
+  let el = document.getElementById('aiOvRoot');
+  if (el) return el;
+  el = document.createElement('div');
+  el.id = 'aiOvRoot';
+  el.className = 'ai-section ovs-backdrop';
+  el.setAttribute('role', 'dialog');
+  el.setAttribute('aria-modal', 'true');
+  el.addEventListener('mousedown', (e) => { if (e.target === el) aiOvClose(); });
+  document.body.appendChild(el);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && aiOvCtx) aiOvClose(); });
+  return el;
+}
+function aiOvFindClient(id) {
+  return ((aiClientsState && aiClientsState.clients) || []).find((x) => x.installationId === id) || null;
+}
+function aiOvIntOf(v) {
+  const t = String(v === undefined || v === null ? '' : v).trim();
+  if (t === '') return NaN;
+  return Number(t);
+}
+function aiOvReadForm() {
+  const g = (k) => { const el = document.getElementById('aiOv_' + k); return el ? el.value : ''; };
+  return { monthly: g('monthly'), text: g('text'), file: g('file'), image: g('image'), daily: g('daily') };
+}
+function aiOvDirty() {
+  if (!aiOvCtx || !aiOvCtx.orig || !document.getElementById('aiOv_monthly')) return false;
+  const f = aiOvReadForm();
+  return Object.keys(aiOvCtx.orig).some((k) => String(f[k]).trim() !== String(aiOvCtx.orig[k]).trim());
+}
+function aiOvValidate(f) {
+  const m = aiOvIntOf(f.monthly), t = aiOvIntOf(f.text), fi = aiOvIntOf(f.file), im = aiOvIntOf(f.image);
+  const dBlank = String(f.daily).trim() === '';
+  const d = dBlank ? null : aiOvIntOf(f.daily);
+  if (![m, t, fi, im].every((x) => Number.isInteger(x))) return 'Monthly credits and the text / file / image costs must be whole numbers.';
+  if (m < 1 || t < 1) return 'Monthly credits and text cost must be at least 1.';
+  if (fi < t) return 'File cost must be at least the text cost.';
+  if (im < fi) return 'Image cost must be at least the file cost.';
+  if (!dBlank && !(Number.isInteger(d) && d >= 0)) return 'Daily neurons must be blank (follow Base), 0 (unlimited) or a whole number.';
+  return '';
+}
+// Kapareho ng applyRelayAiTier() sa server: ang plan ang floor ng override (max), at idinadagdag ang extra credits / neurons / boost.
+function aiOvCalc(f) {
+  const c = aiOvCtx.c || {};
+  const d = aiOvCtx.defaults || {};
+  const tier = (c.plan && !c.plan.isFree) ? ((aiPlansState && aiPlansState.tiers) || []).find((t) => t.id === c.plan.id) : null;
+  const m = Number(f.monthly);
+  const dBlank = String(f.daily).trim() === '';
+  const dOv = dBlank ? null : Number(f.daily);
+  const baseDaily = dBlank ? (Number(d.dailyCap) || 0) : dOv;
+  const monthly = tier ? Math.max(m, Number(tier.monthlyCredits) || 0) : m;
+  let daily;
+  if (tier) {
+    if (Number(tier.dailyCap) === 0) daily = 0;
+    else if (!dBlank) daily = baseDaily === 0 ? 0 : Math.max(baseDaily, Number(tier.dailyCap) || 0);
+    else daily = Number(tier.dailyCap) || 0;
+  } else daily = baseDaily;
+  const ex = c.extra || {};
+  const monthlyTotal = monthly + (Number(ex.credits) || 0);
+  const unlimited = daily === 0;
+  const dailyTotal = unlimited ? 0 : daily + (Number(ex.dailyBonus) || 0) + (Number(ex.dayBoost) || 0);
+  const lowM = !!tier && m < (Number(tier.monthlyCredits) || 0);
+  const lowD = !!tier && !dBlank && dOv !== 0 && Number(tier.dailyCap) !== 0 && dOv < (Number(tier.dailyCap) || 0);
+  return { tier, monthlyTotal, dailyTotal, unlimited, lowM, lowD, dBlank };
+}
+function aiOvInput() {
+  if (!aiOvCtx || !document.getElementById('aiOv_monthly')) return;
+  const f = aiOvReadForm();
+  const err = aiOvValidate(f);
+  const msg = document.getElementById('aiOvMsg');
+  const prev = document.getElementById('aiOvPreview');
+  const save = document.getElementById('aiOvSave');
+  const dirty = aiOvDirty();
+  if (msg) msg.innerHTML = err ? `<span class="ovs-bad">⚠️ ${escapeHtml(err)}</span>` : (dirty ? '<span class="ovs-warn">Unsaved changes</span>' : '<span class="meta">No changes yet.</span>');
+  if (prev) {
+    if (err) prev.innerHTML = '';
+    else {
+      const r = aiOvCalc(f);
+      const notes = [];
+      if (r.lowM) notes.push(`Monthly credits are below the ${escapeHtml(r.tier.name)} plan (${aiOvFmt(r.tier.monthlyCredits)}); the plan value is used (override can only raise it).`);
+      if (r.lowD) notes.push(`Daily neurons are below the ${escapeHtml(r.tier.name)} plan (${aiOvFmt(r.tier.dailyCap)}); the plan value is used.`);
+      prev.innerHTML = `<b>After saving (estimate):</b> ${aiOvFmt(r.monthlyTotal)} credits/month · ${r.unlimited ? '∞ neurons/day' : aiOvFmt(r.dailyTotal) + ' neurons/day'}` +
+        (((aiOvCtx.c.extra || {}).credits || (aiOvCtx.c.extra || {}).dailyBonus || (aiOvCtx.c.extra || {}).dayBoost) ? ' <span class="meta">(includes their extra credits / neurons / boost)</span>' : '') +
+        (r.dBlank ? '<br><span class="meta">Daily neurons blank = follows the plan / Base.</span>' : '') +
+        notes.map((n) => `<br><span class="ovs-warn">ℹ️ ${n}</span>`).join('');
+    }
+  }
+  if (save && !aiOvCtx.busy) save.disabled = !!err || !dirty;
+}
+function aiOvSetBusy(b) {
+  if (!aiOvCtx) return;
+  aiOvCtx.busy = b;
+  const root = document.getElementById('aiOvRoot');
+  if (!root) return;
+  root.querySelectorAll('button[data-ov]').forEach((btn) => { btn.disabled = b; });
+  if (!b) aiOvInput();
+}
+function aiOvRender() {
+  const root = aiOvEnsureDom();
+  const ctx = aiOvCtx;
+  if (!ctx) return;
+  const c = ctx.c || { installationId: ctx.id };
+  const name = aiClientName(c);
+  const head = `<div class="ovs-head">
+      <div style="min-width:0;">
+        <div class="ovs-title">${name ? '🏷️ ' + escapeHtml(name) : '<span class="meta">(walang label)</span>'}</div>
+        <code style="display:block;font-size:11px;word-break:break-all;opacity:.8;margin-top:4px;">${escapeHtml(ctx.id)}</code>
+      </div>
+      <button class="btn-ghost ovs-x" data-ov="x" onclick="aiOvClose()" aria-label="Close">✕</button>
+    </div>`;
+  if (ctx.loading) { root.innerHTML = `<div class="ovs-sheet">${head}<div class="empty" style="margin-top:12px;">Loading...</div></div>`; return; }
+  if (ctx.error) { root.innerHTML = `<div class="ovs-sheet">${head}<div class="ovs-note ovs-bad">${escapeHtml(ctx.error)}</div><div class="ovs-actions"><button class="btn-ghost" onclick="aiOvLoad('${escapeAttr(ctx.id)}')">🔄 Try again</button></div></div>`; return; }
+  const planColor = { free: 'var(--muted)', base: 'var(--accent)', plus: 'var(--green)', pro: 'var(--amber)' };
+  const pc = (c.plan && planColor[c.plan.id]) || 'var(--accent)';
+  const cr = c.credits || { used: 0, limit: 0, remaining: 0 };
+  const dl = c.daily || { used: 0, cap: 0, unlimited: false, questions: 0 };
+  const bar = (used, limit) => {
+    const pct = limit > 0 ? Math.min(100, (used / limit) * 100) : 0;
+    const color = pct >= 90 ? 'var(--red)' : (pct >= 70 ? 'var(--amber)' : 'var(--green)');
+    return `<div class="ai-mini-bar"><span style="width:${pct}%;background:${color};"></span></div>`;
+  };
+  const sub = (c.plan && c.plan.isFree) ? 'no Omni AI subscription' : (c.subscriptionExpiresAt ? 'subscription until ' + new Date(c.subscriptionExpiresAt).toLocaleDateString() : '');
+  const ov = ctx.override;
+  const status = `<div class="ovs-sec">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        ${c.plan ? `<span style="border:1px solid ${pc};color:${pc};border-radius:999px;padding:1px 8px;font-size:11px;font-weight:700;">${escapeHtml(c.plan.name)}</span>` : ''}
+        ${ov ? '<span class="badge">override active</span>' : '<span class="meta">using plan / Default limits</span>'}
+        ${sub ? `<span class="meta">${escapeHtml(sub)}</span>` : ''}
+        <button class="btn-ghost" style="margin-left:auto;padding:2px 8px;" data-ov="copy" onclick="aiOvCopyId()">📋 Copy ID</button>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;font-size:12px;margin-top:10px;">
+        <div>Credits: <b>${aiOvFmt(cr.used)} / ${aiOvFmt(cr.limit)}</b> <span class="meta">(left ${aiOvFmt(cr.remaining)})</span>${bar(cr.used, cr.limit)}</div>
+        <div>Neurons today: <b>${dl.unlimited ? aiOvFmt(dl.used) + ' / ∞' : aiOvFmt(dl.used) + ' / ' + aiOvFmt(dl.cap)}</b> <span class="meta">· ${aiOvFmt(dl.questions)} questions</span>${bar(dl.used, dl.unlimited ? 0 : dl.cap)}</div>
+      </div>
+      ${((c.extra || {}).credits || (c.extra || {}).dailyBonus || (c.extra || {}).dayBoost) ? `<div class="meta" style="margin-top:6px;">Extras: +${aiOvFmt((c.extra || {}).credits)} cr / +${aiOvFmt((c.extra || {}).dailyBonus)} neurons${(c.extra || {}).dayBoost ? ` / +${aiOvFmt((c.extra || {}).dayBoost)} boost today` : ''}</div>` : ''}
+      ${(c.sync && !c.sync.ok) ? `<div class="ovs-note ovs-warn">⚠️ ${escapeHtml((c.sync.notes || []).join(' · '))}</div>` : ''}
+    </div>`;
+  const f = ctx.form;
+  const inp = (k, label, extra) => `<label>${label}<input type="number" min="${k === 'daily' ? 0 : 1}" step="1" inputmode="numeric" id="aiOv_${k}" value="${escapeHtml(f[k])}" ${extra || ''} oninput="aiOvInput()"></label>`;
+  const form = `<div class="ovs-sec">
+      <h3>⚙️ Custom limits (override)</h3>
+      <div class="ovs-grid">
+        ${inp('monthly', 'Monthly credits')}
+        ${inp('daily', 'Daily neurons (blank = follow, 0 = ∞)', 'placeholder="follow"')}
+        ${inp('text', 'Text cost')}
+        ${inp('file', 'File cost')}
+        ${inp('image', 'Image cost')}
+      </div>
+      <div class="ovs-chips">
+        <button class="ovs-chip" data-ov="p" onclick="aiOvPreset('default')">↺ Default values</button>
+        <button class="ovs-chip" data-ov="p" onclick="aiOvPreset('+100')">+100 credits</button>
+        <button class="ovs-chip" data-ov="p" onclick="aiOvPreset('+500')">+500 credits</button>
+        <button class="ovs-chip" data-ov="p" onclick="aiOvPreset('unlimited')">♾️ Unlimited neurons</button>
+        <button class="ovs-chip" data-ov="p" onclick="aiOvPreset('follow')">Follow plan/Base daily</button>
+        <button class="ovs-chip" data-ov="p" onclick="aiOvPreset('undo')">⟲ Undo edits</button>
+      </div>
+      <div id="aiOvPreview" class="ovs-note"></div>
+      <div id="aiOvMsg" class="ovs-note"></div>
+      <div class="ovs-actions">
+        <button class="btn-primary" id="aiOvSave" data-ov="save" onclick="aiOvSave()" disabled>💾 Save override</button>
+        <button class="btn-ghost" data-ov="x2" onclick="aiOvClose()">Close</button>
+      </div>
+      ${ov && ov.updatedAt ? `<div class="meta" style="margin-top:6px;">Override last changed: ${escapeHtml(new Date(ov.updatedAt).toLocaleString())}</div>` : ''}
+    </div>`;
+  const maint = `<div class="ovs-sec">
+      <h3>🧰 Maintenance</h3>
+      <div class="ovs-actions" style="margin-top:0;">
+        <button class="btn-ghost" data-ov="m" onclick="aiOvReset('override')" ${ov ? '' : 'disabled title="No custom override on this client"'}>Remove override only</button>
+        <button class="btn-ghost" data-ov="m" onclick="aiOvReset('credits')">Reset used credits</button>
+        <button class="btn-ghost" data-ov="m" onclick="aiOvReset('daily')">Reset today's neurons</button>
+      </div>
+      <div class="meta" style="margin-top:6px;">Ang tatlong ito ay hindi ginagalaw ang plan o extra packs na binili ng client.</div>
+      <div class="ovs-actions">
+        <button class="btn-ghost ovs-danger" data-ov="m" onclick="aiOvReset('full')">⚠️ Full reset to Default</button>
+      </div>
+      <div class="meta" style="margin-top:6px;">Full reset: tinatanggal ang override, ang AI plan at extra packs ngayong buwan, at ang nagamit na credits/neurons. Walang token refund.</div>
+    </div>`;
+  root.innerHTML = `<div class="ovs-sheet">${head}${status}${form}${maint}</div>`;
+  aiOvInput();
+}
+async function aiOvLoad(id) {
+  if (!aiOvCtx || aiOvCtx.id !== id) return;
+  aiOvCtx.loading = true; aiOvCtx.error = '';
+  aiOvRender();
+  let data;
+  try { data = await aiApi('/relay/admin/api/ai-credits/settings'); } catch (e) { data = null; }
+  if (!aiOvCtx || aiOvCtx.id !== id) return;
+  if (!data || !data.success) {
+    aiOvCtx.loading = false; aiOvCtx.error = (data && data.message) || 'Could not load the override settings.';
+    aiOvRender();
+    return;
+  }
+  relayAiCreditSettingsCache = data;
+  const d = data.defaults || {};
+  const ov = (data.overrides || []).find((x) => x.installationId === id) || null;
+  aiOvCtx.c = aiOvFindClient(id) || aiOvCtx.c || { installationId: id };
+  aiOvCtx.defaults = d;
+  aiOvCtx.override = ov;
+  const src = ov || d;
+  aiOvCtx.form = {
+    monthly: String(src.monthlyCredits ?? ''), text: String(src.textCost ?? ''), file: String(src.fileCost ?? ''), image: String(src.imageCost ?? ''),
+    daily: (ov && ov.dailyCap !== null && ov.dailyCap !== undefined) ? String(ov.dailyCap) : ''
+  };
+  aiOvCtx.orig = { ...aiOvCtx.form };
+  aiOvCtx.loading = false; aiOvCtx.busy = false;
+  aiOvRender();
+}
 function aiClientEdit(installationId) {
-  const idEl = document.getElementById('aiOverrideInstallation');
-  if (idEl) idEl.value = installationId;
-  if (typeof selectAiOverride === 'function') selectAiOverride(installationId);
-  const d = document.getElementById('aisec-tiers') || document.getElementById('aiOverrideInstallation');
-  if (idEl) idEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const id = String(installationId || '').trim();
+  if (!id) return;
+  const root = aiOvEnsureDom();
+  aiOvPrevOverflow = document.body.style.overflow;
+  document.body.style.overflow = 'hidden';
+  aiOvCtx = { id, c: aiOvFindClient(id) || { installationId: id }, loading: true, busy: false };
+  root.style.display = 'flex';
+  aiOvLoad(id);
+}
+function aiOvClose(force) {
+  if (!aiOvCtx) return;
+  if (!force && aiOvCtx.busy) return;
+  if (!force && aiOvDirty() && !window.confirm('Discard the unsaved changes in this override?')) return;
+  aiOvCtx = null;
+  const root = document.getElementById('aiOvRoot');
+  if (root) { root.style.display = 'none'; root.innerHTML = ''; }
+  document.body.style.overflow = aiOvPrevOverflow;
+}
+function aiOvPreset(kind) {
+  if (!aiOvCtx || !aiOvCtx.form) return;
+  const set = (k, v) => { const el = document.getElementById('aiOv_' + k); if (el) el.value = v; };
+  const d = aiOvCtx.defaults || {};
+  if (kind === 'default') {
+    set('monthly', d.monthlyCredits ?? ''); set('text', d.textCost ?? ''); set('file', d.fileCost ?? ''); set('image', d.imageCost ?? ''); set('daily', '');
+  } else if (kind === '+100' || kind === '+500') {
+    const cur = aiOvIntOf(document.getElementById('aiOv_monthly')?.value);
+    set('monthly', (Number.isFinite(cur) ? cur : 0) + Number(kind.slice(1)));
+  } else if (kind === 'unlimited') set('daily', 0);
+  else if (kind === 'follow') set('daily', '');
+  else if (kind === 'undo') Object.keys(aiOvCtx.orig || {}).forEach((k) => set(k, aiOvCtx.orig[k]));
+  aiOvInput();
+}
+async function aiOvCopyId() {
+  if (!aiOvCtx) return;
+  try { await navigator.clipboard.writeText(aiOvCtx.id); toast('Installation ID copied.', 'success'); return; } catch (e) { /* fallback below */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = aiOvCtx.id; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    toast(ok ? 'Installation ID copied.' : 'Could not copy. Select the ID and copy it manually.', ok ? 'success' : 'error');
+  } catch (e) { toast('Could not copy. Select the ID and copy it manually.', 'error'); }
+}
+async function aiOvAfterChange(id) {
+  try { await Promise.all([loadAiClients(true), loadAiCreditSettings(), loadAiPlans()]); } catch (e) { /* the sheet reload below shows any error */ }
+  if (aiOvCtx && aiOvCtx.id === id) await aiOvLoad(id);
+}
+async function aiOvSave() {
+  const ctx = aiOvCtx;
+  if (!ctx || ctx.busy || ctx.loading) return;
+  const f = aiOvReadForm();
+  const err = aiOvValidate(f);
+  if (err) { toast(err, 'error'); return; }
+  const payload = {
+    installationId: ctx.id,
+    monthlyCredits: Number(f.monthly), textCost: Number(f.text), fileCost: Number(f.file), imageCost: Number(f.image),
+    dailyCap: String(f.daily).trim() === '' ? null : Number(f.daily)
+  };
+  aiOvSetBusy(true);
+  try {
+    const data = await aiApi('/relay/admin/api/ai-credits/installation', { method: 'POST', body: JSON.stringify(payload) });
+    if (!data?.success) throw new Error(data?.message || 'Save failed');
+    toast('Override saved.', 'success');
+    await aiOvAfterChange(ctx.id);
+  } catch (e) {
+    toast(e.message || 'Could not save the override.', 'error');
+    aiOvSetBusy(false);
+  }
+}
+async function aiOvReset(mode) {
+  const ctx = aiOvCtx;
+  if (!ctx || ctx.busy || ctx.loading) return;
+  const modes = {
+    override: { body: { keepPurchases: true, keepUsage: true }, title: 'Remove the custom override?', msg: `The custom limits of ${aiClientName(ctx.c) || ctx.id} will be removed. Their plan, extra packs and usage stay as they are.`, ok: 'Override removed.' },
+    credits: { body: { keepOverride: true, keepPurchases: true, usageScope: 'credits' }, title: 'Reset the used credits?', msg: 'The credits used this month go back to 0. The override, plan and extra packs stay. Today\'s neurons are not changed.', ok: 'Used credits reset.' },
+    daily: { body: { keepOverride: true, keepPurchases: true, usageScope: 'daily' }, title: 'Reset today\'s neurons?', msg: 'Today\'s used neurons and question count go back to 0. The override, plan, extra packs and used credits stay.', ok: 'Today\'s neurons reset.' },
+    full: { body: {}, title: 'Full reset to Default?', msg: 'This removes the custom override AND the AI plan (Plus/Pro) and extra credit packs bought this month, and resets the used credits this month and today\'s neurons to 0. Tokens are NOT refunded.', ok: 'Full reset done.' }
+  };
+  const m = modes[mode];
+  if (!m) return;
+  const ok = await confirmAction({ title: m.title, message: m.msg });
+  if (!ok || !aiOvCtx || aiOvCtx.id !== ctx.id) return;
+  aiOvSetBusy(true);
+  try {
+    const data = await aiApi('/relay/admin/api/ai-credits/installation/reset', { method: 'POST', body: JSON.stringify({ installationId: ctx.id, ...m.body }) });
+    if (!data?.success) throw new Error(data?.message || 'Reset failed');
+    const eff = data.effective || {};
+    const now = eff.monthlyLimit !== undefined ? ` Now: ${aiOvFmt(eff.monthlyLimit)} credits/mo · ${eff.dailyUnlimited ? '∞' : aiOvFmt(eff.dailyCap)} neurons/day.` : '';
+    if (data.nothingToReset) toast('Nothing to reset for this client.' + now, 'info');
+    else toast(m.ok + now, 'success');
+    await aiOvAfterChange(ctx.id);
+  } catch (e) {
+    toast(e.message || 'Could not reset.', 'error');
+    aiOvSetBusy(false);
+  }
 }
 function aiExportClientsCsv() {
   const all = (aiClientsState && aiClientsState.clients) || [];
