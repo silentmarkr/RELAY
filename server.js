@@ -9165,6 +9165,25 @@ async function applyRelayAiExtra(settings, installationId, monthKey, clientOrPoo
 // Editable gamit ang env: RELAY_AI_DAY_BOOST_ENABLED (0 para patayin), RELAY_AI_DAY_BOOST_MAX_PER_DAY, RELAY_AI_DAY_BOOST_OPTIONS ("id:neurons:tokens,...").
 const RELAY_AI_DAY_BOOST_ENABLED = String(process.env.RELAY_AI_DAY_BOOST_ENABLED || '1') !== '0';
 const RELAY_AI_DAY_BOOST_MAX_PER_DAY = Math.max(1, parseInt(process.env.RELAY_AI_DAY_BOOST_MAX_PER_DAY, 10) || 3);
+// Late-night guard: ang Boost ay hanggang hatinggabi lang (hindi 24 oras), kaya kapag malapit na ang hatinggabi, kaunti na lang ang magagamit.
+//  RELAY_AI_DAY_BOOST_WARN_MINUTES   (default 120): kung wala pang ganito karaming minuto bago mag-hatinggabi, may BABALA pero PUWEDE pa ring bumili. 0 = walang babala.
+//  RELAY_AI_DAY_BOOST_CUTOFF_MINUTES (default 0):   kung wala pang ganito karaming minuto bago mag-hatinggabi, HINDI na puwedeng bumili. 0 = hindi kailanman haharangin (default).
+const RELAY_AI_DAY_BOOST_WARN_MINUTES = (() => { const v = parseInt(process.env.RELAY_AI_DAY_BOOST_WARN_MINUTES, 10); return Number.isFinite(v) && v >= 0 ? v : 120; })();
+const RELAY_AI_DAY_BOOST_CUTOFF_MINUTES = (() => { const v = parseInt(process.env.RELAY_AI_DAY_BOOST_CUTOFF_MINUTES, 10); return Number.isFinite(v) && v > 0 ? v : 0; })();
+function relayAiDayBoostTimeInfo(now = Date.now()) {
+    const resetsInMs = Math.max(0, relayAiNextDayResetMs(now) - now);
+    return {
+        resetsInMs,
+        minutesLeft: Math.ceil(resetsInMs / 60000),
+        late: RELAY_AI_DAY_BOOST_WARN_MINUTES > 0 && resetsInMs < RELAY_AI_DAY_BOOST_WARN_MINUTES * 60000,
+        blocked: RELAY_AI_DAY_BOOST_CUTOFF_MINUTES > 0 && resetsInMs < RELAY_AI_DAY_BOOST_CUTOFF_MINUTES * 60000
+    };
+}
+function relayAiFmtMinutes(mins) {
+    const m = Math.max(0, Math.round(Number(mins) || 0));
+    const h = Math.floor(m / 60), r = m % 60;
+    return h > 0 ? (r > 0 ? `${h}h ${r}m` : `${h}h`) : `${m}m`;
+}
 const RELAY_AI_DAY_BOOST_OPTIONS = (() => {
     const fallback = [{ id: 'boost1', neurons: 1000, priceTokens: 10 }, { id: 'boost3', neurons: 3000, priceTokens: 25 }];
     const raw = String(process.env.RELAY_AI_DAY_BOOST_OPTIONS || '').trim();
@@ -9252,6 +9271,8 @@ function relayAiDayBoostVerdict(opt, status, boughtToday, capState) {
     if (!status || !status.daily || status.daily.unlimited) return { ok: false, reason: 'Your plan has no daily limit, so you do not need a Boost.' };
     if (status.remaining <= 0) return { ok: false, reason: 'Your monthly credits are used up — a Boost will not help. Buy Extra Credits or upgrade.' };
     if (boughtToday >= RELAY_AI_DAY_BOOST_MAX_PER_DAY) return { ok: false, reason: `You have reached the limit of ${RELAY_AI_DAY_BOOST_MAX_PER_DAY} Boosts for today.` };
+    const timeInfo = relayAiDayBoostTimeInfo();
+    if (timeInfo.blocked) return { ok: false, cutoff: true, reason: `A Boost only lasts until midnight and there is only ${relayAiFmtMinutes(timeInfo.minutesLeft)} left today, so it cannot be bought right now. You can buy one after midnight.` };
     if (capState && capState.enabled && capState.extraAvailable !== null && capState.extraAvailable !== undefined && opt.neurons > capState.extraAvailable) {
         return { ok: false, reason: 'The total daily AI capacity is full, so no Boost can be given right now.' };
     }
@@ -9262,8 +9283,10 @@ async function buildRelayAiDayBoostOffer(installationId, status, capState) {
     const bought = await getRelayAiDayBoostCount(installationId);
     const boostedNeurons = await getRelayAiDayBoostNeurons(installationId);
     const pq = Number(status.daily.perQuestion) || 0;
+    const timeInfo = relayAiDayBoostTimeInfo();
     return {
         enabled: true, maxPerDay: RELAY_AI_DAY_BOOST_MAX_PER_DAY, boughtToday: bought, boostedNeurons,
+        minutesLeft: timeInfo.minutesLeft, resetsInMs: timeInfo.resetsInMs, lateWarning: timeInfo.late, cutoffBlocked: timeInfo.blocked,
         options: RELAY_AI_DAY_BOOST_OPTIONS.map((o) => {
             const v = relayAiDayBoostVerdict(o, status, bought, capState);
             return { id: o.id, neurons: o.neurons, priceTokens: o.priceTokens, approxQuestions: pq > 0 ? Math.floor(o.neurons / pq) : null, canPurchase: v.ok, unavailableReason: v.ok ? null : v.reason };
@@ -9767,9 +9790,11 @@ app.post('/relay/ai-assistant/day-boost/purchase', requireApiKey, requireAllowed
         }
         logActivity(installationId, 'ai_day_boost_purchased', { boostId: opt.id, neurons: opt.neurons, tokensSpent: costTokens, day: dayKey });
         const credits = await getRelayAiCreditStatus(installationId);
+        const lateInfo = relayAiDayBoostTimeInfo();
         const body = {
             success: true,
-            message: `+${relayAiFmtNeurons(opt.neurons)} neurons for today only. They expire at midnight.`,
+            message: `+${relayAiFmtNeurons(opt.neurons)} neurons for today only. They expire at midnight.` + (lateInfo.late ? ` Note: only about ${relayAiFmtMinutes(lateInfo.minutesLeft)} is left today before it expires.` : ''),
+            lateWarning: lateInfo.late, minutesLeft: lateInfo.minutesLeft,
             boost: { id: opt.id, neurons: opt.neurons },
             tokensSpent: costTokens, balanceTokens: balanceAfter, credits
         };

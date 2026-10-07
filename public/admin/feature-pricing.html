@@ -210,6 +210,20 @@
   .ai-sec > summary::-webkit-details-marker { display:none; }
   .ai-sec > summary::before { content:'▸'; color:var(--accent); display:inline-block; transition:transform .15s; }
   .ai-sec[open] > summary::before { transform:rotate(90deg); }
+  /* Collapsed (naka-shrink) na sections: may kulay para agad makita + pulse animation kada 10s (naka-ON/OFF ng button) */
+  .ai-sec:not([open]) { background-color:rgba(34,229,255,.10); border-color:var(--accent-dim); border-left:4px solid var(--accent); }
+  .ai-sec:not([open]) > summary .ai-sec-title { color:var(--accent); }
+  .ai-sec:not([open]) > summary:hover { background-color:rgba(34,229,255,.08); border-radius:var(--radius-lg); }
+  .ai-sec:not([open]).ai-pulse { animation:aiSecPulse 1.8s ease-out 1; }
+  .ai-sec:not([open]).ai-pulse > summary::before { animation:aiSecArrow 1.8s ease-out 1; }
+  @keyframes aiSecPulse {
+    0%   { box-shadow:0 0 0 0 rgba(34,229,255,0); background-color:rgba(34,229,255,.10); }
+    25%  { box-shadow:0 0 0 3px rgba(34,229,255,.65), 0 0 24px rgba(34,229,255,.5); background-color:rgba(34,229,255,.34); }
+    60%  { box-shadow:0 0 0 2px rgba(34,229,255,.25), 0 0 12px rgba(34,229,255,.25); background-color:rgba(34,229,255,.2); }
+    100% { box-shadow:0 0 0 0 rgba(34,229,255,0); background-color:rgba(34,229,255,.10); }
+  }
+  @keyframes aiSecArrow { 0%,100% { transform:translateX(0); } 25% { transform:translateX(4px); } 50% { transform:translateX(0); } 75% { transform:translateX(3px); } }
+  .ai-anim-btn[aria-pressed="true"] { border-color:var(--accent-dim); color:var(--accent); background:var(--accent-soft); }
   .ai-sec-title { font-weight:700; font-size:.95rem; }
   .ai-sec-sub { font-size:.75rem; color:var(--muted); }
   .ai-sec-body { padding:0 14px 14px; }
@@ -397,6 +411,7 @@
             <span id="aiUpdatedStamp" class="meta">—</span>
             <label class="ai-auto"><input type="checkbox" id="aiAutoRefresh" checked onchange="aiToggleAutoRefresh(this)"> Auto-refresh (60s)</label>
             <button class="btn-ghost" onclick="aiRefreshAll()">🔄 Refresh all</button>
+            <button type="button" class="btn-ghost ai-anim-btn" id="aiAnimBtn" onclick="aiToggleAnim()" aria-pressed="true" title="I-on/off ang pulse animation ng mga naka-collapse na sections (kada 10 segundo)">✨ Animation: ON</button>
           </div>
         </div>
         <div id="aiOverview" class="ai-kpis"><div class="empty" style="grid-column:1/-1;">Loading...</div></div>
@@ -635,6 +650,7 @@ function login() {
 }
 function logout() {
   stopAiPoll();
+  aiStopAnim();
   adminKey = '';
   sessionStorage.removeItem('relayAdminKey');
   document.getElementById('app').classList.add('hidden');
@@ -3008,9 +3024,70 @@ function aiInitSections() {
     else d.open = d.getAttribute('data-default-open') === '1';
     if (!d.__aiBound) {
       d.__aiBound = true;
-      d.addEventListener('toggle', () => { const s = aiReadSecState(); s[key] = d.open; aiWriteSecState(s); });
+      d.addEventListener('toggle', () => { d.classList.remove('ai-pulse'); const s = aiReadSecState(); s[key] = d.open; aiWriteSecState(s); });
     }
   });
+}
+// ---- Pulse animation ng mga naka-collapse na sections (kada 10 segundo, may ON/OFF button) ----
+const AI_ANIM_STORE_KEY = 'fpAiAnimOn';
+const AI_ANIM_EVERY_MS = 10000;
+let aiAnimOn = true;
+let aiAnimTimer = null;
+function aiReadAnimPref() {
+  try { return localStorage.getItem(AI_ANIM_STORE_KEY) !== '0'; } catch (e) { return true; }
+}
+function aiWriteAnimPref(on) {
+  try { localStorage.setItem(AI_ANIM_STORE_KEY, on ? '1' : '0'); } catch (e) { /* storage unavailable: hindi lang maaalala ang setting */ }
+}
+function aiRenderAnimBtn() {
+  const b = document.getElementById('aiAnimBtn');
+  if (!b) return;
+  b.textContent = aiAnimOn ? '✨ Animation: ON' : '💤 Animation: OFF';
+  b.setAttribute('aria-pressed', aiAnimOn ? 'true' : 'false');
+}
+function aiClearPulse() {
+  document.querySelectorAll('details.ai-sec.ai-pulse').forEach((d) => d.classList.remove('ai-pulse'));
+}
+function aiPulseCollapsed() {
+  if (!aiAnimOn || document.hidden) return;
+  const sec = document.getElementById('section-ai-plans');
+  if (!sec || sec.classList.contains('hidden')) return; // nasa ibang tab; walang makikita
+  const app = document.getElementById('app');
+  if (app && app.classList.contains('hidden')) return;
+  aiClearPulse();
+  const closed = document.querySelectorAll('details.ai-sec:not([open])');
+  if (!closed.length) return;
+  void sec.offsetWidth; // reflow para ma-restart ang animation sa bawat tick
+  closed.forEach((d) => {
+    d.classList.add('ai-pulse');
+    d.addEventListener('animationend', function onEnd(ev) {
+      if (ev.target !== d) return;
+      d.removeEventListener('animationend', onEnd);
+      d.classList.remove('ai-pulse');
+    });
+  });
+}
+function aiStopAnim() {
+  if (aiAnimTimer) { clearInterval(aiAnimTimer); aiAnimTimer = null; }
+  aiClearPulse();
+}
+function aiStartAnim() {
+  if (aiAnimTimer) clearInterval(aiAnimTimer);
+  aiAnimTimer = null;
+  if (!aiAnimOn) return;
+  aiAnimTimer = setInterval(aiPulseCollapsed, AI_ANIM_EVERY_MS);
+}
+function aiToggleAnim() {
+  aiAnimOn = !aiAnimOn;
+  aiWriteAnimPref(aiAnimOn);
+  aiRenderAnimBtn();
+  if (aiAnimOn) { aiStartAnim(); aiPulseCollapsed(); } else aiStopAnim();
+  toast(aiAnimOn ? 'Animation ng naka-collapse na sections: ON (kada 10s).' : 'Animation: OFF.', 'info');
+}
+function aiInitAnim() {
+  aiAnimOn = aiReadAnimPref();
+  aiRenderAnimBtn();
+  aiStartAnim();
 }
 function aiToggleAllSections(open) {
   document.querySelectorAll('details.ai-sec').forEach((d) => { d.open = !!open; });
@@ -3709,6 +3786,7 @@ async function boot() {
     document.getElementById('loginWrap').classList.add('hidden');
     document.getElementById('app').classList.remove('hidden');
     aiInitSections();
+    aiInitAnim();
     try {
       const savedTab = localStorage.getItem(AI_TAB_STORE_KEY);
       if (['all', 'themes', 'modules', 'tiers', 'receiptCredits', 'aiCredits', 'aiPlans'].includes(savedTab)) setTab(savedTab);
