@@ -223,6 +223,10 @@
     100% { box-shadow:0 0 0 0 rgba(34,229,255,0); background-color:rgba(34,229,255,.10); }
   }
   @keyframes aiSecArrow { 0%,100% { transform:translateX(0); } 25% { transform:translateX(4px); } 50% { transform:translateX(0); } 75% { transform:translateX(3px); } }
+  /* Parehong treatment para sa mga nested na shrinkable sa loob ng Omni AI tab (Providers, Overview, help, atbp.; may inline style kaya may !important) */
+  #section-ai-plans details:not(.ai-sec):not([open]) { background-color:rgba(34,229,255,.10); border-color:var(--accent-dim) !important; border-left:4px solid var(--accent) !important; }
+  #section-ai-plans details:not(.ai-sec):not([open]) > summary { color:var(--accent); }
+  #section-ai-plans details:not(.ai-sec).ai-pulse:not([open]) { animation:aiSecPulse 1.8s ease-out 1; }
   .ai-anim-btn[aria-pressed="true"] { border-color:var(--accent-dim); color:var(--accent); background:var(--accent-soft); }
   .ai-sec-title { font-weight:700; font-size:.95rem; }
   .ai-sec-sub { font-size:.75rem; color:var(--muted); }
@@ -3055,7 +3059,8 @@ function aiPulseCollapsed() {
   const app = document.getElementById('app');
   if (app && app.classList.contains('hidden')) return;
   aiClearPulse();
-  const closed = document.querySelectorAll('details.ai-sec:not([open])');
+  // Lahat ng naka-collapse sa loob ng Omni AI tab (main sections at nested gaya ng nasa Providers), na nakikita lang (hindi nasa loob ng collapsed na parent).
+  const closed = Array.from(sec.querySelectorAll('details:not([open])')).filter((d) => d.offsetParent !== null);
   if (!closed.length) return;
   void sec.offsetWidth; // reflow para ma-restart ang animation sa bawat tick
   closed.forEach((d) => {
@@ -3084,7 +3089,16 @@ function aiToggleAnim() {
   if (aiAnimOn) { aiStartAnim(); aiPulseCollapsed(); } else aiStopAnim();
   toast(aiAnimOn ? 'Animation ng naka-collapse na sections: ON (kada 10s).' : 'Animation: OFF.', 'info');
 }
+let aiAnimToggleHooked = false;
 function aiInitAnim() {
+  if (!aiAnimToggleHooked) {
+    aiAnimToggleHooked = true;
+    // Kapag binuksan ang isang details (anumang level), alisin agad ang pulse class para hindi mag-replay pag isinara ulit. Capture dahil hindi nagba-bubble ang 'toggle'.
+    document.addEventListener('toggle', (ev) => {
+      const t = ev.target;
+      if (t && t.classList && t.classList.contains('ai-pulse')) t.classList.remove('ai-pulse');
+    }, true);
+  }
   aiAnimOn = aiReadAnimPref();
   aiRenderAnimBtn();
   aiStartAnim();
