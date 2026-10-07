@@ -897,7 +897,7 @@ const DRAGONPAY_WEBHOOK_PATH = '/relay/webhooks/dragonpay';
 // limit sa ibaba, kaya may sarili itong mas malaking parser.
 const AI_ASSISTANT_PROXY_PATH = '/relay/ai-assistant/complete';
 const defaultJsonParser = express.json({ limit: '2mb' });
-const aiAssistantJsonParser = express.json({ limit: '8mb' });
+const aiAssistantJsonParser = express.json({ limit: '32mb' }); // BAGO: maraming larawan kada tanong (hanggang 4)
 const cloudBackupChunkRawParser = express.raw({ type: '*/*', limit: '6mb' });
 app.use((req, res, next) => {
     if (req.path === CLOUD_BACKUP_UPLOAD_CHUNK_PATH) {
