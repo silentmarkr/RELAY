@@ -9387,22 +9387,62 @@ async function listRelayAiTiers(onlyEnabled = true) {
     );
     return r.rows.map(mapRelayAiTierRow);
 }
-// Mga Gemini model na puwedeng piliin ng client (Flash / Flash-Lite). null kung walang available (Google OFF/walang key/walang model).
+// ---- Model picker helpers: real version (from the actual Google model ID), family, and display order ----
+// Real version, e.g. "gemini-3.1-flash-lite-preview-09-2026" -> "3.1". Falls back to a number in the display name; null if none.
+function relayAiModelVersion(modelId, displayName) {
+    const fromId = String(modelId || '').match(/gemini-(\d+(?:\.\d+)?)/i);
+    if (fromId) return fromId[1];
+    // Display-name fallback only trusts "Gemini 3 ..." or an x.y number, so names like "Flash 8B" are not mistaken for a version.
+    const fromName = String(displayName || '').match(/gemini\s+(\d+(?:\.\d+)?)\b/i) || String(displayName || '').match(/(?:^|[^\d.])(\d+\.\d+)(?![\d.])/);
+    return fromName ? fromName[1] : null;
+}
+// lite < flash < pro < other (used for the description text and as a tie-breaker in the ordering)
+function relayAiModelFamily(modelId, displayName) {
+    const s = (String(modelId || '') + ' ' + String(displayName || '')).toLowerCase();
+    if (/lite/.test(s)) return 'lite';
+    if (/pro/.test(s)) return 'pro';
+    if (/flash/.test(s)) return 'flash';
+    return 'other';
+}
+const RELAY_AI_MODEL_FAMILY_RANK = { lite: 0, flash: 1, pro: 2, other: 3 };
+// Make sure the shown name carries the REAL version: "Gemini Flash" -> "Gemini 2.5 Flash";
+// a wrong/stale number typed in the display name is replaced by the real one from the model ID.
+function relayAiModelNameWithVersion(name, version) {
+    const n = String(name || '').trim();
+    if (!version) return n;
+    const escaped = version.replace(/\./g, '\\.');
+    if (new RegExp('(^|[^\\d.])' + escaped + '(?![\\d.])').test(n)) return n; // already shows the real version
+    const lead = n.match(/^(gemini\s+)?(\d+(?:\.\d+)*)\s+/i);
+    if (lead) return n.replace(/^(gemini\s+)?(\d+(?:\.\d+)*)\s+/i, (_all, g) => (g || '') + version + ' ');
+    if (/^gemini\s+/i.test(n)) return n.replace(/^(gemini\s+)/i, (_all, g) => g + version + ' ');
+    return version + ' ' + n;
+}
+// Mga Gemini model na puwedeng piliin ng client. null kung walang available (Google OFF/walang key/walang model).
+// Order: lowest version first -> highest version last (Standard is always shown first by the client).
+// Same version: Lite -> Flash -> Pro. Models whose version is unknown go first.
 async function buildRelayAiModelOffer(current) {
     const cfg = await getAiProviderConfig();
     if (!googleUsable(cfg)) return null;
     const allTiers = await listRelayAiTiers(false);
     const gx = getGoogleProviderExhaustion(cfg);
     const options = [];
-    googleModelKeys(cfg).slice().reverse().forEach((k) => { // Flash-Lite muna, saka Flash
+    googleModelKeys(cfg).forEach((k) => {
         const m = cfg.google.models[k];
         if (!m.enabled) return;
         const req = m.requiredTier ? allTiers.find((t) => t.id === m.requiredTier) : null;
         const locked = !!(req && (!current || current.priceTokens < req.priceTokens));
         const av = googleModelAvailability(cfg, k);
-        options.push({ key: k, name: googleModelDisplayName(m), requiredTierId: req ? req.id : null, requiredTierName: req ? req.name : null, locked, unavailable: gx.exhausted || (av.blocked && av.kind === 'daily') });
+        const modelId = googleModelId(cfg, k);
+        const baseName = googleModelDisplayName(m);
+        const version = relayAiModelVersion(modelId, baseName);
+        const family = relayAiModelFamily(modelId, baseName);
+        options.push({ key: k, name: relayAiModelNameWithVersion(baseName, version), version, family, requiredTierId: req ? req.id : null, requiredTierName: req ? req.name : null, locked, unavailable: gx.exhausted || (av.blocked && av.kind === 'daily') });
     });
     if (!options.length) return null;
+    const vnum = (o) => (o.version === null || o.version === undefined) ? -1 : (parseFloat(o.version) || 0);
+    options.sort((a, b) => (vnum(a) - vnum(b))
+        || ((RELAY_AI_MODEL_FAMILY_RANK[a.family] ?? 3) - (RELAY_AI_MODEL_FAMILY_RANK[b.family] ?? 3))
+        || String(a.name).localeCompare(String(b.name)));
     return { enabled: true, options };
 }
 // Dagdag na impormasyon sa bawat plan para madaling ikumpara (tulad ng "5x usage" ng mga sikat na AI app):
@@ -10407,17 +10447,17 @@ const GOOGLE_PRICE_RETRY_MS = 10 * 60 * 1000;
 const AI_USD_PER_NEURON = 0.011 / 1000;
 const GOOGLE_PROMO_END = '2026-12-31T23:59:59.000Z';
 const GOOGLE_BUILTIN_PRICES = [
-    { codes: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash'], inNow: 0.75, outNow: 3.75, inNext: 1.50, outNext: 7.50, switchAt: GOOGLE_PROMO_END },
-    { codes: ['gemini-3.5-flash-lite'], inNow: 0.30, outNow: 2.50, inNext: 0.30, outNext: 2.50, switchAt: null },
-    { codes: ['gemini-3.5-flash'], inNow: 1.50, outNow: 9.00, inNext: 1.50, outNext: 9.00, switchAt: null },
-    { codes: ['gemini-3.1-flash-lite'], inNow: 0.25, outNow: 1.50, inNext: 0.25, outNext: 1.50, switchAt: null },
-    { codes: ['gemini-3.1-pro-preview'], inNow: 2.00, outNow: 12.00, inNext: 2.00, outNext: 12.00, switchAt: null },
-    { codes: ['gemini-3-flash'], inNow: 0.50, outNow: 3.00, inNext: 0.50, outNext: 3.00, switchAt: null },
-    { codes: ['gemini-2.5-pro'], inNow: 1.25, outNow: 10.00, inNext: 1.25, outNext: 10.00, switchAt: null },
-    { codes: ['gemini-2.5-flash-lite'], inNow: 0.10, outNow: 0.40, inNext: 0.10, outNext: 0.40, switchAt: null },
-    { codes: ['gemini-2.5-flash'], inNow: 0.30, outNow: 2.50, inNext: 0.30, outNext: 2.50, switchAt: null },
-    { codes: ['gemini-2.0-flash-lite'], inNow: 0.075, outNow: 0.30, inNext: 0.075, outNext: 0.30, switchAt: null },
-    { codes: ['gemini-2.0-flash'], inNow: 0.10, outNow: 0.40, inNext: 0.10, outNext: 0.40, switchAt: null }
+    { codes: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash'], inNow: 0.75, outNow: 3.75, inNext: 1.50, outNext: 7.50, switchAt: GOOGLE_PROMO_END, free: true },
+    { codes: ['gemini-3.5-flash-lite'], inNow: 0.30, outNow: 2.50, inNext: 0.30, outNext: 2.50, switchAt: null, free: true },
+    { codes: ['gemini-3.5-flash'], inNow: 1.50, outNow: 9.00, inNext: 1.50, outNext: 9.00, switchAt: null, free: true },
+    { codes: ['gemini-3.1-flash-lite'], inNow: 0.25, outNow: 1.50, inNext: 0.25, outNext: 1.50, switchAt: null, free: true },
+    { codes: ['gemini-3.1-pro-preview'], inNow: 2.00, outNow: 12.00, inNext: 2.00, outNext: 12.00, switchAt: null, free: true },
+    { codes: ['gemini-3-flash'], inNow: 0.50, outNow: 3.00, inNext: 0.50, outNext: 3.00, switchAt: null, free: true },
+    { codes: ['gemini-2.5-pro'], inNow: 1.25, outNow: 10.00, inNext: 1.25, outNext: 10.00, switchAt: null, free: true },
+    { codes: ['gemini-2.5-flash-lite'], inNow: 0.10, outNow: 0.40, inNext: 0.10, outNext: 0.40, switchAt: null, free: true },
+    { codes: ['gemini-2.5-flash'], inNow: 0.30, outNow: 2.50, inNext: 0.30, outNext: 2.50, switchAt: null, free: true },
+    { codes: ['gemini-2.0-flash-lite'], inNow: 0.075, outNow: 0.30, inNext: 0.075, outNext: 0.30, switchAt: null, free: null },
+    { codes: ['gemini-2.0-flash'], inNow: 0.10, outNow: 0.40, inNext: 0.10, outNext: 0.40, switchAt: null, free: null }
 ];
 // Parse the "Paid Tier" cell of a pricing row. Handles "$0.30 (text / image)" and
 // "$0.75 through December 31, 2026. $1.50 starting January 1, 2027."
@@ -10475,9 +10515,18 @@ function parseGooglePricingText(text) {
         const po = parseGooglePriceCell(lastCell(outRow));
         if (!pi || !po) return;
         if (!(pi.now > 0 && pi.now < 100 && po.now > 0 && po.now < 500 && pi.next > 0 && po.next > 0)) return;
-        out.push({ codes, inNow: pi.now, outNow: po.now, inNext: pi.next, outNext: po.next, switchAt: pi.switchAt || po.switchAt || null });
+        // Free Tier availability from the same row: "Free of charge" -> true, "Not available" -> false, anything else -> null (unknown).
+        const freeCell = (() => { const c = inRow.split('|').map((x) => x.trim()).filter(Boolean); return c.length >= 3 ? c[c.length - 2] : ''; })();
+        const free = /free of charge/i.test(freeCell) ? true : (/not available/i.test(freeCell) ? false : null);
+        out.push({ codes, inNow: pi.now, outNow: po.now, inNext: pi.next, outNext: po.next, switchAt: pi.switchAt || po.switchAt || null, free });
     });
     return out;
+}
+// Does the model have a Free Tier on the Gemini API? true / false / null (unknown). Uses the live pricing table, else the built-in one.
+function googleModelFreeTier(modelId) {
+    const entry = findGooglePriceEntry(modelId, googlePriceTableNow());
+    if (!entry || typeof entry.free !== 'boolean') return null;
+    return entry.free;
 }
 let googlePriceState = { at: 0, table: null, error: '', lastTryAt: 0, loaded: false };
 let googlePriceInflight = null;
@@ -11223,12 +11272,13 @@ app.post('/relay/admin/api/ai-providers/economics', requireAdminKey, async (req,
     }
 });
 let googleModelListCache = { at: 0, models: null };
+let googleFreeFlagRefreshTried = false;
 // Chat/text models lang: dapat may generateContent; itinatago ang TTS, Live, Image, Embedding, audio, robotics, computer-use, atbp.
 function isGoogleChatModel(m) {
     const id = String((m && m.name) || '').replace(/^models\//, '').toLowerCase();
     if (!/^gemini-/.test(id)) return false;
     if (!Array.isArray(m.supportedGenerationMethods) || !m.supportedGenerationMethods.includes('generateContent')) return false;
-    if (/tts|live|image|embedding|native-audio|audio|robotics|computer-use|imagen|veo|aqa|dialog|customtools/.test(id)) return false;
+    if (/tts|live|image|embedding|native-audio|audio|robotics|computer-use|imagen|veo|aqa|dialog|customtools|transcribe|translate|omni|lyria/.test(id)) return false;
     return true;
 }
 async function fetchGoogleModelList(force) {
@@ -11256,6 +11306,14 @@ async function fetchGoogleModelList(force) {
         if (!pageToken) break;
     }
     try { await getGooglePriceTableBounded(false); } catch (_) { /* built-in estimate is used */ }
+    // A price table cached before the Free Tier column was read has no "free" flags: refresh it once so the Free/Paid filter works.
+    try {
+        const t = googlePriceState.table;
+        if (!googleFreeFlagRefreshTried && t && t.length && !t.some((e) => typeof e.free === 'boolean')) {
+            googleFreeFlagRefreshTried = true; // only once: if the page layout has no Free Tier column, do not hammer Google on every list fetch
+            await getGooglePriceTableBounded(true);
+        }
+    } catch (_) { /* built-in flags are used */ }
     const seen = new Set();
     const models = [];
     out.forEach((m) => {
@@ -11268,6 +11326,8 @@ async function fetchGoogleModelList(force) {
             inputTokenLimit: Number(m.inputTokenLimit) || 0,
             outputTokenLimit: Number(m.outputTokenLimit) || 0,
             thinking: m.thinking === true,
+            description: String(m.description || '').slice(0, 200),
+            free: googleModelFreeTier(id), // true = has a Free Tier, false = paid only, null = unknown (not on the pricing page yet)
             suggested: suggestGoogleRates(id)
         });
     });

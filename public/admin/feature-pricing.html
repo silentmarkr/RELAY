@@ -2445,12 +2445,78 @@ function aiGoogleModelKeyForId(modelId, existingModels) {
   while (models[key]) key = `${base || 'gm_model'}_${i++}`;
   return key;
 }
+// ---- Google model picker: search + filters (plan / family) built from the live Google model list ----
+// Filter state survives re-renders of the provider box (it is re-applied by renderAiProviderCfg).
+let aiPickerFilter = { q: '', show: 'plan', family: '' };
+function aiGoogleModelFamily(id) {
+  const s = String(id || '').toLowerCase();
+  if (/lite/.test(s)) return 'lite';
+  if (/pro/.test(s)) return 'pro';
+  if (/flash/.test(s)) return 'flash';
+  return 'other';
+}
+function aiGoogleModelVersionNum(id) {
+  const m = String(id || '').toLowerCase().match(/gemini-(\d+(?:\.\d+)?)/);
+  return m ? parseFloat(m[1]) : 0;
+}
+// The Google plan being edited right now (unsaved dropdown value wins over the saved config).
+function aiPickerPlan() {
+  const el = document.getElementById('aiPvGPlan');
+  const v = el ? el.value : (aiProviderCfgState && aiProviderCfgState.config && aiProviderCfgState.config.google && aiProviderCfgState.config.google.plan);
+  return v === 'paid' ? 'paid' : 'free';
+}
+// free: true = has a Free Tier, false = paid only, null/undefined = unknown (not on Google's pricing page yet).
+function aiFreeBadge(info) {
+  if (!info) return '';
+  if (info.free === true) return '🆓 Free';
+  if (info.free === false) return '💳 Paid only';
+  return '❔ Free tier unknown';
+}
+function aiPickerFiltered() {
+  const plan = aiPickerPlan();
+  const f = aiPickerFilter;
+  const q = String(f.q || '').trim().toLowerCase();
+  return (aiGoogleModelList || []).filter((x) => {
+    if (f.show === 'plan' && plan === 'free' && x.free === false) return false; // Free plan: hide models that need billing
+    if (f.show === 'free' && x.free !== true) return false;
+    if (f.show === 'paid' && x.free !== false) return false;
+    if (f.family && aiGoogleModelFamily(x.id) !== f.family) return false;
+    if (q && !(String(x.id).toLowerCase().includes(q) || String(x.displayName || '').toLowerCase().includes(q))) return false;
+    return true;
+  }).sort((a, b) => (aiGoogleModelVersionNum(b.id) - aiGoogleModelVersionNum(a.id)) || String(a.id).localeCompare(String(b.id)));
+}
+function aiPickerOptionsHtml() {
+  const added = new Set(Object.values((aiProviderCfgState && aiProviderCfgState.config && aiProviderCfgState.config.google && aiProviderCfgState.config.google.models) || {}).map((m) => m && m.modelId).filter(Boolean));
+  const list = aiPickerFiltered();
+  if (!list.length) return '<option value="" disabled>No model matches the filters.</option>';
+  return list.map((x) => `<option value="${escapeAttr(x.id)}">${added.has(x.id) ? '✓ ' : ''}${escapeHtml(aiFreeBadge(x))} · ${escapeHtml(x.displayName || x.id)} (${escapeHtml(x.id)})${added.has(x.id) ? ' — added' : ''}</option>`).join('');
+}
+function aiPickerCountText() {
+  const shown = aiPickerFiltered().length, total = (aiGoogleModelList || []).length;
+  const plan = aiPickerPlan();
+  const unknown = (aiGoogleModelList || []).filter((x) => typeof x.free !== 'boolean').length;
+  return `Showing ${shown} of ${total} models from Google · Google plan: ${plan === 'free' ? 'Free' : 'Paid'}${unknown ? ` · ${unknown} without Free-tier info (shown as ❔)` : ''}`;
+}
+function aiRefreshModelPicker() {
+  const q = document.getElementById('aiPvPickQ'), show = document.getElementById('aiPvPickShow'), fam = document.getElementById('aiPvPickFam');
+  if (q) aiPickerFilter.q = q.value;
+  if (show) aiPickerFilter.show = show.value;
+  if (fam) aiPickerFilter.family = fam.value;
+  const picker = document.getElementById('aiPvGoogleModelPicker');
+  if (picker) {
+    const keep = picker.value;
+    picker.innerHTML = aiPickerOptionsHtml();
+    if (keep && Array.from(picker.options).some((o) => o.value === keep)) picker.value = keep;
+  }
+  const cnt = document.getElementById('aiPvPickCount');
+  if (cnt) cnt.textContent = aiPickerCountText();
+}
 function aiAddGoogleModel() {
   const picker = document.getElementById('aiPvGoogleModelPicker');
   const modelId = picker?.value || '';
   const info = (aiGoogleModelList || []).find((x) => x.id === modelId);
   if (!info || !modelId) {
-    toast('Fetch the Google model list first, then select a model.', 'error');
+    toast(aiGoogleModelList ? 'Select a model from the list first.' : 'Fetch the Google model list first, then select a model.', 'error');
     return;
   }
   const snap = aiSnapCfgForm();
@@ -2465,6 +2531,7 @@ function aiAddGoogleModel() {
     toast('That Google model is already added.', 'info');
     return;
   }
+  if (aiPickerPlan() === 'free' && info.free === false && !window.confirm(`"${info.displayName || modelId}" has NO Free Tier on Google (paid only).\n\nWhile your Google plan is set to Free, requests to this model will be rejected by Google.\n\nAdd it anyway?`)) return;
   const key = aiGoogleModelKeyForId(modelId, cfg.models);
   const suggested = info.suggested || {};
   cfg.models[key] = {
@@ -2774,7 +2841,7 @@ function renderAiProviderCfg(d) {
     };
     const blockHtml = st.blocked ? `<div class="meta" style="margin-top:6px; color:var(--danger,#ff6b6b); font-weight:700;">🚫 ${st.blockKind === 'daily' ? 'Daily limit exhausted' : 'Per-minute limit reached'} until ${escapeHtml(fmt(st.blockUntil))} — ${escapeHtml(st.blockReason || '')}</div>` : '';
     return `<div style="border:1px solid var(--line); border-radius:8px; padding:8px; margin-top:8px;">
-      <label style="font-size:12px; font-weight:700;"><input type="checkbox" id="aiPv_${key}_enabled" ${m.enabled ? 'checked' : ''}> ${escapeHtml(label)} — available sa OmniAI (client)</label>
+      <label style="font-size:12px; font-weight:700;"><input type="checkbox" id="aiPv_${key}_enabled" ${m.enabled ? 'checked' : ''}> ${escapeHtml(label)} — available sa OmniAI (client)</label>${(() => { const inf = (ml || []).find((x) => x.id === curId); if (!inf) return ''; const bad = inf.free === false && g.plan === 'free'; return ` <span class="meta" style="${bad ? 'color:var(--danger,#ff6b6b); font-weight:700;' : ''}">${escapeHtml(aiFreeBadge(inf))}${bad ? ' — will fail while the Google plan is Free' : ''}</span>`; })()}
       <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; margin-top:6px;">
         <label style="font-size:11px; color:var(--muted);">Model ID<select id="aiPv_${key}_modelId" data-prev="${escapeHtml(curId)}" style="width:100%; margin-top:4px;" onchange="aiModelIdChanged('${key}', this)">${idOptsHtml}</select></label>
         <label style="font-size:11px; color:var(--muted);">Display name<input type="text" id="aiPv_${key}_displayName" value="${escapeHtml(label)}" style="width:100%; margin-top:4px;"></label>
@@ -2799,13 +2866,28 @@ function renderAiProviderCfg(d) {
       </div>
     </div>`;
   };
-  const modelPickerHtml = ml ? `<div style="display:flex; gap:8px; align-items:end; flex-wrap:wrap; margin-bottom:8px;">
-      <label style="font-size:11px; color:var(--muted); flex:1; min-width:240px;">Available Google AI models (${ml.length})
-        <select id="aiPvGoogleModelPicker" style="width:100%; margin-top:4px;">
-          ${ml.map((x) => `<option value="${escapeAttr(x.id)}">${escapeHtml(x.displayName)} (${escapeHtml(x.id)})</option>`).join('')}
-        </select>
-      </label>
-      <button type="button" class="btn-primary" onclick="aiAddGoogleModel()">➕ Add Model</button>
+  const famOpt = (v, t) => `<option value="${v}" ${aiPickerFilter.family === v ? 'selected' : ''}>${t}</option>`;
+  const showOpt = (v, t) => `<option value="${v}" ${aiPickerFilter.show === v ? 'selected' : ''}>${t}</option>`;
+  const modelPickerHtml = ml ? `<div style="border:1px solid var(--line); border-radius:8px; padding:8px; margin-bottom:8px;">
+      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px;">
+        <label style="font-size:11px; color:var(--muted);">Search<input type="text" id="aiPvPickQ" value="${escapeAttr(aiPickerFilter.q)}" placeholder="e.g. 3.1, flash, pro" oninput="aiRefreshModelPicker()" style="width:100%; margin-top:4px;"></label>
+        <label style="font-size:11px; color:var(--muted);">Show
+          <select id="aiPvPickShow" onchange="aiRefreshModelPicker()" style="width:100%; margin-top:4px;">
+            ${showOpt('plan', 'Usable on my Google plan')}${showOpt('free', 'Free tier only')}${showOpt('paid', 'Paid only (no Free tier)')}${showOpt('all', 'All models')}
+          </select></label>
+        <label style="font-size:11px; color:var(--muted);">Type
+          <select id="aiPvPickFam" onchange="aiRefreshModelPicker()" style="width:100%; margin-top:4px;">
+            ${famOpt('', 'All types')}${famOpt('lite', 'Flash-Lite')}${famOpt('flash', 'Flash')}${famOpt('pro', 'Pro')}${famOpt('other', 'Other')}
+          </select></label>
+      </div>
+      <div id="aiPvPickCount" class="meta" style="margin-top:6px;">${escapeHtml(aiPickerCountText())}</div>
+      <div style="display:flex; gap:8px; align-items:end; flex-wrap:wrap; margin-top:6px;">
+        <label style="font-size:11px; color:var(--muted); flex:1; min-width:240px;">Available Google AI models (newest version first)
+          <select id="aiPvGoogleModelPicker" size="8" style="width:100%; margin-top:4px;">${aiPickerOptionsHtml()}</select>
+        </label>
+        <button type="button" class="btn-primary" onclick="aiAddGoogleModel()">➕ Add Model</button>
+      </div>
+      <div class="meta" style="margin-top:4px;">Free/Paid info is read from Google's pricing page (the Gemini API itself does not report it). ❔ = not listed there yet — check AI Studio.</div>
     </div>` : '';
   const u = gs.usage || {};
   const lim = gs.limits || {};
@@ -2913,7 +2995,7 @@ function renderAiProviderCfg(d) {
       <button class="btn-ghost" onclick="loadAiProviderCfg()">🔄 Refresh</button>
     </div>`;
   const planEl = document.getElementById('aiPvGPlan');
-  if (planEl) planEl.onchange = () => { const w = document.getElementById('aiPvPrivacy'); if (w) w.style.display = planEl.value === 'free' ? '' : 'none'; aiSyncDailyRequestsFromDefault(); };
+  if (planEl) planEl.onchange = () => { const w = document.getElementById('aiPvPrivacy'); if (w) w.style.display = planEl.value === 'free' ? '' : 'none'; aiSyncDailyRequestsFromDefault(); aiRefreshModelPicker(); };
   const defEl = document.getElementById('aiPvGDefaultModel');
   if (defEl) defEl.onchange = () => aiSyncDailyRequestsFromDefault();
   renderAiProviderExtras();
