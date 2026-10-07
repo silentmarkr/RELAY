@@ -16,7 +16,7 @@ if (!process.env.UV_THREADPOOL_SIZE) process.env.UV_THREADPOOL_SIZE = '8';
 // dotenv, walang custom loader tulad ng OMNIPOS/env-loader.js) — kaya
 // ang CF_ACCOUNT_ID/CF_AI_API_TOKEN na nakalagay sa RELAY/.env ay
 // hindi talaga nagagamit maliban na lang kung manual mong ini-export
-// sa mismong shell bago mo pinatakbo ang `node server.js`. Ito anggg
+// sa mismong shell bago mo pinatakbo ang `node server.js`. Ito angg
 // dahilan kung bakit "not configured" pa rin ang vision AI kahit
 // naka-set na ang .env at naka-agree na sa Cloudflare model terms.
 (function loadDotEnvFile() {
