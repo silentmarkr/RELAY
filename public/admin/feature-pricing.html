@@ -2232,6 +2232,12 @@ function aiEconUsd(x) {
   if (!Number.isFinite(t)) return '—';
   return '$' + (Math.abs(t * 100 - Math.round(t * 100)) < 1e-9 ? t.toFixed(2) : String(+t.toFixed(4)));
 }
+function aiPhp(x) { return '₱' + (Number(x) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+// Peso profit cell: green when positive, red when it is a loss.
+function aiPhpProfitCell(x) {
+  const v = Math.round((Number(x) || 0) * 100) / 100;
+  return `<td style="padding:3px 6px; text-align:right; white-space:nowrap; font-weight:700; color:${v < 0 ? 'var(--danger,#ff6b6b)' : '#16a34a'};">${v < 0 ? '−' : ''}${aiPhp(Math.abs(v))}</td>`;
+}
 function aiEconPctCell(pct, target) {
   const color = pct >= target ? '#16a34a' : (pct >= 0 ? '#d97706' : 'var(--danger,#ff6b6b)');
   return `<td style="padding:3px 6px; text-align:right; font-weight:700; color:${color}; white-space:nowrap;">${Number(pct).toFixed(1)}%</td>`;
@@ -2264,14 +2270,17 @@ function aiEconSlotHtml(s, data) {
       ${aiEconPctCell(t.typical.profitPctMax, target)}
       ${aiEconPctCell(t.typical.profitPctExpected, target)}
       ${aiEconPctCell(t.heavy.profitPctMax, target)}
+      <td style="padding:3px 6px; text-align:right; white-space:nowrap;">${aiPhp(t.typical.maxCostPhp)}</td>
+      ${aiPhpProfitCell(t.netPhp - t.typical.maxCostPhp)}
+      ${aiPhpProfitCell(t.netPhp - t.heavy.maxCostPhp)}
       <td style="padding:3px 6px; text-align:right; white-space:nowrap;">${n(t.recommendedDailyCap)} <span style="color:var(--muted);">(~${n(t.recommendedQuestionsPerDay)} q/day)</span></td>
     </tr>`).join('');
-  const table = rows ? `<div style="overflow-x:auto; margin-top:6px;"><table style="border-collapse:collapse; font-size:11px; min-width:620px; width:100%;">
+  const table = rows ? `<div style="overflow-x:auto; margin-top:6px;"><table style="border-collapse:collapse; font-size:11px; min-width:900px; width:100%;">
       <thead><tr style="color:var(--muted); text-align:right;">
         <th style="padding:3px 6px; text-align:left;">Plan</th><th style="padding:3px 6px;">Price</th><th style="padding:3px 6px;">Credits</th><th style="padding:3px 6px;">Daily neurons</th>
-        <th style="padding:3px 6px;">Questions/day</th><th style="padding:3px 6px;">Profit (all credits used)</th><th style="padding:3px 6px;">Profit (${st.expectedUsagePercent}% used)</th><th style="padding:3px 6px;">Profit (heavy questions)</th><th style="padding:3px 6px;">Daily neurons for ${target}% profit</th>
+        <th style="padding:3px 6px;">Questions/day</th><th style="padding:3px 6px;">Profit (all credits used)</th><th style="padding:3px 6px;">Profit (${st.expectedUsagePercent}% used)</th><th style="padding:3px 6px;">Profit (heavy questions)</th><th style="padding:3px 6px;">Google cost ₱ / client / month (all credits used)</th><th style="padding:3px 6px;">Profit ₱ / client / month (typical)</th><th style="padding:3px 6px;">Profit ₱ / client / month (heavy)</th><th style="padding:3px 6px;">Daily neurons for ${target}% profit</th>
       </tr></thead><tbody>${rows}</tbody></table></div>
-    <div style="margin-top:4px; color:var(--muted);">Profit % = (price after ${st.feePercent}% fee − Google cost) ÷ price after fee. Typical question = ${n(st.avgInputTokens)} in / ${n(st.avgOutputTokens)} out tokens; heavy = ${n(st.heavyInputTokens)} / ${n(st.heavyOutputTokens)}. Green = at or above your ${target}% target, orange = below target, red = a loss.</div>` : '<div style="color:var(--muted); margin-top:4px;">No enabled paid plans were found, so there is no profit table yet.</div>';
+    <div style="margin-top:4px; color:var(--muted);">Profit ₱ = price after ${st.feePercent}% fee (the ₱ shown as "net") − Google cost if that client uses ALL credits (or the full daily neurons for ${st.daysPerMonth} days, whichever is lower). Multiply by the number of clients on that plan for the total. Profit % = (price after ${st.feePercent}% fee − Google cost) ÷ price after fee. Typical question = ${n(st.avgInputTokens)} in / ${n(st.avgOutputTokens)} out tokens; heavy = ${n(st.heavyInputTokens)} / ${n(st.heavyOutputTokens)}. Green = at or above your ${target}% target, orange = below target, red = a loss.</div>` : '<div style="color:var(--muted); margin-top:4px;">No enabled paid plans were found, so there is no profit table yet.</div>';
   const pr = (x) => aiEconPctCell(x, target);
   const packRows = (s.packs || []).map((k) => `<tr><td style="padding:3px 6px; font-weight:700; white-space:nowrap;">${escapeHtml(k.name)}</td><td style="padding:3px 6px; text-align:right; white-space:nowrap;">₱${n(k.priceTokens)} · ${n(k.credits)} credits</td>${pr(k.profitPctMax)}${pr(k.profitPctExpected)}${pr(k.heavyPct)}</tr>`).join('');
   const boostRows = (s.boosts || []).map((k) => `<tr><td style="padding:3px 6px; font-weight:700; white-space:nowrap;">Boost ${n(k.neurons)} neurons</td><td style="padding:3px 6px; text-align:right; white-space:nowrap;">₱${n(k.priceTokens)}</td>${pr(k.profitPctMax)}${pr(k.profitPctExpected)}${pr(k.heavyPct)}</tr>`).join('');
