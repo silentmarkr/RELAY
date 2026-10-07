@@ -1754,6 +1754,7 @@ async function loadAiPlans(providerOnly) {
   loadAiUsage();
   loadAiGoogleUsage();
   loadAiProfit();
+  loadAiPriceWatch(false);
   if (providerOnly) return;
   loadAiProviderCfg();
   renderAiBreakdownBox(data.breakdown ? { ...data.breakdown, month: data.month } : null, data.capacity);
@@ -1940,7 +1941,168 @@ async function loadAiProviderCfg() {
   renderAiFreeTierBox();
   renderAiSetupBox();
   renderAiOverview();
+  loadAiAudit();
+  loadAiPriceWatch(false);
   if (!aiGoogleModelList && !aiGoogleModelListLoading && data.status && data.status.google && data.status.google.configured) aiFetchGoogleModels(false);
+}
+// ===== PROVIDER EXTRAS: deleted models (undo), Google price watch, change log, test all =====
+let aiPriceWatchState = null;
+let aiPriceWatchAt = 0;
+let aiAuditState = null;
+const aiExtrasOpen = { trash: true, price: true, audit: false };
+function aiAgo(ms) {
+  const sec = Math.max(0, Math.round((Date.now() - Number(ms || 0)) / 1000));
+  if (sec < 60) return sec + 's ago';
+  if (sec < 3600) return Math.round(sec / 60) + ' min ago';
+  if (sec < 86400) return Math.round(sec / 3600) + ' h ago';
+  return Math.round(sec / 86400) + ' d ago';
+}
+function aiModelTestLineHtml(results, modelId) {
+  const tr = results && modelId ? results[modelId] : null;
+  if (!tr) return '<div class="meta" style="margin-top:6px;">Not tested yet.</div>';
+  const color = tr.ok ? '#16a34a' : 'var(--danger,#ff6b6b)';
+  return `<div class="meta" style="margin-top:6px; color:${color};">${tr.ok ? '✅ Last test OK' : '❌ Last test failed'} · ${Number(tr.tookMs || 0).toLocaleString()} ms · ${escapeHtml(aiAgo(tr.at))}${tr.ok ? '' : ' — ' + escapeHtml(tr.message || '')}</div>`;
+}
+async function loadAiPriceWatch(force) {
+  if (!force && aiPriceWatchState && Date.now() - aiPriceWatchAt < 5 * 60 * 1000) return;
+  let d;
+  try { d = await aiApi('/relay/admin/api/ai-providers/price-watch'); } catch (e) { d = null; }
+  if (!d || !d.success) return;
+  aiPriceWatchState = d;
+  aiPriceWatchAt = Date.now();
+  renderAiProviderExtras();
+  renderAiOverview();
+}
+async function loadAiAudit() {
+  let d;
+  try { d = await aiApi('/relay/admin/api/ai-providers/audit?limit=60'); } catch (e) { d = null; }
+  if (!d || !d.success) return;
+  aiAuditState = Array.isArray(d.items) ? d.items : [];
+  renderAiProviderExtras();
+}
+function aiPwUseRates(key, inRate, outRate) {
+  const i = document.getElementById(`aiPv_${key}_in`), o = document.getElementById(`aiPv_${key}_out`);
+  if (!i || !o) { toast('That model row is not on the page.', 'error'); return; }
+  i.value = inRate; o.value = outRate;
+  aiScheduleEconomics(0);
+  toast('Recommended neurons filled in. Press "I-save ang AI Provider" to apply.', 'success');
+}
+function renderAiProviderExtras() {
+  const el = document.getElementById('aiPvExtras');
+  if (!el) return;
+  const n = (x) => Number(x || 0).toLocaleString();
+  const usd = (v) => '$' + (Math.round(Number(v) * 10000) / 10000);
+  const box = 'border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin-top:8px;';
+  const parts = [];
+  // 1) Recently deleted models (undo)
+  const trash = (aiProviderCfgState && Array.isArray(aiProviderCfgState.trash)) ? aiProviderCfgState.trash : [];
+  if (trash.length) {
+    parts.push(`<details style="${box}" ${aiExtrasOpen.trash ? 'open' : ''} ontoggle="aiExtrasOpen.trash = this.open">
+      <summary style="cursor:pointer; font-weight:700; font-size:12px;">🗑️ Recently deleted models (${trash.length}) — can be restored for 24 hours</summary>
+      ${trash.map((t) => {
+        const left = Math.max(0, Math.ceil((Number(t.expiresAt) - Date.now()) / 3600000));
+        return `<div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; border-top:1px dashed var(--line); padding-top:6px;">
+          <div style="min-width:0; flex:1;"><b>${escapeHtml(t.displayName)}</b> <span class="meta">(${escapeHtml(t.modelId || '—')})</span><div class="meta">Deleted ${escapeHtml(aiAgo(t.deletedAt))} · ${left} h left</div></div>
+          <button class="btn-primary" onclick="aiRestoreGoogleModel('${escapeAttr(t.key)}')">↩️ Restore</button>
+        </div>`;
+      }).join('')}
+    </details>`);
+  }
+  // 2) Google price watch
+  const pw = aiPriceWatchState;
+  if (pw) {
+    const sched = pw.scheduled || [], changes = pw.changes || [];
+    const icon = sched.some((x) => x.risk === 'loss') ? '🚨' : (sched.some((x) => x.risk === 'low') ? '⚠️' : (sched.length || changes.length ? 'ℹ️' : '✅'));
+    const stColor = (st) => st === 'loss' ? 'var(--red)' : (st === 'low' ? '#f59e0b' : '#16a34a');
+    const schedHtml = sched.map((x) => {
+      const pi = x.nowUsd.in > 0 ? Math.round((x.nextUsd.in / x.nowUsd.in - 1) * 1000) / 10 : 0;
+      const po = x.nowUsd.out > 0 ? Math.round((x.nextUsd.out / x.nowUsd.out - 1) * 1000) / 10 : 0;
+      const sign = (v) => (v > 0 ? '+' : '') + v + '%';
+      const tiers = x.increase && x.tiers.length ? `<div style="overflow-x:auto; margin-top:6px;"><table style="width:100%; font-size:12px; border-collapse:collapse; min-width:300px;">
+          <thead><tr style="text-align:left; color:var(--muted);"><th style="padding:3px 4px;">Plan</th><th>Profit now</th><th>Profit after</th></tr></thead>
+          <tbody>${x.tiers.map((t) => `<tr style="border-top:1px dashed var(--line);"><td style="padding:3px 4px;">${escapeHtml(t.name)}</td><td>${t.nowPct === null ? '—' : t.nowPct + '%'}</td><td style="font-weight:700; color:${stColor(t.afterStatus)};">${t.afterPct}%</td></tr>`).join('')}</tbody></table></div>` : '';
+      const rec = (x.increase && x.recommendedRates) ? `<div class="meta" style="margin-top:6px;">Neurons / 1M tokens now: in ${n(x.rates.in)} / out ${n(x.rates.out)} → recommended for the new price: in ${n(x.recommendedRates.in)} / out ${n(x.recommendedRates.out)}.
+          <button class="btn-ghost" style="margin-left:4px;" onclick="aiPwUseRates('${escapeAttr(x.key)}', ${Number(x.recommendedRates.in) || 0}, ${Number(x.recommendedRates.out) || 0})">Use recommended</button></div>` : '';
+      return `<div style="${box}">
+        <b>${escapeHtml(x.name)}</b> <span class="meta">(${escapeHtml(x.modelId)})</span>
+        <div style="font-size:12px; margin-top:4px;">${x.increase ? '⬆️ Price goes UP' : '⬇️ Price goes down'} after <b>${escapeHtml(new Date(x.switchAt).toLocaleDateString())}</b> (${n(x.daysLeft)} day${x.daysLeft === 1 ? '' : 's'}): input ${usd(x.nowUsd.in)} → ${usd(x.nextUsd.in)} (${sign(pi)}) · output ${usd(x.nowUsd.out)} → ${usd(x.nextUsd.out)} (${sign(po)}) per 1M tokens.</div>
+        ${tiers}${rec}
+      </div>`;
+    }).join('');
+    const chHtml = changes.length ? `<div style="${box}"><b style="font-size:12px;">Recent Google price changes (30 days)</b>${changes.map((c) => `<div class="meta" style="margin-top:4px;">${escapeHtml(c.code)}: ${usd(c.from.in)} / ${usd(c.from.out)} → ${usd(c.to.in)} / ${usd(c.to.out)} · ${escapeHtml(aiAgo(c.at))}</div>`).join('')}</div>` : '';
+    parts.push(`<details style="${box}" ${aiExtrasOpen.price ? 'open' : ''} ontoggle="aiExtrasOpen.price = this.open">
+      <summary style="cursor:pointer; font-weight:700; font-size:12px;">${icon} Google price watch${sched.length ? ' — ' + sched.length + ' scheduled change(s)' : ''}</summary>
+      ${schedHtml || '<div class="meta" style="margin-top:8px;">No scheduled price change for your enabled models.</div>'}
+      ${chHtml}
+      <div class="meta" style="margin-top:8px;">Prices: ${escapeHtml(pw.source === 'live' ? 'live from the Google pricing page' : (pw.source === 'stale' ? 'last saved copy (old)' : 'built-in estimate'))}${pw.fetchedAt ? ' · ' + escapeHtml(new Date(pw.fetchedAt).toLocaleString()) : ''}. "Profit after" uses your typical-question numbers and the current neurons rates.
+        <button class="btn-ghost" style="margin-left:4px;" onclick="loadAiPriceWatch(true)">🔄 Check now</button></div>
+    </details>`);
+  }
+  // 3) Change log
+  const labels = { 'ai-provider': 'Provider settings', calculator: 'Calculator settings', 'auto-price': 'Auto price', 'safe-caps': 'Safe daily neurons', 'restore-model': 'Model restored', 'credit-default': 'Default credits', 'client-override': 'Client override', 'client-reset': 'Client reset', 'google-price-change': 'Google price change' };
+  const au = Array.isArray(aiAuditState) ? aiAuditState : null;
+  parts.push(`<details style="${box}" ${aiExtrasOpen.audit ? 'open' : ''} ontoggle="aiExtrasOpen.audit = this.open">
+    <summary style="cursor:pointer; font-weight:700; font-size:12px;">📜 Change log${au ? ' (' + au.length + ')' : ''}</summary>
+    ${au === null ? '<div class="meta" style="margin-top:8px;">Loading...</div>' : (au.length ? au.map((it) => `<div style="border-top:1px dashed var(--line); margin-top:8px; padding-top:6px;">
+      <div class="meta">${escapeHtml(new Date(it.at).toLocaleString())} · <b>${escapeHtml(labels[it.action] || it.action)}</b>${it.ip ? ' · ' + escapeHtml(it.ip) : ''}</div>
+      ${(it.summary || []).map((l) => `<div style="font-size:12px; word-break:break-word;">• ${escapeHtml(l)}</div>`).join('')}
+    </div>`).join('') : '<div class="meta" style="margin-top:8px;">No changes recorded yet.</div>')}
+    <div style="margin-top:8px;"><button class="btn-ghost" onclick="loadAiAudit()">🔄 Refresh log</button></div>
+  </details>`);
+  el.innerHTML = parts.join('');
+}
+// Re-load the provider box without losing unsaved typing or models that were added on this page but are not saved yet.
+async function aiReloadCfgKeepForm() {
+  const snap = aiSnapCfgForm();
+  const prevModels = { ...((aiProviderCfgState && aiProviderCfgState.config && aiProviderCfgState.config.google && aiProviderCfgState.config.google.models) || {}) };
+  await loadAiProviderCfg();
+  const gNew = aiProviderCfgState && aiProviderCfgState.config && aiProviderCfgState.config.google;
+  if (gNew && gNew.models) {
+    let readded = false;
+    Object.keys(prevModels).forEach((k) => { if (!gNew.models[k]) { gNew.models[k] = prevModels[k]; readded = true; } });
+    if (readded) renderAiProviderCfg(aiProviderCfgState);
+  }
+  aiRestoreCfgForm(snap);
+}
+async function aiRestoreGoogleModel(key) {
+  const snap = aiSnapCfgForm();
+  const data = await aiApi('/relay/admin/api/ai-providers/restore-model', { method: 'POST', body: JSON.stringify({ key }) });
+  if (!data?.success) { toast(data?.message || 'Could not restore the model.', 'error'); return; }
+  const g = aiProviderCfgState && aiProviderCfgState.config && aiProviderCfgState.config.google;
+  const restored = data.config && data.config.google && data.config.google.models && data.config.google.models[data.restoredKey];
+  if (g && g.models && restored) g.models[data.restoredKey] = restored;
+  aiProviderCfgState = { ...aiProviderCfgState, status: data.status || aiProviderCfgState.status, trash: data.trash || [] };
+  renderAiProviderCfg(aiProviderCfgState);
+  aiRestoreCfgForm(snap);
+  renderAiSetupBox();
+  renderAiOverview();
+  loadAiPlans(true);
+  loadAiAudit();
+  loadAiPriceWatch(true);
+  toast('Model restored.', 'success');
+}
+async function aiGoogleTestAll() {
+  // Look the message box up every time: the provider box is re-rendered after the tests, which replaces this element.
+  const setMsg = (t, ok) => { const el = document.getElementById('aiPvTestResult'); if (el) { el.style.display = ''; el.style.color = ok ? '#16a34a' : 'var(--danger,#ff6b6b)'; el.textContent = t; } };
+  const keys = aiGoogleModelKeysInForm().filter((k) => document.getElementById(`aiPv_${k}_enabled`)?.checked && aiModelIdValue(k));
+  if (!keys.length) { setMsg('No enabled model with a Model ID to test.', false); return; }
+  const ok = await confirmAction({ title: 'Test all enabled models?', message: `This sends 1 tiny request to each of the ${keys.length} enabled model(s). Each test counts toward that model's daily request limit (RPD).` });
+  if (!ok) return;
+  let passed = 0;
+  const failed = [];
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    const label = String(document.getElementById(`aiPv_${k}_displayName`)?.value || aiModelIdValue(k) || k);
+    setMsg(`Testing ${i + 1}/${keys.length}: ${label}...`, true);
+    const data = await aiApi('/relay/admin/api/ai-providers/test', { method: 'POST', body: JSON.stringify({ model: k, modelId: aiModelIdValue(k) }) });
+    if (data && data.success) passed++;
+    else failed.push(`${label}${data && data.quota ? ' (' + (data.quota === 'daily' ? 'daily limit used up' : 'per-minute limit') + ')' : ''}`);
+    if (i < keys.length - 1) await new Promise((r) => setTimeout(r, 800));
+  }
+  const text = `${failed.length ? '⚠️' : '✅'} Tested ${keys.length} model(s): ${passed} OK${failed.length ? ' · ' + failed.length + ' failed: ' + failed.join(', ') : ''}.`;
+  loadAiPlans(true);
+  await aiReloadCfgKeepForm();
+  setMsg(text, !failed.length);
 }
 let aiGoogleModelList = null;
 // Keys of every Google model row currently shown in the form (works for the original and the added models).
@@ -2348,12 +2510,16 @@ async function aiDeleteGoogleModel(key) {
   Object.keys(snap).forEach((id) => { if (id.indexOf(`aiPv_${key}_`) === 0) delete snap[id]; });
   if (snap.aiPvGDefaultModel === key || !g.models[snap.aiPvGDefaultModel]) snap.aiPvGDefaultModel = g.defaultModel;
   if (data.status) aiProviderCfgState = { ...aiProviderCfgState, status: data.status };
+  if (Array.isArray(data.trash)) aiProviderCfgState = { ...aiProviderCfgState, trash: data.trash };
   renderAiProviderCfg(aiProviderCfgState);
   aiRestoreCfgForm(snap);
   renderAiSetupBox();
   renderAiOverview();
   loadAiPlans(true);
-  toast(`Deleted "${name}".`, 'success');
+  loadAiAudit();
+  loadAiPriceWatch(true);
+  const inTrash = Array.isArray(data.trash) && data.trash.some((t) => t.key === key);
+  toast(inTrash ? `Deleted "${name}". You can restore it for 24 hours (see "Recently deleted models").` : `Removed "${name}".`, 'success');
 }
 async function aiPickGoogleModel(key) {
   const sel = document.getElementById(`aiPv_${key}_pick`);
@@ -2606,6 +2772,7 @@ function renderAiProviderCfg(d) {
         ${lim('tpm', 'TPM (input tokens/minuto)')}
       </div>
       ${blockHtml}
+      ${keyOk ? aiModelTestLineHtml(gs.testResults, curId) : ''}
       <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
         ${keyOk ? `<button class="btn-ghost" onclick="aiGoogleTest('${key}')">🧪 Test this model</button>` : ''}
         <button class="btn-ghost" style="color:var(--danger,#ff6b6b);" onclick="aiDeleteGoogleModel('${key}')">🗑️ Delete model</button>
@@ -2637,6 +2804,7 @@ function renderAiProviderCfg(d) {
         <label style="font-size:12px; color:var(--muted);">Google plan${sel('aiPvGPlan', g.plan, [['free', 'Free'], ['paid', 'Paid (billing naka-enable)']])}</label>
         <label style="font-size:12px; color:var(--muted);">Default Gemini model (for Base and everyone who has not chosen one)${sel('aiPvGDefaultModel', g.defaultModel, modelEntries.map(([key, model]) => [key, model.displayName || model.modelId || key]))}</label>
       </div>
+      <label style="font-size:12px; display:block; margin-top:8px;"><input type="checkbox" id="aiPvGFailover" ${g.autoFailover ? 'checked' : ''}> Auto-failover: if the chosen and the default model are blocked or out of limit, try the other enabled models (cheapest first). <span class="meta">Only models the client's plan may use.</span></label>
       <div id="aiPvPrivacy" class="meta" style="margin-top:6px; color:var(--danger,#ff6b6b); ${g.plan === 'free' ? '' : 'display:none;'}">⚠️ Free tier: Google may use the data for training (per their terms). Live store data (sales, inventory) is passed to the AI — Paid is safer.</div>
       <div style="font-size:11px; color:var(--muted); margin:8px 0 2px;">Daily limit per plan (0 = no limit). Google numbers are per-project and change — confirm in their rate-limits docs before setting them.</div>
       <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px;">
@@ -2717,16 +2885,18 @@ function renderAiProviderCfg(d) {
       <div class="meta" style="margin-top:6px;">"Neurons / 1M tokens" is the conversion that lets Base/Plus/Pro use the same daily neurons on Google. Default = equivalent to the price ($0.011 / 1,000 neurons). Change it when the Google price changes.</div>
       ${usageHtml}
     </div>
+    <div id="aiPvExtras"></div>
     <div id="aiPvTestResult" class="meta" style="display:none; margin-top:8px; font-weight:700; word-break:break-word;"></div>
     <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
       <button class="btn-primary" onclick="saveAiProviderCfg()">💾 I-save ang AI Provider</button>
-      ${keyOk ? `<button class="btn-ghost" onclick="aiFetchGoogleModels(true)">📥 Fetch the model list from Google</button><button class="btn-ghost" onclick="aiGoogleTest()">🧪 Test Google</button><button class="btn-ghost" onclick="aiGoogleResetUsage()">♻️ Reset the Google count</button><button class="btn-ghost" onclick="aiGoogleClearLearned()">🧹 Clear the learned limit</button>` : ''}
+      ${keyOk ? `<button class="btn-ghost" onclick="aiFetchGoogleModels(true)">📥 Fetch the model list from Google</button><button class="btn-ghost" onclick="aiGoogleTest()">🧪 Test Google</button><button class="btn-ghost" onclick="aiGoogleTestAll()">🧪 Test all models</button><button class="btn-ghost" onclick="aiGoogleResetUsage()">♻️ Reset the Google count</button><button class="btn-ghost" onclick="aiGoogleClearLearned()">🧹 Clear the learned limit</button>` : ''}
       <button class="btn-ghost" onclick="loadAiProviderCfg()">🔄 Refresh</button>
     </div>`;
   const planEl = document.getElementById('aiPvGPlan');
   if (planEl) planEl.onchange = () => { const w = document.getElementById('aiPvPrivacy'); if (w) w.style.display = planEl.value === 'free' ? '' : 'none'; aiSyncDailyRequestsFromDefault(); };
   const defEl = document.getElementById('aiPvGDefaultModel');
   if (defEl) defEl.onchange = () => aiSyncDailyRequestsFromDefault();
+  renderAiProviderExtras();
   if (aiEconState) aiRenderEconomics(aiEconState);
   aiScheduleEconomics(0);
 }
@@ -2749,6 +2919,7 @@ async function saveAiProviderCfg() {
   const body = {
     google: {
       enabled: !!v('aiPvGEnabled')?.checked,
+      autoFailover: !!v('aiPvGFailover')?.checked,
       plan: v('aiPvGPlan')?.value,
       defaultModel: v('aiPvGDefaultModel')?.value,
       freeDailyRequests: v('aiPvFreeRpd')?.value,
@@ -2763,6 +2934,7 @@ async function saveAiProviderCfg() {
   toast('AI provider settings saved.', 'success');
   await loadAiProviderCfg();
   loadAiPlans(true);
+  loadAiPriceWatch(true);
 }
 async function aiGoogleTest(key) {
   const el = document.getElementById('aiPvTestResult');
@@ -2781,18 +2953,8 @@ async function aiGoogleTest(key) {
   }
   loadAiPlans(true);
   // I-refresh ang mga bilang (RPM/RPD/TPM) nang hindi nawawala ang mga hindi pa na-save na input at ang mensahe ng test.
-  const snap = aiSnapCfgForm();
   const msgText = el ? el.textContent : '', msgColor = el ? el.style.color : '';
-  // Reloading from the server must not drop models that were added on this page but are not saved yet.
-  const prevModels = { ...((aiProviderCfgState && aiProviderCfgState.config && aiProviderCfgState.config.google && aiProviderCfgState.config.google.models) || {}) };
-  await loadAiProviderCfg();
-  const gNew = aiProviderCfgState && aiProviderCfgState.config && aiProviderCfgState.config.google;
-  if (gNew && gNew.models) {
-    let readded = false;
-    Object.keys(prevModels).forEach((k) => { if (!gNew.models[k]) { gNew.models[k] = prevModels[k]; readded = true; } });
-    if (readded) renderAiProviderCfg(aiProviderCfgState);
-  }
-  aiRestoreCfgForm(snap);
+  await aiReloadCfgKeepForm();
   const el3 = document.getElementById('aiPvTestResult');
   if (el3 && msgText) { el3.style.display = ''; el3.style.color = msgColor; el3.textContent = msgText; }
 }
@@ -3375,7 +3537,16 @@ function renderAiOverview() {
     </table></div>
     <div class="meta" style="margin-top:6px;">Kita = lahat ng binayad ng client ngayong buwan (plan + Extra Credits + Boosts) × ₱${n(pf.phpPerToken, 2)}/token − ${n(pf.feePercent, 1)}% fee. Google cost = totoong gastos sa Google ng mga sagot na nagamit nila (token × presyo, ₱${n(pf.fx, 2)}/$). Ang Free (Cloudflare) clients ay hindi kasama.</div>
   </details>` : '';
-  kpiEl.innerHTML = cards.join('') + profitDetails;
+  const worst = pf && Array.isArray(pf.worstClients) ? pf.worstClients : [];
+  const worstDetails = worst.length ? `<details style="grid-column:1/-1; border:1px solid var(--border); border-radius:var(--radius-lg); padding:8px 12px;">
+    <summary style="cursor:pointer; font-size:12px; font-weight:700;">🔻 Pinakamababang kita na clients (ngayong buwan)</summary>
+    <div style="overflow-x:auto; margin-top:8px;"><table style="width:100%; font-size:12px; border-collapse:collapse; min-width:520px;">
+      <thead><tr style="text-align:left; color:var(--muted);"><th style="padding:4px 6px;">Client</th><th>Plan</th><th>Kita</th><th>Google cost</th><th>Profit</th><th>Margin</th><th></th></tr></thead>
+      <tbody>${worst.map((c) => `<tr style="border-top:1px dashed var(--line);"><td style="padding:4px 6px;">${c.label ? escapeHtml(c.label) : '<span class="meta">' + escapeHtml(String(c.installationId).slice(0, 8)) + '…</span>'}</td><td>${escapeHtml(c.tier || '—')}</td><td>${peso(c.netPhp)}</td><td>${peso(c.costPhp)}</td><td style="font-weight:700; color:${Number(c.profitPhp) < 0 ? 'var(--red)' : 'inherit'};">${peso(c.profitPhp)}</td><td>${c.marginPct === null || c.marginPct === undefined ? '—' : n(c.marginPct, 1) + '%'}</td><td><button class="btn-ghost" style="padding:2px 8px;" onclick="aiClientEdit('${escapeAttr(c.installationId)}')">Override</button></td></tr>`).join('')}</tbody>
+    </table></div>
+    <div class="meta" style="margin-top:6px;">Ang pula ay lugi (mas malaki ang gastos sa Google kaysa sa kita). Pindutin ang Override para ayusin ang limits ng client.</div>
+  </details>` : '';
+  kpiEl.innerHTML = cards.join('') + profitDetails + worstDetails;
 
   // ---- Health checks / alerts ----
   const alerts = [];
@@ -3429,6 +3600,25 @@ function renderAiOverview() {
   }
   if (relayAiCreditSettingsCache && relayAiCreditSettingsCache.defaults && Number(relayAiCreditSettingsCache.defaults.dailyCap) === 0) {
     add('warn', 'Base clients have no daily neurons limit (0 = unlimited) — they can use up the whole Google quota.', 'capacity');
+  }
+  // ---- Profit / client budget cap / Google price alerts ----
+  if (pf) {
+    const t = pf.totals || {};
+    const hasMoney = Number(t.netPhp) > 0 || Number(t.costPhp) > 0;
+    if (hasMoney && Number(t.profitPhp) < 0) add('danger', `Lugi ngayong buwan: ${peso(t.profitPhp)} (kita ${peso(t.netPhp)}, gastos sa Google ${peso(t.costPhp)}).`, 'clients');
+    else if (hasMoney && t.marginPct !== null && t.marginPct !== undefined && Number(t.marginPct) < Number(pf.targetMarginPercent)) add('warn', `Ang margin ngayong buwan (${n(t.marginPct, 1)}%) ay mas mababa sa target (${n(pf.targetMarginPercent, 1)}%).`, 'clients');
+    if (Number(t.losingClients) > 0) add('warn', `${n(t.losingClients)} client(s) ang lugi ngayong buwan — tingnan ang "Pinakamababang kita" sa Profit card.`, 'clients');
+    if (pf.budget && pf.budget.enabled) {
+      if (Number(pf.budget.blocked) > 0) add('danger', `${n(pf.budget.blocked)} client(s) hit their budget cap (${n(pf.budget.percent)}% of what they paid) — their AI answers are blocked until renewal.`, 'clients');
+      if (Number(pf.budget.warn) > 0) add('warn', `${n(pf.budget.warn)} client(s) are close to their budget cap.`, 'clients');
+    }
+  }
+  if (aiPriceWatchState) {
+    (aiPriceWatchState.scheduled || []).filter((x) => x.increase && Number(x.daysLeft) <= 90).forEach((x) => {
+      if (x.risk === 'loss') add('danger', `Google will raise the price of ${x.name} in ${n(x.daysLeft)} day(s): at the new price some plans LOSE money (worst plan ${n(x.worstAfterPct, 1)}%).`, 'provider');
+      else if (x.risk === 'low') add('warn', `Google will raise the price of ${x.name} in ${n(x.daysLeft)} day(s): some plans fall below your target margin (worst plan ${n(x.worstAfterPct, 1)}%).`, 'provider');
+    });
+    (aiPriceWatchState.changes || []).slice(0, 3).forEach((c) => add('warn', `Google changed the price of ${c.code} (${aiAgo(c.at)}) — check the profit tables.`, 'provider'));
   }
   if (!alerts.length) add('ok', '✅ No problems found in the current Omni AI settings.');
   if (alertsEl) {

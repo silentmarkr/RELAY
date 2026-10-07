@@ -7439,6 +7439,7 @@ const AI_PROVIDER_CFG_DEFAULTS = {
         paidDailyRequests: 0,
         freeDailyNeurons: 0,         // 0 = walang limit (neurons-equivalent)
         paidDailyNeurons: 0,
+        autoFailover: false,         // true = kapag ang piniling model at ang default ay naubos/pumalya, subukan ang iba pang naka-enable na model (pinakamura muna)
         defaultModel: 'flashLite',
         models: {
             // rpm/rpd/tpm = limit ng modelong ito sa Google AI Studio (0 = walang itinakda; gagamitin ang natutunan mula sa 429 kung meron).
@@ -7498,6 +7499,7 @@ function normalizeAiProviderConfig(src) {
             paidDailyRequests: num(g.paidDailyRequests, D.google.paidDailyRequests, 0, 100000000),
             freeDailyNeurons: num(g.freeDailyNeurons, D.google.freeDailyNeurons, 0, 1000000000),
             paidDailyNeurons: num(g.paidDailyNeurons, D.google.paidDailyNeurons, 0, 1000000000),
+            autoFailover: typeof g.autoFailover === 'boolean' ? g.autoFailover : D.google.autoFailover,
             defaultModel,
             models
         }
@@ -7568,6 +7570,19 @@ async function buildAiAttemptPlan(cfg, installationId, modelChoice) {
     aiDefaultProviderChain(cfg).forEach((a) => {
         if (!attempts.some((x) => x.provider === a.provider && x.modelKey === a.modelKey)) attempts.push(a);
     });
+    // Optional auto-failover (admin setting): when the chosen and the default model are blocked or fail, try every other enabled model,
+    // cheapest first, but only the models this client's plan is allowed to use.
+    if (cfg.google.autoFailover && googleUsable(cfg)) {
+        const rate = (k) => (Number(cfg.google.models[k].inputNeuronsPerM) || 0) + (Number(cfg.google.models[k].outputNeuronsPerM) || 0);
+        const rest = googleModelKeys(cfg)
+            .filter((k) => cfg.google.models[k].enabled && googleModelId(cfg, k) && !attempts.some((x) => x.provider === 'google' && x.modelKey === k))
+            .sort((a, b) => rate(a) - rate(b));
+        for (const k of rest) {
+            let ok = true;
+            if (cfg.google.models[k].requiredTier) { try { ok = await relayAiClientMeetsTier(installationId, cfg.google.models[k].requiredTier); } catch (_) { ok = false; } }
+            if (ok) attempts.push({ provider: 'google', modelKey: k, modelId: googleModelId(cfg, k) });
+        }
+    }
     return attempts;
 }
 // ---- Google estado ng pagkaubos + paggamit (araw ng Google = hatinggabi ng Pacific Time) ----
@@ -10047,12 +10062,232 @@ async function buildAiProvidersStatus() {
             }, {}),
             // Last pasted AI Studio > Rate limit table (used by the admin page to auto-fill RPM/TPM/RPD on model select).
             studioLimits: { rows: googleStudioLimits.rows, at: googleStudioLimits.at },
+            testResults: await getGoogleTestResults(),
             models
         },
         chain: aiDefaultProviderChain(cfg).map((a) => ({ provider: a.provider, modelKey: a.modelKey, modelId: a.modelId })),
         free: buildFreeProviderStatus(cfg)
     };
 }
+// ===== PROVIDER CHANGE LOG (audit) =====
+// Every change of the AI provider / calculator / prices / client override is written here (newest first, last 200), so the admin can see who changed what and when.
+const AI_AUDIT_KEY = 'ai-provider-audit';
+const AI_AUDIT_MAX = 200;
+let aiProviderAuditCache = null;
+async function getAiProviderAudit() {
+    if (aiProviderAuditCache) return aiProviderAuditCache;
+    let stored = null;
+    try { stored = await getPersistentJSON(AI_AUDIT_KEY, null); } catch (_) { stored = null; }
+    aiProviderAuditCache = Array.isArray(stored) ? stored.slice(0, AI_AUDIT_MAX) : [];
+    return aiProviderAuditCache;
+}
+async function recordAiProviderAudit(req, action, summary) {
+    try {
+        const items = (Array.isArray(summary) ? summary : [summary]).map((x) => String(x === undefined || x === null ? '' : x).slice(0, 240)).filter(Boolean);
+        if (!items.length) return;
+        const list = await getAiProviderAudit();
+        const shown = items.slice(0, 12);
+        if (items.length > shown.length) shown.push(`…and ${items.length - shown.length} more change(s)`);
+        list.unshift({ at: Date.now(), action: String(action || 'change').slice(0, 40), summary: shown, ip: String((req && req.ip) || '').slice(0, 60) });
+        if (list.length > AI_AUDIT_MAX) list.length = AI_AUDIT_MAX;
+        setPersistentJSON(AI_AUDIT_KEY, list);
+    } catch (err) { console.error('AI audit log error:', err && err.message); }
+}
+// Lists the changed simple values (numbers / text / true-false) between two objects, e.g. "Google plan: free → paid".
+function diffAiPrimitiveFields(label, a, b) {
+    const out = [];
+    const isPrim = (v) => v === null || ['string', 'number', 'boolean'].includes(typeof v);
+    const A = (a && typeof a === 'object') ? a : {}, B = (b && typeof b === 'object') ? b : {};
+    const fmt = (v) => (v === undefined || v === null || v === '') ? '—' : String(v);
+    Array.from(new Set(Object.keys(A).concat(Object.keys(B)))).forEach((k) => {
+        const x = A[k], y = B[k];
+        if (k === 'updatedAt' || k === 'source') return;
+        if ((x !== undefined && !isPrim(x)) || (y !== undefined && !isPrim(y))) return;
+        if (String(x) !== String(y)) out.push(`${label} ${k}: ${fmt(x)} → ${fmt(y)}`);
+    });
+    return out;
+}
+function describeAiProviderConfigChange(cur, next) {
+    const out = [];
+    const cg = (cur && cur.google) || {}, ng = (next && next.google) || {};
+    out.push(...diffAiPrimitiveFields('Google', cg, ng));
+    out.push(...diffAiPrimitiveFields('Free', cur && cur.free, next && next.free));
+    const cm = cg.models || {}, nm = ng.models || {};
+    const nameOf = (m, k) => (m && (m.displayName || m.modelId)) || k;
+    Object.keys(nm).forEach((k) => {
+        if (!cm[k]) out.push(`Added model "${nameOf(nm[k], k)}" (${(nm[k] && nm[k].modelId) || k})`);
+        else out.push(...diffAiPrimitiveFields(`Model "${nameOf(nm[k], k)}"`, cm[k], nm[k]));
+    });
+    Object.keys(cm).forEach((k) => { if (!nm[k]) out.push(`Deleted model "${nameOf(cm[k], k)}" (${(cm[k] && cm[k].modelId) || k})`); });
+    return out;
+}
+// ===== DELETED MODELS (kept 24 hours so the admin can undo a delete) =====
+const AI_MODEL_TRASH_KEY = 'ai-provider-model-trash';
+const AI_MODEL_TRASH_TTL_MS = 24 * 60 * 60 * 1000;
+let aiModelTrashCache = null;
+async function getAiModelTrash() {
+    if (!aiModelTrashCache) {
+        let stored = null;
+        try { stored = await getPersistentJSON(AI_MODEL_TRASH_KEY, null); } catch (_) { stored = null; }
+        aiModelTrashCache = Array.isArray(stored) ? stored : [];
+    }
+    const now = Date.now();
+    const kept = aiModelTrashCache.filter((t) => t && t.key && t.model && now - (Number(t.deletedAt) || 0) < AI_MODEL_TRASH_TTL_MS);
+    if (kept.length !== aiModelTrashCache.length) { aiModelTrashCache = kept; setPersistentJSON(AI_MODEL_TRASH_KEY, kept); }
+    return aiModelTrashCache;
+}
+function saveAiModelTrash(list) {
+    aiModelTrashCache = list.slice(0, 20);
+    setPersistentJSON(AI_MODEL_TRASH_KEY, aiModelTrashCache);
+}
+function publicAiModelTrash(list) {
+    return (list || []).map((t) => ({
+        key: t.key, displayName: String((t.model && (t.model.displayName || t.model.modelId)) || t.key).slice(0, 80),
+        modelId: String((t.model && t.model.modelId) || '').slice(0, 80), deletedAt: Number(t.deletedAt) || 0,
+        expiresAt: (Number(t.deletedAt) || 0) + AI_MODEL_TRASH_TTL_MS
+    }));
+}
+// ===== LAST TEST RESULT PER MODEL ID =====
+const AI_TEST_RESULTS_KEY = 'ai-provider-test-results';
+let googleTestResultsCache = null;
+async function getGoogleTestResults() {
+    if (!googleTestResultsCache) {
+        let stored = null;
+        try { stored = await getPersistentJSON(AI_TEST_RESULTS_KEY, null); } catch (_) { stored = null; }
+        googleTestResultsCache = (stored && typeof stored === 'object' && !Array.isArray(stored)) ? stored : {};
+    }
+    return googleTestResultsCache;
+}
+async function recordGoogleTestResult(modelId, result) {
+    try {
+        const id = String(modelId || '').slice(0, 80);
+        if (!id) return;
+        const all = await getGoogleTestResults();
+        all[id] = { ok: !!result.ok, at: Date.now(), tookMs: Number(result.tookMs) || 0, message: String(result.message || '').slice(0, 160), quota: result.quota || null };
+        const ids = Object.keys(all);
+        if (ids.length > 60) ids.sort((a, b) => (all[a].at || 0) - (all[b].at || 0)).slice(0, ids.length - 60).forEach((k) => { delete all[k]; });
+        setPersistentJSON(AI_TEST_RESULTS_KEY, all);
+    } catch (_) { /* informational only */ }
+}
+// ===== GOOGLE PRICE WATCH =====
+// 1) Detects when the Google pricing page changes a model's price (compared with the last snapshot) and logs it.
+// 2) Looks ahead at scheduled price increases and shows the profit of every plan before and after the change.
+const AI_PRICE_SNAPSHOT_KEY = 'ai-price-snapshot';
+const AI_PRICE_CHANGES_KEY = 'ai-price-changes';
+async function detectGooglePriceDrift(table) {
+    try {
+        const next = {};
+        (table || []).forEach((e) => {
+            const code = (e.codes || [])[0];
+            if (code) next[code] = { in: e.inNow, out: e.outNow, inNext: e.inNext, outNext: e.outNext, switchAt: e.switchAt || null };
+        });
+        let snap = null;
+        try { snap = await getPersistentJSON(AI_PRICE_SNAPSHOT_KEY, null); } catch (_) { snap = null; }
+        if (snap && typeof snap === 'object' && Object.keys(snap).length) {
+            const diff = (x, y) => Math.abs(Number(x) - Number(y)) > 1e-9;
+            const changes = [];
+            Object.keys(next).forEach((code) => {
+                const a = snap[code], b = next[code];
+                if (!a) return;
+                if (diff(a.in, b.in) || diff(a.out, b.out) || diff(a.inNext, b.inNext) || diff(a.outNext, b.outNext) || (a.switchAt || null) !== (b.switchAt || null)) {
+                    changes.push({ at: Date.now(), code, from: a, to: b });
+                }
+            });
+            if (changes.length) {
+                let old = [];
+                try { old = await getPersistentJSON(AI_PRICE_CHANGES_KEY, []); } catch (_) { old = []; }
+                setPersistentJSON(AI_PRICE_CHANGES_KEY, changes.concat(Array.isArray(old) ? old : []).slice(0, 40));
+                const usd = (v) => '$' + (Math.round(Number(v) * 10000) / 10000);
+                await recordAiProviderAudit(null, 'google-price-change', changes.slice(0, 10).map((c) => `Google price ${c.code}: ${usd(c.from.in)} / ${usd(c.from.out)} → ${usd(c.to.in)} / ${usd(c.to.out)} per 1M tokens${c.to.switchAt ? ` (next: ${usd(c.to.inNext)} / ${usd(c.to.outNext)} from ${String(c.to.switchAt).slice(0, 10)})` : ''}`));
+                console.log(`💲 Google price change detected for ${changes.length} model(s).`);
+            }
+        }
+        setPersistentJSON(AI_PRICE_SNAPSHOT_KEY, next);
+    } catch (err) { console.warn('⚠️ Price drift check failed:', err && err.message); }
+}
+async function buildAiPriceWatch() {
+    const cfg = await getAiProviderConfig();
+    const settings = await getAiEconSettings();
+    const fx = await getAiFx(settings, false);
+    let tiers = [];
+    try { tiers = pgPoolDevices ? (await listRelayAiTiers(false)).filter((t) => t.enabled !== false && Number(t.priceTokens) > 0) : []; } catch (_) { tiers = []; }
+    const now = Date.now();
+    const scheduled = [];
+    googleModelKeys(cfg).forEach((key) => {
+        const m = cfg.google.models[key];
+        const modelId = googleModelId(cfg, key);
+        if (!m || !m.enabled || !modelId) return;
+        const slot = { key, modelId, inRate: Number(m.inputNeuronsPerM) || 0, outRate: Number(m.outputNeuronsPerM) || 0, enabled: true, autoFill: false };
+        const cur = buildSlotEconomics(slot, { ...settings, priceBasis: 'current' }, fx.rate, tiers, null);
+        if (!cur.price || !cur.price.scheduledChange) return;
+        const pr = cur.price;
+        const increase = pr.nextInUsd > pr.nowInUsd || pr.nextOutUsd > pr.nowOutUsd;
+        const row = {
+            key, modelId, name: String(m.displayName || modelId).slice(0, 80), switchAt: pr.switchAt,
+            daysLeft: Math.max(0, Math.ceil((Date.parse(pr.switchAt) - now) / 86400000)),
+            nowUsd: { in: pr.nowInUsd, out: pr.nowOutUsd }, nextUsd: { in: pr.nextInUsd, out: pr.nextOutUsd },
+            increase, rates: { in: slot.inRate, out: slot.outRate }, recommendedRates: null, tiers: [], risk: 'ok', worstAfterPct: null
+        };
+        if (increase) {
+            const after = buildSlotEconomics(slot, { ...settings, priceBasis: 'safe' }, fx.rate, tiers, null);
+            row.recommendedRates = after.recommended || null;
+            row.tiers = (after.tiers || []).map((t, i) => {
+                const before = (cur.tiers || [])[i];
+                return { id: t.id, name: t.name, nowPct: before ? before.typical.profitPctMax : null, afterPct: t.typical.profitPctMax, afterStatus: t.status };
+            });
+            const sts = row.tiers.map((t) => t.afterStatus);
+            row.risk = sts.includes('loss') ? 'loss' : (sts.includes('low') ? 'low' : 'ok');
+            const pcts = row.tiers.map((t) => t.afterPct).filter((x) => Number.isFinite(x));
+            row.worstAfterPct = pcts.length ? Math.min(...pcts) : null;
+        }
+        scheduled.push(row);
+    });
+    scheduled.sort((a, b) => a.daysLeft - b.daysLeft);
+    let changes = [];
+    try { const c = await getPersistentJSON(AI_PRICE_CHANGES_KEY, []); changes = Array.isArray(c) ? c.filter((x) => x && now - (Number(x.at) || 0) < 30 * 86400000).slice(0, 10) : []; } catch (_) { changes = []; }
+    const meta = googlePriceMeta();
+    return { scheduled, changes, source: meta.source, fetchedAt: meta.fetchedAt, targetMarginPercent: Number(settings.targetMarginPercent) || 0 };
+}
+app.get('/relay/admin/api/ai-providers/price-watch', requireAdminKey, async (req, res) => {
+    try {
+        try { await getGooglePriceTableBounded(false); } catch (_) { /* the built-in table is used */ }
+        return res.json({ success: true, ...(await buildAiPriceWatch()) });
+    } catch (err) {
+        console.error('AI price watch error:', err.message);
+        return res.status(503).json({ success: false, message: 'Could not check the Google prices: ' + err.message });
+    }
+});
+app.get('/relay/admin/api/ai-providers/audit', requireAdminKey, async (req, res) => {
+    try {
+        const limit = Math.min(200, Math.max(1, Number(req.query?.limit) || 60));
+        return res.json({ success: true, items: (await getAiProviderAudit()).slice(0, limit) });
+    } catch (err) {
+        return res.status(503).json({ success: false, message: 'Could not load the change log.' });
+    }
+});
+app.post('/relay/admin/api/ai-providers/restore-model', requireAdminKey, async (req, res) => {
+    try {
+        const key = String(req.body?.key || '');
+        const trash = await getAiModelTrash();
+        const idx = trash.findIndex((t) => t.key === key);
+        if (idx < 0) return res.status(404).json({ success: false, message: 'That model is no longer in the deleted list (deleted models are kept for 24 hours).' });
+        const cur = await getAiProviderConfig();
+        const item = trash[idx];
+        let newKey = item.key;
+        if (cur.google.models[newKey]) newKey = (String(item.key).slice(0, 48) + '_r' + Date.now().toString(36)).slice(0, 60);
+        const next = normalizeAiProviderConfig({ ...cur, google: { ...cur.google, models: { ...cur.google.models, [newKey]: item.model } } });
+        aiProviderConfigCache = next;
+        setPersistentJSON('ai-provider-config', next);
+        const left = trash.slice(); left.splice(idx, 1);
+        saveAiModelTrash(left);
+        const nm = (item.model && (item.model.displayName || item.model.modelId)) || newKey;
+        await recordAiProviderAudit(req, 'restore-model', [`Restored deleted model "${nm}" (${(item.model && item.model.modelId) || newKey})`]);
+        return res.json({ success: true, restoredKey: newKey, config: next, status: await buildAiProvidersStatus(), trash: publicAiModelTrash(left) });
+    } catch (err) {
+        console.error('AI restore model error:', err.message);
+        return res.status(503).json({ success: false, message: 'Could not restore the model.' });
+    }
+});
 app.get('/relay/admin/api/ai-providers', requireAdminKey, async (req, res) => {
     try {
         const cfg = await getAiProviderConfig();
@@ -10066,7 +10301,8 @@ app.get('/relay/admin/api/ai-providers', requireAdminKey, async (req, res) => {
         return res.json({
             success: true, config: cfg, tiers, tierMap,
             envDefaults: { flash: GOOGLE_AI_MODEL_FLASH, flashLite: GOOGLE_AI_MODEL_FLASH_LITE },
-            status: await buildAiProvidersStatus()
+            status: await buildAiProvidersStatus(),
+            trash: publicAiModelTrash(await getAiModelTrash())
         });
     } catch (err) {
         console.error('AI providers GET error:', err.message);
@@ -10115,12 +10351,20 @@ app.post('/relay/admin/api/ai-providers/settings', requireAdminKey, async (req, 
             googleLearnedLimits = {}; saveGoogleLearnedLimits();
             googleModelBlocks = {}; saveGoogleModelBlocks();
         }
+        // Deleted models are kept for 24 hours so the admin can undo (Restore).
+        const removedNow = removeKeys.filter((k) => cur.google.models[k] && !next.google.models[k]);
+        if (removedNow.length) {
+            const trash = (await getAiModelTrash()).filter((t) => !removedNow.includes(t.key));
+            removedNow.forEach((k) => trash.unshift({ key: k, model: cur.google.models[k], deletedAt: Date.now() }));
+            saveAiModelTrash(trash);
+        }
+        await recordAiProviderAudit(req, 'ai-provider', describeAiProviderConfigChange(cur, next));
         aiProviderConfigCache = next;
         setPersistentJSON('ai-provider-config', next);
         console.log(`🤖 AI provider config saved: Free(Cloudflare)=${next.free.enabled ? 'ON' : 'OFF'} ${next.free.monthlyCredits}cr/${next.free.dailyNeurons}n, Base/Plus/Pro(Google)=${next.google.enabled ? 'ON' : 'OFF'}/${next.google.plan}`);
         // Nagbago ang Google limits/models -> nagbago ang auto Total daily capacity; buksan ulit ang lock kung may bakante na.
         if (pgPoolDevices) { try { await releaseRelayAiLockIfFreed(relayAiMonthKey(), true); } catch (_) {} }
-        return res.json({ success: true, config: next, status: await buildAiProvidersStatus() });
+        return res.json({ success: true, config: next, status: await buildAiProvidersStatus(), trash: publicAiModelTrash(await getAiModelTrash()) });
     } catch (err) {
         console.error('AI providers settings error:', err.message);
         return res.status(503).json({ success: false, message: 'Unable to save AI provider settings.' });
@@ -10256,6 +10500,7 @@ async function getGooglePriceTable(force) {
             googlePriceState.at = Date.now();
             googlePriceState.error = '';
             setPersistentJSON('google-price-cache', { at: googlePriceState.at, table });
+            detectGooglePriceDrift(table);
             console.log(`💲 Google prices refreshed from the pricing page: ${table.length} model entries.`);
         } catch (err) {
             googlePriceState.error = String((err && err.name === 'AbortError') ? 'Timed out reading the Google pricing page.' : (err && err.message) || err).slice(0, 240);
@@ -10641,6 +10886,7 @@ app.post('/relay/admin/api/ai-providers/economics/auto-price', requireAdminKey, 
         await getAiEconSettings();
         await getAiFx(aiEconSettingsCache || normalizeAiEconSettings({}), false);
         const changes = await applyAutoPrices(req.body && req.body.mode === 'all' ? 'all' : 'raise', false);
+        await recordAiProviderAudit(req, 'auto-price', (changes || []).map((c) => `Price of ${c.name || c.id}: ${c.from} → ${c.to} tokens`));
         return res.json({ success: true, changes, note: 'Applies to new purchases only.' });
     } catch (err) {
         console.error('Auto price error:', err.message);
@@ -10782,7 +11028,8 @@ async function buildAiProfitSummary(monthKey) {
     const out = {
         month: monthKey, fx, phpPerToken, feePercent: feePct, targetMarginPercent: Number(st.targetMarginPercent) || 0,
         totals: { clients: 0, payingClients: 0, paidTokens: 0, grossPhp: 0, netPhp: 0, costPhp: 0, profitPhp: 0, marginPct: null, neurons: 0, questions: 0, losingClients: 0 },
-        byTier: []
+        byTier: [], worstClients: [],
+        budget: { enabled: !!(st.antiLossEnabled && st.antiLossClientBudget), percent: Number(st.antiLossClientBudgetPercent) || 0, blocked: 0, warn: 0 }
     };
     if (!pgPoolDevices) return out;
     const r = await pgPoolDevices.query(`
@@ -10804,12 +11051,20 @@ async function buildAiProfitSummary(monthKey) {
         FROM ids i
         LEFT JOIN relay_ai_cost_ledger l ON l.installation_id = i.installation_id AND l.month_key = $1::text`, [monthKey]);
     const groups = new Map();
+    const clientRows = [];
     r.rows.forEach((row) => {
         const tokens = (Number(row.tier_tokens) || 0) + (Number(row.extra_tokens) || 0) + (Number(row.boost_tokens) || 0);
         const grossPhp = tokens * phpPerToken;
         const netPhp = grossPhp * (1 - feePct / 100);
         const costPhp = (Number(row.cost_usd) || 0) * fx;
         const neurons = Number(row.neurons) || 0;
+        // Same rule as the client budget cap: blocked at the budget %, warning at 80% of it.
+        const budgetPhp = netPhp * (Number(st.antiLossClientBudgetPercent) || 0) / 100;
+        if (out.budget.enabled && netPhp > 0) {
+            if (costPhp >= budgetPhp) out.budget.blocked++;
+            else if (costPhp >= budgetPhp * 0.8) out.budget.warn++;
+        }
+        if (tokens > 0 || costPhp > 0) clientRows.push({ installationId: row.installation_id, label: deviceLabels.get(row.installation_id) || null, tier: row.tier_name || null, paidTokens: tokens, netPhp, costPhp, profitPhp: netPhp - costPhp, neurons, questions: Number(row.questions) || 0 });
         const key = row.tier_id || '_none';
         let g = groups.get(key);
         if (!g) { g = { tierId: row.tier_id || null, tier: row.tier_name || 'No plan this month', clients: 0, payingClients: 0, paidTokens: 0, grossPhp: 0, netPhp: 0, costPhp: 0, neurons: 0, questions: 0, losingClients: 0 }; groups.set(key, g); }
@@ -10827,14 +11082,25 @@ async function buildAiProfitSummary(monthKey) {
     groups.forEach((g) => { Object.keys(t).forEach((k) => { t[k] += g[k]; }); });
     out.totals = { ...fin({ ...t }), };
     out.byTier = list;
+    // The 5 clients with the lowest profit (negative = losing money).
+    out.worstClients = clientRows.sort((a, b) => a.profitPhp - b.profitPhp || b.costPhp - a.costPhp).slice(0, 5).map((c) => ({
+        installationId: c.installationId, label: c.label, tier: c.tier, paidTokens: c.paidTokens,
+        netPhp: r2(c.netPhp), costPhp: r2(c.costPhp), profitPhp: r2(c.profitPhp), neurons: Math.round(c.neurons), questions: c.questions,
+        marginPct: c.netPhp > 0 ? Math.round(c.profitPhp / c.netPhp * 1000) / 10 : null
+    }));
     return out;
 }
+let aiProfitCache = { at: 0, month: '', value: null };
 app.get('/relay/admin/api/ai-profit', requireAdminKey, async (req, res) => {
     try {
         await getAiEconSettings();
         const m = String(req.query?.month || '').trim();
         const monthKey = /^\d{4}-(0[1-9]|1[0-2])$/.test(m) ? m : relayAiMonthKey();
-        return res.json({ success: true, ...(await buildAiProfitSummary(monthKey)) });
+        // The admin page asks every minute; a 20-second cache keeps the database load tiny.
+        if (aiProfitCache.value && aiProfitCache.month === monthKey && Date.now() - aiProfitCache.at < 20000) return res.json({ success: true, ...aiProfitCache.value });
+        const value = await buildAiProfitSummary(monthKey);
+        aiProfitCache = { at: Date.now(), month: monthKey, value };
+        return res.json({ success: true, ...value });
     } catch (err) {
         console.error('AI profit summary error:', err.message);
         return res.status(503).json({ success: false, message: 'Could not compute the profit of Omni AI: ' + err.message });
@@ -10854,6 +11120,7 @@ app.post('/relay/admin/api/ai-providers/economics/safe-caps', requireAdminKey, a
         await getAiEconSettings();
         const ids = Array.isArray(b.tierIds) ? b.tierIds.map((x) => String(x).trim().toLowerCase()).filter(Boolean) : null;
         const changes = await applyAntiLossCaps(b.mode === 'target' ? 'target' : 'anti', ids);
+        await recordAiProviderAudit(req, 'safe-caps', (changes || []).map((c) => `Daily neurons of ${c.name || c.id}: ${c.from} → ${c.to}`));
         return res.json({ success: true, changes, note: 'Plans that were already sold keep the daily neurons they were sold with until they renew.' });
     } catch (err) {
         console.error('Anti-loss safe caps error:', err.message);
@@ -10875,7 +11142,10 @@ app.post('/relay/admin/api/ai-providers/economics', requireAdminKey, async (req,
         const cfg = await getAiProviderConfig();
         const stored = await getAiEconSettings();
         const settings = normalizeAiEconSettings({ ...stored, ...((b.settings && typeof b.settings === 'object') ? b.settings : {}) });
-        if (b.save === true) { aiEconSettingsCache = settings; setPersistentJSON('ai-econ-settings', settings); }
+        if (b.save === true) {
+            await recordAiProviderAudit(req, 'calculator', diffAiPrimitiveFields('Calculator', stored, settings));
+            aiEconSettingsCache = settings; setPersistentJSON('ai-econ-settings', settings);
+        }
         const refresh = b.refreshPrices === true;
         const priceMeta = await getGooglePriceTableBounded(refresh);
         const fx = await getAiFx(settings, refresh);
@@ -11022,8 +11292,10 @@ app.post('/relay/admin/api/ai-providers/test', requireAdminKey, async (req, res)
         const r = await callGoogleGeminiAI([{ role: 'system', content: 'You are a connectivity test.' }, { role: 'user', content: 'Reply with the single word: OK' }], false, modelId);
         if (!r.success) {
             lastGoogleError = { message: `${modelId}: ${String(r.message || 'Unknown Google AI error.')}`.slice(0, 300), at: Date.now() };
+            await recordGoogleTestResult(modelId, { ok: false, tookMs: Date.now() - t0, message: r.message || 'Unknown Google AI error.', quota: r.googleQuota || null });
             return res.json({ success: false, model: modelId, message: r.message, quota: r.googleQuota || null, tookMs: Date.now() - t0 });
         }
+        await recordGoogleTestResult(modelId, { ok: true, tookMs: Date.now() - t0, message: 'OK' });
         return res.json({ success: true, model: modelId, answer: String(r.answer || '').slice(0, 80), tookMs: Date.now() - t0, usage: r.cfUsage || null, reasoningEffort: r.reasoningEffort || 'default', enabledInAdmin: !!cfg.google.enabled, usable: googleUsable(cfg) });
     } catch (err) {
         console.error('AI providers test error:', err.message);
@@ -11958,6 +12230,7 @@ app.post('/relay/admin/api/ai-credits/default', requireAdminKey, async (req, res
             [RELAY_AI_DEFAULT_SETTINGS_ID, settings.monthlyCredits, settings.textCost, settings.fileCost, settings.imageCost, settings.dailyCap]
         );
         const saved = await getRelayAiDefaultSettings();
+        await recordAiProviderAudit(req, 'credit-default', diffAiPrimitiveFields('Default credits', current, saved));
         console.log(`🤖 AI credit defaults updated via admin: ${saved.monthlyCredits} monthly / text ${saved.textCost} / file ${saved.fileCost} / image ${saved.imageCost}`);
         return res.json({ success: true, settings: saved });
     } catch (err) {
@@ -11980,6 +12253,7 @@ app.post('/relay/admin/api/ai-credits/installation', requireAdminKey, async (req
             [installationId, settings.monthlyCredits, settings.textCost, settings.fileCost, settings.imageCost, settings.dailyCap]
         );
         const saved = await getRelayAiSettings(installationId);
+        await recordAiProviderAudit(req, 'client-override', [`Override for ${installationId.slice(0, 13)}…: ${saved.monthlyCredits} credits/mo · text ${saved.textCost} / file ${saved.fileCost} / image ${saved.imageCost} · daily ${saved.dailyCapInherited ? 'follows plan/Base' : (Number(saved.dailyCap) === 0 ? 'unlimited' : saved.dailyCap)}`]);
         console.log(`🤖 AI credit override updated for ${installationId}: ${saved.monthlyCredits} monthly`);
         relayAiClientUsageCache.at = 0; relayAiClientUsageCache.value = null;
         return res.json({ success: true, installationId, settings: saved });
@@ -12053,6 +12327,7 @@ app.post('/relay/admin/api/ai-credits/installation/reset', requireAdminKey, asyn
             logActivity(installationId, 'ai_purchases_reset_by_admin', { month: monthKey, removedTier, removedExtraPacks, usageCleared });
         }
         relayAiClientUsageCache.at = 0; relayAiClientUsageCache.value = null;
+        await recordAiProviderAudit(req, 'client-reset', [`Reset for ${installationId.slice(0, 13)}…: ${[removedOverride ? 'override removed' : '', removedTier ? 'plan removed' : '', removedExtraPacks ? removedExtraPacks + ' extra pack(s) removed' : '', usageCleared ? (usageScope === 'credits' ? 'used credits cleared' : (usageScope === 'daily' ? "today's neurons cleared" : 'usage cleared')) : ''].filter(Boolean).join(', ') || 'nothing changed'}`]);
         const effective = await getRelayAiCreditStatus(installationId);
         console.log(`🤖 AI credit override reset for ${installationId}; default is active again (tier removed: ${removedTier}, extra packs removed: ${removedExtraPacks}, usage cleared: ${usageCleared}).`);
         // Kung wala talagang nahanap na kahit ano para sa ID na ito, malamang mali/iba ang installation ID
