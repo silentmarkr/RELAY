@@ -19437,6 +19437,62 @@ app.get('/relay/download/:code', async (req, res) => {
     logActivity(null, 'client_package_downloaded', { code, label: meta.label || null, ip: req.ip });
     res.download(RELEASE_PACKAGE_PATH, 'omnipos-client.zip');
 });
+// OmniPOS.apk bootstrap: latest version + download links (see relay-bootstrap-patch.js for notes)
+app.get('/relay/bootstrap', rateLimit('bootstrap', 30, 10 * 60 * 1000), async (req, res) => {
+    try {
+        let clientZipUrl = process.env.BOOTSTRAP_CLIENT_ZIP_URL || null;
+        let clientZipPath = null;
+
+        const wantsZip = String(req.query.zip || '') === '1';
+        const mintDisabled = String(process.env.BOOTSTRAP_ZIP_MINT || '').toLowerCase() === 'off';
+        if (!clientZipUrl && wantsZip && !mintDisabled) {
+            await ensureReleasePackageFreshOnDisk();
+            if (fs.existsSync(RELEASE_PACKAGE_PATH)) {
+                const now = Date.now();
+                // Clean up bootstrap codes that are used up or expired.
+                for (const [oldCode, meta] of downloadCodes) {
+                    if (meta && meta.label === 'bootstrap'
+                        && ((meta.expiresAt && now > meta.expiresAt) || meta.usesRemaining <= 0)) {
+                        downloadCodes.delete(oldCode);
+                    }
+                }
+                const code = crypto.randomBytes(9).toString('base64url');
+                downloadCodes.set(code, {
+                    label: 'bootstrap',
+                    maxUses: 1,
+                    usesRemaining: 1,
+                    createdAt: now,
+                    expiresAt: now + 60 * 60 * 1000,
+                    lastUsedAt: null,
+                    downloadCount: 0
+                });
+                await saveDownloadCodes(downloadCodes);
+                // A path (not a full URL): the app adds its own Relay URL, so it also works behind a proxy / https.
+                clientZipPath = `/relay/download/${code}`;
+            }
+        }
+
+        res.set('Cache-Control', 'no-store');
+        res.json({
+            success: true,
+            // Version of the published package (from publish-version)
+            version: (typeof systemVersionInfo !== 'undefined' && systemVersionInfo && systemVersionInfo.version) || '0.0.0',
+            clientZipUrl,
+            clientZipPath,
+            // Termux APK links (optional; when empty the app uses the GitHub link for the phone's CPU)
+            termuxApkUrls: {
+                'arm64-v8a': process.env.BOOTSTRAP_TERMUX_ARM64 || null,
+                'armeabi-v7a': process.env.BOOTSTRAP_TERMUX_ARM32 || null,
+                'x86_64': process.env.BOOTSTRAP_TERMUX_X86_64 || null,
+                'universal': process.env.BOOTSTRAP_TERMUX_UNIVERSAL || null
+            }
+        });
+    } catch (err) {
+        console.error('bootstrap error:', err);
+        res.status(500).json({ success: false, message: 'Could not prepare the download links.' });
+    }
+});
+
 app.get('/relay/health', (req, res) => res.json({ success: true, status: 'ok' }));
 async function bootstrapStores() {
     // Siguraduhing tapos na ang CREATE TABLE bago mag-SELECT — iwas race condition sa Neon cold-start
