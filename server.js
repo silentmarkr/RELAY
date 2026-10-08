@@ -16,7 +16,7 @@ if (!process.env.UV_THREADPOOL_SIZE) process.env.UV_THREADPOOL_SIZE = '8';
 // dotenv, walang custom loader tulad ng OMNIPOS/env-loader.js) — kaya
 // ang CF_ACCOUNT_ID/CF_AI_API_TOKEN na nakalagay sa RELAY/.env ay
 // hindi talaga nagagamit maliban na lang kung manual mong ini-export
-// sa mismong shell bago mo pinatakbo ang `node server.js`. Ito ang
+// sa mismong shell bago mo pinatakbo ang `node server.js`. Ito angg
 // dahilan kung bakit "not configured" pa rin ang vision AI kahit
 // naka-set na ang .env at naka-agree na sa Cloudflare model terms.
 (function loadDotEnvFile() {
@@ -13170,6 +13170,52 @@ const CLOUD_BACKUP_CHUNK_SIZE_BYTES = CLOUD_BACKUP_MAX_CHUNK_SIZE_BYTES;
 const CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS = new Map();
 const CLOUD_BACKUP_UPLOAD_LOCKS = new Map();
 const CLOUD_BACKUP_CHUNK_SESSION_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+// ===================================================================
+// CLOUD BACKUP CONTROL CENTER — runtime counters (in-memory, mula nang
+// huling restart ng RELAY). Ito ang nagbibigay ng visibility sa mga
+// pumalyang sync/restore na DATI ay console.error lang (hindi makikita
+// sa admin panel). Walang epekto sa charging/billing — pang-monitor lang.
+// Ang mga na-record na successful/blocked na event ay galing pa rin sa
+// activityLog (persistent); ang mga ito ay para sa FAILURES at
+// session-level na problema na hindi dating naitatala kahit saan.
+// ===================================================================
+const CLOUD_BACKUP_RUNTIME_STATS = {
+    startedAt: Date.now(),
+    syncOk: 0,
+    syncFailed: 0,
+    restoreOk: 0,
+    restoreFailed: 0,
+    sessionRejects: 0,
+    refundsAfterFailure: 0,
+    abandonedSessions: 0,
+    recentFailures: []
+};
+const CLOUD_BACKUP_RECENT_FAILURES_MAX = 60;
+// kind: 'sync' (pumalya ang pagsulat sa Postgres) | 'parse' (sira/corrupt
+// ang na-upload) | 'session' (hindi kilala/kulang na upload session) |
+// 'restore' (pumalya ang pag-restore).
+function recordCloudBackupFailure(kind, installationId, message, extra) {
+    try {
+        const s = CLOUD_BACKUP_RUNTIME_STATS;
+        if (kind === 'restore') s.restoreFailed++;
+        else if (kind === 'session') s.sessionRejects++;
+        else s.syncFailed++;
+        const info = extra || {};
+        if (info.refunded) s.refundsAfterFailure++;
+        s.recentFailures.unshift({
+            at: Date.now(),
+            kind,
+            installationId: installationId || null,
+            message: String(message || '').slice(0, 300),
+            refunded: !!info.refunded,
+            transient: !!info.transient,
+            modules: Array.isArray(info.modules) ? info.modules.slice(0, 10).map((m) => String(m).slice(0, 60)) : null
+        });
+        if (s.recentFailures.length > CLOUD_BACKUP_RECENT_FAILURES_MAX) s.recentFailures.length = CLOUD_BACKUP_RECENT_FAILURES_MAX;
+    } catch (err) {
+        // Hindi dapat kailanman makasira ng totoong request ang monitoring.
+    }
+}
 function cleanupCloudBackupUploadSession(uploadId) {
     const session = CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS.get(uploadId);
     if (!session) return;
@@ -13185,6 +13231,7 @@ function armCloudBackupSessionIdleTimer(uploadId) {
     if (session.idleTimer) clearTimeout(session.idleTimer);
     session.idleTimer = setTimeout(() => {
         console.warn(`⚠️ CLOUD_BACKUP: inabandona ang upload session ${uploadId} (walang bagong chunk sa loob ng ${CLOUD_BACKUP_CHUNK_SESSION_IDLE_TIMEOUT_MS / 60000} min) — nililinis, pinapalaya ang lock.`);
+        CLOUD_BACKUP_RUNTIME_STATS.abandonedSessions++;
         cleanupCloudBackupUploadSession(uploadId);
     }, CLOUD_BACKUP_CHUNK_SESSION_IDLE_TIMEOUT_MS);
     if (typeof session.idleTimer.unref === 'function') session.idleTimer.unref();
@@ -13316,6 +13363,7 @@ app.post('/relay/cloud-backup/upload/chunk', requireApiKey, requireAllowedDevice
     const installationId = String(req.query.installationId || '');
     const session = uploadId && CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS.get(uploadId);
     if (!session || session.installationId !== installationId) {
+        recordCloudBackupFailure('session', installationId, 'Unknown or expired upload session (client retried after a restart/timeout, or sent a wrong id).');
         return res.status(404).json({ success: false, message: 'Unknown or expired upload session. Start a new cloud backup upload.' });
     }
     const chunk = req.body;
@@ -13324,6 +13372,7 @@ app.post('/relay/cloud-backup/upload/chunk', requireApiKey, requireAllowedDevice
     }
     if (session.receivedBytes + chunk.length > session.totalBytes) {
         cleanupCloudBackupUploadSession(uploadId);
+        recordCloudBackupFailure('session', installationId, 'Client sent more bytes than declared at upload start.');
         return res.status(400).json({ success: false, message: 'Received more bytes than declared at upload start — aborting session. Please start a new sync.' });
     }
     session.chunks.push(chunk);
@@ -13341,9 +13390,11 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
     const trigger = (req.body && req.body.trigger === 'automatic') ? 'automatic' : 'manual';
     const session = uploadId && CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS.get(String(uploadId));
     if (!session || session.installationId !== installationId) {
+        recordCloudBackupFailure('session', installationId, 'Unknown or expired upload session (client retried after a restart/timeout, or sent a wrong id).');
         return res.status(404).json({ success: false, message: 'Unknown or expired upload session. Start a new cloud backup upload.' });
     }
     if (session.receivedBytes !== session.totalBytes) {
+        recordCloudBackupFailure('session', installationId, `Incomplete upload — received ${session.receivedBytes} of ${session.totalBytes} bytes.`);
         return res.status(400).json({
             success: false,
             message: `Incomplete upload — received ${session.receivedBytes} of ${session.totalBytes} declared bytes. No partial backup was saved; keep sending the remaining chunks or start a new sync.`
@@ -13396,6 +13447,7 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
                 message: `The uploaded backup decompressed to more data than your ${CLOUD_BACKUP_PLANS[session.tier] ? CLOUD_BACKUP_PLANS[session.tier].name : session.tier} storage allowance (${session.quotaMB} MB limit) allows. Upgrade your Cloud Backup plan or free up space before syncing.`
             });
         }
+        recordCloudBackupFailure('parse', installationId, (err && err.message) || 'Could not parse the assembled backup data.');
         return res.status(400).json({ success: false, message: 'Could not parse the assembled backup data as JSON — the upload may have been corrupted in transit. Please try syncing again.' });
     }
     const { storeName, modules, moduleNames, totalRecords } = parsedBody || {};
@@ -13540,6 +13592,7 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
                     console.error('⚠️ CLOUD_TOKENS: failed to refund after a failed sync write:', refundErr.message);
                 });
             }
+            recordCloudBackupFailure('sync', installationId, friendlyMessage, { refunded: !!(tokenConsumeResult && tokenConsumeResult.tokensCharged > 0), transient: anyTransient, modules: failedModules.map(f => f.module) });
             return res.status(500).json({ success: false, message: friendlyMessage, failedModules: failedModules.map(f => f.module) });
         }
         await runPgWriteTx(pgPool, async (client) => {
@@ -13558,6 +13611,7 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
             );
         });
         logActivity(installationId, 'cloud_backup_sync', { moduleCount: Object.keys(modules).length, totalRecords: totalRecords || null, storeName: storeName || null, sizeBytes: totalSizeBytes });
+        CLOUD_BACKUP_RUNTIME_STATS.syncOk++;
         // AYOS/BAGO: TAPOS na ang buong pagsulat sa Postgres (successful,
         // hindi kasama ang mga naunang gate/checks) — dito lang natin
         // masusukat ang AKTWAL na tagal ng compute na ito. Idinaragdag ito
@@ -13597,6 +13651,7 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
                 console.error('⚠️ CLOUD_TOKENS: failed to refund after a failed sync write:', refundErr.message);
             });
         }
+        recordCloudBackupFailure('sync', installationId, err.message, { refunded: !!(tokenConsumeResult && tokenConsumeResult.tokensCharged > 0), transient: isTransientPgConnectionError(err) });
         res.status(500).json({ success: false, message: friendlyMessage });
     } finally {
         cleanupCloudBackupUploadSession(String(uploadId));
@@ -15894,6 +15949,843 @@ app.post('/relay/admin/api/client-cost-allocation/maintenance-fee', requireAdmin
     saveClientMaintenanceFeeConfig(clientMaintenanceFeeConfig);
     res.json({ success: true, clientMaintenanceFeeConfig });
 });
+// ===================================================================
+// CLOUD BACKUP CONTROL CENTER (admin) — isang tawag na nagbibigay ng
+// BUONG larawan ng Cloud Backup: fleet, storage/Neon capacity, per-client
+// health, plans/MRR, finance, risk (stale/quota/utang/retention), events
+// at calibration. READ-ONLY lahat — wala itong binabago sa wallet,
+// ledger, backup data o presyo. (Ang mga aksyon — retention purge,
+// actual-bill, pricing — ay gamit pa rin ang mga dati nang endpoint.)
+//
+// Mga thresholds ng "health" ay galing sa query param (may sane defaults
+// at clamped) para ma-tune ng developer mula sa page nang walang redeploy:
+//   nearQuotaPercent (default 80), staleHours (default 36),
+//   restoreFlag30d (default 3), expiringSoonDays (default 7)
+// ===================================================================
+const CLOUD_BACKUP_SIZE_HISTORY_KEY = 'cloud-backup-size-history';
+let cloudBackupSizeHistoryPromise = null;
+function loadCloudBackupSizeHistory() {
+    if (!cloudBackupSizeHistoryPromise) {
+        cloudBackupSizeHistoryPromise = getPersistentJSON(CLOUD_BACKUP_SIZE_HISTORY_KEY, [])
+            .then((stored) => (Array.isArray(stored)
+                ? stored.filter((e) => e && typeof e.day === 'string' && Number.isFinite(Number(e.bytes))).map((e) => ({ day: e.day, bytes: Number(e.bytes), clients: Number(e.clients) || 0 }))
+                : []))
+            .catch(() => []);
+    }
+    return cloudBackupSizeHistoryPromise;
+}
+async function recordCloudBackupSizeSnapshot(totalBytes, clientCount) {
+    if (!Number.isFinite(totalBytes) || totalBytes < 0) return;
+    const hist = await loadCloudBackupSizeHistory();
+    const day = new Date().toISOString().slice(0, 10);
+    const last = hist.length ? hist[hist.length - 1] : null;
+    if (last && last.day === day) {
+        if (last.bytes === totalBytes && last.clients === clientCount) return;
+        last.bytes = totalBytes;
+        last.clients = clientCount;
+    } else {
+        hist.push({ day, bytes: totalBytes, clients: clientCount });
+        if (hist.length > 180) hist.splice(0, hist.length - 180);
+    }
+    setPersistentJSON(CLOUD_BACKUP_SIZE_HISTORY_KEY, hist);
+}
+async function runCloudBackupSizeSnapshotSweep() {
+    if (!pgPool) return;
+    try {
+        const { rows } = await queryWithRetry(
+            pgPool,
+            'SELECT COALESCE(SUM(size_bytes), 0)::float8 AS bytes, COUNT(*)::int AS n FROM cloud_backup_meta WHERE size_bytes > 0',
+            []
+        );
+        const r = rows[0] || {};
+        await recordCloudBackupSizeSnapshot(Number(r.bytes) || 0, Number(r.n) || 0);
+    } catch (err) {
+        console.warn('⚠️ CLOUD_BACKUP size snapshot failed:', err.message);
+    }
+}
+setInterval(runCloudBackupSizeSnapshotSweep, 6 * 60 * 60 * 1000);
+setTimeout(runCloudBackupSizeSnapshotSweep, 240 * 1000);
+
+function cbccClamp(v, lo, hi, dflt) {
+    const n = Number(v);
+    return (v !== undefined && v !== null && v !== '' && Number.isFinite(n) && n >= lo && n <= hi) ? n : dflt;
+}
+function cbccThresholds(q) {
+    const src = q || {};
+    return {
+        nearQuotaPercent: cbccClamp(src.nearQuotaPercent, 1, 100, 80),
+        staleHours: cbccClamp(src.staleHours, 1, 24 * 90, 36),
+        restoreFlag30d: cbccClamp(src.restoreFlag30d, 1, 1000, 3),
+        expiringSoonDays: cbccClamp(src.expiringSoonDays, 1, 90, 7)
+    };
+}
+function cbccR2(x) { return Math.round((Number(x) || 0) * 100) / 100; }
+function cbccMB(bytes) { return cbccR2((Number(bytes) || 0) / (1024 * 1024)); }
+function cbccMs(v) {
+    if (v === null || v === undefined) return null;
+    const t = new Date(v).getTime();
+    return Number.isFinite(t) ? t : null;
+}
+function cbccPrevMonthStr() {
+    const d = new Date();
+    const prev = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 1));
+    return `${prev.getUTCFullYear()}-${String(prev.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+function cbccGrowth(hist) {
+    if (!Array.isArray(hist) || hist.length < 2) return null;
+    const last = hist[hist.length - 1];
+    const lastT = Date.parse(last.day + 'T00:00:00Z');
+    if (!Number.isFinite(lastT)) return null;
+    const targetT = lastT - 7 * 24 * 60 * 60 * 1000;
+    let first = hist[0];
+    for (const e of hist) {
+        const t = Date.parse(e.day + 'T00:00:00Z');
+        if (Number.isFinite(t) && t >= targetT) { first = e; break; }
+    }
+    const firstT = Date.parse(first.day + 'T00:00:00Z');
+    const days = (lastT - firstT) / (24 * 60 * 60 * 1000);
+    if (!Number.isFinite(days) || days < 1) return null;
+    return { perDayBytes: (last.bytes - first.bytes) / days, windowDays: Math.round(days * 10) / 10 };
+}
+const CBCC_SEVERITY = { ok: 0, info: 0, warn: 1, danger: 2 };
+
+async function buildCloudBackupControlCenter(th) {
+    const now = Date.now();
+    const DAY = 24 * 60 * 60 * 1000;
+    const errors = [];
+    const safe = async (label, promise, fallback) => {
+        try { return await promise; } catch (err) {
+            errors.push({ part: label, message: String((err && err.message) || err).slice(0, 200) });
+            return fallback;
+        }
+    };
+    const q = (text, params) => queryWithRetry(pgPool, text, params || []);
+
+    const [
+        metaRes, walletRes, winRes, dailyRes, hodRes, perClientRes, ledgerRes, purchaseRes, tableRes,
+        dbBytes, topTables, neonUsage, fx, retentionNow, retentionSoon, alloc, sizeHistory
+    ] = await Promise.all([
+        safe('meta', q('SELECT installation_id, store_name, total_records, module_count, size_bytes, last_sync_at, first_sync_at, sync_count, restore_count, last_restore_at FROM cloud_backup_meta'), { rows: [] }),
+        safe('wallets', q('SELECT installation_id, balance_tokens, auto_sync_enabled, debt_since, reserved_tokens, cost_safety_mode FROM cloud_token_wallets'), { rows: [] }),
+        safe('hourly-windows', q(
+            `SELECT
+                COALESCE(SUM(sync_count) FILTER (WHERE hour_start >= now() - interval '24 hours'), 0)::float8 AS syncs24,
+                COALESCE(SUM(sync_count) FILTER (WHERE hour_start >= now() - interval '7 days'), 0)::float8 AS syncs7,
+                COALESCE(SUM(sync_count), 0)::float8 AS syncs30,
+                COALESCE(SUM(restore_count) FILTER (WHERE hour_start >= now() - interval '24 hours'), 0)::float8 AS restores24,
+                COALESCE(SUM(restore_count) FILTER (WHERE hour_start >= now() - interval '7 days'), 0)::float8 AS restores7,
+                COALESCE(SUM(restore_count), 0)::float8 AS restores30,
+                COALESCE(SUM(bytes_synced) FILTER (WHERE hour_start >= now() - interval '24 hours'), 0)::float8 AS bytes24,
+                COALESCE(SUM(bytes_synced) FILTER (WHERE hour_start >= now() - interval '7 days'), 0)::float8 AS bytes7,
+                COALESCE(SUM(bytes_synced), 0)::float8 AS bytes30,
+                COALESCE(SUM(compute_seconds) FILTER (WHERE hour_start >= now() - interval '24 hours'), 0)::float8 AS compute24,
+                COALESCE(SUM(compute_seconds) FILTER (WHERE hour_start >= now() - interval '7 days'), 0)::float8 AS compute7,
+                COALESCE(SUM(compute_seconds), 0)::float8 AS compute30,
+                COUNT(DISTINCT installation_id) FILTER (WHERE hour_start >= now() - interval '24 hours')::int AS active24,
+                COUNT(DISTINCT installation_id) FILTER (WHERE hour_start >= now() - interval '7 days')::int AS active7,
+                COUNT(DISTINCT installation_id)::int AS active30
+             FROM cloud_backup_usage_hourly
+             WHERE hour_start >= now() - interval '30 days'`), { rows: [{}] }),
+        safe('hourly-daily', q(
+            `SELECT to_char(hour_start AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS d,
+                    SUM(sync_count)::float8 AS syncs, SUM(restore_count)::float8 AS restores,
+                    SUM(bytes_synced)::float8 AS bytes, SUM(compute_seconds)::float8 AS compute,
+                    COUNT(DISTINCT installation_id)::int AS clients
+             FROM cloud_backup_usage_hourly
+             WHERE (hour_start AT TIME ZONE 'UTC') >= date_trunc('day', now() AT TIME ZONE 'UTC') - interval '13 days'
+             GROUP BY 1 ORDER BY 1`), { rows: [] }),
+        safe('hourly-hod', q(
+            `SELECT EXTRACT(HOUR FROM hour_start AT TIME ZONE 'UTC')::int AS h,
+                    SUM(sync_count)::float8 AS syncs, SUM(compute_seconds)::float8 AS compute
+             FROM cloud_backup_usage_hourly
+             WHERE hour_start >= now() - interval '14 days'
+             GROUP BY 1 ORDER BY 1`), { rows: [] }),
+        safe('hourly-per-client', q(
+            `SELECT installation_id,
+                    COALESCE(SUM(sync_count) FILTER (WHERE hour_start >= now() - interval '24 hours'), 0)::int AS s24,
+                    COALESCE(SUM(sync_count) FILTER (WHERE hour_start >= now() - interval '7 days'), 0)::int AS s7,
+                    COALESCE(SUM(sync_count), 0)::int AS s30,
+                    COALESCE(SUM(restore_count), 0)::int AS r30,
+                    COALESCE(SUM(bytes_synced) FILTER (WHERE hour_start >= now() - interval '7 days'), 0)::float8 AS b7,
+                    COALESCE(SUM(compute_seconds), 0)::float8 AS c30
+             FROM cloud_backup_usage_hourly
+             WHERE hour_start >= now() - interval '30 days'
+             GROUP BY installation_id`), { rows: [] }),
+        safe('ledger', q(
+            `SELECT COALESCE(category, '(none)') AS category, type, COUNT(*)::int AS n, COALESCE(SUM(tokens), 0)::float8 AS tokens
+             FROM cloud_token_ledger
+             WHERE created_at >= now() - interval '30 days'
+             GROUP BY 1, 2 ORDER BY 3 DESC`), { rows: [] }),
+        safe('purchases', q(
+            `SELECT
+                COUNT(*) FILTER (WHERE status = 'paid')::int AS paid_n,
+                COALESCE(SUM(amount_php) FILTER (WHERE status = 'paid'), 0)::float8 AS paid_php,
+                COALESCE(SUM(tokens) FILTER (WHERE status = 'paid'), 0)::float8 AS paid_tokens,
+                COUNT(*) FILTER (WHERE status = 'failed')::int AS failed_n,
+                COUNT(*) FILTER (WHERE status = 'pending' AND created_at < now() - interval '1 hour')::int AS stuck_pending_n
+             FROM cloud_token_purchases
+             WHERE created_at >= now() - interval '30 days'`), { rows: [{}] }),
+        safe('table-sizes', q(
+            `SELECT relname AS table_name, pg_total_relation_size(relid)::float8 AS bytes
+             FROM pg_catalog.pg_statio_user_tables
+             WHERE relname IN ('cloud_backup_modules','cloud_backup_meta','cloud_backup_usage_hourly','cloud_token_wallets','cloud_token_ledger','cloud_token_purchases','cloud_sync_activity')
+             ORDER BY 2 DESC`), { rows: [] }),
+        safe('db-size', getPgDatabaseSizeBytes(pgPool), null),
+        safe('top-tables', getTopTableSizes(pgPool, 8), []),
+        safe('neon-usage', getNeonProjectUsage(NEON_CLOUD_BACKUP_PROJECT_ID), null),
+        safe('exchange-rate', getUsdToPhpRate(), { rate: EXCHANGE_RATE_FALLBACK_USD_TO_PHP, source: 'fallback', fetchedAt: null }),
+        safe('retention-now', findCloudBackupRetentionCandidates(CLOUD_BACKUP_DATA_RETENTION_DAYS), []),
+        safe('retention-soon', findCloudBackupRetentionCandidates(Math.max(1, CLOUD_BACKUP_DATA_RETENTION_DAYS - 14)), []),
+        safe('cost-allocation', computeClientCostAllocation(), null),
+        safe('size-history', loadCloudBackupSizeHistory(), [])
+    ]);
+
+    const metaRows = metaRes.rows || [];
+    const walletRows = walletRes.rows || [];
+    const win = (winRes.rows && winRes.rows[0]) || {};
+    const rate = (fx && fx.rate) || EXCHANGE_RATE_FALLBACK_USD_TO_PHP;
+
+    const metaBy = new Map(metaRows.map((r) => [r.installation_id, r]));
+    const walletBy = new Map(walletRows.map((r) => [r.installation_id, r]));
+    const hourlyBy = new Map((perClientRes.rows || []).map((r) => [r.installation_id, r]));
+    const allocBy = new Map();
+    if (alloc && alloc.success && Array.isArray(alloc.clients)) {
+        for (const c of alloc.clients) allocBy.set(c.installationId, c);
+    }
+
+    // Union: lahat ng may backup data + lahat ng may Cloud Backup unlock
+    // (para makita rin ang nag-subscribe pero wala pang unang sync).
+    const ids = new Set(metaBy.keys());
+    for (const id of Object.keys(issuedUnlocks || {})) {
+        if (issuedUnlocks[id] && issuedUnlocks[id]['cloud_backup']) ids.add(id);
+    }
+
+    const clients = [];
+    for (const id of ids) {
+        const meta = metaBy.get(id) || null;
+        const wallet = walletBy.get(id) || null;
+        const hr = hourlyBy.get(id) || null;
+        const sub = getCloudBackupSubscriptionForClient(id);
+        const tierKey = (sub.tier && CLOUD_BACKUP_PLANS[sub.tier]) ? sub.tier : 'basic';
+        const plan = CLOUD_BACKUP_PLANS[tierKey];
+        let status = 'none';
+        if (sub.isLifetime) status = 'lifetime';
+        else if (sub.active) status = 'active';
+        else if (sub.expiresAt !== null) status = 'expired';
+
+        const sizeBytes = meta ? (Number(meta.size_bytes) || 0) : 0;
+        const hasBackup = sizeBytes > 0;
+        const sizeMB = cbccMB(sizeBytes);
+        const quotaMB = plan.storageQuotaMB;
+        const pctQuota = quotaMB > 0 ? (sizeMB / quotaMB) * 100 : 0;
+        const lastSyncMs = meta ? cbccMs(meta.last_sync_at) : null;
+        const ageMs = lastSyncMs !== null ? Math.max(0, now - lastSyncMs) : null;
+        const balance = wallet ? (Number(wallet.balance_tokens) || 0) : 0;
+        const autoSyncEnabled = wallet ? wallet.auto_sync_enabled !== false : true;
+        const debtSinceMs = wallet ? cbccMs(wallet.debt_since) : null;
+        const debtDays = (balance < 0 && debtSinceMs !== null) ? (now - debtSinceMs) / DAY : null;
+        const restore30 = hr ? (Number(hr.r30) || 0) : 0;
+        const label = deviceLabels.get(id) || null;
+
+        const issues = [];
+        const add = (level, code, text) => issues.push({ level, code, text });
+        const activeLike = status === 'active' || status === 'lifetime';
+
+        if (hasBackup && pctQuota > 100) add('danger', 'over_quota', `Over quota: ${sizeMB} MB of ${quotaMB} MB (${plan.name}).`);
+        else if (hasBackup && pctQuota >= th.nearQuotaPercent) add('warn', 'near_quota', `${cbccR2(pctQuota)}% of quota used (${sizeMB}/${quotaMB} MB).`);
+
+        if (hasBackup && activeLike && autoSyncEnabled && ageMs !== null && balance >= 0) {
+            const staleMs = th.staleHours * 3600 * 1000;
+            const criticalMs = Math.max(staleMs * 4, 7 * DAY);
+            if (ageMs > criticalMs) add('danger', 'stale_critical', `No backup for ${Math.floor(ageMs / DAY)} day(s) — expected about every ${cbccR2(plan.autoBackupIntervalMs / 3600000)}h.`);
+            else if (ageMs > staleMs) add('warn', 'stale', `Last backup ${cbccR2(ageMs / 3600000)}h ago (threshold ${th.staleHours}h).`);
+        }
+        if (!autoSyncEnabled && activeLike) add('info', 'auto_sync_off', 'Auto-sync is turned off by the client.');
+
+        if (balance < 0) {
+            let text = `In debt: ${cbccR2(balance)} tokens`;
+            let level = 'danger';
+            if (hasBackup && CLOUD_BACKUP_DEBT_PURGE_DAYS > 0 && debtDays !== null) {
+                const remaining = CLOUD_BACKUP_DEBT_PURGE_DAYS - debtDays;
+                text += remaining <= 0
+                    ? ` — past the ${CLOUD_BACKUP_DEBT_PURGE_DAYS}-day limit, backup is purged on the next daily sweep.`
+                    : ` — backup is purged in ~${Math.ceil(remaining)} day(s) if unpaid.`;
+            } else if (hasBackup && CLOUD_BACKUP_DEBT_PURGE_DAYS > 0) {
+                text += ' — debt start date not recorded yet.';
+            }
+            add(level, 'in_debt', text);
+        } else if (activeLike && hasBackup && balance === 0) {
+            add('info', 'zero_balance', 'Token balance is 0 — a sync that needs a whole token can be blocked.');
+        }
+
+        if (status === 'expired') {
+            const daysSince = Math.floor((now - sub.expiresAt) / DAY);
+            if (hasBackup) {
+                const remaining = CLOUD_BACKUP_DATA_RETENTION_DAYS - daysSince;
+                if (remaining <= 0) add(CLOUD_BACKUP_AUTO_PURGE_ENABLED ? 'danger' : 'warn', 'retention_due', `Expired ${daysSince}d ago — past the ${CLOUD_BACKUP_DATA_RETENTION_DAYS}-day retention. ${CLOUD_BACKUP_AUTO_PURGE_ENABLED ? 'Deleted on the next daily sweep.' : 'Auto-purge is OFF — purge manually.'}`);
+                else add('warn', 'expired', `Subscription expired ${daysSince}d ago — data deleted in ${remaining}d unless renewed.`);
+            } else {
+                add('info', 'expired', `Subscription expired ${daysSince}d ago (no backup data stored).`);
+            }
+        }
+        if (status === 'none' && hasBackup) add('warn', 'no_subscription', 'Backup data exists but there is no Cloud Backup subscription record.');
+        if (status === 'active' && sub.expiresAt !== null) {
+            const left = sub.expiresAt - now;
+            if (left >= 0 && left <= th.expiringSoonDays * DAY) add('info', 'expiring_soon', `Subscription ends in ${Math.max(0, Math.ceil(left / DAY))} day(s).`);
+        }
+        if (activeLike && !hasBackup) add('info', 'never_synced', 'Subscribed but has no backup data yet.');
+        if (restore30 >= th.restoreFlag30d) add('warn', 'restore_heavy', `${restore30} restores in the last 30 days.`);
+
+        let health = 'ok';
+        for (const it of issues) { if (CBCC_SEVERITY[it.level] > CBCC_SEVERITY[health]) health = it.level; }
+        if (health === 'info') health = 'ok';
+
+        let mrr = 0;
+        if (status === 'active') mrr = sub.billingCycle === 'yearly' ? plan.price.yearly / 12 : plan.price.monthly;
+        const al = allocBy.get(id) || null;
+        const baseCostPHP = al ? al.baseCostPHP : null;
+
+        clients.push({
+            installationId: id,
+            label,
+            storeName: meta ? (meta.store_name || null) : null,
+            status,
+            tier: sub.tier || null,
+            tierKey,
+            tierName: plan.name,
+            billingCycle: sub.billingCycle || null,
+            expiresAt: sub.expiresAt,
+            hasBackup,
+            sizeMB,
+            quotaMB,
+            pctQuota: cbccR2(pctQuota),
+            moduleCount: meta ? (meta.module_count === null ? null : Number(meta.module_count)) : null,
+            totalRecords: meta ? (meta.total_records === null ? null : Number(meta.total_records)) : null,
+            syncCount: meta ? (Number(meta.sync_count) || 0) : 0,
+            restoreCount: meta ? (Number(meta.restore_count) || 0) : 0,
+            lastSyncAt: lastSyncMs,
+            firstSyncAt: meta ? cbccMs(meta.first_sync_at) : null,
+            lastRestoreAt: meta ? cbccMs(meta.last_restore_at) : null,
+            ageHours: ageMs !== null ? cbccR2(ageMs / 3600000) : null,
+            intervalHours: cbccR2(plan.autoBackupIntervalMs / 3600000),
+            balanceTokens: cbccR2(balance),
+            autoSyncEnabled,
+            debtSince: debtSinceMs,
+            debtDays: debtDays !== null ? cbccR2(debtDays) : null,
+            reservedTokens: wallet ? cbccR2(wallet.reserved_tokens) : 0,
+            safetyMode: wallet ? (wallet.cost_safety_mode || null) : null,
+            syncs24h: hr ? hr.s24 : 0,
+            syncs7d: hr ? hr.s7 : 0,
+            syncs30d: hr ? hr.s30 : 0,
+            restores30d: restore30,
+            bytes7dMB: hr ? cbccMB(hr.b7) : 0,
+            compute30dSec: hr ? cbccR2(hr.c30) : 0,
+            mrrPHP: cbccR2(mrr),
+            baseCostPHP: baseCostPHP !== null ? cbccR2(baseCostPHP) : null,
+            marginPHP: baseCostPHP !== null ? cbccR2(mrr - baseCostPHP) : null,
+            health,
+            issues
+        });
+    }
+    clients.sort((a, b) => (CBCC_SEVERITY[b.health] - CBCC_SEVERITY[a.health]) || (b.sizeMB - a.sizeMB));
+
+    // ---------- Fleet totals ----------
+    const sumBy = (arr, f) => arr.reduce((s, x) => s + (Number(f(x)) || 0), 0);
+    const withBackup = clients.filter((c) => c.hasBackup);
+    const activeLikeClients = clients.filter((c) => c.status === 'active' || c.status === 'lifetime');
+    const hasIssue = (c, code) => c.issues.some((i) => i.code === code);
+    const totalSizeBytes = sumBy(metaRows, (r) => r.size_bytes);
+    const debtTokens = sumBy(walletRows.filter((w) => Number(w.balance_tokens) < 0), (w) => -Number(w.balance_tokens));
+    const prepaidTokens = sumBy(walletRows.filter((w) => Number(w.balance_tokens) > 0), (w) => w.balance_tokens);
+    const biggest = withBackup.reduce((m, c) => (!m || c.sizeMB > m.sizeMB ? c : m), null);
+    const mrrPHP = cbccR2(sumBy(clients, (c) => c.mrrPHP));
+    const committedQuotaMB = sumBy(activeLikeClients, (c) => c.quotaMB);
+    const fleet = {
+        clientsTotal: clients.length,
+        clientsWithBackup: withBackup.length,
+        statusCounts: {
+            active: clients.filter((c) => c.status === 'active').length,
+            lifetime: clients.filter((c) => c.status === 'lifetime').length,
+            expired: clients.filter((c) => c.status === 'expired').length,
+            none: clients.filter((c) => c.status === 'none').length
+        },
+        healthCounts: {
+            ok: clients.filter((c) => c.health === 'ok').length,
+            warn: clients.filter((c) => c.health === 'warn').length,
+            danger: clients.filter((c) => c.health === 'danger').length
+        },
+        totalSizeBytes,
+        totalSizeMB: cbccMB(totalSizeBytes),
+        avgSizeMB: withBackup.length ? cbccR2(cbccMB(totalSizeBytes) / withBackup.length) : 0,
+        biggest: biggest ? { installationId: biggest.installationId, label: biggest.label, storeName: biggest.storeName, sizeMB: biggest.sizeMB } : null,
+        committedQuotaMB,
+        committedQuotaUsedPercent: committedQuotaMB > 0 ? cbccR2((sumBy(activeLikeClients, (c) => c.sizeMB) / committedQuotaMB) * 100) : 0,
+        totalSyncsAllTime: sumBy(metaRows, (r) => r.sync_count),
+        totalRestoresAllTime: sumBy(metaRows, (r) => r.restore_count),
+        mrrPHP,
+        nearQuota: clients.filter((c) => hasIssue(c, 'near_quota')).length,
+        overQuota: clients.filter((c) => hasIssue(c, 'over_quota')).length,
+        stale: clients.filter((c) => hasIssue(c, 'stale')).length,
+        staleCritical: clients.filter((c) => hasIssue(c, 'stale_critical')).length,
+        inDebt: clients.filter((c) => hasIssue(c, 'in_debt')).length,
+        restoreHeavy: clients.filter((c) => hasIssue(c, 'restore_heavy')).length,
+        expiringSoon: clients.filter((c) => hasIssue(c, 'expiring_soon')).length,
+        autoSyncOff: clients.filter((c) => hasIssue(c, 'auto_sync_off')).length,
+        neverSynced: clients.filter((c) => hasIssue(c, 'never_synced')).length,
+        wallets: {
+            count: walletRows.length,
+            debtorCount: walletRows.filter((w) => Number(w.balance_tokens) < 0).length,
+            debtTokens: cbccR2(debtTokens),
+            prepaidTokens: cbccR2(prepaidTokens)
+        }
+    };
+
+    // Renewal forecast: active, non-lifetime clients whose subscription ends within 4 weeks.
+    const renewalWeeks = [0, 1, 2, 3].map((w) => {
+        const g = clients.filter((c) => c.status === 'active' && c.expiresAt !== null && (c.expiresAt - now) >= w * 7 * DAY && (c.expiresAt - now) < (w + 1) * 7 * DAY);
+        return { week: w + 1, count: g.length, mrrPHP: cbccR2(sumBy(g, (c) => c.mrrPHP)) };
+    });
+    fleet.renewalWeeks = renewalWeeks;
+    fleet.mrrExpiring28dPHP = cbccR2(sumBy(renewalWeeks, (w) => w.mrrPHP));
+    fleet.expiring28dCount = renewalWeeks.reduce((s, w) => s + w.count, 0);
+
+    // ---------- Plans / tiers ----------
+    const tierIds = ['basic', 'standard', 'pro'];
+    const plans = tierIds.filter((t) => CLOUD_BACKUP_PLANS[t]).map((t) => {
+        const p = CLOUD_BACKUP_PLANS[t];
+        const group = clients.filter((c) => c.tierKey === t && c.status !== 'lifetime' && c.status !== 'none');
+        const act = group.filter((c) => c.status === 'active');
+        return {
+            id: t,
+            name: p.name,
+            priceMonthly: p.price.monthly,
+            priceYearly: p.price.yearly,
+            quotaMB: p.storageQuotaMB,
+            autoBackupIntervalHours: cbccR2(p.autoBackupIntervalMs / 3600000),
+            customized: !!(cloudBackupPlanOverrides && cloudBackupPlanOverrides[t] && Object.keys(cloudBackupPlanOverrides[t]).length),
+            clients: group.length,
+            active: act.length,
+            expired: group.length - act.length,
+            sizeMB: cbccR2(sumBy(group, (c) => c.sizeMB)),
+            nearQuota: group.filter((c) => c.hasBackup && c.pctQuota >= th.nearQuotaPercent).length,
+            mrrPHP: cbccR2(sumBy(act, (c) => c.mrrPHP)),
+            costPHP: allocBy.size ? cbccR2(sumBy(group, (c) => c.baseCostPHP || 0)) : null,
+            avgUsedPercent: group.filter((c) => c.hasBackup).length
+                ? cbccR2(sumBy(group.filter((c) => c.hasBackup), (c) => c.pctQuota) / group.filter((c) => c.hasBackup).length)
+                : 0
+        };
+    });
+    plans.forEach((p) => { p.marginPHP = p.costPHP !== null ? cbccR2(p.mrrPHP - p.costPHP) : null; });
+    const lifetimeGroup = clients.filter((c) => c.status === 'lifetime');
+    const noneGroup = clients.filter((c) => c.status === 'none');
+    const specialGroups = {
+        lifetime: { clients: lifetimeGroup.length, sizeMB: cbccR2(sumBy(lifetimeGroup, (c) => c.sizeMB)) },
+        none: { clients: noneGroup.length, sizeMB: cbccR2(sumBy(noneGroup, (c) => c.sizeMB)) }
+    };
+
+    // ---------- Neon / storage capacity ----------
+    const configuredPlan = neonConfiguredPlans.cloudBackup || 'free';
+    const detectedPlan = neonUsage ? normalizeNeonPlanId(neonUsage.planId) : null;
+    const effectivePlan = detectedPlan || configuredPlan;
+    const planDef = NEON_PRICING[effectivePlan] || null;
+    const GiB = 1024 * 1024 * 1024;
+    const includedStorageGB = (planDef && typeof planDef.includedStorageGB === 'number') ? planDef.includedStorageGB : null;
+    const includedComputeHours = (planDef && typeof planDef.includedComputeHours === 'number') ? planDef.includedComputeHours : null;
+    const storageCapBytes = (effectivePlan === 'free' && includedStorageGB) ? includedStorageGB * GiB : null;
+    const growth = cbccGrowth(sizeHistory);
+    let daysToCap = null;
+    if (storageCapBytes && Number.isFinite(dbBytes) && growth && growth.perDayBytes > 0) {
+        daysToCap = Math.max(0, (storageCapBytes - dbBytes) / growth.perDayBytes);
+    }
+    const realCost = neonUsage ? safeCall(() => computeNeonRealCost(neonUsage, configuredPlan)) : null;
+    const projection = neonUsage ? safeCall(() => projectFullPeriodCUHours(neonUsage)) : null;
+    const cuHoursUsed = (neonUsage && neonUsage.computeTimeSeconds !== null && neonUsage.computeTimeSeconds !== undefined) ? neonUsage.computeTimeSeconds / 3600 : null;
+    function safeCall(fn) { try { return fn(); } catch (err) { errors.push({ part: 'neon-calc', message: String(err.message || err).slice(0, 200) }); return null; } }
+    const neon = {
+        apiConfigured: NEON_API_CONFIGURED,
+        projectIdSet: !!NEON_CLOUD_BACKUP_PROJECT_ID,
+        usageReachable: !!neonUsage,
+        configuredPlan,
+        detectedPlan,
+        effectivePlan,
+        planMismatch: !!(detectedPlan && detectedPlan !== configuredPlan),
+        includedStorageGB,
+        includedComputeHours,
+        storageCapBytes,
+        dbBytes: Number.isFinite(dbBytes) ? dbBytes : null,
+        dbMB: Number.isFinite(dbBytes) ? cbccMB(dbBytes) : null,
+        dbPercentOfCap: (storageCapBytes && Number.isFinite(dbBytes)) ? cbccR2((dbBytes / storageCapBytes) * 100) : null,
+        sharedWithDevices: !DEVICES_DB_IS_SEPARATE,
+        cuHoursUsed: cuHoursUsed !== null ? cbccR2(cuHoursUsed) : null,
+        computePercentOfIncluded: (effectivePlan === 'free' && includedComputeHours && cuHoursUsed !== null) ? cbccR2((cuHoursUsed / includedComputeHours) * 100) : null,
+        usage: neonUsage,
+        realCost,
+        projection,
+        growth: growth ? { perDayMB: cbccR2(growth.perDayBytes / (1024 * 1024)), windowDays: growth.windowDays } : null,
+        daysToCap: daysToCap !== null ? Math.round(daysToCap) : null,
+        sizeHistory: (sizeHistory || []).slice(-60).map((e) => ({ day: e.day, mb: cbccMB(e.bytes), clients: e.clients })),
+        ownTables: (tableRes.rows || []).map((r) => ({ table: r.table_name, mb: cbccMB(r.bytes) })),
+        topTables: (topTables || []).map((t) => ({ table: t.table, mb: cbccMB(t.bytes) }))
+    };
+
+    // ---------- Economics ----------
+    const economics = {
+        mrrPHP,
+        allocationAvailable: !!(alloc && alloc.success),
+        allocationMessage: (alloc && alloc.success) ? null : ((alloc && alloc.message) || 'Cost allocation is not available yet.'),
+        totalCostPHP: (alloc && alloc.success) ? alloc.totalCostPHP : null,
+        totalComputeCostPHP: (alloc && alloc.success) ? alloc.totalComputeCostPHP : null,
+        totalStorageCostPHP: (alloc && alloc.success) ? alloc.totalStorageCostPHP : null,
+        costBasis: (alloc && alloc.success) ? alloc.costBasis : null,
+        costWarning: (alloc && alloc.success) ? alloc.warning : null,
+        estMarginPHP: (alloc && alloc.success) ? cbccR2(mrrPHP - alloc.totalCostPHP) : null,
+        exchangeRate: { usdToPhp: rate, source: (fx && fx.source) || 'unknown', fetchedAt: (fx && fx.fetchedAt) || null },
+        ledger30d: (ledgerRes.rows || []).map((r) => ({ category: r.category, type: r.type, count: r.n, tokens: cbccR2(r.tokens) })),
+        purchases30d: {
+            paidCount: Number((purchaseRes.rows[0] || {}).paid_n) || 0,
+            paidPHP: cbccR2((purchaseRes.rows[0] || {}).paid_php),
+            paidTokens: cbccR2((purchaseRes.rows[0] || {}).paid_tokens),
+            failedCount: Number((purchaseRes.rows[0] || {}).failed_n) || 0,
+            stuckPendingCount: Number((purchaseRes.rows[0] || {}).stuck_pending_n) || 0
+        },
+        actualBillMonths: Object.keys(cloudBackupActualBills || {}).sort().reverse().slice(0, 6),
+        prevMonth: cbccPrevMonthStr(),
+        prevMonthBillEntered: !!(cloudBackupActualBills && cloudBackupActualBills[cbccPrevMonthStr()])
+    };
+
+    // ---------- Activity ----------
+    const timelineMap = new Map((dailyRes.rows || []).map((r) => [r.d, r]));
+    const timeline = [];
+    for (let i = 13; i >= 0; i--) {
+        const d = new Date(now - i * DAY).toISOString().slice(0, 10);
+        const r = timelineMap.get(d);
+        timeline.push({
+            day: d,
+            syncs: r ? Number(r.syncs) || 0 : 0,
+            restores: r ? Number(r.restores) || 0 : 0,
+            mb: r ? cbccMB(r.bytes) : 0,
+            computeSec: r ? cbccR2(r.compute) : 0,
+            clients: r ? Number(r.clients) || 0 : 0
+        });
+    }
+    const hodMap = new Map((hodRes.rows || []).map((r) => [Number(r.h), r]));
+    const hourOfDay = [];
+    for (let h = 0; h < 24; h++) {
+        const r = hodMap.get(h);
+        hourOfDay.push({ h, syncs: r ? Number(r.syncs) || 0 : 0, computeSec: r ? cbccR2(r.compute) : 0 });
+    }
+    const activity = {
+        hourOfDay,
+        windows: {
+            h24: { syncs: win.syncs24 || 0, restores: win.restores24 || 0, mb: cbccMB(win.bytes24), computeSec: cbccR2(win.compute24), activeClients: win.active24 || 0 },
+            d7: { syncs: win.syncs7 || 0, restores: win.restores7 || 0, mb: cbccMB(win.bytes7), computeSec: cbccR2(win.compute7), activeClients: win.active7 || 0 },
+            d30: { syncs: win.syncs30 || 0, restores: win.restores30 || 0, mb: cbccMB(win.bytes30), computeSec: cbccR2(win.compute30), activeClients: win.active30 || 0 }
+        },
+        timeline
+    };
+
+    // ---------- Events (activityLog) + blocked reasons ----------
+    const isCbEvent = (e) => e && typeof e.type === 'string' && (e.type.startsWith('cloud_backup') || e.type === 'cloud_token_purchase_paid' || e.type === 'cost_safety_net_purchase_blocked');
+    const log = Array.isArray(activityLog) ? activityLog : [];
+    const blocked = { h24: {}, d7: {} };
+    let blockedTotal24 = 0;
+    for (const e of log) {
+        if (!e || (e.type !== 'cloud_backup_blocked' && e.type !== 'cloud_backup_restore_blocked')) continue;
+        const reason = (e.type === 'cloud_backup_restore_blocked' ? 'restore: ' : 'sync: ') + String((e.details && e.details.reason) || 'unknown');
+        const age = now - (Number(e.at) || 0);
+        if (age <= DAY) { blocked.h24[reason] = (blocked.h24[reason] || 0) + 1; blockedTotal24++; }
+        if (age <= 7 * DAY) blocked.d7[reason] = (blocked.d7[reason] || 0) + 1;
+    }
+    const events = log.filter(isCbEvent).slice(0, 60).map((e) => ({
+        at: e.at,
+        type: e.type,
+        installationId: e.installationId || null,
+        label: e.installationId ? (deviceLabels.get(e.installationId) || null) : null,
+        count: e.count || 1,
+        details: e.details || {}
+    }));
+    const oldestLog = log.length ? log[log.length - 1].at : null;
+
+    // ---------- Runtime ----------
+    const sessions = [];
+    for (const [uploadId, s] of CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS.entries()) {
+        sessions.push({
+            uploadIdShort: String(uploadId).slice(0, 8),
+            installationId: s.installationId,
+            label: deviceLabels.get(s.installationId) || null,
+            tier: s.tier,
+            totalMB: cbccMB(s.totalBytes),
+            receivedMB: cbccMB(s.receivedBytes),
+            ageSec: Math.round((now - (s.createdAt || now)) / 1000)
+        });
+    }
+    const st = CLOUD_BACKUP_RUNTIME_STATS;
+    const cs = (neonPricingOverrides && neonPricingOverrides.cloudBackupSyncCompute) || {};
+    const cc = NEON_PRICING.cloudBackupSyncCompute || NEON_PRICING_BASE.cloudBackupSyncCompute;
+    const runtime = {
+        processUptimeSec: Math.round(process.uptime()),
+        countersSince: st.startedAt,
+        syncOk: st.syncOk,
+        syncFailed: st.syncFailed,
+        restoreOk: st.restoreOk,
+        restoreFailed: st.restoreFailed,
+        sessionRejects: st.sessionRejects,
+        refundsAfterFailure: st.refundsAfterFailure,
+        abandonedSessions: st.abandonedSessions,
+        recentFailures: st.recentFailures.map((f) => ({ ...f, label: f.installationId ? (deviceLabels.get(f.installationId) || null) : null })),
+        sessionsInFlight: sessions,
+        blocked: { h24: blocked.h24, d7: blocked.d7, total24h: blockedTotal24 },
+        activityLogWindowStart: oldestLog,
+        activityLogSize: log.length
+    };
+    const config = {
+        retentionDays: CLOUD_BACKUP_DATA_RETENTION_DAYS,
+        autoPurgeEnabled: CLOUD_BACKUP_AUTO_PURGE_ENABLED,
+        debtPurgeDays: CLOUD_BACKUP_DEBT_PURGE_DAYS,
+        historyStorageFactor: CLOUD_BACKUP_HISTORY_STORAGE_FACTOR,
+        safetyMarginMultiplier: CLOUD_BACKUP_COST_SAFETY_MARGIN_MULTIPLIER,
+        minBillableSyncSeconds: CLOUD_BACKUP_MIN_BILLABLE_SYNC_SECONDS,
+        autosuspendTailSeconds: NEON_AUTOSUSPEND_TAIL_SECONDS,
+        chunkSizeMB: cbccMB(CLOUD_BACKUP_CHUNK_SIZE_BYTES),
+        sessionIdleTimeoutMin: CLOUD_BACKUP_CHUNK_SESSION_IDLE_TIMEOUT_MS / 60000,
+        syncActivityRetentionDays: CLOUD_SYNC_ACTIVITY_RETENTION_DAYS
+    };
+    const calibration = {
+        samples: Number(cs.measuredSampleCount) || 0,
+        minSamples: CLOUD_BACKUP_TIMING_MIN_SAMPLES,
+        maxSamples: CLOUD_BACKUP_TIMING_MAX_SAMPLES,
+        calibrated: !!cs.calibrated,
+        assumedCU: cc.assumedCU,
+        baseSeconds: Math.round(cc.assumedBaseSeconds * 10000) / 10000,
+        secondsPerMB: Math.round(cc.assumedSecondsPerMB * 10000) / 10000
+    };
+
+    // Sample cost matrix (per tier x laki ng backup)
+    const costSamples = [];
+    try {
+        const sizes = [0.5, 1, 5, 25, 100];
+        for (const t of tierIds) {
+            const p = CLOUD_BACKUP_PLANS[t];
+            if (!p) continue;
+            const syncsPerMonth = Math.max(1, Math.round((30 * DAY) / p.autoBackupIntervalMs));
+            for (const mb of sizes) {
+                const bytes = mb * 1024 * 1024;
+                const perSync = computeRealCloudBackupSyncCostPHP(bytes, t, rate);
+                const perRestore = computeRealCloudBackupRestoreCostPHP(bytes, t, rate);
+                const monthlyStorage = computeStorageHoldingFeeCostPHP(bytes, STORAGE_HOLDING_FEE_MONTH_MS, rate);
+                const monthlySync = perSync * syncsPerMonth;
+                costSamples.push({
+                    tier: t,
+                    sizeMB: mb,
+                    perSyncPHP: Math.round(perSync * 1000) / 1000,
+                    perRestorePHP: Math.round(perRestore * 1000) / 1000,
+                    syncsPerMonthMax: syncsPerMonth,
+                    monthlySyncPHPMax: cbccR2(monthlySync),
+                    monthlyStoragePHP: cbccR2(monthlyStorage),
+                    monthlyTotalPHPMax: cbccR2(monthlySync + monthlyStorage),
+                    priceMonthly: p.price.monthly,
+                    marginPHPWorstCase: cbccR2(p.price.monthly - monthlySync - monthlyStorage)
+                });
+            }
+        }
+    } catch (err) {
+        errors.push({ part: 'cost-samples', message: String(err.message || err).slice(0, 200) });
+    }
+
+    // ---------- Risk lists ----------
+    const mapCand = (c) => ({
+        installationId: c.installationId, label: c.label, storeName: c.storeName, sizeMB: c.sizeMB,
+        daysSinceExpiry: c.daysSinceExpiry, expiryKnown: c.expiryKnown, estMonthlyStorageCostPHP: c.estMonthlyStorageCostPHP, lastSyncAt: cbccMs(c.lastSyncAt)
+    });
+    const nowIds = new Set((retentionNow || []).map((c) => c.installationId));
+    const risk = {
+        retentionNow: (retentionNow || []).map(mapCand),
+        retentionSoon: (retentionSoon || []).filter((c) => !nowIds.has(c.installationId)).map(mapCand),
+        debtPurge: clients.filter((c) => c.hasBackup && c.balanceTokens < 0).map((c) => ({
+            installationId: c.installationId, label: c.label, storeName: c.storeName, sizeMB: c.sizeMB,
+            balanceTokens: c.balanceTokens, debtDays: c.debtDays,
+            purgeInDays: (CLOUD_BACKUP_DEBT_PURGE_DAYS > 0 && c.debtDays !== null) ? cbccR2(CLOUD_BACKUP_DEBT_PURGE_DAYS - c.debtDays) : null
+        })).sort((a, b) => (a.purgeInDays === null ? 1e9 : a.purgeInDays) - (b.purgeInDays === null ? 1e9 : b.purgeInDays))
+    };
+
+    // ---------- Setup checklist ----------
+    const setup = {
+        postgres: !!pgPool,
+        devicesDbSeparate: DEVICES_DB_IS_SEPARATE,
+        neonApiKey: !!NEON_API_KEY,
+        neonProjectId: !!NEON_CLOUD_BACKUP_PROJECT_ID,
+        neonUsageReachable: !!neonUsage,
+        planMismatch: neon.planMismatch,
+        configuredPlan,
+        detectedPlan,
+        exchangeRateLive: !!(fx && typeof fx.source === 'string' && fx.source.includes('live') && !fx.source.includes('stale')),
+        calibrated: calibration.calibrated,
+        prevMonthBillEntered: economics.prevMonthBillEntered,
+        prevMonth: economics.prevMonth,
+        autoPurgeEnabled: CLOUD_BACKUP_AUTO_PURGE_ENABLED,
+        debtPurgeEnabled: CLOUD_BACKUP_DEBT_PURGE_DAYS > 0
+    };
+
+    // ---------- Alerts ----------
+    const alerts = [];
+    const addAlert = (level, key, text, section) => alerts.push({ level, key, text, section: section || null });
+    if (errors.length) addAlert('warn', 'partial', `Some data could not be loaded (${errors.map((e) => e.part).join(', ')}) — figures below may be incomplete.`, 'status');
+    if (!NEON_API_CONFIGURED) addAlert('warn', 'neon-api', 'Neon API is not configured (NEON_API_KEY / NEON_CLOUD_BACKUP_PROJECT_ID) — real usage and cost are unavailable.', 'setup');
+    else if (!neonUsage) addAlert('warn', 'neon-unreachable', 'Neon API is configured but the usage request failed — check the key / project ID.', 'setup');
+    if (neon.planMismatch) addAlert('warn', 'plan-mismatch', `Neon reports plan "${detectedPlan}" but the admin dropdown says "${configuredPlan}" — sync/restore cost estimates use the dropdown.`, 'setup');
+    if (neon.dbPercentOfCap !== null) {
+        if (neon.dbPercentOfCap >= 100) addAlert('danger', 'storage-cap', `Database is at ${neon.dbPercentOfCap}% of the Free Neon storage cap — writes may fail. Upgrade the Neon plan.`, 'capacity');
+        else if (neon.dbPercentOfCap >= 80) addAlert('warn', 'storage-cap', `Database is at ${neon.dbPercentOfCap}% of the Free Neon storage cap.`, 'capacity');
+    }
+    if (neon.computePercentOfIncluded !== null && neon.computePercentOfIncluded >= 80) {
+        addAlert(neon.computePercentOfIncluded >= 100 ? 'danger' : 'warn', 'compute-cap', `Neon Free compute is at ${neon.computePercentOfIncluded}% of the included ${includedComputeHours} CU-hours this period.`, 'capacity');
+    }
+    if (daysToCap !== null && daysToCap <= 30) addAlert(daysToCap <= 7 ? 'danger' : 'warn', 'cap-forecast', `At the current growth (${neon.growth.perDayMB} MB/day) the Free storage cap is reached in about ${Math.round(daysToCap)} day(s).`, 'capacity');
+    if (fleet.overQuota) addAlert('danger', 'over-quota', `${fleet.overQuota} client(s) are over their storage quota.`, 'risks');
+    if (fleet.nearQuota) addAlert('warn', 'near-quota', `${fleet.nearQuota} client(s) are at ${th.nearQuotaPercent}%+ of their quota (upsell candidates).`, 'risks');
+    if (fleet.staleCritical) addAlert('danger', 'stale-critical', `${fleet.staleCritical} active client(s) have not backed up in a long time.`, 'risks');
+    if (fleet.stale) addAlert('warn', 'stale', `${fleet.stale} active client(s) are overdue for a backup (> ${th.staleHours}h).`, 'risks');
+    if (fleet.inDebt) addAlert('danger', 'in-debt', `${fleet.inDebt} client(s) are in token debt (${cbccR2(debtTokens)} tokens owed in total).`, 'finance');
+    const imminentDebt = risk.debtPurge.filter((d) => d.purgeInDays !== null && d.purgeInDays <= 7);
+    if (imminentDebt.length) addAlert('danger', 'debt-purge', `${imminentDebt.length} backup(s) will be purged within 7 days for unpaid debt.`, 'risks');
+    if (risk.retentionNow.length) addAlert(CLOUD_BACKUP_AUTO_PURGE_ENABLED ? 'danger' : 'warn', 'retention-now', `${risk.retentionNow.length} expired backup(s) are past the ${CLOUD_BACKUP_DATA_RETENTION_DAYS}-day retention. ${CLOUD_BACKUP_AUTO_PURGE_ENABLED ? 'They are deleted on the next daily sweep.' : 'Auto-purge is OFF — purge them manually.'}`, 'risks');
+    if (risk.retentionSoon.length) addAlert('warn', 'retention-soon', `${risk.retentionSoon.length} expired backup(s) will reach the retention limit within 14 days.`, 'risks');
+    if (st.syncFailed > 0) addAlert('warn', 'sync-failed', `${st.syncFailed} sync failure(s) since the last restart.`, 'events');
+    if (st.restoreFailed > 0) addAlert('warn', 'restore-failed', `${st.restoreFailed} restore failure(s) since the last restart.`, 'events');
+    if (blockedTotal24 > 0) addAlert('info', 'blocked', `${blockedTotal24} sync/restore attempt(s) were blocked in the last 24h (quota, tokens, locked feature…).`, 'events');
+    if (economics.purchases30d.stuckPendingCount > 0) addAlert('warn', 'stuck-purchases', `${economics.purchases30d.stuckPendingCount} token purchase(s) have been pending for over an hour.`, 'finance');
+    if (!calibration.calibrated) addAlert('info', 'calibration', `Compute timing is still on seed values (${calibration.samples}/${calibration.minSamples} samples).`, 'calibration');
+    if (!setup.exchangeRateLive) addAlert('info', 'fx', 'USD→PHP rate is using a fallback/stale value.', 'setup');
+    if (!economics.prevMonthBillEntered && NEON_API_CONFIGURED) addAlert('info', 'bill', `The actual Neon bill for ${economics.prevMonth} has not been entered yet (needed for profit/loss).`, 'finance');
+    if (economics.estMarginPHP !== null && economics.estMarginPHP < 0) addAlert('warn', 'negative-margin', `Estimated monthly margin is negative (₱${economics.estMarginPHP}) — recurring plan revenue is below the Neon cost.`, 'finance');
+
+    {
+        const total = Math.max(1, fleet.clientsTotal);
+        let score = 100 - 70 * (fleet.healthCounts.danger / total) - 30 * (fleet.healthCounts.warn / total);
+        score -= 10 * alerts.filter((a) => a.level === 'danger' && ['storage-cap', 'compute-cap', 'cap-forecast'].includes(a.key)).length;
+        fleet.healthScore = Math.max(0, Math.min(100, Math.round(score)));
+    }
+    return {
+        success: true,
+        checkedAt: now,
+        thresholds: th,
+        partialErrors: errors,
+        alerts,
+        fleet,
+        plans,
+        specialGroups,
+        neon,
+        economics,
+        activity,
+        events,
+        runtime,
+        config,
+        calibration,
+        costSamples,
+        risk,
+        setup,
+        clients
+    };
+}
+
+let cbccCache = { key: '', at: 0, payload: null };
+const CBCC_CACHE_MS = 8000;
+app.get('/relay/admin/api/cloud-backup/control-center', requireAdminKey, async (req, res) => {
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured.' });
+    try {
+        const th = cbccThresholds(req.query);
+        const key = JSON.stringify(th);
+        if (req.query.force !== '1' && cbccCache.payload && cbccCache.key === key && (Date.now() - cbccCache.at) < CBCC_CACHE_MS) {
+            return res.json({ ...cbccCache.payload, cached: true });
+        }
+        const payload = await buildCloudBackupControlCenter(th);
+        cbccCache = { key, at: Date.now(), payload };
+        // Pagkatapos ng buong build, itala ang laki ngayong araw (para sa growth forecast).
+        recordCloudBackupSizeSnapshot(payload.fleet.totalSizeBytes, payload.fleet.clientsWithBackup).catch(() => {});
+        res.json({ ...payload, cached: false });
+    } catch (err) {
+        console.error('⚠️  /relay/admin/api/cloud-backup/control-center error:', err.message);
+        res.status(500).json({ success: false, message: 'Could not build the Cloud Backup control center: ' + err.message });
+    }
+});
+app.get('/relay/admin/api/cloud-backup/control-center/client/:installationId', requireAdminKey, async (req, res) => {
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured.' });
+    const installationId = String(req.params.installationId || '').trim();
+    if (!installationId) return res.status(400).json({ success: false, message: 'Missing installationId.' });
+    try {
+        const q = (text, params) => queryWithRetry(pgPool, text, params);
+        const [modules, daily, ledger, syncAct] = await Promise.all([
+            q('SELECT module, record_count, size_bytes, updated_at FROM cloud_backup_modules WHERE installation_id = $1 ORDER BY size_bytes DESC', [installationId]),
+            q(`SELECT to_char(hour_start AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS d, SUM(sync_count)::int AS syncs, SUM(restore_count)::int AS restores,
+                      SUM(bytes_synced)::float8 AS bytes, SUM(compute_seconds)::float8 AS compute
+               FROM cloud_backup_usage_hourly
+               WHERE installation_id = $1 AND hour_start >= now() - interval '14 days'
+               GROUP BY 1 ORDER BY 1 DESC`, [installationId]),
+            q('SELECT id, type, tokens, balance_after, note, category, trigger_type, created_at FROM cloud_token_ledger WHERE installation_id = $1 ORDER BY id DESC LIMIT 25', [installationId]),
+            q('SELECT id, trigger_type, cost_tokens, accrued_after, size_bytes, created_at FROM cloud_sync_activity WHERE installation_id = $1 ORDER BY id DESC LIMIT 15', [installationId])
+        ]);
+        const log = Array.isArray(activityLog) ? activityLog : [];
+        const events = log.filter((e) => e && e.installationId === installationId && typeof e.type === 'string' && e.type.startsWith('cloud_')).slice(0, 30)
+            .map((e) => ({ at: e.at, type: e.type, count: e.count || 1, details: e.details || {} }));
+        const failures = CLOUD_BACKUP_RUNTIME_STATS.recentFailures.filter((f) => f.installationId === installationId).slice(0, 15);
+        res.json({
+            success: true,
+            installationId,
+            modules: modules.rows.map((m) => ({ module: m.module, records: Number(m.record_count) || 0, sizeMB: cbccMB(m.size_bytes), updatedAt: cbccMs(m.updated_at) })),
+            daily: daily.rows.map((r) => ({ day: r.d, syncs: r.syncs, restores: r.restores, mb: cbccMB(r.bytes), computeSec: cbccR2(r.compute) })),
+            ledger: ledger.rows.map((r) => ({ id: String(r.id), type: r.type, tokens: cbccR2(r.tokens), balanceAfter: r.balance_after === null ? null : cbccR2(r.balance_after), note: r.note || null, category: r.category || null, trigger: r.trigger_type || null, at: cbccMs(r.created_at) })),
+            syncActivity: syncAct.rows.map((r) => ({ trigger: r.trigger_type, costTokens: Math.round(Number(r.cost_tokens) * 10000) / 10000, accruedAfter: Math.round(Number(r.accrued_after) * 10000) / 10000, sizeMB: r.size_bytes === null ? null : cbccMB(r.size_bytes), at: cbccMs(r.created_at) })),
+            events,
+            failures
+        });
+    } catch (err) {
+        console.error('⚠️  control-center client detail error:', err.message);
+        res.status(500).json({ success: false, message: 'Could not load this client\'s details: ' + err.message });
+    }
+});
+
+// What-if simulator: eksaktong parehong formula na ginagamit sa totoong singil (sync/restore/storage),
+// para makita ng admin ang gastos at margin ng isang hypothetical na client. READ-ONLY.
+app.get('/relay/admin/api/cloud-backup/control-center/simulate', requireAdminKey, async (req, res) => {
+    try {
+        const tier = CLOUD_BACKUP_PLANS[String(req.query.tier || '')] ? String(req.query.tier) : 'basic';
+        const plan = CLOUD_BACKUP_PLANS[tier];
+        const sizeMB = cbccClamp(req.query.sizeMB, 0.01, 100000, 5);
+        const maxSyncs = Math.max(1, Math.round((30 * 24 * 60 * 60 * 1000) / plan.autoBackupIntervalMs));
+        const syncsPerMonth = cbccClamp(req.query.syncsPerMonth, 1, 100000, maxSyncs);
+        const restoresPerMonth = cbccClamp(req.query.restoresPerMonth, 0, 1000, 0);
+        const fx = await getUsdToPhpRate();
+        const rate = (fx && fx.rate) || EXCHANGE_RATE_FALLBACK_USD_TO_PHP;
+        const bytes = sizeMB * 1024 * 1024;
+        const perSync = computeRealCloudBackupSyncCostPHP(bytes, tier, rate);
+        const perRestore = computeRealCloudBackupRestoreCostPHP(bytes, tier, rate);
+        const monthlyStorage = computeStorageHoldingFeeCostPHP(bytes, STORAGE_HOLDING_FEE_MONTH_MS, rate);
+        const monthlySync = perSync * syncsPerMonth;
+        const monthlyRestore = perRestore * restoresPerMonth;
+        const total = monthlySync + monthlyRestore + monthlyStorage;
+        const price = plan.price.monthly;
+        res.json({
+            success: true,
+            tier, tierName: plan.name, sizeMB, quotaMB: plan.storageQuotaMB, overQuota: sizeMB > plan.storageQuotaMB,
+            intervalHours: cbccR2(plan.autoBackupIntervalMs / 3600000),
+            syncsPerMonth, maxSyncsPerMonth: maxSyncs, restoresPerMonth,
+            perSyncPHP: Math.round(perSync * 1000) / 1000,
+            perRestorePHP: Math.round(perRestore * 1000) / 1000,
+            monthlySyncPHP: cbccR2(monthlySync),
+            monthlyRestorePHP: cbccR2(monthlyRestore),
+            monthlyStoragePHP: cbccR2(monthlyStorage),
+            monthlyTotalPHP: cbccR2(total),
+            priceMonthly: price,
+            marginPHP: cbccR2(price - total),
+            marginPercent: price > 0 ? cbccR2(((price - total) / price) * 100) : null,
+            breakEvenSyncsPerMonth: perSync > 0 ? Math.max(0, Math.floor((price - monthlyStorage - monthlyRestore) / perSync)) : null,
+            usdToPhp: rate,
+            neonPlanForRates: neonConfiguredPlans.cloudBackup || 'free'
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, message: 'Simulation failed: ' + err.message });
+    }
+});
 app.get('/relay/admin/api/cloud-backup', requireAdminKey, async (req, res) => {
     if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
     try {
@@ -16055,6 +16947,7 @@ app.post('/relay/cloud-backup/restore', requireApiKey, requireAllowedDevice, rat
             tokensCharged: chargeResult.tokensCharged,
             balanceAfter: chargeResult.balanceTokens
         });
+        CLOUD_BACKUP_RUNTIME_STATS.restoreOk++;
         const restoreResponseBody = {
             success: true,
             message: 'Nakuha ang cloud backup para sa installation na ito.',
@@ -16090,6 +16983,7 @@ app.post('/relay/cloud-backup/restore', requireApiKey, requireAllowedDevice, rat
         res.send(restoreResponseGzipped);
     } catch (err) {
         console.error('⚠️ CLOUD_BACKUP: hindi na-kuha mula sa Postgres:', err.message);
+        recordCloudBackupFailure('restore', installationId, err.message, { refunded: restoreTokensChargedForRefund > 0, transient: isTransientPgConnectionError(err) });
         // BUGFIX: kung na-charge na ang restore pero pumalya bago maipadala ang data, i-refund.
         if (restoreTokensChargedForRefund > 0 && !res.headersSent) {
             await creditCloudTokens(installationId, restoreTokensChargedForRefund, 'Refund — failed restore', 'REFUND').catch((refundErr) => {

@@ -120,6 +120,134 @@
     .fee-bar .field { width: 100%; }
     .fee-bar .btn { width: 100%; justify-content: center; }
   }
+  /* ===== Cloud Backup Control Center ===== */
+  main.wide { max-width: 1100px; }
+  .cb-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+  .cb-tab-btn {
+    background: transparent; border: 1.5px solid var(--border); color: var(--muted);
+    border-radius: 999px; padding: 7px 16px; cursor: pointer; font-family: var(--font-ui); font-size: .85rem;
+  }
+  .cb-tab-btn:hover { border-color: var(--border-soft); color: var(--text); }
+  .cb-tab-btn.active { background: var(--accent-soft); border-color: var(--border-soft); color: var(--accent); }
+  .cb-card { position: relative; background: var(--card); border: 1px solid var(--accent-dim); border-radius: var(--radius-lg); padding: 18px; margin-bottom: 14px; }
+  .cb-card h2 { font-family: var(--font-ui); font-size: 1rem; font-weight: 700; margin: 0; }
+  .cb-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .cb-mono { font-family: var(--font-mono); font-size: 11px; word-break: break-all; }
+  .cb-note { font-size: 12px; color: var(--muted); margin-top: 8px; line-height: 1.55; }
+  .cb-empty { color: var(--muted-dim); font-family: var(--font-mono); font-size: 12px; text-align: center; padding: 22px 10px; border: 1px dashed var(--border-soft); border-radius: var(--radius); background: rgba(255,255,255,.015); }
+  .cb-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+  .cb-head-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .cb-auto { font-size: 12px; color: var(--muted); display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+  .cb-card input[type="checkbox"] { accent-color: var(--accent); }
+  .cb-card input[type="text"], .cb-card input[type="number"], .cb-card input[type="month"], .cb-card select {
+    padding: 8px 10px; border-radius: var(--radius); border: 1.5px solid var(--border);
+    background: var(--bg-raise); color: var(--text); font-family: var(--font-mono); font-size: .9rem; max-width: 100%;
+  }
+  .cb-card select { font-family: var(--font-ui); font-size: .85rem; }
+  .cb-card input:focus, .cb-card select:focus { outline: none; border-color: var(--accent); }
+  .cb-btn { padding: 8px 13px; border-radius: var(--radius); cursor: pointer; font-family: var(--font-ui); font-size: .85rem; background: transparent; border: 1.5px solid var(--border); color: var(--text); }
+  .cb-btn:hover { border-color: var(--border-soft); background: var(--card-hover); }
+  .cb-btn.primary { background: var(--accent-soft); border-color: var(--border-soft); color: var(--accent); }
+  .cb-btn.primary:hover { background: var(--accent); color: var(--accent-text); }
+  .cb-btn.danger { border-color: var(--red-line); color: var(--red); }
+  .cb-btn.danger:hover { background: var(--red-bg); }
+  .cb-btn.small { padding: 4px 10px; font-size: .78rem; }
+  .cb-btn:disabled { opacity: .5; cursor: not-allowed; }
+  .cb-anim-btn[aria-pressed="true"] { border-color: var(--accent-dim); color: var(--accent); background: var(--accent-soft); }
+  .cb-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-bottom: 12px; }
+  .cb-kpi { border: 1px solid var(--border); border-left: 4px solid var(--accent-dim); border-radius: var(--radius-lg); padding: 12px; background: rgba(255,255,255,.025); }
+  .cb-kpi.ok { border-left-color: var(--green); }
+  .cb-kpi.warn { border-left-color: var(--amber); }
+  .cb-kpi.danger { border-left-color: var(--red); }
+  .cb-kpi-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+  .cb-kpi-value { font-size: 1.3rem; font-weight: 700; margin-top: 2px; word-break: break-word; }
+  .cb-kpi-sub { font-size: 11px; color: var(--muted); margin-top: 2px; word-break: break-word; }
+  .cb-bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin-top: 8px; }
+  .cb-bar > span { display: block; height: 100%; background: var(--accent); }
+  .cb-bar.ok > span, .cb-kpi.ok .cb-bar > span { background: var(--green); }
+  .cb-bar.warn > span, .cb-kpi.warn .cb-bar > span { background: var(--amber); }
+  .cb-bar.danger > span, .cb-kpi.danger .cb-bar > span { background: var(--red); }
+  .cb-alert { display: flex; gap: 10px; align-items: flex-start; justify-content: space-between; padding: 9px 12px; border-radius: var(--radius); border: 1px solid var(--border); font-size: .84rem; margin-bottom: 6px; line-height: 1.45; }
+  .cb-alert.danger { background: var(--red-bg); border-color: var(--red-line); color: var(--red); }
+  .cb-alert.warn { background: var(--amber-bg); border-color: var(--amber-line); color: var(--amber); }
+  .cb-alert.info { background: var(--accent-soft); border-color: var(--border-soft); color: var(--accent); }
+  .cb-alert.ok { background: var(--green-bg); border-color: var(--green-line); color: var(--green); }
+  .cb-link { background: transparent; border: none; color: inherit; text-decoration: underline; cursor: pointer; font-family: var(--font-ui); font-size: .8rem; white-space: nowrap; padding: 0; }
+  .cb-nav { position: sticky; top: 0; z-index: 5; display: flex; gap: 6px; flex-wrap: nowrap; overflow-x: auto; padding: 8px 0; margin: 8px 0 12px; background: var(--bg); border-bottom: 1px solid var(--line); }
+  .cb-chip { flex: 0 0 auto; white-space: nowrap; background: transparent; border: 1.5px solid var(--border); color: var(--muted); border-radius: 999px; padding: 6px 13px; cursor: pointer; font-family: var(--font-ui); font-size: .8rem; }
+  .cb-chip:hover { border-color: var(--border-soft); color: var(--text); }
+  .cb-chip.ghost { border-style: dashed; }
+  .cb-nav-spacer { flex: 1 1 auto; }
+  .cb-help { margin-bottom: 12px; }
+  .cb-help > summary { cursor: pointer; font-size: .85rem; color: var(--muted); }
+  .cb-sec { border: 1px solid var(--border); border-radius: var(--radius-lg); margin-bottom: 10px; background: rgba(255,255,255,.015); scroll-margin-top: 60px; }
+  .cb-sec > summary { list-style: none; cursor: pointer; padding: 12px 14px; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .cb-sec > summary::-webkit-details-marker { display: none; }
+  .cb-sec > summary::before { content: '▸'; color: var(--accent); display: inline-block; transition: transform .15s; }
+  .cb-sec[open] > summary::before { transform: rotate(90deg); }
+  .cb-sec:not([open]) { background-color: rgba(34,229,255,.10); border-color: var(--accent-dim); border-left: 4px solid var(--accent); }
+  .cb-sec:not([open]) > summary .cb-sec-title { color: var(--accent); }
+  .cb-sec:not([open]) > summary:hover { background-color: rgba(34,229,255,.08); border-radius: var(--radius-lg); }
+  .cb-sec:not([open]).cb-pulse { animation: cbSecPulse 1.8s ease-out 1; }
+  .cb-sec:not([open]).cb-pulse > summary::before { animation: cbSecArrow 1.8s ease-out 1; }
+  @keyframes cbSecPulse {
+    0%   { box-shadow: 0 0 0 0 rgba(34,229,255,0); background-color: rgba(34,229,255,.10); }
+    25%  { box-shadow: 0 0 0 3px rgba(34,229,255,.65), 0 0 24px rgba(34,229,255,.5); background-color: rgba(34,229,255,.34); }
+    60%  { box-shadow: 0 0 0 2px rgba(34,229,255,.25), 0 0 12px rgba(34,229,255,.25); background-color: rgba(34,229,255,.2); }
+    100% { box-shadow: 0 0 0 0 rgba(34,229,255,0); background-color: rgba(34,229,255,.10); }
+  }
+  @keyframes cbSecArrow { 0%,100% { transform: translateX(0); } 25% { transform: translateX(4px); } 50% { transform: translateX(0); } 75% { transform: translateX(3px); } }
+  #section-control details:not(.cb-sec):not([open]) { background-color: rgba(34,229,255,.10); border-color: var(--accent-dim) !important; border-left: 4px solid var(--accent) !important; }
+  #section-control details:not(.cb-sec):not([open]) > summary { color: var(--accent); }
+  #section-control details:not(.cb-sec).cb-pulse:not([open]) { animation: cbSecPulse 1.8s ease-out 1; }
+  .cb-sec-title { font-weight: 700; font-size: .95rem; }
+  .cb-sec-sub { font-size: .75rem; color: var(--muted); }
+  .cb-sec-body { padding: 0 14px 14px; }
+  .cb-box { padding: 10px; border: 1px solid var(--line); border-radius: 10px; margin-top: 10px; }
+  .cb-box h3 { margin: 0 0 8px; font-size: .82rem; letter-spacing: .02em; color: var(--accent); }
+  .cb-grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+  .cb-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 10px 12px; border-radius: var(--radius); background: rgba(255,255,255,.025); margin-bottom: 6px; border: 1px solid var(--border); font-size: .85rem; }
+  .cb-row:hover { border-color: var(--border-soft); }
+  .cb-row .grow { flex: 1 1 200px; min-width: 0; }
+  .cb-badge { display: inline-block; font-size: .68rem; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  .cb-badge.ok { border-color: var(--green-line); background: var(--green-bg); color: var(--green); }
+  .cb-badge.warn { border-color: var(--amber-line); background: var(--amber-bg); color: var(--amber); }
+  .cb-badge.danger { border-color: var(--red-line); background: var(--red-bg); color: var(--red); }
+  .cb-badge.info { border-color: var(--border-soft); background: var(--accent-soft); color: var(--accent); }
+  .cb-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .cb-table { width: 100%; border-collapse: collapse; font-size: .8rem; min-width: 520px; }
+  .cb-table th { text-align: left; font-weight: 600; color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .cb-table td { padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; font-family: var(--font-mono); font-size: .78rem; }
+  .cb-table td.txt { font-family: var(--font-ui); white-space: normal; }
+  .cb-pos { color: var(--green); }
+  .cb-neg { color: var(--red); }
+  .cb-toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+  .cb-toolbar input[type="text"] { flex: 1 1 200px; min-width: 160px; }
+  .cb-client { border: 1px solid var(--border); border-left: 4px solid var(--green); border-radius: var(--radius-lg); padding: 12px; margin-bottom: 8px; background: rgba(255,255,255,.02); }
+  .cb-client.warn { border-left-color: var(--amber); }
+  .cb-client.danger { border-left-color: var(--red); }
+  .cb-client-top { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; align-items: flex-start; }
+  .cb-client-name { font-weight: 700; font-size: .95rem; word-break: break-word; }
+  .cb-client-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 6px 12px; margin-top: 8px; font-size: .78rem; }
+  .cb-client-grid b { display: block; font-size: .66rem; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  .cb-issues { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .cb-issue { font-size: .72rem; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--line); color: var(--muted); }
+  .cb-issue.warn { border-color: var(--amber-line); background: var(--amber-bg); color: var(--amber); }
+  .cb-issue.danger { border-color: var(--red-line); background: var(--red-bg); color: var(--red); }
+  .cb-issue.info { border-color: var(--border-soft); background: var(--accent-soft); color: var(--accent); }
+  .cb-client-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+  .cb-detail { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 10px; }
+  .cb-chart { width: 100%; height: auto; display: block; }
+  .cb-setup-item { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 6px; font-size: .85rem; }
+  .cb-setup-item .ico { flex: 0 0 22px; text-align: center; }
+  .cb-setup-item .hint { font-size: .75rem; color: var(--muted); margin-top: 2px; line-height: 1.45; }
+  .cb-th-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .cb-th-grid label { font-size: 11px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
+  @media (max-width: 720px) {
+    .cb-head-actions { width: 100%; }
+    .cb-kpis { grid-template-columns: repeat(2, 1fr); }
+    .cb-card { padding: 12px; }
+  }
 </style>
 </head>
 <body>
@@ -148,7 +276,12 @@
     </div>
   </div>
 
-  <main>
+  <main id="mainWrap">
+    <div class="cb-tabs">
+      <button type="button" class="cb-tab-btn" data-tab="control" onclick="setTab('control')">📡 Control Center</button>
+      <button type="button" class="cb-tab-btn" data-tab="pricing" onclick="setTab('pricing')">💳 Plans &amp; Pricing</button>
+    </div>
+    <div id="section-pricing" class="hidden">
     <p class="intro">
       This is the ONLY place Cloud Backup pricing lives. OmniPOS installations fetch it from
       <code>GET /relay/pricing</code> on their own (with a local fallback cache in case this
@@ -217,6 +350,238 @@
         </div>
       </div>
     </div>
+    </div>
+    <div id="section-control">
+      <div class="cb-card" id="cbCard">
+        <div class="cb-head">
+          <h2>📡 Cloud Backup — Control Center</h2>
+          <div class="cb-head-actions">
+            <span id="cbStamp" class="cb-meta">—</span>
+            <label class="cb-auto"><input type="checkbox" id="cbAuto" checked onchange="cbToggleAuto(this)"> Auto-refresh (60s)</label>
+            <button type="button" class="cb-btn" onclick="cbRefresh()">🔄 Refresh all</button>
+            <button type="button" class="cb-btn" onclick="cbCopyReport()" title="Copy a plain-text status summary to the clipboard">📋 Copy report</button>
+            <button type="button" class="cb-btn cb-anim-btn" id="cbAnimBtn" onclick="cbToggleAnim()" aria-pressed="true" title="Turn the pulse animation of collapsed sections on/off (every 10 seconds)">✨ Animation: ON</button>
+          </div>
+        </div>
+        <div id="cbOverview" class="cb-kpis"><div class="cb-empty" style="grid-column:1/-1;">Loading...</div></div>
+        <details class="cb-sec" id="cbsec-profit" data-sec="profit">
+          <summary><span class="cb-sec-title">💰 Profit per plan</span><span class="cb-sec-sub">Recurring revenue vs real Neon cost, per tier</span></summary>
+          <div class="cb-sec-body" id="cbBody-profit"></div>
+        </details>
+        <details class="cb-sec" id="cbsec-lowest" data-sec="lowest">
+          <summary><span class="cb-sec-title">🔻 Lowest-margin clients</span><span class="cb-sec-sub">Paying clients that cost you the most</span></summary>
+          <div class="cb-sec-body" id="cbBody-lowest"></div>
+        </details>
+        <div id="cbAlerts"></div>
+        <div class="cb-nav" id="cbNav">
+          <button type="button" class="cb-chip" onclick="cbNavGo('setup')">🧭 Setup</button>
+          <button type="button" class="cb-chip" onclick="cbNavGo('status')">🚦 Status</button>
+          <button type="button" class="cb-chip" onclick="cbNavGo('thresholds')">🎚️ Thresholds</button>
+          <button type="button" class="cb-chip" onclick="cbNavGo('activity')">📈 Activity</button>
+          <button type="button" class="cb-chip" onclick="cbNavGo('capacity')">💾 Capacity &amp; Neon</button>
+          <button type="button" class="cb-chip" onclick="cbNavGo('plans')">🏷️ Plans</button>
+          <button type="button" class="cb-chip" onclick="cbNavGo('clients')">👤 Clients</button>
+          <button type="button" class="cb-chip" onclick="cbNavGo('risks')">⚠️ Risks</button>
+          <button type="button" class="cb-chip" onclick="cbNavGo('finance')">💰 Finance</button>
+          <button type="button" class="cb-chip" onclick="cbNavGo('events')">🛰️ Events</button>
+          <button type="button" class="cb-chip" onclick="cbNavGo('calibration')">📏 Calibration</button>
+          <span class="cb-nav-spacer"></span>
+          <button type="button" class="cb-chip ghost" onclick="cbToggleAll(true)">Expand all</button>
+          <button type="button" class="cb-chip ghost" onclick="cbToggleAll(false)">Collapse all</button>
+        </div>
+        <details class="cb-help">
+          <summary>ℹ️ How the Cloud Backup control center works (read first)</summary>
+          <div class="cb-note">
+            <b>One screen for the whole Cloud Backup system — read-only.</b><br>
+            • <b>Clients</b> = every installation that has backup data <u>or</u> a Cloud Backup subscription (so “subscribed but never synced” also shows up).<br>
+            • <b>Health</b>: <span class="cb-badge ok">ok</span> nothing wrong · <span class="cb-badge warn">warn</span> needs attention (near quota, overdue backup, restore-heavy, debt countdown, expired) · <span class="cb-badge danger">danger</span> act now (over quota, long-silent, in debt past limit, retention due). The cut-offs are editable in <b>🎚️ Thresholds</b>.<br>
+            • <b>MRR</b> = recurring plan revenue of active, non-lifetime clients (monthly price, or yearly ÷ 12). <b>Cost</b> comes from the real Neon usage split per client (Client Cost Allocation), so margin is only shown when the Neon API is configured.<br>
+            • <b>Failures / blocked</b> counters: failed syncs/restores live in memory since the last RELAY restart; blocked attempts come from the activity log (last 500 events of every type).<br>
+            • Actions here: purge an expired backup, download a client's backup JSON, enter the actual Neon bill. Everything else (prices, retention days) is edited in the <b>Plans &amp; Pricing</b> tab.
+          </div>
+        </details>
+
+        <details class="cb-sec" id="cbsec-setup" data-sec="setup">
+          <summary><span class="cb-sec-title">🧭 Setup Checklist</span><span class="cb-sec-sub">What is still missing for accurate cost &amp; capacity numbers</span></summary>
+          <div class="cb-sec-body" id="cbBody-setup"></div>
+        </details>
+
+        <details class="cb-sec" id="cbsec-status" data-sec="status" data-default-open="1">
+          <summary><span class="cb-sec-title">🚦 System Status</span><span class="cb-sec-sub">Postgres · Neon API · sweeps · uploads in flight</span></summary>
+          <div class="cb-sec-body" id="cbBody-status"></div>
+        </details>
+
+        <details class="cb-sec" id="cbsec-thresholds" data-sec="thresholds">
+          <summary><span class="cb-sec-title">🎚️ Health Thresholds</span><span class="cb-sec-sub">When is a client “near quota”, “overdue”, “restore-heavy”</span></summary>
+          <div class="cb-sec-body">
+            <div class="cb-th-grid">
+              <label>Near-quota at (% of plan quota)<input type="number" id="cbThNear" min="1" max="100" step="1"></label>
+              <label>Backup overdue after (hours)<input type="number" id="cbThStale" min="1" max="2160" step="1"></label>
+              <label>Restore-heavy at (restores / 30 days)<input type="number" id="cbThRestore" min="1" max="1000" step="1"></label>
+              <label>Expiring-soon within (days)<input type="number" id="cbThExpiring" min="1" max="90" step="1"></label>
+            </div>
+            <div class="cb-toolbar" style="margin-top:12px;">
+              <button type="button" class="cb-btn primary" onclick="cbSaveThresholds()">Save &amp; apply</button>
+              <button type="button" class="cb-btn" onclick="cbResetThresholds()">Reset to defaults</button>
+            </div>
+            <div class="cb-note">Saved in this browser only (not on the server). An “overdue” client is an <b>active, non-debtor, auto-sync-on</b> client whose last backup is older than the threshold; it becomes <b>critical</b> after 4× the threshold or 7 days (whichever is longer). Shops that close overnight are normal — keep this above your longest closed period.</div>
+          </div>
+        </details>
+
+        <details class="cb-sec" id="cbsec-activity" data-sec="activity" data-default-open="1">
+          <summary><span class="cb-sec-title">📈 Activity</span><span class="cb-sec-sub">Syncs, restores, data volume and compute (last 14 days, UTC)</span></summary>
+          <div class="cb-sec-body">
+            <div id="cbActWindows"></div>
+            <div class="cb-toolbar" style="margin-top:12px;">
+              <label class="cb-meta" for="cbActMetric">Chart:</label>
+              <select id="cbActMetric" onchange="cbRenderActChart()">
+                <option value="syncs">Syncs per day</option>
+                <option value="restores">Restores per day</option>
+                <option value="mb">MB uploaded per day</option>
+                <option value="computeSec">Compute seconds per day</option>
+                <option value="clients">Active clients per day</option>
+              </select>
+              <button type="button" class="cb-btn small" onclick="cbExportTimelineCsv()">⬇ CSV</button>
+            </div>
+            <div id="cbActChart"></div>
+            <div class="cb-box"><h3>🕒 Busiest hours (UTC, last 14 days)</h3><div id="cbActHod"></div></div>
+            <div class="cb-box"><h3>🏆 Top consumers</h3><div id="cbActTop"></div></div>
+          </div>
+        </details>
+
+        <details class="cb-sec" id="cbsec-capacity" data-sec="capacity">
+          <summary><span class="cb-sec-title">💾 Capacity &amp; Neon</span><span class="cb-sec-sub">Database size vs plan cap · compute · growth forecast · real Neon cost</span></summary>
+          <div class="cb-sec-body">
+            <div id="cbBody-capacity"></div>
+            <div class="cb-box" id="cbPlannerBox">
+              <h3>🧮 Capacity planner — how many more clients fit?</h3>
+              <div class="cb-toolbar">
+                <label class="cb-meta">Avg backup size of a new client (MB)</label>
+                <input type="number" id="cbPlanAvg" min="0.1" step="0.1" oninput="cbRenderPlanner()">
+                <button type="button" class="cb-btn small" onclick="cbPlanAvgReset()">Use current average</button>
+              </div>
+              <div id="cbPlannerOut"></div>
+            </div>
+          </div>
+        </details>
+
+        <details class="cb-sec" id="cbsec-plans" data-sec="plans">
+          <summary><span class="cb-sec-title">🏷️ Plans &amp; Tiers</span><span class="cb-sec-sub">Clients, storage and recurring revenue per tier</span></summary>
+          <div class="cb-sec-body" id="cbBody-plans"></div>
+        </details>
+
+        <details class="cb-sec" id="cbsec-clients" data-sec="clients" data-default-open="1">
+          <summary><span class="cb-sec-title">👤 Clients</span><span class="cb-sec-sub">Per installation: plan, storage, last backup, tokens, cost &amp; margin</span></summary>
+          <div class="cb-sec-body">
+            <div class="cb-toolbar">
+              <input type="text" id="cbSearch" placeholder="Search label, store or installation ID" oninput="cbClientsRerender(true)">
+              <select id="cbFilter" onchange="cbClientsRerender(true)">
+                <option value="all">All clients</option>
+                <option value="problems">⚠️ Any problem</option>
+                <option value="danger">🔴 Critical only</option>
+                <option value="warn">🟠 Warnings only</option>
+                <option value="active">Active subscription</option>
+                <option value="expired">Expired</option>
+                <option value="lifetime">Lifetime</option>
+                <option value="none">No subscription record</option>
+                <option value="hasbackup">Has backup data</option>
+                <option value="nosync">Never synced</option>
+                <option value="nearquota">Near / over quota</option>
+                <option value="stale">Overdue backup</option>
+                <option value="debt">In token debt</option>
+                <option value="restore">Restore-heavy</option>
+                <option value="expiring">Expiring soon</option>
+                <option value="autooff">Auto-sync off</option>
+              </select>
+              <select id="cbTierFilter" onchange="cbClientsRerender(true)">
+                <option value="all">All tiers</option>
+                <option value="basic">Basic</option>
+                <option value="standard">Standard</option>
+                <option value="pro">Pro</option>
+              </select>
+              <select id="cbSort" onchange="cbClientsRerender(true)">
+                <option value="health">Sort: worst health first</option>
+                <option value="size">Sort: biggest backup</option>
+                <option value="quota">Sort: highest quota %</option>
+                <option value="lastsync">Sort: oldest backup</option>
+                <option value="balance">Sort: lowest token balance</option>
+                <option value="syncs7">Sort: most syncs (7d)</option>
+                <option value="mrr">Sort: highest MRR</option>
+                <option value="margin">Sort: lowest margin</option>
+              </select>
+              <button type="button" class="cb-btn small" onclick="cbExportClientsCsv()">⬇ CSV</button>
+            </div>
+            <div id="cbClientCount" class="cb-meta" style="margin-bottom:8px;"></div>
+            <div id="cbClientList"></div>
+            <div style="text-align:center;margin-top:8px;"><button type="button" class="cb-btn hidden" id="cbMoreBtn" onclick="cbShowMore()">Show more</button></div>
+          </div>
+        </details>
+
+        <details class="cb-sec" id="cbsec-risks" data-sec="risks" data-default-open="1">
+          <summary><span class="cb-sec-title">⚠️ Risks &amp; Attention</span><span class="cb-sec-sub">Purge queue · quota · overdue backups · debt · expiring</span></summary>
+          <div class="cb-sec-body">
+            <div class="cb-toolbar"><button type="button" class="cb-btn small" onclick="cbExportRisksCsv()">⬇ Export all issues (CSV)</button></div>
+            <div id="cbBody-risks"></div>
+          </div>
+        </details>
+
+        <details class="cb-sec" id="cbsec-finance" data-sec="finance">
+          <summary><span class="cb-sec-title">💰 Finance &amp; Cost</span><span class="cb-sec-sub">MRR vs Neon cost · this month's reconciliation · tokens · actual bill</span></summary>
+          <div class="cb-sec-body">
+            <div id="cbBody-finance"></div>
+            <div class="cb-box" id="cbBillBox">
+              <h3>🧾 Enter the actual Neon bill</h3>
+              <div class="cb-toolbar">
+                <select id="cbBillMonth"></select>
+                <input type="number" id="cbBillUsd" min="0" step="0.01" placeholder="Actual bill (USD)">
+                <input type="text" id="cbBillNote" placeholder="Note (optional)">
+                <button type="button" class="cb-btn primary" onclick="cbSaveBill()">Save bill</button>
+              </div>
+              <div class="cb-note">Locked in with today's USD→PHP rate. Needed to compute real profit/loss in the reconciliation above.</div>
+            </div>
+          </div>
+        </details>
+
+        <details class="cb-sec" id="cbsec-events" data-sec="events">
+          <summary><span class="cb-sec-title">🛰️ Live Events &amp; Failures</span><span class="cb-sec-sub">Failed syncs/restores · blocked attempts · recent activity</span></summary>
+          <div class="cb-sec-body" id="cbBody-events"></div>
+        </details>
+
+        <details class="cb-sec" id="cbsec-calibration" data-sec="calibration">
+          <summary><span class="cb-sec-title">📏 Compute Calibration &amp; Price Simulator</span><span class="cb-sec-sub">Measured sync timing · cost per sync/restore · worst-case margin per tier</span></summary>
+          <div class="cb-sec-body">
+            <div id="cbBody-calibration"></div>
+            <div class="cb-box" id="cbSimBox">
+              <h3>🎛️ What-if simulator (real pricing formula)</h3>
+              <div class="cb-th-grid">
+                <label>Tier<select id="cbSimTier"><option value="basic">Basic</option><option value="standard">Standard</option><option value="pro">Pro</option></select></label>
+                <label>Backup size (MB)<input type="number" id="cbSimSize" min="0.01" step="0.1" value="25"></label>
+                <label>Syncs / month (blank = plan max)<input type="number" id="cbSimSyncs" min="1" step="1" placeholder="max"></label>
+                <label>Restores / month<input type="number" id="cbSimRestores" min="0" step="1" value="0"></label>
+                <label>Number of such clients<input type="number" id="cbSimClients" min="1" step="1" value="1"></label>
+              </div>
+              <div class="cb-toolbar" style="margin-top:10px;"><button type="button" class="cb-btn primary" onclick="cbRunSim()">Simulate</button></div>
+              <div id="cbSimOut"></div>
+            </div>
+            <div class="cb-box" id="cbCalibBox">
+              <h3>🔧 Calibration controls</h3>
+              <div class="cb-th-grid">
+                <label>Compute size (CU)<input type="number" id="cbCalCU" min="0" step="0.01"></label>
+                <label>Base seconds per sync<input type="number" id="cbCalBase" min="0" step="0.01"></label>
+                <label>Seconds per MB<input type="number" id="cbCalPerMB" min="0" step="0.001"></label>
+                <label>Neon plan used for estimates<select id="cbCalPlan"><option value="free">free</option><option value="launch">launch</option><option value="scale">scale</option><option value="enterprise">enterprise</option></select></label>
+              </div>
+              <div class="cb-toolbar" style="margin-top:10px;">
+                <button type="button" class="cb-btn primary" onclick="cbSaveCalib()">Save assumptions</button>
+                <button type="button" class="cb-btn" onclick="cbSavePlan()">Save Neon plan</button>
+                <button type="button" class="cb-btn danger" onclick="cbResetCalib()">Reset calibration to seed</button>
+              </div>
+              <div class="cb-note">Normally you do not need to touch these — every real sync is measured and the numbers recalibrate themselves after the minimum samples. Saving here overrides the values until the next recalibration. <b>Reset</b> deletes the measured samples and goes back to the seed defaults.</div>
+            </div>
+          </div>
+        </details>
+      </div>
+    </div>
   </main>
 </div>
 
@@ -270,6 +635,9 @@ function login() {
 }
 
 function logout() {
+  cbStopPoll();
+  cbData = null;
+  cbDirty = true;
   adminKey = '';
   sessionStorage.removeItem('relayAdminKey');
   document.getElementById('app').classList.add('hidden');
@@ -379,6 +747,7 @@ async function loadPricing() {
   renderModuleSubPlans();
 
   await loadGracePeriods();
+  cbDirty = true;
 }
 
 async function loadGracePeriods() {
@@ -506,12 +875,1225 @@ async function resetModuleSubPlan(featureId) {
   }
 }
 
+// =====================================================================
+// CLOUD BACKUP CONTROL CENTER
+// =====================================================================
+const CB_TAB_KEY = 'cbActiveTab';
+const CB_SEC_KEY = 'cbSecState';
+const CB_ANIM_KEY = 'cbAnimOn';
+const CB_TH_KEY = 'cbThresholds';
+const CB_TH_DEFAULTS = { nearQuotaPercent: 80, staleHours: 36, restoreFlag30d: 3, expiringSoonDays: 7 };
+const CB_POLL_MS = 60000;
+const CB_ANIM_EVERY_MS = 10000;
+const CB_PAGE_SIZE = 25;
+
+let cbData = null;
+let cbRecon = null;
+let cbLoading = false;
+let cbPending = null;
+let cbDirty = true;
+let cbPollTimer = null;
+let cbAnimTimer = null;
+let cbAnimOn = true;
+let cbClientLimit = CB_PAGE_SIZE;
+let cbCurrentTab = 'control';
+let cbBillInit = false;
+let cbCalibFilled = false;
+let cbInited = false;
+const cbOpenDetails = new Set();
+const cbDetailHtml = {};
+const cbFilteredCache = [];
+
+function cbLsGet(key, dflt) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw === null ? dflt : JSON.parse(raw);
+  } catch (e) { return dflt; }
+}
+function cbLsSet(key, val) {
+  try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) { /* storage unavailable: setting just will not persist */ }
+}
+function cbEl(id) { return document.getElementById(id); }
+function cbEsc(s) {
+  return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+}
+function cbN(n, d) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '—';
+  return v.toLocaleString(undefined, { maximumFractionDigits: d === undefined ? 0 : d, minimumFractionDigits: 0 });
+}
+function cbPhp(x) {
+  const v = Number(x);
+  if (!Number.isFinite(v)) return '—';
+  return (v < 0 ? '-₱' : '₱') + Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function cbUsd(x) {
+  const v = Number(x);
+  if (!Number.isFinite(v)) return '—';
+  return '$' + v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function cbSize(mb) {
+  const v = Number(mb);
+  if (!Number.isFinite(v)) return '—';
+  if (v >= 1024) return (v / 1024).toLocaleString(undefined, { maximumFractionDigits: 2 }) + ' GB';
+  return v.toLocaleString(undefined, { maximumFractionDigits: 2 }) + ' MB';
+}
+function cbTime(ms) {
+  if (ms === null || ms === undefined) return '—';
+  const d = new Date(ms);
+  return Number.isFinite(d.getTime()) ? d.toLocaleString() : '—';
+}
+function cbAgo(ms) {
+  if (ms === null || ms === undefined) return 'never';
+  const diff = Date.now() - Number(ms);
+  if (!Number.isFinite(diff)) return '—';
+  if (diff < 0) return 'in the future';
+  const s = Math.floor(diff / 1000);
+  if (s < 60) return s + 's ago';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + 'm ago';
+  const h = Math.floor(m / 60);
+  if (h < 48) return h + 'h ago';
+  return Math.floor(h / 24) + 'd ago';
+}
+function cbDuration(sec) {
+  const s = Math.max(0, Math.floor(Number(sec) || 0));
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return d + 'd ' + h + 'h';
+  if (h > 0) return h + 'h ' + m + 'm';
+  return m + 'm ' + (s % 60) + 's';
+}
+function cbWho(c) {
+  return c.label || c.storeName || '(unnamed)';
+}
+function cbTone(pct, warnAt, dangerAt) {
+  if (pct >= (dangerAt === undefined ? 100 : dangerAt)) return 'danger';
+  if (pct >= (warnAt === undefined ? 80 : warnAt)) return 'warn';
+  return 'ok';
+}
+function cbKpi(label, value, sub, tone, pct) {
+  const bar = (typeof pct === 'number' && Number.isFinite(pct))
+    ? `<div class="cb-bar"><span style="width:${Math.max(0, Math.min(100, pct))}%"></span></div>` : '';
+  return `<div class="cb-kpi ${tone || ''}"><div class="cb-kpi-label">${label}</div><div class="cb-kpi-value">${value}</div>${sub ? `<div class="cb-kpi-sub">${sub}</div>` : ''}${bar}</div>`;
+}
+function cbBar(pct, tone) {
+  const p = Math.max(0, Math.min(100, Number(pct) || 0));
+  return `<div class="cb-bar ${tone || cbTone(p)}"><span style="width:${p}%"></span></div>`;
+}
+function cbBadge(text, tone) {
+  return `<span class="cb-badge ${tone || ''}">${cbEsc(text)}</span>`;
+}
+
+// ---------- Thresholds ----------
+function cbReadThresholds() {
+  const saved = cbLsGet(CB_TH_KEY, null);
+  const out = Object.assign({}, CB_TH_DEFAULTS);
+  if (saved && typeof saved === 'object') {
+    Object.keys(out).forEach((k) => {
+      const n = Number(saved[k]);
+      if (Number.isFinite(n) && n > 0) out[k] = n;
+    });
+  }
+  return out;
+}
+function cbFillThresholdInputs() {
+  const t = cbReadThresholds();
+  cbEl('cbThNear').value = t.nearQuotaPercent;
+  cbEl('cbThStale').value = t.staleHours;
+  cbEl('cbThRestore').value = t.restoreFlag30d;
+  cbEl('cbThExpiring').value = t.expiringSoonDays;
+}
+function cbSaveThresholds() {
+  const t = {
+    nearQuotaPercent: Number(cbEl('cbThNear').value),
+    staleHours: Number(cbEl('cbThStale').value),
+    restoreFlag30d: Number(cbEl('cbThRestore').value),
+    expiringSoonDays: Number(cbEl('cbThExpiring').value)
+  };
+  if (!(t.nearQuotaPercent >= 1 && t.nearQuotaPercent <= 100)) return toast('Near-quota must be between 1 and 100.', 'error');
+  if (!(t.staleHours >= 1 && t.staleHours <= 2160)) return toast('Overdue hours must be between 1 and 2160.', 'error');
+  if (!(t.restoreFlag30d >= 1 && t.restoreFlag30d <= 1000)) return toast('Restore-heavy must be between 1 and 1000.', 'error');
+  if (!(t.expiringSoonDays >= 1 && t.expiringSoonDays <= 90)) return toast('Expiring-soon must be between 1 and 90 days.', 'error');
+  cbLsSet(CB_TH_KEY, t);
+  toast('Thresholds saved.');
+  loadCb(true);
+}
+function cbResetThresholds() {
+  cbLsSet(CB_TH_KEY, CB_TH_DEFAULTS);
+  cbFillThresholdInputs();
+  toast('Thresholds reset to defaults.');
+  loadCb(true);
+}
+
+// ---------- Section state / animation ----------
+function cbReadSecState() { const v = cbLsGet(CB_SEC_KEY, {}); return (v && typeof v === 'object') ? v : {}; }
+function cbInitSections() {
+  const saved = cbReadSecState();
+  document.querySelectorAll('details.cb-sec').forEach((d) => {
+    const key = d.getAttribute('data-sec');
+    if (Object.prototype.hasOwnProperty.call(saved, key)) d.open = !!saved[key];
+    else d.open = d.getAttribute('data-default-open') === '1';
+    if (!d.__cbBound) {
+      d.__cbBound = true;
+      d.addEventListener('toggle', () => {
+        d.classList.remove('cb-pulse');
+        const s = cbReadSecState();
+        s[key] = d.open;
+        cbLsSet(CB_SEC_KEY, s);
+      });
+    }
+  });
+}
+function cbToggleAll(open) {
+  document.querySelectorAll('details.cb-sec').forEach((d) => { d.open = !!open; });
+}
+function cbNavGo(key) {
+  const d = cbEl('cbsec-' + key);
+  if (!d) return;
+  d.open = true;
+  d.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+function cbRenderAnimBtn() {
+  const b = cbEl('cbAnimBtn');
+  if (!b) return;
+  b.textContent = cbAnimOn ? '✨ Animation: ON' : '💤 Animation: OFF';
+  b.setAttribute('aria-pressed', cbAnimOn ? 'true' : 'false');
+}
+function cbClearPulse() {
+  document.querySelectorAll('#section-control .cb-pulse').forEach((d) => d.classList.remove('cb-pulse'));
+}
+function cbPulseCollapsed() {
+  if (!cbAnimOn || document.hidden || cbCurrentTab !== 'control') return;
+  const sec = cbEl('section-control');
+  const app = cbEl('app');
+  if (!sec || sec.classList.contains('hidden') || (app && app.classList.contains('hidden'))) return;
+  cbClearPulse();
+  const closed = Array.from(sec.querySelectorAll('details:not([open])')).filter((d) => d.offsetParent !== null);
+  if (!closed.length) return;
+  void sec.offsetWidth;
+  closed.forEach((d) => {
+    d.classList.add('cb-pulse');
+    d.addEventListener('animationend', function onEnd(ev) {
+      if (ev.target !== d) return;
+      d.removeEventListener('animationend', onEnd);
+      d.classList.remove('cb-pulse');
+    });
+  });
+}
+function cbStopAnim() {
+  if (cbAnimTimer) { clearInterval(cbAnimTimer); cbAnimTimer = null; }
+  cbClearPulse();
+}
+function cbStartAnim() {
+  if (cbAnimTimer) clearInterval(cbAnimTimer);
+  cbAnimTimer = null;
+  if (!cbAnimOn) return;
+  cbAnimTimer = setInterval(cbPulseCollapsed, CB_ANIM_EVERY_MS);
+}
+function cbToggleAnim() {
+  cbAnimOn = !cbAnimOn;
+  cbLsSet(CB_ANIM_KEY, cbAnimOn ? 1 : 0);
+  cbRenderAnimBtn();
+  if (cbAnimOn) { cbStartAnim(); cbPulseCollapsed(); } else cbStopAnim();
+  toast(cbAnimOn ? 'Animation of collapsed sections: ON (every 10s).' : 'Animation: OFF.');
+}
+
+// ---------- Polling ----------
+function cbStartPoll() {
+  cbStopPoll();
+  cbPollTimer = setInterval(() => {
+    if (document.hidden || cbCurrentTab !== 'control') return;
+    loadCb(false);
+  }, CB_POLL_MS);
+}
+function cbStopPoll() {
+  if (cbPollTimer) { clearInterval(cbPollTimer); cbPollTimer = null; }
+}
+function cbToggleAuto(cb) {
+  if (cb && cb.checked) cbStartPoll(); else cbStopPoll();
+}
+function cbRefresh() {
+  loadCb(true);
+  toast('Refreshing Cloud Backup data...');
+}
+
+// ---------- Tabs ----------
+function setTab(tab) {
+  cbCurrentTab = tab === 'pricing' ? 'pricing' : 'control';
+  cbLsSet(CB_TAB_KEY, cbCurrentTab);
+  cbEl('section-control').classList.toggle('hidden', cbCurrentTab !== 'control');
+  cbEl('section-pricing').classList.toggle('hidden', cbCurrentTab !== 'pricing');
+  cbEl('mainWrap').classList.toggle('wide', cbCurrentTab === 'control');
+  document.querySelectorAll('.cb-tab-btn').forEach((b) => b.classList.toggle('active', b.getAttribute('data-tab') === cbCurrentTab));
+  if (cbCurrentTab === 'control') cbEnter(); else cbStopPoll();
+}
+function cbEnter() {
+  if (!cbInited) {
+    cbInited = true;
+    cbAnimOn = cbLsGet(CB_ANIM_KEY, 1) !== 0;
+    cbRenderAnimBtn();
+    cbFillThresholdInputs();
+    cbInitSections();
+    cbStartAnim();
+    cbEl('cbClientList').addEventListener('click', cbClientClick);
+    cbEl('cbBody-risks').addEventListener('click', cbClientClick);
+    cbEl('cbBody-finance').addEventListener('click', cbClientClick);
+    cbEl('cbBody-lowest').addEventListener('click', cbClientClick);
+  }
+  if (cbEl('cbAuto').checked) cbStartPoll();
+  if (!cbData || cbDirty) loadCb(false);
+}
+
+// ---------- Loading ----------
+async function loadCb(force) {
+  if (cbLoading) { cbPending = (cbPending === true) || !!force; return; }
+  cbLoading = true;
+  cbEl('cbStamp').textContent = 'Loading...';
+  try {
+    const th = cbReadThresholds();
+    const params = new URLSearchParams(Object.assign({}, th, force ? { force: '1' } : {}));
+    const [data, recon] = await Promise.all([
+      api('/relay/admin/api/cloud-backup/control-center?' + params.toString()),
+      api('/relay/admin/api/cloud-backup/reconciliation').catch((e) => ({ success: false, message: e.message }))
+    ]);
+    cbData = data;
+    cbRecon = recon;
+    cbDirty = false;
+    cbRenderAll();
+    cbEl('cbStamp').textContent = 'Updated ' + new Date(data.checkedAt || Date.now()).toLocaleTimeString() + (data.cached ? ' (cached)' : '');
+    // Keep opened client details fresh (old content stays visible until the new one arrives).
+    cbOpenDetails.forEach((id) => { cbLoadDetail(id); });
+  } catch (err) {
+    if (err.message !== 'forbidden') {
+      cbEl('cbStamp').textContent = 'Failed to load';
+      if (!cbData) cbEl('cbOverview').innerHTML = `<div class="cb-empty" style="grid-column:1/-1;">Could not load the control center: ${cbEsc(err.message)}</div>`;
+      toast(err.message, 'error');
+    }
+  } finally {
+    cbLoading = false;
+    if (cbPending !== null) { const f = cbPending; cbPending = null; loadCb(f); }
+  }
+}
+
+function cbRenderAll() {
+  if (!cbData) return;
+  const steps = [cbRenderOverview, cbRenderProfit, cbRenderLowest, cbRenderAlerts, cbRenderSetup, cbRenderStatus, cbRenderActivity, cbRenderCapacity,
+    cbRenderPlans, cbClientsRerender, cbRenderRisks, cbRenderFinance, cbRenderEvents, cbRenderCalibration, cbRenderPlanner, cbFillCalibForm, cbInitBillForm];
+  steps.forEach((fn) => {
+    try { fn(); } catch (err) { console.error('Control center render error in ' + fn.name + ':', err); }
+  });
+}
+
+// ---------- Overview KPIs ----------
+function cbRenderOverview() {
+  const d = cbData;
+  const f = d.fleet, n = d.neon, a = d.activity.windows, rt = d.runtime, ec = d.economics;
+  const cards = [];
+  const sc = f.statusCounts;
+  cards.push(cbKpi('Clients with backup', cbN(f.clientsWithBackup), `${cbN(f.clientsTotal)} total · ${cbN(sc.active)} active · ${cbN(sc.expired)} expired · ${cbN(sc.lifetime)} lifetime`, 'neutral'));
+  const hc = f.healthCounts;
+  const scoreTone = f.healthScore >= 85 ? 'ok' : (f.healthScore >= 60 ? 'warn' : 'danger');
+  cards.unshift(cbKpi('Health score', `${cbN(f.healthScore)} / 100`, 'clients + capacity + risks combined', scoreTone, f.healthScore));
+  const healthTone = hc.danger > 0 ? 'danger' : (hc.warn > 0 ? 'warn' : 'ok');
+  cards.push(cbKpi('Client health', `${cbN(hc.ok)} / ${cbN(f.clientsTotal)} ok`, `${cbN(hc.danger)} critical · ${cbN(hc.warn)} warning`, healthTone, f.clientsTotal ? (hc.ok / f.clientsTotal) * 100 : 100));
+  cards.push(cbKpi('Backup storage used', cbSize(f.totalSizeMB), `avg ${cbSize(f.avgSizeMB)} per client · ${cbN(f.committedQuotaUsedPercent, 1)}% of ${cbSize(f.committedQuotaMB)} sold quota`, 'neutral', f.committedQuotaUsedPercent));
+  if (n.dbPercentOfCap !== null) {
+    cards.push(cbKpi('Database vs Free cap', `${cbN(n.dbPercentOfCap, 1)}%`, `${cbSize(n.dbMB)} of ${cbN(n.includedStorageGB, 2)} GB${n.sharedWithDevices ? ' (shared with Devices DB)' : ''}`, cbTone(n.dbPercentOfCap, 80, 100), n.dbPercentOfCap));
+  } else {
+    cards.push(cbKpi('Database size', n.dbMB !== null ? cbSize(n.dbMB) : '—', `Neon plan: ${cbEsc(n.effectivePlan)} · no hard cap tracked`, 'neutral'));
+  }
+  if (n.computePercentOfIncluded !== null) {
+    cards.push(cbKpi('Neon compute (Free)', `${cbN(n.computePercentOfIncluded, 1)}%`, `${cbN(n.cuHoursUsed, 2)} / ${cbN(n.includedComputeHours)} CU-hours this period`, cbTone(n.computePercentOfIncluded, 80, 100), n.computePercentOfIncluded));
+  } else {
+    cards.push(cbKpi('Neon compute used', n.cuHoursUsed !== null ? `${cbN(n.cuHoursUsed, 2)} CU-h` : '—', n.usageReachable ? 'this billing period' : 'Neon API not reachable', 'neutral'));
+  }
+  cards.push(cbKpi('Syncs (24h)', cbN(a.h24.syncs), `${cbN(a.h24.activeClients)} clients · ${cbSize(a.h24.mb)} · 7d: ${cbN(a.d7.syncs)} · 30d: ${cbN(a.d30.syncs)}`, 'neutral'));
+  cards.push(cbKpi('Restores (24h)', cbN(a.h24.restores), `7d: ${cbN(a.d7.restores)} · 30d: ${cbN(a.d30.restores)} · ${cbN(f.restoreHeavy)} heavy client(s)`, f.restoreHeavy > 0 ? 'warn' : 'neutral'));
+  const failTotal = rt.syncFailed + rt.restoreFailed;
+  cards.push(cbKpi('Failures since restart', cbN(failTotal), `${cbN(rt.syncOk)} OK syncs · ${cbN(rt.restoreOk)} OK restores · ${cbN(rt.sessionRejects)} session rejects`, failTotal > 0 ? 'warn' : 'ok'));
+  const topBlocked = Object.entries(rt.blocked.h24 || {}).sort((x, y) => y[1] - x[1])[0];
+  cards.push(cbKpi('Blocked attempts (24h)', cbN(rt.blocked.total24h), topBlocked ? `top: ${cbEsc(topBlocked[0])} (${cbN(topBlocked[1])})` : 'none', rt.blocked.total24h > 0 ? 'warn' : 'ok'));
+  const marginSub = ec.allocationAvailable
+    ? `cost ${cbPhp(ec.totalCostPHP)} · margin ${cbPhp(ec.estMarginPHP)}`
+    : 'cost n/a (needs Neon API)';
+  cards.push(cbKpi('Recurring revenue (MRR)', cbPhp(f.mrrPHP), `${cbN(sc.active)} paying · ${marginSub}`, ec.estMarginPHP !== null ? (ec.estMarginPHP >= 0 ? 'ok' : 'danger') : 'neutral'));
+  cards.push(cbKpi('Token debt', `${cbN(f.wallets.debtTokens, 2)} tokens`, `${cbN(f.wallets.debtorCount)} debtor(s) · ${cbN(f.wallets.prepaidTokens, 2)} prepaid tokens held`, f.wallets.debtTokens > 0 ? 'danger' : 'ok'));
+  cards.push(cbKpi('Quota pressure', cbN(f.nearQuota + f.overQuota), `${cbN(f.overQuota)} over · ${cbN(f.nearQuota)} at ${cbN(d.thresholds.nearQuotaPercent)}%+ (upsell)`, f.overQuota > 0 ? 'danger' : (f.nearQuota > 0 ? 'warn' : 'ok')));
+  cards.push(cbKpi('Overdue backups', cbN(f.stale + f.staleCritical), `${cbN(f.staleCritical)} critical · threshold ${cbN(d.thresholds.staleHours)}h`, f.staleCritical > 0 ? 'danger' : (f.stale > 0 ? 'warn' : 'ok')));
+  const purgeNow = d.risk.retentionNow.length;
+  cards.push(cbKpi('Purge queue', cbN(purgeNow), `+${cbN(d.risk.retentionSoon.length)} within 14d · ${cbN(d.risk.debtPurge.length)} debt-purge watch`, purgeNow > 0 ? 'danger' : (d.risk.retentionSoon.length > 0 ? 'warn' : 'ok')));
+  const rc = n.realCost;
+  cards.push(cbKpi('Neon cost (this period)', rc && rc.totalMonthlyCostUSD !== null && rc.totalMonthlyCostUSD !== undefined ? cbUsd(rc.totalMonthlyCostUSD) : '—', rc && rc.totalMonthlyCostUSD !== null && rc.totalMonthlyCostUSD !== undefined ? `≈ ${cbPhp(rc.totalMonthlyCostUSD * ec.exchangeRate.usdToPhp)} · rates of ${cbEsc(rc.tierUsedForRates || n.effectivePlan)}` : 'needs Neon API', 'neutral'));
+  cards.push(cbKpi('Neon plan', cbEsc(n.effectivePlan), n.planMismatch ? `⚠️ dropdown says "${cbEsc(n.configuredPlan)}"` : (n.detectedPlan ? 'detected from Neon API' : 'from admin dropdown'), n.planMismatch ? 'warn' : 'neutral'));
+  cbEl('cbOverview').innerHTML = cards.join('');
+}
+
+// ---------- Alerts ----------
+function cbRenderAlerts() {
+  const rank = { danger: 0, warn: 1, info: 2 };
+  const list = (cbData.alerts || []).slice().sort((x, y) => (rank[x.level] - rank[y.level]));
+  const urgent = list.filter((a) => a.level === 'danger' || a.level === 'warn').length;
+  document.title = (urgent ? '(' + urgent + ') ' : '') + 'Cloud Backup Pricing — RELAY Admin';
+  if (!list.length) {
+    cbEl('cbAlerts').innerHTML = '<div class="cb-alert ok">✅ No problems found in Cloud Backup right now.</div>';
+    return;
+  }
+  const icon = { danger: '🔴', warn: '🟠', info: 'ℹ️' };
+  cbEl('cbAlerts').innerHTML = list.map((al) => {
+    const go = al.section ? `<button type="button" class="cb-link" onclick="cbNavGo('${cbEsc(al.section)}')">View</button>` : '';
+    return `<div class="cb-alert ${cbEsc(al.level)}"><span>${icon[al.level] || ''} ${cbEsc(al.text)}</span>${go}</div>`;
+  }).join('');
+}
+
+// ---------- Profit per plan / lowest margin (summary sections above the nav) ----------
+function cbRenderProfit() {
+  const d = cbData;
+  const rows = d.plans;
+  const totCost = rows.some((p) => p.costPHP !== null) ? rows.reduce((s, p) => s + (p.costPHP || 0), 0) : null;
+  const totMrr = rows.reduce((s, p) => s + p.mrrPHP, 0);
+  let html = `<div class="cb-scroll"><table class="cb-table"><thead><tr><th>Plan</th><th>Active</th><th>MRR</th><th>Cost share</th><th>Margin</th><th>Margin %</th></tr></thead><tbody>${rows.map((p) => {
+    const pct = (p.marginPHP !== null && p.mrrPHP > 0) ? cbN((p.marginPHP / p.mrrPHP) * 100, 1) + '%' : '—';
+    return `<tr><td class="txt">${cbEsc(p.name.replace('Cloud Backup — ', ''))}</td><td>${cbN(p.active)}</td><td>${cbPhp(p.mrrPHP)}</td><td>${p.costPHP === null ? '—' : cbPhp(p.costPHP)}</td><td class="${p.marginPHP === null ? '' : (p.marginPHP < 0 ? 'cb-neg' : 'cb-pos')}">${p.marginPHP === null ? '—' : cbPhp(p.marginPHP)}</td><td>${pct}</td></tr>`;
+  }).join('')}<tr><td class="txt"><b>Total</b></td><td>${cbN(rows.reduce((s, p) => s + p.active, 0))}</td><td><b>${cbPhp(totMrr)}</b></td><td>${totCost === null ? '—' : cbPhp(totCost)}</td><td class="${totCost === null ? '' : (totMrr - totCost < 0 ? 'cb-neg' : 'cb-pos')}">${totCost === null ? '—' : cbPhp(totMrr - totCost)}</td><td>${(totCost !== null && totMrr > 0) ? cbN(((totMrr - totCost) / totMrr) * 100, 1) + '%' : '—'}</td></tr></tbody></table></div>`;
+  html += `<div class="cb-note">Cost share = each tier's clients' share of the real Neon cost (storage + compute by actual size and sync weight). Lifetime clients${d.specialGroups.lifetime.clients ? ' (' + cbN(d.specialGroups.lifetime.clients) + ')' : ''} pay no recurring fee, so their cost is not covered by the MRR above.${d.economics.allocationAvailable ? '' : ' Cost is unavailable until the Neon API is configured.'}</div>`;
+  cbEl('cbBody-profit').innerHTML = html;
+}
+function cbRenderLowest() {
+  const arr = cbData.clients.filter((c) => c.status === 'active' && c.marginPHP !== null).sort((a, b) => a.marginPHP - b.marginPHP).slice(0, 8);
+  cbEl('cbBody-lowest').innerHTML = arr.length
+    ? arr.map((c) => cbClientRiskRow(c, `MRR ${cbPhp(c.mrrPHP)} − cost ${cbPhp(c.baseCostPHP)} = <b class="${c.marginPHP < 0 ? 'cb-neg' : 'cb-pos'}">${cbPhp(c.marginPHP)}</b>`)).join('')
+    : '<div class="cb-meta">Needs the Neon API (per-client cost) and at least one active paying client.</div>';
+}
+async function cbCopyReport() {
+  if (!cbData) return toast('Nothing loaded yet.', 'error');
+  const d = cbData, f = d.fleet, n = d.neon, a = d.activity.windows.h24;
+  const lines = [
+    `Cloud Backup status — ${new Date(d.checkedAt).toLocaleString()}`,
+    `Health score: ${f.healthScore}/100 (${f.healthCounts.danger} critical, ${f.healthCounts.warn} warning of ${f.clientsTotal} clients)`,
+    `Clients with backup: ${f.clientsWithBackup} · active ${f.statusCounts.active}, expired ${f.statusCounts.expired}, lifetime ${f.statusCounts.lifetime}`,
+    `Storage: ${cbSize(f.totalSizeMB)} stored · DB ${n.dbMB !== null ? cbSize(n.dbMB) : 'n/a'}${n.dbPercentOfCap !== null ? ' (' + n.dbPercentOfCap + '% of Free cap)' : ''}`,
+    `Last 24h: ${a.syncs} syncs, ${a.restores} restores, ${a.activeClients} clients`,
+    `MRR: ${cbPhp(f.mrrPHP)}${d.economics.estMarginPHP !== null ? ' · est. margin ' + cbPhp(d.economics.estMarginPHP) : ''}`,
+    `Debt: ${f.wallets.debtTokens} tokens (${f.wallets.debtorCount} wallets)`,
+    `Failures since restart: ${d.runtime.syncFailed} sync, ${d.runtime.restoreFailed} restore`,
+    '', 'Alerts:'
+  ].concat((d.alerts || []).length ? d.alerts.map((x) => `- [${x.level}] ${x.text}`) : ['- none']);
+  try { await navigator.clipboard.writeText(lines.join('\n')); toast('Status report copied.'); } catch (e) { toast('Copy failed — your browser blocked the clipboard.', 'error'); }
+}
+
+// ---------- Setup ----------
+function cbSetupItem(state, title, hint) {
+  const ico = { ok: '✅', warn: '⚠️', info: 'ℹ️' }[state] || 'ℹ️';
+  return `<div class="cb-setup-item"><span class="ico">${ico}</span><div><div>${title}</div>${hint ? `<div class="hint">${hint}</div>` : ''}</div></div>`;
+}
+function cbRenderSetup() {
+  const s = cbData.setup, c = cbData.calibration;
+  const items = [];
+  items.push(cbSetupItem(s.postgres ? 'ok' : 'warn', 'Postgres for Cloud Backup (DATABASE_URL)', s.postgres ? 'Connected.' : 'Not configured — Cloud Backup cannot work without it.'));
+  const neonMissing = [];
+  if (!s.neonApiKey) neonMissing.push('NEON_API_KEY');
+  if (!s.neonProjectId) neonMissing.push('NEON_CLOUD_BACKUP_PROJECT_ID');
+  if (neonMissing.length) items.push(cbSetupItem('warn', 'Neon API for real usage &amp; cost', `Missing: ${neonMissing.join(', ')}. Without it the cost split, margin and compute cap numbers are unavailable.`));
+  else if (!s.neonUsageReachable) items.push(cbSetupItem('warn', 'Neon API for real usage &amp; cost', 'Configured but the request failed — check that the key and project ID are valid.'));
+  else items.push(cbSetupItem('ok', 'Neon API for real usage &amp; cost', 'Reachable.'));
+  if (s.detectedPlan) {
+    items.push(cbSetupItem(s.planMismatch ? 'warn' : 'ok', 'Neon plan matches the admin dropdown', s.planMismatch
+      ? `Neon says <b>${cbEsc(s.detectedPlan)}</b> but the dropdown is <b>${cbEsc(s.configuredPlan)}</b>. Sync/restore price estimates use the dropdown — fix it in Client Cost Allocation / DB Health.`
+      : `Both are <b>${cbEsc(s.detectedPlan)}</b>.`) + (s.planMismatch ? `<div class="cb-client-actions"><button type="button" class="cb-btn small primary" onclick="cbSetPlanTo('${cbEsc(s.detectedPlan)}')">Use detected plan (${cbEsc(s.detectedPlan)})</button></div>` : ''));
+  } else {
+    items.push(cbSetupItem('info', 'Neon plan detection', `Could not detect the plan from Neon; using the dropdown value <b>${cbEsc(s.configuredPlan)}</b>.`));
+  }
+  items.push(cbSetupItem(s.devicesDbSeparate ? 'ok' : 'info', 'Devices/License database', s.devicesDbSeparate ? 'Separate database — Cloud Backup storage numbers are not mixed with device data.' : 'Shared with Cloud Backup (same DATABASE_URL). Database-size numbers include device/license tables.'));
+  items.push(cbSetupItem(s.exchangeRateLive ? 'ok' : 'warn', 'USD → PHP exchange rate', s.exchangeRateLive ? 'Live rate in use.' : 'Using a fallback or stale rate — peso costs are approximate.'));
+  items.push(cbSetupItem(s.calibrated ? 'ok' : 'info', 'Compute timing calibration', s.calibrated ? `Calibrated from ${cbN(c.samples)} real syncs.` : `${cbN(c.samples)} / ${cbN(c.minSamples)} real syncs measured — seed values still in use.`));
+  items.push(cbSetupItem(s.prevMonthBillEntered ? 'ok' : (s.neonApiKey ? 'warn' : 'info'), `Actual Neon bill for ${cbEsc(s.prevMonth)}`, s.prevMonthBillEntered ? 'Entered.' : 'Not entered yet — real profit/loss for that month cannot be computed. Use “Enter the actual Neon bill” in 💰 Finance.'));
+  items.push(cbSetupItem('info', 'Expired-backup auto-purge', s.autoPurgeEnabled ? `ON — expired backups are deleted after ${cbN(cbData.config.retentionDays)} days (daily sweep).` : 'OFF — expired backups stay forever until purged manually.'));
+  items.push(cbSetupItem('info', 'Unpaid-debt purge', s.debtPurgeEnabled ? `ON — backups of wallets in debt are deleted after ${cbN(cbData.config.debtPurgeDays)} days.` : 'OFF (CLOUD_BACKUP_DEBT_PURGE_DAYS = 0).'));
+  cbEl('cbBody-setup').innerHTML = items.join('');
+}
+
+// ---------- Status ----------
+function cbRenderStatus() {
+  const d = cbData, rt = d.runtime, cfg = d.config, ec = d.economics;
+  const cards = [];
+  cards.push(cbKpi('Postgres', d.setup.postgres ? '✅ Connected' : '🚫 Missing', d.setup.devicesDbSeparate ? 'separate Devices DB' : 'shared with Devices DB', d.setup.postgres ? 'ok' : 'danger'));
+  cards.push(cbKpi('Neon API', d.neon.usageReachable ? '✅ Online' : (d.neon.apiConfigured ? '⚠️ Failing' : '⚪ Not set'), d.neon.usageReachable ? `plan: ${cbEsc(d.neon.effectivePlan)}` : 'real usage unavailable', d.neon.usageReachable ? 'ok' : 'warn'));
+  cards.push(cbKpi('USD → PHP', cbN(ec.exchangeRate.usdToPhp, 2), `${cbEsc(ec.exchangeRate.source)}${ec.exchangeRate.fetchedAt ? ' · ' + cbAgo(ec.exchangeRate.fetchedAt) : ''}`, d.setup.exchangeRateLive ? 'ok' : 'warn'));
+  cards.push(cbKpi('Expired-backup purge', cfg.autoPurgeEnabled ? 'ON' : 'OFF', `after ${cbN(cfg.retentionDays)} days · daily sweep`, cfg.autoPurgeEnabled ? 'ok' : 'warn'));
+  cards.push(cbKpi('Debt purge', cfg.debtPurgeDays > 0 ? 'ON' : 'OFF', cfg.debtPurgeDays > 0 ? `after ${cbN(cfg.debtPurgeDays)} days in debt` : 'disabled', cfg.debtPurgeDays > 0 ? 'ok' : 'warn'));
+  cards.push(cbKpi('RELAY uptime', cbDuration(rt.processUptimeSec), `counters since ${cbTime(rt.countersSince)}`, 'neutral'));
+  cards.push(cbKpi('Uploads in flight', cbN(rt.sessionsInFlight.length), `${cbN(rt.abandonedSessions)} abandoned since restart · idle timeout ${cbN(cfg.sessionIdleTimeoutMin)}m`, 'neutral'));
+  cards.push(cbKpi('Token purchases (30d)', `${cbN(ec.purchases30d.paidCount)} paid`, `${cbPhp(ec.purchases30d.paidPHP)} · ${cbN(ec.purchases30d.failedCount)} failed · ${cbN(ec.purchases30d.stuckPendingCount)} stuck`, ec.purchases30d.stuckPendingCount > 0 ? 'warn' : 'neutral'));
+  let html = `<div class="cb-kpis">${cards.join('')}</div>`;
+  if (rt.sessionsInFlight.length) {
+    html += '<div class="cb-box"><h3>⏳ Uploads in flight</h3>' + rt.sessionsInFlight.map((s) => {
+      const pct = s.totalMB > 0 ? (s.receivedMB / s.totalMB) * 100 : 0;
+      return `<div class="cb-row"><div class="grow"><b>${cbEsc(s.label || s.installationId)}</b> <span class="cb-meta">${cbEsc(s.tier || '')} · ${cbEsc(s.uploadIdShort)}</span>${cbBar(pct, 'ok')}</div><span class="cb-meta">${cbN(s.receivedMB, 2)} / ${cbN(s.totalMB, 2)} MB · ${cbN(s.ageSec)}s</span></div>`;
+    }).join('') + '</div>';
+  }
+  if (d.partialErrors && d.partialErrors.length) {
+    html += '<div class="cb-box"><h3>⚠️ Parts that failed to load</h3>' + d.partialErrors.map((e) => `<div class="cb-row"><span><b>${cbEsc(e.part)}</b></span><span class="cb-meta">${cbEsc(e.message)}</span></div>`).join('') + '</div>';
+  }
+  cbEl('cbBody-status').innerHTML = html;
+}
+
+// ---------- Activity ----------
+function cbWinCard(title, w) {
+  return `<div class="cb-kpi"><div class="cb-kpi-label">${title}</div><div class="cb-kpi-value">${cbN(w.syncs)} syncs</div><div class="cb-kpi-sub">${cbN(w.restores)} restores · ${cbSize(w.mb)} uploaded · ${cbN(w.computeSec)}s compute · ${cbN(w.activeClients)} active clients</div></div>`;
+}
+function cbRenderActivity() {
+  const w = cbData.activity.windows;
+  cbEl('cbActWindows').innerHTML = `<div class="cb-kpis">${cbWinCard('Last 24 hours', w.h24)}${cbWinCard('Last 7 days', w.d7)}${cbWinCard('Last 30 days', w.d30)}</div>`;
+  cbRenderActChart();
+  cbRenderActExtras();
+}
+function cbRenderActExtras() {
+  const hod = cbData.activity.hourOfDay || [];
+  const total = hod.reduce((s, r) => s + r.syncs, 0);
+  const peak = hod.reduce((m, r) => (r.syncs > m.syncs ? r : m), { h: 0, syncs: 0 });
+  cbEl('cbActHod').innerHTML = total > 0
+    ? cbBarChart(hod.map((r) => r.syncs), hod.map((r) => r.h), (v) => cbN(v), (h) => String(h).padStart(2, '0'))
+      + `<div class="cb-meta">Peak hour: <b>${String(peak.h).padStart(2, '0')}:00 UTC</b> (${cbN(peak.syncs)} syncs). Heavy peaks keep the Neon compute awake longer — consider staggering auto-backups if compute cost is high.</div>`
+    : '<div class="cb-empty">No sync activity in the last 14 days.</div>';
+  const cl = cbData.clients;
+  const top = (key, fmt, title) => {
+    const arr = cl.filter((c) => (Number(c[key]) || 0) > 0).sort((a, b) => b[key] - a[key]).slice(0, 5);
+    return `<div><div class="cb-meta" style="margin-bottom:4px;"><b>${title}</b></div>` + (arr.length
+      ? arr.map((c) => `<div class="cb-row"><span class="grow">${cbEsc(cbWho(c))}</span><b>${fmt(c[key])}</b><button type="button" class="cb-btn small" data-act="goto" data-id="${cbEsc(c.installationId)}">Open</button></div>`).join('')
+      : '<div class="cb-meta">No data.</div>') + '</div>';
+  };
+  cbEl('cbActTop').innerHTML = '<div class="cb-grid2">'
+    + top('syncs7d', (v) => cbN(v) + ' syncs', 'Most syncs (7d)')
+    + top('bytes7dMB', (v) => cbSize(v), 'Most data uploaded (7d)')
+    + top('compute30dSec', (v) => cbN(v) + ' s', 'Most compute (30d)') + '</div>';
+}
+function cbBarChart(values, labels, fmt, labelFn) {
+  const lf = labelFn || ((l) => String(l).slice(5));
+  const W = 640, H = 160, padL = 8, padR = 8, padT = 14, padB = 24;
+  const max = Math.max.apply(null, values.concat([0]));
+  const n = values.length;
+  const slot = (W - padL - padR) / n;
+  const bw = Math.max(4, slot * 0.62);
+  let bars = '';
+  values.forEach((v, i) => {
+    const h = max > 0 ? ((H - padT - padB) * v) / max : 0;
+    const x = padL + i * slot + (slot - bw) / 2;
+    const y = H - padB - h;
+    bars += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(h, v > 0 ? 1 : 0).toFixed(1)}" rx="2" style="fill:var(--accent)" opacity="0.85"><title>${cbEsc(labels[i])}: ${cbEsc(fmt(v))}</title></rect>`;
+    if (v > 0) bars += `<text x="${(x + bw / 2).toFixed(1)}" y="${(y - 3).toFixed(1)}" text-anchor="middle" style="fill:var(--muted);font-size:9px">${cbEsc(fmt(v))}</text>`;
+    if (i % 2 === 0 || n <= 7) bars += `<text x="${(x + bw / 2).toFixed(1)}" y="${H - 8}" text-anchor="middle" style="fill:var(--muted-dim);font-size:9px">${cbEsc(lf(labels[i]))}</text>`;
+  });
+  return `<svg class="cb-chart" viewBox="0 0 ${W} ${H}" role="img"><line x1="${padL}" y1="${H - padB}" x2="${W - padR}" y2="${H - padB}" style="stroke:var(--border)" stroke-width="1"/>${bars}</svg>`;
+}
+function cbRenderActChart() {
+  if (!cbData) return;
+  const metric = cbEl('cbActMetric').value;
+  const tl = cbData.activity.timeline;
+  const fmt = (v) => (metric === 'mb' ? cbN(v, 1) : (metric === 'computeSec' ? cbN(v, 0) : cbN(v)));
+  const total = tl.reduce((s, r) => s + (Number(r[metric]) || 0), 0);
+  cbEl('cbActChart').innerHTML = cbBarChart(tl.map((r) => Number(r[metric]) || 0), tl.map((r) => r.day), fmt)
+    + `<div class="cb-meta">14-day total: <b>${cbN(total, metric === 'mb' ? 1 : 0)}</b>${metric === 'clients' ? ' (sum of daily active clients)' : ''}. Days are UTC.</div>`;
+}
+
+// ---------- Capacity & Neon ----------
+function cbSparkline(points) {
+  if (!points || points.length < 2) return '<div class="cb-empty">Collecting size history — a snapshot is stored every 6 hours and whenever this page loads. Growth forecast appears after 2+ days.</div>';
+  const W = 640, H = 110, pad = 10;
+  const ys = points.map((p) => p.mb);
+  const min = Math.min.apply(null, ys), max = Math.max.apply(null, ys);
+  const span = max - min || 1;
+  const coords = points.map((p, i) => {
+    const x = pad + (i * (W - 2 * pad)) / (points.length - 1);
+    const y = H - pad - ((p.mb - min) / span) * (H - 2 * pad);
+    return x.toFixed(1) + ',' + y.toFixed(1);
+  });
+  return `<svg class="cb-chart" viewBox="0 0 ${W} ${H}" role="img"><polyline fill="none" style="stroke:var(--accent)" stroke-width="2" points="${coords.join(' ')}"/></svg>`
+    + `<div class="cb-meta">${cbEsc(points[0].day)} → ${cbEsc(points[points.length - 1].day)} · ${cbSize(min)} → ${cbSize(points[points.length - 1].mb)} (backup payload total)</div>`;
+}
+function cbRenderCapacity() {
+  const d = cbData, n = d.neon, f = d.fleet;
+  let html = '<div class="cb-grid2">';
+  html += '<div class="cb-box" style="margin-top:0"><h3>💾 Storage</h3>';
+  if (n.dbPercentOfCap !== null) {
+    html += `<div>${cbSize(n.dbMB)} of ${cbN(n.includedStorageGB, 2)} GB Free cap (<b>${cbN(n.dbPercentOfCap, 1)}%</b>)</div>${cbBar(n.dbPercentOfCap)}`;
+  } else {
+    html += `<div>Database size: <b>${n.dbMB !== null ? cbSize(n.dbMB) : '—'}</b></div><div class="cb-meta">Plan ${cbEsc(n.effectivePlan)} has no hard storage cap tracked here (included: ${n.includedStorageGB !== null ? cbN(n.includedStorageGB, 2) + ' GB' : 'n/a'}).</div>`;
+  }
+  html += `<div class="cb-meta" style="margin-top:6px;">${n.sharedWithDevices ? 'This database is shared with Devices/License data, so its size includes those tables.' : 'Dedicated Cloud Backup database.'}</div>`;
+  html += `<div style="margin-top:10px;">Backup payload stored: <b>${cbSize(f.totalSizeMB)}</b> across ${cbN(f.clientsWithBackup)} client(s)</div>`;
+  html += `<div class="cb-meta">Sold quota (active + lifetime): ${cbSize(f.committedQuotaMB)} · used ${cbN(f.committedQuotaUsedPercent, 1)}% — if every client filled their quota the database would need ≈ ${cbSize(f.committedQuotaMB)} of payload.</div>${cbBar(f.committedQuotaUsedPercent, 'ok')}`;
+  if (f.biggest) html += `<div class="cb-meta" style="margin-top:6px;">Biggest client: <b>${cbEsc(f.biggest.label || f.biggest.storeName || f.biggest.installationId)}</b> (${cbSize(f.biggest.sizeMB)})</div>`;
+  html += '</div>';
+  html += '<div class="cb-box" style="margin-top:0"><h3>⚙️ Compute</h3>';
+  if (n.computePercentOfIncluded !== null) {
+    html += `<div>${cbN(n.cuHoursUsed, 2)} of ${cbN(n.includedComputeHours)} CU-hours (<b>${cbN(n.computePercentOfIncluded, 1)}%</b>)</div>${cbBar(n.computePercentOfIncluded)}`;
+  } else {
+    html += `<div>Used this period: <b>${n.cuHoursUsed !== null ? cbN(n.cuHoursUsed, 2) + ' CU-hours' : '—'}</b></div>`;
+  }
+  const p = n.projection;
+  if (p) html += `<div class="cb-meta" style="margin-top:6px;">Projected for the full period: <b>${cbN(p.projectedCUHoursFullPeriod, 2)} CU-h</b> (after ${cbN(p.elapsedHours, 1)}h)${p.lowConfidence ? ' — ⚠️ low confidence, less than 24h of data' : ''}</div>`;
+  if (n.usage) {
+    html += `<div class="cb-meta" style="margin-top:6px;">Period start: ${cbEsc(n.usage.consumptionPeriodStart ? cbTime(Date.parse(n.usage.consumptionPeriodStart)) : '—')} · active time ${n.usage.activeTimeSeconds !== null ? cbDuration(n.usage.activeTimeSeconds) : '—'} · data transfer ${n.usage.dataTransferBytes !== null ? cbSize(n.usage.dataTransferBytes / 1048576) : '—'}</div>`;
+  } else {
+    html += '<div class="cb-meta" style="margin-top:6px;">Neon usage is not available (API not configured or failing).</div>';
+  }
+  html += '</div></div>';
+
+  html += '<div class="cb-box"><h3>📉 Growth forecast</h3>';
+  if (n.growth) {
+    html += `<div>Backup payload is growing by <b>${cbN(n.growth.perDayMB, 2)} MB/day</b> (over the last ${cbN(n.growth.windowDays, 1)} days).</div>`;
+    if (n.daysToCap !== null) html += `<div class="${n.daysToCap <= 30 ? 'cb-neg' : ''}" style="margin-top:4px;">At this rate the Free storage cap is reached in about <b>${cbN(n.daysToCap)} day(s)</b>.</div>`;
+    else if (n.dbPercentOfCap !== null) html += '<div class="cb-meta" style="margin-top:4px;">Not growing — no cap risk at the current rate.</div>';
+  } else {
+    html += '<div class="cb-meta">Not enough history yet to estimate growth.</div>';
+  }
+  html += cbSparkline(n.sizeHistory) + '</div>';
+
+  const rc = n.realCost;
+  html += '<div class="cb-box"><h3>💵 Real Neon cost (current period)</h3>';
+  if (rc) {
+    html += `<div class="cb-scroll"><table class="cb-table"><tbody>
+      <tr><td class="txt">Compute</td><td>${rc.computeCostUSD !== null ? cbUsd(rc.computeCostUSD) : '—'}</td><td class="txt">${rc.cuHours !== null ? cbN(rc.cuHours, 2) + ' CU-hours' : ''}${rc.avgComputeCUs !== null ? ' · avg ' + cbN(rc.avgComputeCUs, 3) + ' CU' : ''}</td></tr>
+      <tr><td class="txt">Storage</td><td>${rc.storageCostUSD !== null ? cbUsd(rc.storageCostUSD) : '—'}</td><td class="txt">${rc.storageGBMonths !== null ? cbN(rc.storageGBMonths, 4) + ' GB-months' : ''}</td></tr>
+      <tr><td class="txt"><b>Total</b></td><td><b>${rc.totalMonthlyCostUSD !== null ? cbUsd(rc.totalMonthlyCostUSD) : '—'}</b></td><td class="txt">${cbEsc(rc.tierUsedForRates || '')} rates${rc.usedFallbackPlan ? ' (fallback plan)' : ''}${rc.dataTransferGB !== null ? ' · transfer ' + cbN(rc.dataTransferGB, 3) + ' GB' : ''}</td></tr>
+    </tbody></table></div>`;
+    if (rc.tierUsedForRates === 'free') html += '<div class="cb-meta" style="margin-top:6px;">Free plan rates are $0, so the real cost shows as $0.00 even though the Free caps above still apply.</div>';
+  } else {
+    html += '<div class="cb-meta">Not available — needs NEON_API_KEY and NEON_CLOUD_BACKUP_PROJECT_ID.</div>';
+  }
+  html += '</div>';
+
+  html += '<div class="cb-grid2">';
+  html += '<div class="cb-box"><h3>🗄️ Cloud Backup tables</h3>' + ((n.ownTables && n.ownTables.length)
+    ? n.ownTables.map((t) => `<div class="cb-row"><span class="cb-mono">${cbEsc(t.table)}</span><b>${cbSize(t.mb)}</b></div>`).join('')
+    : '<div class="cb-meta">No table sizes available.</div>') + '</div>';
+  html += '<div class="cb-box"><h3>🗄️ Largest tables in this database</h3>' + ((n.topTables && n.topTables.length)
+    ? n.topTables.map((t) => `<div class="cb-row"><span class="cb-mono">${cbEsc(t.table)}</span><b>${cbSize(t.mb)}</b></div>`).join('')
+    : '<div class="cb-meta">No table sizes available.</div>') + '</div>';
+  html += '</div>';
+  cbEl('cbBody-capacity').innerHTML = html;
+}
+
+// ---------- Plans ----------
+function cbRenderPlans() {
+  const d = cbData;
+  let html = '<div class="cb-grid2">';
+  d.plans.forEach((p) => {
+    html += `<div class="cb-box" style="margin-top:0;">
+      <h3>${cbEsc(p.name)} ${p.customized ? cbBadge('customized', 'warn') : cbBadge('default')}</h3>
+      <div>${cbPhp(p.priceMonthly)} / month · ${cbPhp(p.priceYearly)} / year</div>
+      <div class="cb-meta">${cbSize(p.quotaMB)} quota · auto-backup every ${cbN(p.autoBackupIntervalHours, 2)}h</div>
+      <div class="cb-client-grid" style="margin-top:10px;">
+        <div><b>Clients</b>${cbN(p.clients)}</div>
+        <div><b>Active</b>${cbN(p.active)}</div>
+        <div><b>Expired</b>${cbN(p.expired)}</div>
+        <div><b>Stored</b>${cbSize(p.sizeMB)}</div>
+        <div><b>Avg quota used</b>${cbN(p.avgUsedPercent, 1)}%</div>
+        <div><b>Near quota</b>${cbN(p.nearQuota)}</div>
+        <div><b>MRR</b>${cbPhp(p.mrrPHP)}</div>
+        <div><b>Cost share</b>${p.costPHP === null ? '—' : cbPhp(p.costPHP)}</div>
+        <div><b>Margin</b>${p.marginPHP === null ? '—' : `<span class="${p.marginPHP < 0 ? 'cb-neg' : 'cb-pos'}">${cbPhp(p.marginPHP)}</span>`}</div>
+      </div>
+      ${cbBar(p.avgUsedPercent, 'ok')}
+    </div>`;
+  });
+  html += '</div>';
+  const sg = d.specialGroups;
+  html += `<div class="cb-box"><h3>Other groups</h3>
+    <div class="cb-row"><span>♾️ Lifetime (legacy one-time purchase, no recurring fee)</span><b>${cbN(sg.lifetime.clients)} client(s) · ${cbSize(sg.lifetime.sizeMB)}</b></div>
+    <div class="cb-row"><span>❔ Backup data without a subscription record</span><b>${cbN(sg.none.clients)} client(s) · ${cbSize(sg.none.sizeMB)}</b></div>
+    <div class="cb-note">Total MRR ${cbPhp(d.fleet.mrrPHP)} counts active monthly clients at the monthly price and yearly clients at yearly ÷ 12. Edit prices, quotas and intervals in the <button type="button" class="cb-link" onclick="setTab('pricing')">Plans &amp; Pricing</button> tab.</div></div>`;
+  const rw = d.fleet.renewalWeeks || [];
+  html += `<div class="cb-box"><h3>🔁 Renewal forecast — next 4 weeks ${d.fleet.expiring28dCount > 0 ? cbBadge(cbN(d.fleet.expiring28dCount) + ' ending', 'warn') : cbBadge('none ending', 'ok')}</h3>
+    <div class="cb-scroll"><table class="cb-table"><thead><tr><th>Week</th><th>Subscriptions ending</th><th>MRR at risk</th></tr></thead><tbody>${rw.map((w) => `<tr><td class="txt">Week ${w.week}</td><td>${cbN(w.count)}</td><td>${cbPhp(w.mrrPHP)}</td></tr>`).join('')}</tbody></table></div>
+    <div class="cb-note">Total MRR ending within 28 days: <b>${cbPhp(d.fleet.mrrExpiring28dPHP)}</b> (${d.fleet.mrrPHP > 0 ? cbN((d.fleet.mrrExpiring28dPHP / d.fleet.mrrPHP) * 100, 1) : '0'}% of MRR). Clients need enough tokens before the end date to renew.</div></div>`;
+  const buckets = [{ l: '0–25%', lo: 0, hi: 25 }, { l: '25–50%', lo: 25, hi: 50 }, { l: '50–80%', lo: 50, hi: 80 }, { l: '80–100%', lo: 80, hi: 100.0001 }, { l: 'Over 100%', lo: 100.0001, hi: Infinity }];
+  const withB = d.clients.filter((c) => c.hasBackup);
+  html += `<div class="cb-box"><h3>📊 Quota usage distribution (${cbN(withB.length)} clients with data)</h3>` + buckets.map((b, i) => {
+    const n = withB.filter((c) => c.pctQuota >= b.lo && c.pctQuota < b.hi).length;
+    const pct = withB.length ? (n / withB.length) * 100 : 0;
+    return `<div class="cb-row"><span class="grow">${b.l}${cbBar(pct, i >= 4 ? 'danger' : (i === 3 ? 'warn' : 'ok'))}</span><b>${cbN(n)}</b></div>`;
+  }).join('') + '<div class="cb-note">Lots of clients in 0–25% means the quotas you sell are far above real usage (room to oversell). Many in 80%+ means upsell time.</div></div>';
+  cbEl('cbBody-plans').innerHTML = html;
+}
+
+// ---------- Clients ----------
+function cbCodes(c) { return new Set(c.issues.map((i) => i.code)); }
+function cbFilterClients() {
+  if (!cbData) return [];
+  const q = (cbEl('cbSearch').value || '').trim().toLowerCase();
+  const f = cbEl('cbFilter').value;
+  const tier = cbEl('cbTierFilter').value;
+  const sort = cbEl('cbSort').value;
+  const hasAny = (c, codes) => { const s = cbCodes(c); return codes.some((x) => s.has(x)); };
+  let list = cbData.clients.filter((c) => {
+    if (q) {
+      const hay = [c.installationId, c.label, c.storeName].filter(Boolean).join(' ').toLowerCase();
+      if (hay.indexOf(q) === -1) return false;
+    }
+    if (tier !== 'all') {
+      if (c.status === 'lifetime' || c.status === 'none' || c.tierKey !== tier) return false;
+    }
+    switch (f) {
+      case 'problems': return c.health !== 'ok';
+      case 'danger': return c.health === 'danger';
+      case 'warn': return c.health === 'warn';
+      case 'active': return c.status === 'active';
+      case 'expired': return c.status === 'expired';
+      case 'lifetime': return c.status === 'lifetime';
+      case 'none': return c.status === 'none';
+      case 'hasbackup': return c.hasBackup;
+      case 'nosync': return hasAny(c, ['never_synced']);
+      case 'nearquota': return hasAny(c, ['near_quota', 'over_quota']);
+      case 'stale': return hasAny(c, ['stale', 'stale_critical']);
+      case 'debt': return hasAny(c, ['in_debt']);
+      case 'restore': return hasAny(c, ['restore_heavy']);
+      case 'expiring': return hasAny(c, ['expiring_soon']);
+      case 'autooff': return hasAny(c, ['auto_sync_off']);
+      default: return true;
+    }
+  });
+  const num = (v, dflt) => (v === null || v === undefined || !Number.isFinite(Number(v)) ? dflt : Number(v));
+  const sorters = {
+    health: null,
+    size: (a, b) => b.sizeMB - a.sizeMB,
+    quota: (a, b) => b.pctQuota - a.pctQuota,
+    lastsync: (a, b) => num(a.lastSyncAt, Infinity) - num(b.lastSyncAt, Infinity),
+    balance: (a, b) => a.balanceTokens - b.balanceTokens,
+    syncs7: (a, b) => b.syncs7d - a.syncs7d,
+    mrr: (a, b) => b.mrrPHP - a.mrrPHP,
+    margin: (a, b) => num(a.marginPHP, Infinity) - num(b.marginPHP, Infinity)
+  };
+  if (sorters[sort]) list = list.slice().sort(sorters[sort]);
+  return list;
+}
+function cbClientsRerender(resetLimit) {
+  if (!cbData) return;
+  if (resetLimit === true) cbClientLimit = CB_PAGE_SIZE;
+  const list = cbFilterClients();
+  cbFilteredCache.length = 0;
+  list.forEach((c) => cbFilteredCache.push(c));
+  const shown = list.slice(0, cbClientLimit);
+  cbEl('cbClientCount').textContent = `Showing ${shown.length} of ${list.length} matching (${cbData.clients.length} total)`;
+  cbEl('cbClientList').innerHTML = shown.length ? shown.map(cbClientCardHtml).join('') : '<div class="cb-empty">No clients match this filter.</div>';
+  cbEl('cbMoreBtn').classList.toggle('hidden', list.length <= cbClientLimit);
+  // Restore any open detail panels (their data is cached or re-fetched).
+  shown.forEach((c) => { if (cbOpenDetails.has(c.installationId) && !cbDetailHtml[c.installationId]) cbLoadDetail(c.installationId); });
+}
+function cbShowMore() {
+  cbClientLimit += CB_PAGE_SIZE;
+  cbClientsRerender(false);
+}
+function cbStatusBadge(c) {
+  const map = { active: ['active', 'ok'], lifetime: ['lifetime', 'info'], expired: ['expired', 'warn'], none: ['no subscription', 'warn'] };
+  const m = map[c.status] || [c.status, ''];
+  return cbBadge(m[0], m[1]);
+}
+function cbClientCardHtml(c) {
+  const id = cbEsc(c.installationId);
+  const tierLabel = c.status === 'lifetime' ? 'Lifetime' : (c.status === 'none' ? '—' : c.tierName.replace('Cloud Backup — ', ''));
+  const sizeTone = c.pctQuota > 100 ? 'danger' : cbTone(c.pctQuota, cbData.thresholds.nearQuotaPercent, 100);
+  const issues = c.issues.length
+    ? `<div class="cb-issues">${c.issues.map((i) => `<span class="cb-issue ${cbEsc(i.level)}">${cbEsc(i.text)}</span>`).join('')}</div>` : '';
+  const open = cbOpenDetails.has(c.installationId);
+  const money = c.status === 'active'
+    ? `${cbPhp(c.mrrPHP)}${c.baseCostPHP !== null ? ` − ${cbPhp(c.baseCostPHP)} = <span class="${c.marginPHP < 0 ? 'cb-neg' : 'cb-pos'}">${cbPhp(c.marginPHP)}</span>` : ''}`
+    : (c.baseCostPHP !== null ? `cost ${cbPhp(c.baseCostPHP)}` : '—');
+  return `<div class="cb-client ${cbEsc(c.health)}" data-id="${id}">
+    <div class="cb-client-top">
+      <div><span class="cb-client-name">${cbEsc(cbWho(c))}</span> ${cbBadge(tierLabel, 'info')} ${cbStatusBadge(c)}${c.billingCycle ? ' ' + cbBadge(c.billingCycle) : ''}</div>
+      <div class="cb-mono">${id}</div>
+    </div>
+    ${c.hasBackup ? `<div class="cb-meta" style="margin-top:8px;">${cbSize(c.sizeMB)} of ${cbSize(c.quotaMB)} · ${cbN(c.pctQuota, 1)}%</div>${cbBar(Math.min(100, c.pctQuota), sizeTone)}` : '<div class="cb-meta" style="margin-top:8px;">No backup data stored yet.</div>'}
+    <div class="cb-client-grid">
+      <div><b>Last backup</b>${c.lastSyncAt ? cbAgo(c.lastSyncAt) : 'never'}</div>
+      <div><b>Every (plan)</b>${cbN(c.intervalHours, 2)}h</div>
+      <div><b>Syncs 24h / 7d / 30d</b>${cbN(c.syncs24h)} / ${cbN(c.syncs7d)} / ${cbN(c.syncs30d)}</div>
+      <div><b>Restores (30d / all)</b>${cbN(c.restores30d)} / ${cbN(c.restoreCount)}</div>
+      <div><b>Token balance</b><span class="${c.balanceTokens < 0 ? 'cb-neg' : ''}">${cbN(c.balanceTokens, 2)}</span>${c.autoSyncEnabled ? '' : ' · auto-sync off'}</div>
+      <div><b>Plan expires</b>${c.expiresAt ? cbTime(c.expiresAt) : (c.status === 'lifetime' ? 'never' : '—')}</div>
+      <div><b>MRR − cost = margin</b>${money}</div>
+      <div><b>Modules / records</b>${c.moduleCount === null ? '—' : cbN(c.moduleCount)} / ${c.totalRecords === null ? '—' : cbN(c.totalRecords)}</div>
+    </div>
+    ${issues}
+    <div class="cb-client-actions">
+      <button type="button" class="cb-btn small primary" data-act="detail" data-id="${id}">${open ? 'Hide details' : 'Details'}</button>
+      <button type="button" class="cb-btn small" data-act="copy" data-id="${id}">Copy ID</button>
+      ${c.hasBackup ? `<button type="button" class="cb-btn small" data-act="download" data-id="${id}">Download backup</button>` : ''}
+      ${c.hasBackup ? `<button type="button" class="cb-btn small danger" data-act="charge" data-id="${id}">⚡ Charge restore</button>` : ''}
+    </div>
+    <div class="cb-detail ${open ? '' : 'hidden'}" id="cbd-${cbDomKey(c.installationId)}">${open ? (cbDetailHtml[c.installationId] || 'Loading...') : ''}</div>
+  </div>`;
+}
+function cbDomKey(id) {
+  return String(id).replace(/[^A-Za-z0-9_-]/g, (ch) => '_' + ch.charCodeAt(0).toString(16) + '_');
+}
+async function cbLoadDetail(id) {
+  const box = cbEl('cbd-' + cbDomKey(id));
+  if (box && !cbDetailHtml[id]) box.innerHTML = 'Loading...';
+  try {
+    const data = await api('/relay/admin/api/cloud-backup/control-center/client/' + encodeURIComponent(id));
+    cbDetailHtml[id] = cbDetailRender(data);
+  } catch (err) {
+    if (err.message === 'forbidden') return;
+    cbDetailHtml[id] = `<div class="cb-meta cb-neg">Could not load details: ${cbEsc(err.message)}</div>`;
+  }
+  const box2 = cbEl('cbd-' + cbDomKey(id));
+  if (box2 && cbOpenDetails.has(id)) box2.innerHTML = cbDetailHtml[id];
+}
+function cbDetailRender(d) {
+  let html = '';
+  html += '<div class="cb-box" style="margin-top:0"><h3>🧩 Modules in the cloud</h3>' + (d.modules.length
+    ? `<div class="cb-scroll"><table class="cb-table"><thead><tr><th>Module</th><th>Records</th><th>Size</th><th>Updated</th></tr></thead><tbody>${d.modules.map((m) => `<tr><td class="txt">${cbEsc(m.module)}</td><td>${cbN(m.records)}</td><td>${cbSize(m.sizeMB)}</td><td>${cbAgo(m.updatedAt)}</td></tr>`).join('')}</tbody></table></div>`
+    : '<div class="cb-meta">No modules stored.</div>') + '</div>';
+  html += '<div class="cb-box"><h3>📅 Last 14 days (UTC)</h3>' + (d.daily.length
+    ? `<div class="cb-scroll"><table class="cb-table"><thead><tr><th>Day</th><th>Syncs</th><th>Restores</th><th>MB</th><th>Compute s</th></tr></thead><tbody>${d.daily.map((r) => `<tr><td>${cbEsc(r.day)}</td><td>${cbN(r.syncs)}</td><td>${cbN(r.restores)}</td><td>${cbN(r.mb, 2)}</td><td>${cbN(r.computeSec, 1)}</td></tr>`).join('')}</tbody></table></div>`
+    : '<div class="cb-meta">No activity recorded.</div>') + '</div>';
+  html += '<div class="cb-box"><h3>🪙 Recent token ledger</h3>' + (d.ledger.length
+    ? `<div class="cb-scroll"><table class="cb-table"><thead><tr><th>When</th><th>Category</th><th>Tokens</th><th>Balance after</th><th>Note</th></tr></thead><tbody>${d.ledger.map((r) => `<tr><td>${cbAgo(r.at)}</td><td>${cbEsc(r.category || r.type)}</td><td class="${r.tokens < 0 ? 'cb-neg' : 'cb-pos'}">${cbN(r.tokens, 2)}</td><td>${r.balanceAfter === null ? '—' : cbN(r.balanceAfter, 2)}</td><td class="txt">${cbEsc(r.note || '')}</td></tr>`).join('')}</tbody></table></div>`
+    : '<div class="cb-meta">No ledger entries.</div>') + '</div>';
+  if (d.syncActivity.length) {
+    html += `<div class="cb-box"><h3>🔁 Fractional sync visibility</h3><div class="cb-scroll"><table class="cb-table"><thead><tr><th>When</th><th>Trigger</th><th>Cost (tokens)</th><th>Accrued</th><th>Size</th></tr></thead><tbody>${d.syncActivity.map((r) => `<tr><td>${cbAgo(r.at)}</td><td>${cbEsc(r.trigger)}</td><td>${cbN(r.costTokens, 4)}</td><td>${cbN(r.accruedAfter, 4)}</td><td>${r.sizeMB === null ? '—' : cbSize(r.sizeMB)}</td></tr>`).join('')}</tbody></table></div></div>`;
+  }
+  if (d.failures.length) {
+    html += '<div class="cb-box"><h3>🔴 Failures since RELAY restart</h3>' + d.failures.map((f) => `<div class="cb-row"><span><b>${cbEsc(f.kind)}</b> · ${cbEsc(f.message)}${f.modules ? ' · ' + cbEsc(f.modules.join(', ')) : ''}${f.refunded ? ' · refunded' : ''}</span><span class="cb-meta">${cbAgo(f.at)}</span></div>`).join('') + '</div>';
+  }
+  html += '<div class="cb-box"><h3>🛰️ Recent events</h3>' + (d.events.length
+    ? d.events.map((e) => `<div class="cb-row"><span>${cbEventLabel(e.type)}${e.count > 1 ? ' ×' + e.count : ''} <span class="cb-meta">${cbEsc(cbDetailSummary(e.details))}</span></span><span class="cb-meta">${cbAgo(e.at)}</span></div>`).join('')
+    : '<div class="cb-meta">No recent events in the activity log (it keeps the latest 500 events of all types).</div>') + '</div>';
+  return html;
+}
+async function cbClientClick(ev) {
+  const btn = ev.target && ev.target.closest ? ev.target.closest('[data-act]') : null;
+  if (!btn) return;
+  const id = btn.getAttribute('data-id');
+  const act = btn.getAttribute('data-act');
+  if (!id) return;
+  if (act === 'detail') {
+    if (cbOpenDetails.has(id)) cbOpenDetails.delete(id); else cbOpenDetails.add(id);
+    const open = cbOpenDetails.has(id);
+    const box = cbEl('cbd-' + cbDomKey(id));
+    if (box) {
+      box.classList.toggle('hidden', !open);
+      if (open) box.innerHTML = cbDetailHtml[id] || 'Loading...';
+    }
+    btn.textContent = open ? 'Hide details' : 'Details';
+    if (open) cbLoadDetail(id);
+  } else if (act === 'copy') {
+    try { await navigator.clipboard.writeText(id); toast('Installation ID copied.'); } catch (e) { toast('Copy failed — select the ID manually.', 'error'); }
+  } else if (act === 'download') {
+    cbDownloadBackup(id);
+  } else if (act === 'goto') {
+    cbGotoClient(id);
+  } else if (act === 'charge') {
+    cbChargeRestore(id);
+  } else if (act === 'purge') {
+    cbPurge(id, btn.getAttribute('data-size') || '?');
+  }
+}
+function cbGotoClient(id) {
+  cbEl('cbSearch').value = id;
+  cbEl('cbFilter').value = 'all';
+  cbEl('cbTierFilter').value = 'all';
+  cbClientsRerender(true);
+  cbNavGo('clients');
+}
+async function cbDownloadBackup(id) {
+  try {
+    const res = await fetch('/relay/admin/api/cloud-backup/' + encodeURIComponent(id) + '/download', { headers: { 'x-relay-admin-key': adminKey } });
+    if (res.status === 403) { logout(); return; }
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      throw new Error(j.message || ('Download failed (' + res.status + ')'));
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'cloud-backup-' + id + '.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+async function cbChargeRestore(id) {
+  const raw = prompt('Manual punitive charge (restore abuse) for ' + id + '.\nHow many tokens to deduct from this client?');
+  if (raw === null) return;
+  const tokens = Number(raw);
+  if (!Number.isFinite(tokens) || tokens <= 0) return toast('Enter a positive number of tokens.', 'error');
+  const note = prompt('Short note for the ledger (optional):') || '';
+  if (!confirm('Deduct ' + tokens + ' token(s) from ' + id + '? This is recorded in their ledger.')) return;
+  try {
+    const data = await api('/relay/admin/api/devices/' + encodeURIComponent(id) + '/charge-restore', { method: 'POST', body: JSON.stringify({ tokens, note }) });
+    toast('Charged ' + data.tokensCharged + ' token(s). New balance: ' + data.balanceTokens);
+    delete cbDetailHtml[id];
+    loadCb(true);
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+async function cbPurge(id, sizeMB) {
+  if (!confirm(`Permanently delete the cloud backup of ${id} (${sizeMB} MB)?\n\nThis cannot be undone. Wallet/ledger history is kept.`)) return;
+  try {
+    const data = await api('/relay/admin/api/cloud-backup/retention-purge', { method: 'POST', body: JSON.stringify({ installationId: id, confirm: true }) });
+    toast(data.message || 'Backup purged.');
+    delete cbDetailHtml[id];
+    cbOpenDetails.delete(id);
+    loadCb(true);
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+// ---------- Risks ----------
+function cbRiskGroup(title, count, tone, rowsHtml, emptyText) {
+  return `<div class="cb-box"><h3>${title} ${count > 0 ? cbBadge(String(count), tone) : cbBadge('0', 'ok')}</h3>${rowsHtml || `<div class="cb-meta">${emptyText}</div>`}</div>`;
+}
+function cbClientRiskRow(c, rightHtml) {
+  return `<div class="cb-row"><div class="grow"><b>${cbEsc(cbWho(c))}</b> <span class="cb-meta">${cbEsc(c.tierName.replace('Cloud Backup — ', ''))} · ${cbSize(c.sizeMB)}</span><div class="cb-mono">${cbEsc(c.installationId)}</div></div><div>${rightHtml}</div><button type="button" class="cb-btn small" data-act="goto" data-id="${cbEsc(c.installationId)}">Open</button></div>`;
+}
+function cbRenderRisks() {
+  const d = cbData;
+  const cl = d.clients;
+  const has = (c, code) => c.issues.some((i) => i.code === code);
+  let html = '';
+  const purgeRow = (c, extra) => `<div class="cb-row"><div class="grow"><b>${cbEsc(c.label || c.storeName || '(unnamed)')}</b> <span class="cb-meta">${cbSize(c.sizeMB)}${extra ? ' · ' + extra : ''}</span><div class="cb-mono">${cbEsc(c.installationId)}</div></div><button type="button" class="cb-btn small danger" data-act="purge" data-id="${cbEsc(c.installationId)}" data-size="${cbEsc(c.sizeMB)}">Purge now</button><button type="button" class="cb-btn small" data-act="goto" data-id="${cbEsc(c.installationId)}">Open</button></div>`;
+  const rn = d.risk.retentionNow;
+  html += cbRiskGroup('🗑️ Past retention — deleted by the next sweep' + (d.config.autoPurgeEnabled ? '' : ' (auto-purge OFF)'), rn.length, 'danger',
+    rn.map((c) => purgeRow(c, `expired ${c.daysSinceExpiry}d ago${c.expiryKnown ? '' : ' (from last sync)'} · ≈ ${cbPhp(c.estMonthlyStorageCostPHP)}/mo`)).join(''),
+    `No expired backups beyond the ${cbN(d.config.retentionDays)}-day retention.`);
+  const rs = d.risk.retentionSoon;
+  html += cbRiskGroup('⏳ Reaching retention within 14 days', rs.length, 'warn',
+    rs.map((c) => purgeRow(c, `expired ${c.daysSinceExpiry}d ago · ${Math.max(0, d.config.retentionDays - c.daysSinceExpiry)}d left`)).join(''), 'Nothing about to expire.');
+  const dp = d.risk.debtPurge;
+  const dpById = new Map(cl.map((c) => [c.installationId, c]));
+  html += cbRiskGroup('💸 Unpaid debt — backup purge countdown', dp.length, 'danger',
+    dp.map((x) => {
+      const c = dpById.get(x.installationId);
+      if (!c) return '';
+      const when = x.purgeInDays === null ? 'debt start not recorded' : (x.purgeInDays <= 0 ? '<b class="cb-neg">due on the next sweep</b>' : `purged in ~${cbN(Math.ceil(x.purgeInDays))}d`);
+      return cbClientRiskRow(c, `<span class="cb-neg">${cbN(x.balanceTokens, 2)} tokens</span> · ${when}`);
+    }).join(''), d.config.debtPurgeDays > 0 ? 'No client with backup data is in debt.' : 'Debt purge is disabled.');
+  const overQ = cl.filter((c) => has(c, 'over_quota') || has(c, 'near_quota')).sort((a, b) => b.pctQuota - a.pctQuota);
+  const nextTier = (c) => {
+    const order = d.plans.map((p) => p.id);
+    const idx = order.indexOf(c.tierKey);
+    return idx >= 0 && idx < order.length - 1 ? d.plans[idx + 1] : null;
+  };
+  html += cbRiskGroup(`📦 Over / near quota (≥ ${cbN(d.thresholds.nearQuotaPercent)}%)`, overQ.length, overQ.some((c) => has(c, 'over_quota')) ? 'danger' : 'warn',
+    overQ.map((c) => {
+      const nt = nextTier(c);
+      return cbClientRiskRow(c, `<b class="${c.pctQuota > 100 ? 'cb-neg' : ''}">${cbN(c.pctQuota, 1)}%</b>${nt ? ` · upsell → ${cbEsc(nt.name.replace('Cloud Backup — ', ''))} ${cbPhp(nt.priceMonthly)}/mo` : ' · top tier'}`);
+    }).join(''), 'Nobody is near their quota.');
+  const stale = cl.filter((c) => has(c, 'stale') || has(c, 'stale_critical')).sort((a, b) => (b.ageHours || 0) - (a.ageHours || 0));
+  html += cbRiskGroup(`🕰️ Overdue backups (> ${cbN(d.thresholds.staleHours)}h)`, stale.length, stale.some((c) => has(c, 'stale_critical')) ? 'danger' : 'warn',
+    stale.map((c) => cbClientRiskRow(c, `last backup ${cbAgo(c.lastSyncAt)} · plan expects ~${cbN(c.intervalHours, 2)}h`)).join(''), 'All active clients backed up recently.');
+  const rh = cl.filter((c) => has(c, 'restore_heavy')).sort((a, b) => b.restores30d - a.restores30d);
+  html += cbRiskGroup(`♻️ Restore-heavy (≥ ${cbN(d.thresholds.restoreFlag30d)} in 30 days)`, rh.length, 'warn',
+    rh.map((c) => cbClientRiskRow(c, `${cbN(c.restores30d)} restores · last ${cbAgo(c.lastRestoreAt)}`)).join(''), 'No unusual restore activity.');
+  const ex = cl.filter((c) => has(c, 'expiring_soon')).sort((a, b) => (a.expiresAt || 0) - (b.expiresAt || 0));
+  html += cbRiskGroup(`📅 Expiring within ${cbN(d.thresholds.expiringSoonDays)} days`, ex.length, 'info',
+    ex.map((c) => cbClientRiskRow(c, `ends ${cbTime(c.expiresAt)} · balance ${cbN(c.balanceTokens, 2)} tokens`)).join(''), 'No subscription ends soon.');
+  const ns = cl.filter((c) => has(c, 'never_synced'));
+  html += cbRiskGroup('🌱 Subscribed but never synced', ns.length, 'info',
+    ns.map((c) => cbClientRiskRow(c, c.status === 'lifetime' ? 'lifetime' : `${cbEsc(c.status)}`)).join(''), 'Every subscriber has synced at least once.');
+  const nsub = cl.filter((c) => has(c, 'no_subscription'));
+  html += cbRiskGroup('❔ Backup data without a subscription record', nsub.length, 'warn',
+    nsub.map((c) => cbClientRiskRow(c, 'no record')).join(''), 'None.');
+  cbEl('cbBody-risks').innerHTML = html;
+}
+
+// ---------- Finance ----------
+function cbRenderFinance() {
+  const d = cbData, ec = d.economics, f = d.fleet;
+  let html = '<div class="cb-kpis">';
+  html += cbKpi('MRR (active plans)', cbPhp(f.mrrPHP), `${cbN(f.statusCounts.active)} active client(s)`, 'neutral');
+  html += cbKpi('Neon cost (projected)', ec.allocationAvailable ? cbPhp(ec.totalCostPHP) : '—', ec.allocationAvailable ? `compute ${cbPhp(ec.totalComputeCostPHP)} · storage ${cbPhp(ec.totalStorageCostPHP)}` : cbEsc(ec.allocationMessage || 'not available'), 'neutral');
+  html += cbKpi('Estimated margin', ec.estMarginPHP !== null ? cbPhp(ec.estMarginPHP) : '—', ec.estMarginPHP !== null ? 'MRR − projected Neon cost' : 'needs Neon API', ec.estMarginPHP !== null ? (ec.estMarginPHP >= 0 ? 'ok' : 'danger') : 'neutral');
+  html += cbKpi('Token purchases (30d)', cbPhp(ec.purchases30d.paidPHP), `${cbN(ec.purchases30d.paidCount)} paid · ${cbN(ec.purchases30d.paidTokens, 2)} tokens`, 'neutral');
+  html += cbKpi('Debt owed', `${cbN(f.wallets.debtTokens, 2)} tokens`, `${cbN(f.wallets.debtorCount)} wallet(s)`, f.wallets.debtTokens > 0 ? 'danger' : 'ok');
+  html += cbKpi('Prepaid tokens held', `${cbN(f.wallets.prepaidTokens, 2)}`, `across ${cbN(f.wallets.count)} wallet(s)`, 'neutral');
+  html += '</div>';
+  if (ec.costWarning) html += `<div class="cb-alert warn">⚠️ ${cbEsc(ec.costWarning)}</div>`;
+  const r = cbRecon;
+  html += '<div class="cb-box"><h3>🧮 Reconciliation — what clients paid vs the real Neon bill</h3>';
+  if (r && r.success) {
+    html += `<div class="cb-meta">Month ${cbEsc(r.month)} · sync/restore/storage charges (plan fees excluded)</div>
+      <div class="cb-scroll"><table class="cb-table"><tbody>
+      <tr><td class="txt">Net charged to clients</td><td><b>${cbPhp(r.netChargedPHP)}</b></td><td class="txt">gross ${cbPhp(r.grossChargedPHP)} − refunds ${cbPhp(r.refundedPHP)}</td></tr>
+      <tr><td class="txt">Unpaid (became debt)</td><td>${cbPhp(r.unpaidChargesPHP)}</td><td class="txt">outstanding debt now: ${cbPhp(r.outstandingDebtPHP)}</td></tr>
+      <tr><td class="txt">Plan / activation revenue</td><td>${cbPhp(r.planRevenuePHP)}</td><td class="txt">${cbN(r.activationCount)} activation(s)</td></tr>
+      <tr><td class="txt">Charge events</td><td>${cbN(r.syncChargeCount)} sync</td><td class="txt">${cbN(r.restoreChargeCount)} restore · ${cbN(r.storageFeeChargeCount)} storage-fee</td></tr>
+      <tr><td class="txt">Actual Neon bill</td><td>${r.actualBill ? cbPhp(r.actualBill.actualBillPHP) : '—'}</td><td class="txt">${r.actualBill ? cbUsd(r.actualBill.actualBillUSD) + ' @ ' + cbN(r.actualBill.exchangeRateUsed, 2) + (r.actualBill.note ? ' · ' + cbEsc(r.actualBill.note) : '') : 'not entered for this month'}</td></tr>
+      <tr><td class="txt"><b>Profit / loss</b></td><td class="${r.profitLossPHP === null ? '' : (r.profitLossPHP >= 0 ? 'cb-pos' : 'cb-neg')}"><b>${r.profitLossPHP === null ? '—' : cbPhp(r.profitLossPHP)}</b></td><td class="txt">${r.status === 'kumikita' ? '✅ profitable' : (r.status === 'lugi' ? '🔴 losing money' : 'enter the bill to compute')}</td></tr>
+      </tbody></table></div>`;
+  } else {
+    html += `<div class="cb-meta">Reconciliation unavailable: ${cbEsc((r && r.message) || 'unknown error')}</div>`;
+  }
+  html += '</div>';
+  html += '<div class="cb-box"><h3>🪙 Omni Token ledger — last 30 days</h3>' + (ec.ledger30d.length
+    ? `<div class="cb-scroll"><table class="cb-table"><thead><tr><th>Category</th><th>Type</th><th>Entries</th><th>Tokens</th></tr></thead><tbody>${ec.ledger30d.map((x) => `<tr><td class="txt">${cbEsc(x.category)}</td><td>${cbEsc(x.type)}</td><td>${cbN(x.count)}</td><td class="${x.tokens < 0 ? 'cb-neg' : 'cb-pos'}">${cbN(x.tokens, 2)}</td></tr>`).join('')}</tbody></table></div><div class="cb-note">Covers every Omni Token use (not just backup): SYNC_CHARGE, RESTORE_CHARGE, STORAGE_HOLDING_FEE and FEATURE_UNLOCK are the Cloud Backup ones.</div>`
+    : '<div class="cb-meta">No ledger activity in the last 30 days.</div>') + '</div>';
+  const withCost = d.clients.filter((c) => c.baseCostPHP !== null).sort((a, b) => b.baseCostPHP - a.baseCostPHP).slice(0, 5);
+  html += '<div class="cb-box"><h3>🔥 Most expensive clients (Neon cost share)</h3>' + (withCost.length
+    ? withCost.map((c) => cbClientRiskRow(c, `cost ${cbPhp(c.baseCostPHP)}${c.status === 'active' ? ` · MRR ${cbPhp(c.mrrPHP)} · <span class="${c.marginPHP < 0 ? 'cb-neg' : 'cb-pos'}">${cbPhp(c.marginPHP)}</span>` : ''}`)).join('')
+    : '<div class="cb-meta">Per-client cost needs the Neon API (Client Cost Allocation).</div>') + '</div>';
+  html += `<div class="cb-note">Open <a href="client-cost-allocation.html" style="color:var(--accent);">Client Cost Allocation</a> for the full per-client formula and safety-net settings.</div>`;
+  cbEl('cbBody-finance').innerHTML = html;
+}
+function cbInitBillForm() {
+  if (cbBillInit || !cbData) return;
+  cbBillInit = true;
+  const sel = cbEl('cbBillMonth');
+  const months = [];
+  const now = new Date();
+  for (let i = 0; i < 8; i++) {
+    const dt = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+    months.push(dt.getUTCFullYear() + '-' + String(dt.getUTCMonth() + 1).padStart(2, '0'));
+  }
+  sel.innerHTML = months.map((m) => `<option value="${m}">${m}</option>`).join('');
+  if (months.indexOf(cbData.economics.prevMonth) !== -1) sel.value = cbData.economics.prevMonth;
+}
+async function cbSaveBill() {
+  const month = cbEl('cbBillMonth').value;
+  const usdRaw = cbEl('cbBillUsd').value;
+  const usd = Number(usdRaw);
+  if (usdRaw === '' || !Number.isFinite(usd) || usd < 0) return toast('Enter the bill amount in USD (0 or more).', 'error');
+  try {
+    await api('/relay/admin/api/cloud-backup/actual-bill', { method: 'POST', body: JSON.stringify({ month, actualBillUSD: usd, note: cbEl('cbBillNote').value.trim() || null }) });
+    toast(`Saved the ${month} bill.`);
+    cbEl('cbBillUsd').value = '';
+    cbEl('cbBillNote').value = '';
+    loadCb(true);
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+// ---------- Events ----------
+const CB_EVENT_LABELS = {
+  cloud_backup_sync: '✅ Sync',
+  cloud_backup_blocked: '⛔ Sync blocked',
+  cloud_backup_restored: '♻️ Restore',
+  cloud_backup_restore_blocked: '⛔ Restore blocked',
+  cloud_backup_retention_purge: '🗑️ Retention purge',
+  cloud_backup_debt_purge: '🗑️ Debt purge',
+  cloud_backup_restore_manual_charge: '⚡ Manual restore charge',
+  cloud_token_purchase_paid: '💳 Token purchase paid',
+  cost_safety_net_purchase_blocked: '🛡️ Safety-net blocked a purchase'
+};
+function cbEventLabel(type) { return cbEsc(CB_EVENT_LABELS[type] || type); }
+function cbDetailSummary(details) {
+  if (!details || typeof details !== 'object') return '';
+  const parts = Object.keys(details).slice(0, 5).map((k) => {
+    const v = details[k];
+    return k + '=' + (v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v));
+  });
+  const s = parts.join(' · ');
+  return s.length > 140 ? s.slice(0, 140) + '…' : s;
+}
+function cbRenderEvents() {
+  const d = cbData, rt = d.runtime;
+  let html = '<div class="cb-kpis">';
+  html += cbKpi('Sync failures', cbN(rt.syncFailed), 'since RELAY restart (write errors + corrupt uploads)', rt.syncFailed > 0 ? 'warn' : 'ok');
+  html += cbKpi('Restore failures', cbN(rt.restoreFailed), 'since RELAY restart', rt.restoreFailed > 0 ? 'warn' : 'ok');
+  html += cbKpi('Session rejects', cbN(rt.sessionRejects), 'unknown / incomplete upload sessions', rt.sessionRejects > 0 ? 'warn' : 'ok');
+  html += cbKpi('Refunded after failure', cbN(rt.refundsAfterFailure), 'tokens returned automatically', 'neutral');
+  html += '</div>';
+  html += '<div class="cb-box" style="margin-top:0"><h3>🔴 Recent failures</h3>' + (rt.recentFailures.length
+    ? rt.recentFailures.slice(0, 25).map((f) => `<div class="cb-row"><div class="grow"><b>${cbEsc(f.kind)}</b>${f.transient ? ' ' + cbBadge('transient DB error', 'warn') : ''}${f.refunded ? ' ' + cbBadge('refunded', 'info') : ''}<div class="cb-meta">${cbEsc(f.message)}${f.modules ? ' · modules: ' + cbEsc(f.modules.join(', ')) : ''}</div><div class="cb-mono">${cbEsc(f.label || f.installationId || '')}${f.label && f.installationId ? ' · ' + cbEsc(f.installationId) : ''}</div></div><span class="cb-meta">${cbAgo(f.at)}</span></div>`).join('')
+    : '<div class="cb-meta">No failures recorded since the last RELAY restart. 🎉</div>') + '</div>';
+  const reasons = (obj) => Object.entries(obj || {}).sort((a, b) => b[1] - a[1]);
+  const b24 = reasons(rt.blocked.h24), b7 = reasons(rt.blocked.d7);
+  html += '<div class="cb-grid2"><div class="cb-box"><h3>⛔ Blocked — last 24h</h3>' + (b24.length ? b24.map(([k, v]) => `<div class="cb-row"><span>${cbEsc(k)}</span><b>${cbN(v)}</b></div>`).join('') : '<div class="cb-meta">None.</div>') + '</div>'
+    + '<div class="cb-box"><h3>⛔ Blocked — last 7 days</h3>' + (b7.length ? b7.map(([k, v]) => `<div class="cb-row"><span>${cbEsc(k)}</span><b>${cbN(v)}</b></div>`).join('') : '<div class="cb-meta">None.</div>') + '</div></div>';
+  html += `<div class="cb-note">Blocked counts come from the activity log, which keeps only the latest ${cbN(rt.activityLogSize)} events of every type${rt.activityLogWindowStart ? ' (oldest: ' + cbTime(rt.activityLogWindowStart) + ')' : ''} — so on a busy RELAY the 7-day number can be lower than reality.</div>`;
+  html += '<div class="cb-box"><h3>🛰️ Recent Cloud Backup events</h3>' + (d.events.length
+    ? d.events.map((e) => `<div class="cb-row"><div class="grow">${cbEventLabel(e.type)}${e.count > 1 ? ' ×' + e.count : ''} · <b>${cbEsc(e.label || e.installationId || '')}</b><div class="cb-meta">${cbEsc(cbDetailSummary(e.details))}</div></div><span class="cb-meta">${cbAgo(e.at)}</span></div>`).join('')
+    : '<div class="cb-meta">No recent events.</div>') + '</div>';
+  cbEl('cbBody-events').innerHTML = html;
+}
+
+// ---------- Calibration ----------
+function cbRenderCalibration() {
+  const d = cbData, c = d.calibration, cfg = d.config;
+  let html = '<div class="cb-kpis">';
+  html += cbKpi('Measured samples', `${cbN(c.samples)} / ${cbN(c.minSamples)}`, c.calibrated ? '✅ calibrated from real syncs' : 'still on seed values', c.calibrated ? 'ok' : 'warn', Math.min(100, (c.samples / c.minSamples) * 100));
+  html += cbKpi('Base seconds / sync', cbN(c.baseSeconds, 3), 'fixed overhead per sync', 'neutral');
+  html += cbKpi('Seconds per MB', cbN(c.secondsPerMB, 4), 'size-dependent compute', 'neutral');
+  html += cbKpi('Assumed compute size', `${cbN(c.assumedCU, 2)} CU`, 'used for CU-hour cost', 'neutral');
+  html += cbKpi('Safety margin', `×${cbN(cfg.safetyMarginMultiplier, 2)}`, 'added on every charge', 'neutral');
+  html += cbKpi('Minimum billable sync', `${cbN(cfg.minBillableSyncSeconds)}s`, `autosuspend tail ${cbN(cfg.autosuspendTailSeconds)}s`, 'neutral');
+  html += cbKpi('History storage factor', `×${cbN(cfg.historyStorageFactor, 2)}`, 'extra storage for Neon history', 'neutral');
+  html += cbKpi('Upload chunk size', `${cbN(cfg.chunkSizeMB, 1)} MB`, `session idle timeout ${cbN(cfg.sessionIdleTimeoutMin)}m`, 'neutral');
+  html += '</div>';
+  html += '<div class="cb-box" style="margin-top:0"><h3>🧪 Price simulator — what one client costs you per month</h3>';
+  html += '<div class="cb-note" style="margin-top:0;margin-bottom:8px;">Uses today\'s calibration, Neon plan rates and safety margin. “Worst case” assumes the POS is online and syncs at <b>every</b> auto-backup interval all month; real clients usually sync less, so the true margin is better.</div>';
+  if (d.costSamples.length) {
+    html += `<div class="cb-scroll"><table class="cb-table"><thead><tr><th>Tier</th><th>Backup</th><th>Per sync</th><th>Per restore</th><th>Syncs/mo (max)</th><th>Sync cost/mo</th><th>Storage/mo</th><th>Total/mo</th><th>Price/mo</th><th>Worst-case margin</th></tr></thead><tbody>${d.costSamples.map((s) => `<tr><td class="txt">${cbEsc(s.tier)}</td><td>${cbSize(s.sizeMB)}</td><td>${cbPhp(s.perSyncPHP)}</td><td>${cbPhp(s.perRestorePHP)}</td><td>${cbN(s.syncsPerMonthMax)}</td><td>${cbPhp(s.monthlySyncPHPMax)}</td><td>${cbPhp(s.monthlyStoragePHP)}</td><td>${cbPhp(s.monthlyTotalPHPMax)}</td><td>${cbPhp(s.priceMonthly)}</td><td class="${s.marginPHPWorstCase < 0 ? 'cb-neg' : 'cb-pos'}"><b>${cbPhp(s.marginPHPWorstCase)}</b></td></tr>`).join('')}</tbody></table></div>`;
+  } else {
+    html += '<div class="cb-meta">Simulator unavailable.</div>';
+  }
+  html += '</div>';
+  cbEl('cbBody-calibration').innerHTML = html;
+}
+
+// ---------- Planner / simulator / calibration controls ----------
+function cbCurrentAvgMB() {
+  const f = cbData.fleet;
+  return f.clientsWithBackup > 0 ? f.avgSizeMB : 5;
+}
+function cbPlanAvgReset() {
+  if (!cbData) return;
+  cbEl('cbPlanAvg').value = cbN(cbCurrentAvgMB(), 2).replace(/,/g, '');
+  cbRenderPlanner();
+}
+function cbRenderPlanner() {
+  if (!cbData) return;
+  const inp = cbEl('cbPlanAvg');
+  if (inp.value === '') cbPlanAvgReset();
+  const avg = Math.max(0.1, Number(inp.value) || cbCurrentAvgMB());
+  const n = cbData.neon, f = cbData.fleet;
+  const rows = [];
+  if (n.storageCapBytes && n.dbMB !== null) {
+    const capMB = n.storageCapBytes / 1048576;
+    const freeMB = Math.max(0, capMB - n.dbMB);
+    const fits = Math.floor(freeMB / avg);
+    rows.push(`<div class="cb-row"><span>Free Neon storage left (${cbSize(capMB)} cap − ${cbSize(n.dbMB)} used)</span><b>${cbSize(freeMB)}</b></div>`);
+    rows.push(`<div class="cb-row"><span>New clients that still fit at ${cbN(avg, 2)} MB each</span><b class="${fits < 5 ? 'cb-neg' : 'cb-pos'}">${cbN(fits)}</b></div>`);
+    const perDay = n.growth ? n.growth.perDayMB : 0;
+    if (perDay > 0) rows.push(`<div class="cb-row"><span>Current growth ${cbN(perDay, 2)} MB/day → cap reached in</span><b>${cbN(freeMB / perDay)} day(s)</b></div>`);
+  } else {
+    rows.push('<div class="cb-meta">No hard storage cap is tracked for the current Neon plan, so there is no fixed client limit — storage is billed by use instead.</div>');
+  }
+  const byQuota = Object.assign({}, ...cbData.plans.map((p) => ({ [p.id]: p })));
+  const fullMB = f.committedQuotaMB;
+  rows.push(`<div class="cb-row"><span>Worst case: every sold quota fully used</span><b>${cbSize(fullMB)}</b></div>`);
+  if (n.storageCapBytes) {
+    const capMB = n.storageCapBytes / 1048576;
+    rows.push(`<div class="cb-row"><span>Sold quota vs Free cap (overcommit ratio)</span><b class="${fullMB > capMB ? 'cb-neg' : 'cb-pos'}">${cbN(capMB > 0 ? fullMB / capMB : 0, 2)}×</b></div>`);
+  }
+  rows.push(`<div class="cb-meta">Avg quota used by active plans: ${cbData.plans.map((p) => cbEsc(p.name.replace('Cloud Backup — ', '')) + ' ' + cbN(byQuota[p.id].avgUsedPercent, 1) + '%').join(' · ')}</div>`);
+  cbEl('cbPlannerOut').innerHTML = rows.join('');
+}
+async function cbRunSim() {
+  const p = new URLSearchParams({ tier: cbEl('cbSimTier').value, sizeMB: cbEl('cbSimSize').value || '25', restoresPerMonth: cbEl('cbSimRestores').value || '0' });
+  if (cbEl('cbSimSyncs').value !== '') p.set('syncsPerMonth', cbEl('cbSimSyncs').value);
+  const count = Math.max(1, Math.floor(Number(cbEl('cbSimClients').value) || 1));
+  try {
+    const r = await api('/relay/admin/api/cloud-backup/control-center/simulate?' + p.toString());
+    const x = (v) => cbPhp(v * count);
+    cbEl('cbSimOut').innerHTML = `<div class="cb-scroll" style="margin-top:10px;"><table class="cb-table"><tbody>
+      <tr><td class="txt">Plan</td><td>${cbEsc(r.tierName)}</td><td class="txt">${cbSize(r.quotaMB)} quota · every ${cbN(r.intervalHours, 2)}h (max ${cbN(r.maxSyncsPerMonth)} syncs/mo)</td></tr>
+      <tr><td class="txt">Per sync / per restore</td><td>${cbPhp(r.perSyncPHP)}</td><td class="txt">${cbPhp(r.perRestorePHP)} per restore</td></tr>
+      <tr><td class="txt">Sync cost / month</td><td>${x(r.monthlySyncPHP)}</td><td class="txt">${cbN(r.syncsPerMonth)} syncs × ${cbN(count)} client(s)</td></tr>
+      <tr><td class="txt">Restore cost / month</td><td>${x(r.monthlyRestorePHP)}</td><td class="txt">${cbN(r.restoresPerMonth)} restores</td></tr>
+      <tr><td class="txt">Storage holding / month</td><td>${x(r.monthlyStoragePHP)}</td><td class="txt">${cbSize(r.sizeMB)} each</td></tr>
+      <tr><td class="txt"><b>Total cost / month</b></td><td><b>${x(r.monthlyTotalPHP)}</b></td><td class="txt">rates of Neon plan: ${cbEsc(r.neonPlanForRates)} · ₱${cbN(r.usdToPhp, 2)}/USD</td></tr>
+      <tr><td class="txt">Revenue / month</td><td>${x(r.priceMonthly)}</td><td class="txt">${cbPhp(r.priceMonthly)} × ${cbN(count)}</td></tr>
+      <tr><td class="txt"><b>Margin</b></td><td class="${r.marginPHP < 0 ? 'cb-neg' : 'cb-pos'}"><b>${x(r.marginPHP)}</b></td><td class="txt">${r.marginPercent === null ? '' : cbN(r.marginPercent, 1) + '%'}${r.breakEvenSyncsPerMonth !== null ? ' · break-even at ' + cbN(r.breakEvenSyncsPerMonth) + ' syncs/mo' : ''}</td></tr>
+    </tbody></table></div>${r.overQuota ? '<div class="cb-alert warn" style="margin-top:8px;">⚠️ This size is above the plan quota — a real client could not store it.</div>' : ''}`;
+  } catch (err) {
+    if (err.message !== 'forbidden') toast(err.message, 'error');
+  }
+}
+function cbFillCalibForm() {
+  if (!cbData) return;
+  const active = document.activeElement && document.activeElement.id;
+  if (cbCalibFilled && /^cbCal/.test(active || '')) return; // do not overwrite while typing
+  cbCalibFilled = true;
+  const c = cbData.calibration;
+  cbEl('cbCalCU').value = c.assumedCU;
+  cbEl('cbCalBase').value = c.baseSeconds;
+  cbEl('cbCalPerMB').value = c.secondsPerMB;
+  cbEl('cbCalPlan').value = cbData.neon.configuredPlan;
+}
+async function cbSaveCalib() {
+  const body = { assumedCU: Number(cbEl('cbCalCU').value), assumedBaseSeconds: Number(cbEl('cbCalBase').value), assumedSecondsPerMB: Number(cbEl('cbCalPerMB').value) };
+  if (Object.values(body).some((v) => !Number.isFinite(v) || v < 0)) return toast('All values must be numbers of 0 or more.', 'error');
+  try {
+    await api('/relay/admin/api/pricing/cloud-backup-sync-compute', { method: 'POST', body: JSON.stringify(body) });
+    toast('Compute assumptions saved.');
+    cbCalibFilled = false;
+    loadCb(true);
+  } catch (err) { toast(err.message, 'error'); }
+}
+async function cbResetCalib() {
+  if (!confirm('Delete all measured timing samples and go back to the seed compute assumptions?\nCharges will use the seed values until enough new syncs are measured.')) return;
+  try {
+    await api('/relay/admin/api/pricing/cloud-backup-sync-compute/reset', { method: 'POST', body: '{}' });
+    toast('Calibration reset to seed values.');
+    cbCalibFilled = false;
+    loadCb(true);
+  } catch (err) { toast(err.message, 'error'); }
+}
+async function cbSetPlanTo(tier) {
+  if (['free', 'launch', 'scale', 'enterprise'].indexOf(tier) === -1) return;
+  if (!confirm('Set the Neon plan used for Cloud Backup cost estimates to "' + tier + '"? This changes how sync/restore prices are computed.')) return;
+  try {
+    await api('/relay/admin/api/db-health/plan', { method: 'POST', body: JSON.stringify({ database: 'cloudBackup', tier }) });
+    toast('Neon plan set to ' + tier + '.');
+    cbCalibFilled = false;
+    loadCb(true);
+  } catch (err) { toast(err.message, 'error'); }
+}
+function cbSavePlan() { cbSetPlanTo(cbEl('cbCalPlan').value); }
+
+// ---------- CSV ----------
+function cbExportRisksCsv() {
+  if (!cbData) return;
+  const rows = [];
+  cbData.clients.forEach((c) => c.issues.forEach((i) => rows.push([c.installationId, c.label, c.storeName, c.status, c.tier, i.level, i.code, i.text])));
+  cbDownloadText(`cloud-backup-issues-${cbStamp()}.csv`, cbCsv(['installationId', 'label', 'storeName', 'status', 'tier', 'level', 'code', 'text'], rows));
+}
+function cbCsvCell(v) {
+  let s = v === null || v === undefined ? '' : String(v);
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function cbCsv(header, rows) {
+  return [header].concat(rows).map((r) => r.map(cbCsvCell).join(',')).join('\r\n');
+}
+function cbDownloadText(filename, text) {
+  const blob = new Blob(['\ufeff' + text], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+function cbStamp() { return new Date().toISOString().slice(0, 10); }
+function cbExportClientsCsv() {
+  if (!cbData) return;
+  const rows = cbFilteredCache.map((c) => [c.installationId, c.label, c.storeName, c.status, c.tier, c.billingCycle,
+    c.expiresAt ? new Date(c.expiresAt).toISOString() : '', c.sizeMB, c.quotaMB, c.pctQuota,
+    c.lastSyncAt ? new Date(c.lastSyncAt).toISOString() : '', c.balanceTokens, c.syncs24h, c.syncs7d, c.syncs30d, c.restores30d,
+    c.mrrPHP, c.baseCostPHP, c.marginPHP, c.health, c.issues.map((i) => i.code).join('|')]);
+  cbDownloadText(`cloud-backup-clients-${cbStamp()}.csv`, cbCsv(
+    ['installationId', 'label', 'storeName', 'status', 'tier', 'billingCycle', 'expiresAt', 'sizeMB', 'quotaMB', 'pctQuota', 'lastSyncAt', 'balanceTokens', 'syncs24h', 'syncs7d', 'syncs30d', 'restores30d', 'mrrPHP', 'baseCostPHP', 'marginPHP', 'health', 'issues'], rows));
+}
+function cbExportTimelineCsv() {
+  if (!cbData) return;
+  cbDownloadText(`cloud-backup-activity-${cbStamp()}.csv`, cbCsv(['day_utc', 'syncs', 'restores', 'mb_uploaded', 'compute_seconds', 'active_clients'],
+    cbData.activity.timeline.map((r) => [r.day, r.syncs, r.restores, r.mb, r.computeSec, r.clients])));
+}
+
+// ---------- Page boot ----------
 async function boot() {
   if (!adminKey) return;
   try {
     await loadPricing();
     document.getElementById('loginWrap').classList.add('hidden');
     document.getElementById('app').classList.remove('hidden');
+    setTab(cbLsGet(CB_TAB_KEY, 'control'));
   } catch (err) {
     // api() already handles 403 (bad key); other errors just toast.
     if (err.message !== 'forbidden') toast(err.message, 'error');
