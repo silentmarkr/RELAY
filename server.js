@@ -863,6 +863,14 @@ try {
 } catch (err) {
 }
 const app = express();
+// Sa likod ng reverse proxy (Render) ang RELAY: kung walang "trust proxy", ang req.ip ay IP ng proxy
+// mismo, kaya IISANG rate-limit bucket ang lahat ng device. Naka-configure via TRUST_PROXY_HOPS
+// (default: 1 sa Render, 0 kung hindi) para hindi ma-spoof ang X-Forwarded-For kapag walang proxy.
+{
+    const envHops = parseInt(process.env.TRUST_PROXY_HOPS, 10);
+    const hops = Number.isFinite(envHops) && envHops >= 0 ? envHops : (process.env.RENDER ? 1 : 0);
+    if (hops > 0) app.set('trust proxy', hops);
+}
 app.use((req, res, next) => {
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
@@ -18321,7 +18329,7 @@ app.post('/relay/cloud-tokens/activate-receipt-credit', requireApiKey, requireAl
         res.status(500).json({ success: false, message: err.message });
     }
 });
-app.get('/relay/latest-version', requireApiKey, rateLimit('latest-version', 60, 10 * 60 * 1000), (req, res) => {
+app.get('/relay/latest-version', requireApiKey, rateLimit('latest-version', 200, 10 * 60 * 1000), (req, res) => {
     const installationId = String(req.query.installationId || '').trim();
     const targeted = installationId ? targetedReleases.get(installationId) : null;
     const info = targeted || systemVersionInfo;
@@ -18333,7 +18341,7 @@ app.get('/relay/latest-version', requireApiKey, rateLimit('latest-version', 60, 
         targeted: !!targeted
     });
 });
-app.get('/relay/release-package', requireApiKey, rateLimit('release-package', 10, 60 * 60 * 1000), async (req, res) => {
+app.get('/relay/release-package', requireApiKey, rateLimit('release-package', 30, 60 * 60 * 1000), async (req, res) => {
     await ensureReleasePackageFreshOnDisk();
     if (!fs.existsSync(RELEASE_PACKAGE_PATH)) {
         return res.status(503).json({ success: false, message: 'Walang naka-publish na release package sa RELAY pa.' });
