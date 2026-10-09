@@ -1216,7 +1216,7 @@ a:focus-visible,
             One button, two steps: (1) builds a fresh <code>omnipos-client.zip</code> from the latest code in your repo, and (2) immediately announces this new version/changelog to existing clients (they'll see it in their "Check for Update"). If the build fails, the version publish will NOT proceed.
           </div>
           <div class="backup-row">
-            <input type="text" id="publishVersionInput" placeholder="New version (e.g. 1.0.43)" style="flex:1; min-width:140px;">
+            <input type="text" id="publishVersionInput" placeholder="Version (blangko = kukunin sa git package.json)" style="flex:1; min-width:140px;">
             <input type="text" id="publishRepoUrlInput" placeholder="repoUrl (optional — leave blank if OMNIPOS_REPO_URL is already set)" style="flex:2; min-width:220px;">
             <input type="text" id="publishRefInput" placeholder="branch/ref (default: main)" style="flex:1; min-width:120px;">
           </div>
@@ -2119,12 +2119,9 @@ async function publishRelease() {
   const targetIdInput = document.getElementById('publishTargetIdInput');
   const obfuscateCheckbox = document.getElementById('publishObfuscateCheckbox');
   const version = versionInput ? versionInput.value.trim() : '';
-  if (!version) {
-    toast('A version is required (e.g. "1.0.43").', 'error');
-    return;
-  }
   const obfuscate = obfuscateCheckbox ? !!obfuscateCheckbox.checked : true;
-  const body = { version, obfuscate };
+  const body = { obfuscate };
+  if (version) body.version = version;
   const changelog = changelogInput ? changelogInput.value.trim() : '';
   const caption = captionInput ? captionInput.value.trim() : '';
   const repoUrl = repoUrlInput ? repoUrlInput.value.trim() : '';
@@ -2151,7 +2148,7 @@ async function publishRelease() {
         ? `targeted only at installationId ${data.installationId}`
         : 'now visible to ALL clients';
       const obfNote = data.build && data.build.obfuscated === false ? ' — unobfuscated' : '';
-      toast(`✅ Built v${version} (${mb} MB)${obfNote} — ${scopeMsg}.`, 'success');
+      toast(`✅ Built v${data.version || version} (${mb} MB)${obfNote} — ${scopeMsg}.`, 'success');
       if (data.build && data.build.warning) toast(data.build.warning, 'warning');
       if (versionInput) versionInput.value = '';
       if (changelogInput) changelogInput.value = '';

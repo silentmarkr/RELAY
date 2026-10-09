@@ -18349,11 +18349,31 @@ app.get('/relay/release-package', requireApiKey, rateLimit('release-package', 30
     logActivity(null, 'release_package_self_update_fetch', { ip: req.ip });
     res.download(RELEASE_PACKAGE_PATH, 'omnipos-client.zip');
 });
+// Nililinis at vini-validate ang version bago i-publish: tinatanggal ang leading "v" at tumatanggap LANG ng
+// purong numeric na format (hal. "1.3.0", "1.3", "1.3.0.1"). Bawal ang prerelease suffix (hal. "-beta.1") dahil
+// binabasa iyon ng OMNIPOS at ng OPInstaller bilang dagdag na numero (1.3.0-beta.1 -> 1.3.0.1), kaya lalabas na
+// MAS BAGO ang beta kaysa sa 1.3.0 final at hindi made-detect ang final bilang update.
+function normalizeReleaseVersion(raw) {
+    const cleaned = String(raw || '').trim().replace(/^[vV]/, '');
+    return /^\d+(\.\d+){0,3}$/.test(cleaned) ? cleaned : '';
+}
+// true lang kung MAS BAGO ang `candidate` kaysa sa `current` (numeric na paghahambing kada bahagi).
+function isReleaseVersionNewer(candidate, current) {
+    const parts = (v) => String(v || '0').trim().replace(/^[vV]/, '').split(/[-+]/)[0].split('.').map((n) => parseInt(n, 10) || 0);
+    const a = parts(candidate);
+    const b = parts(current);
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+        const x = a[i] || 0;
+        const y = b[i] || 0;
+        if (x !== y) return x > y;
+    }
+    return false;
+}
 app.post('/relay/admin/api/system/publish-version', requireAdminKey, async (req, res) => {
     const { version, changelog, installationId } = req.body || {};
-    const trimmedVersion = String(version || '').trim();
+    const trimmedVersion = normalizeReleaseVersion(version);
     if (!trimmedVersion) {
-        return res.status(400).json({ success: false, message: 'Kailangan ang "version" (hal. "1.3.0").' });
+        return res.status(400).json({ success: false, message: 'Kailangan ang valid na "version" (hal. "1.3.0", walang "v" sa unahan at walang ibang karakter).' });
     }
     const entry = {
         version: trimmedVersion,
@@ -19168,7 +19188,7 @@ async function performBuildReleaseInner(reqBody, req, publishOverride) {
     }
     const repoUrl = (reqBody && reqBody.repoUrl) || process.env.OMNIPOS_REPO_URL;
     const ref = (reqBody && reqBody.ref) || 'main';
-    const caption = String((reqBody && reqBody.caption) || '').trim();
+    let caption = String((reqBody && reqBody.caption) || '').trim();
     const shouldObfuscate = !(reqBody && (reqBody.obfuscate === false || reqBody.obfuscate === 'false' || reqBody.obfuscate === 0 || reqBody.obfuscate === '0'));
     if (!repoUrl) {
         const err = new Error('Walang repoUrl na ibinigay at walang OMNIPOS_REPO_URL env var na naka-set.');
@@ -19200,9 +19220,45 @@ async function performBuildReleaseInner(reqBody, req, publishOverride) {
                 else reject(new Error(`git clone exited with code ${code}`));
             });
         });
+        // Kunin ang SHA at pangalan (subject) ng pinakabagong commit/push BAGO tanggalin ang .git sa filter step.
+        let commitSha = '';
+        let commitMessage = '';
+        try {
+            const info = execSync('git log -1 --format=%H%n%s', { cwd: tmpDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).split('\n');
+            commitSha = String(info[0] || '').trim();
+            commitMessage = String(info[1] || '').trim().slice(0, 200);
+        } catch (gitInfoErr) {
+            console.warn(`⚠️  Hindi mabasa ang git commit info: ${gitInfoErr.message}`);
+        }
+        if (!caption && commitMessage) caption = commitMessage;
         setBuildProgress({ stage: 'filter', percent: BUILD_STEP_END_PERCENT.clone, message: 'Tinatanggal ang mga excluded file...' });
         removeExcludedRecursive(tmpDir);
-        const resolvedVersion = (publishOverride && publishOverride.version) || systemVersionInfo.version || '0.0.0';
+        let resolvedVersion;
+        if (publishOverride && publishOverride.version) {
+            resolvedVersion = publishOverride.version;
+        } else if (publishOverride) {
+            // AUTO: walang tinype na version — kunin ang version mula sa package.json ng git push mismo.
+            let repoVersion = '';
+            try {
+                const repoPkg = JSON.parse(fs.readFileSync(path.join(tmpDir, 'package.json'), 'utf8'));
+                repoVersion = normalizeReleaseVersion(repoPkg.version);
+            } catch (repoPkgErr) {
+            }
+            if (!repoVersion) {
+                const err = new Error('Walang valid na "version" sa package.json ng git repo (hal. "1.1.46"). Ilagay ito sa package.json o mag-type ng version manu-mano.');
+                err.statusCode = 400;
+                throw err;
+            }
+            const forced = !!(reqBody && (reqBody.force === true || reqBody.force === 'true'));
+            if (!publishOverride.targetInstallationId && !forced && !isReleaseVersionNewer(repoVersion, systemVersionInfo.version)) {
+                const err = new Error(`Ang version sa git (v${repoVersion}) ay hindi mas bago sa kasalukuyang published (v${systemVersionInfo.version || '0.0.0'}). I-bump ang "version" sa package.json bago mag-push, o mag-type ng version manu-mano para i-force.`);
+                err.statusCode = 409;
+                throw err;
+            }
+            resolvedVersion = repoVersion;
+        } else {
+            resolvedVersion = systemVersionInfo.version || '0.0.0';
+        }
         try {
             const pkgPath = path.join(tmpDir, 'package.json');
             if (fs.existsSync(pkgPath)) {
@@ -19382,7 +19438,10 @@ async function performBuildReleaseInner(reqBody, req, publishOverride) {
             envEncrypted: envResult.encrypted,
             builtAt,
             persistedToNeon,
-            warning
+            warning,
+            version: resolvedVersion,
+            commitSha: commitSha || null,
+            commitMessage: commitMessage || null
         };
     } catch (err) {
         console.error('❌ Build-release error:', err.message);
@@ -19401,9 +19460,11 @@ app.post('/relay/admin/api/build-release', requireAdminKey, async (req, res) => 
     }
 });
 app.post('/relay/admin/api/system/publish-release', requireAdminKey, async (req, res) => {
-    const version = String((req.body && req.body.version) || '').trim();
-    if (!version) {
-        return res.status(400).json({ success: false, message: 'Kailangan ang "version" (hal. "1.3.0").' });
+    // Optional na ang version: kapag blangko, kukunin ito (at ang pangalan ng push) mula sa git repo mismo.
+    const rawVersion = String((req.body && req.body.version) || '').trim();
+    const version = rawVersion ? normalizeReleaseVersion(rawVersion) : '';
+    if (rawVersion && !version) {
+        return res.status(400).json({ success: false, message: 'Hindi valid ang "version" (hal. "1.3.0", walang ibang karakter). Iwanang blangko para kunin ito sa git package.json.' });
     }
     const targetId = String((req.body && req.body.installationId) || '').trim();
     let buildResult;
@@ -19416,8 +19477,9 @@ app.post('/relay/admin/api/system/publish-release', requireAdminKey, async (req,
             message: `Hindi na-build ang release — HINDI isinagawa ang publish-version: ${err.message}`
         });
     }
-    const changelog = String((req.body && req.body.changelog) || '').trim();
-    const entry = { version, changelog, publishedAt: Date.now() };
+    const publishedVersion = buildResult.version || version;
+    const changelog = String((req.body && req.body.changelog) || '').trim() || buildResult.commitMessage || '';
+    const entry = { version: publishedVersion, changelog, publishedAt: Date.now() };
     if (targetId) {
         targetedReleases.set(targetId, entry);
         saveTargetedReleases(targetedReleases);
@@ -19426,13 +19488,15 @@ app.post('/relay/admin/api/system/publish-release', requireAdminKey, async (req,
         saveSystemVersionInfo(systemVersionInfo);
     }
     logActivity(targetId || null, 'release_built_and_published', {
-        version, changelog, sizeBytes: buildResult.sizeBytes, targeted: !!targetId
+        version: publishedVersion, changelog, sizeBytes: buildResult.sizeBytes, targeted: !!targetId, commitSha: buildResult.commitSha || null, autoVersion: !version
     });
     res.json({
         success: true,
         message: targetId
-            ? `Nabuo ang bersyon ${version} — na-target lang ito sa installationId ${targetId}. Ibang device, hindi ito makikita.`
-            : `Nabuo at na-publish na ang bersyon ${version}. Makikita na ito ng LAHAT ng kliyente sa susunod na update-check nila.`,
+            ? `Nabuo ang bersyon ${publishedVersion} — na-target lang ito sa installationId ${targetId}. Ibang device, hindi ito makikita.`
+            : `Nabuo at na-publish na ang bersyon ${publishedVersion}. Makikita na ito ng LAHAT ng kliyente sa susunod na update-check nila.`,
+        version: publishedVersion,
+        changelog,
         build: buildResult,
         targeted: !!targetId,
         installationId: targetId || null,
