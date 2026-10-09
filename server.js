@@ -2945,11 +2945,82 @@ const PAYMENT_PROVIDERS_CONFIGURED = {
 function findPaymentMethod(methodId) {
     return PAYMENT_METHOD_CATALOG.find((m) => m.id === methodId) || null;
 }
+// ---- PayMongo: alin LANG ang TALAGANG enabled sa PayMongo account ----
+// Dati, basta may PayMongo secret key ay lalabas ang GCash, Maya, Online Banking at QR Ph kahit hindi pa pala naka-enable
+// ang ilan sa mga ito sa PayMongo account (kaya nagfa-fail ang bayad). Ngayon, tinatanong ang PayMongo
+// (GET /v1/merchants/capabilities/payment_methods) at iyon lang ang ipinapakita/tinatanggap. Ang hugis ng sagot nito ay hindi
+// buo ang dokumentasyon, kaya tolerant ang pagbasa (listahan ng string, {data:[...]}, o listahan ng object na may id/type/name).
+// Kapag hindi ma-fetch o hindi mabasa (at wala pang naunang tamang sagot), HINDI nagfi-filter (ipinapakita ang lahat ng naka-configure)
+// para hindi mawalan ng paraan ng pagbabayad dahil lang sa pansamantalang error. May cache at "stale-while-error".
+const PAYMONGO_CAPABILITY_ALIASES = {
+    gcash: ['gcash'],
+    maya: ['paymaya', 'maya'],
+    online_banking: ['dob', 'dob_ubp', 'online_banking'],
+    qrph: ['qrph']
+};
+const PAYMONGO_CAPABILITY_TTL_MS = 10 * 60 * 1000;
+const PAYMONGO_CAPABILITY_RETRY_MS = 60 * 1000;
+let paymongoCapabilityCache = { types: null, at: 0, nextTryAt: 0 };
+let paymongoCapabilityInflight = null;
+function collectPaymongoCapabilityStrings(node, out, depth) {
+    if (node == null || depth > 4) return;
+    if (typeof node === 'string') { const v = node.trim().toLowerCase(); if (v) out.add(v); return; }
+    if (Array.isArray(node)) { node.forEach((n) => collectPaymongoCapabilityStrings(n, out, depth + 1)); return; }
+    if (typeof node === 'object') {
+        ['data', 'payment_methods', 'attributes'].forEach((k) => { if (k in node) collectPaymongoCapabilityStrings(node[k], out, depth + 1); });
+        ['id', 'type', 'name'].forEach((k) => { if (typeof node[k] === 'string') out.add(node[k].trim().toLowerCase()); });
+    }
+}
+async function refreshPaymongoCapabilities(force) {
+    if (!PAYMONGO_SECRET_KEY) return;
+    const now = Date.now();
+    if (!force && paymongoCapabilityCache.types && now - paymongoCapabilityCache.at < PAYMONGO_CAPABILITY_TTL_MS) return;
+    if (!force && now < paymongoCapabilityCache.nextTryAt) return;
+    if (paymongoCapabilityInflight) return paymongoCapabilityInflight;
+    paymongoCapabilityInflight = (async () => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 6000);
+        try {
+            const resp = await fetch(`${PAYMONGO_API_BASE}/merchants/capabilities/payment_methods`, {
+                method: 'GET',
+                headers: { accept: 'application/json', Authorization: paymongoAuthHeader() },
+                signal: controller.signal
+            });
+            const body = await resp.json().catch(() => null);
+            const found = new Set();
+            if (resp.ok) collectPaymongoCapabilityStrings(body, found, 0);
+            if (resp.ok && found.size > 0) {
+                const prev = paymongoCapabilityCache.types ? Array.from(paymongoCapabilityCache.types).sort().join(',') : '';
+                const next = Array.from(found).sort().join(',');
+                paymongoCapabilityCache = { types: found, at: Date.now(), nextTryAt: 0 };
+                if (prev !== next) console.log(`[PayMongo] Enabled payment methods on this account (${PAYMONGO_ENV}): ${next}`);
+            } else {
+                console.warn(`[PayMongo] Could not read the enabled payment methods (HTTP ${resp.status}, ${found.size} entries) — ${paymongoCapabilityCache.types ? 'using the last known list' : 'showing every configured PayMongo method for now'}.`);
+                paymongoCapabilityCache.nextTryAt = Date.now() + PAYMONGO_CAPABILITY_RETRY_MS;
+            }
+        } catch (err) {
+            console.warn('[PayMongo] Payment-method capability check failed:', err && err.message ? err.message : err);
+            paymongoCapabilityCache.nextTryAt = Date.now() + PAYMONGO_CAPABILITY_RETRY_MS;
+        } finally {
+            clearTimeout(timer);
+        }
+    })().finally(() => { paymongoCapabilityInflight = null; });
+    return paymongoCapabilityInflight;
+}
+function isPaymongoMethodEnabledOnAccount(methodId) {
+    const types = paymongoCapabilityCache.types;
+    if (!types) return true; // walang kilalang listahan — huwag magtago ng method
+    const aliases = PAYMONGO_CAPABILITY_ALIASES[methodId];
+    if (!aliases) return true;
+    return aliases.some((a) => types.has(a));
+}
 function isPaymentMethodAvailable(methodId) {
     const m = findPaymentMethod(methodId);
     if (!m) return false;
     const check = PAYMENT_PROVIDERS_CONFIGURED[m.provider];
-    return !!(check && check());
+    if (!(check && check())) return false;
+    if (m.provider === 'paymongo' && !isPaymongoMethodEnabledOnAccount(methodId)) return false;
+    return true;
 }
 // Ibinabalik lang ang mga method na TALAGANG naka-configure ang env
 // var(s) nito sa Render ngayon — ito mismo ang isasagawa ng OMNIPOS
@@ -2964,8 +3035,12 @@ async function createPaymentCheckout({ method, amountPHP, purchaseId, base, desc
         err.code = 'UNSUPPORTED_METHOD';
         throw err;
     }
+    if (m.provider === 'paymongo') await refreshPaymongoCapabilities(false);
     if (!isPaymentMethodAvailable(method)) {
-        const err = new Error(`${m.label} is not configured on the relay right now.`);
+        const configured = PAYMENT_PROVIDERS_CONFIGURED[m.provider] && PAYMENT_PROVIDERS_CONFIGURED[m.provider]();
+        const err = new Error(configured
+            ? `${m.label} is not enabled on the PayMongo account right now.`
+            : `${m.label} is not configured on the relay right now.`);
         err.code = 'PROVIDER_NOT_CONFIGURED';
         throw err;
     }
@@ -13809,6 +13884,8 @@ app.get('/relay/cloud-tokens/packages', requireApiKey, rateLimit('cloud-tokens-p
     // ngayon — ito mismo ang gagamitin ng OMNIPOS para buuin ang dropdown,
     // kaya kung ano lang ang naka-set sa Render env, iyon lang ang
     // lalabas/mapipili.
+    // ?refresh=1 (galing sa Refresh button ng OMNIPOS): sapilitang tanungin ulit ang PayMongo kung alin ang enabled ngayon.
+    await refreshPaymongoCapabilities(req.query && (req.query.refresh === '1' || req.query.refresh === 'true'));
     const paymentMethods = getAvailablePaymentMethods();
     res.json({
         success: true,
@@ -13820,6 +13897,8 @@ app.get('/relay/cloud-tokens/packages', requireApiKey, rateLimit('cloud-tokens-p
         sampleSizeBytesUsed: CLOUD_BACKUP_SAMPLE_SIZE_BYTES_FOR_CATALOG,
         tokensPerPeso: 1,
         paymentMethods,
+        // Ang paunang napipiling paraan ng bayad (una sa listahan ng aktuwal na available); null kung wala.
+        defaultPaymentMethod: paymentMethods.length ? paymentMethods[0].id : null,
         // NOTE: estSyncTokensPerMonth/Year, estTotalMonthlyTokens/YearlyTokens,
         // recommendedExtraBalanceMonthly/Yearly, estRestoreTokensPerRestore(Exact),
         // and estTotalMonthly/YearlyTokensWithOneRestore on each package are
@@ -14041,6 +14120,7 @@ app.post('/relay/cloud-tokens/purchase/create', requireApiKey, requireAllowedDev
     // sa PAYMENT_METHOD_CATALOG/PAYMENT_PROVIDERS_CONFIGURED (env-based)
     // kung valid AT available ang hiniling na method — anumang provider
     // ang nasa likod nito (PayMongo, Xendit, Stripe, PayPal, ...).
+    await refreshPaymongoCapabilities(false);
     if (!isPaymentMethodAvailable(method)) {
         const available = getAvailablePaymentMethods().map((m) => m.label).join(', ') || 'no payment method configured yet';
         return res.status(400).json({ success: false, message: `This payment method is invalid or unavailable. Currently available: ${available}.` });
