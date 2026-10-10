@@ -6551,6 +6551,433 @@ app.get('/relay/admin/api/analytics', requireAdminKey, (req, res) => {
         }
     });
 });
+// ===================================================================
+// BAGO: REVENUE BREAKDOWN PER SUBSCRIPTION (para sa Analytics page).
+// GET /relay/admin/api/analytics/revenue-breakdown?months=6   (3..12)
+//
+// Tatlong magkakahiwalay na pinagkukunan ng numero (hindi pinaghahalo
+// para walang double-counting):
+//   1) LICENSES (issuedUnlocks, in-memory) -> active count, MRR/ARR,
+//      active revenue, monthly/yearly split, expiring, grace, lapsed.
+//      Kasama dito ang LAHAT ng pinagmulan (self-serve tokens, admin
+//      grant, OTP). Isang entry lang ang tinatago kada device kada
+//      feature (huling bayad), kaya "latest purchase" ang all-time dito.
+//   2) LEDGER (cloud_token_ledger) -> totoong naubos na Omni Tokens sa
+//      bawat subscription/add-on (1 token = PHP 1), may buwanang trend.
+//      Hindi kasama dito ang admin grant/OTP na walang token na nagastos.
+//   3) AI TABLES (relay_ai_tier_purchases / extra / day boosts) at
+//      TOKEN SALES (cloud_token_purchases, status = 'paid') -> detalye
+//      ng Omni AI at ang cash-in galing sa pagbebenta ng Omni Tokens.
+// Buwan ay nakabatay sa Asia/Manila (UTC+8). Walang binabago sa data.
+// ===================================================================
+const ANALYTICS_SUBSCRIPTION_IDS = ['cloud_backup', 'ai_assistant', 'multi_branch', 'rbac_management', 'remote_operations'];
+const ANALYTICS_MANILA_OFFSET_MS = 8 * 60 * 60 * 1000;
+const ANALYTICS_LEDGER_BUCKET_ORDER = ['cloud_backup', 'ai_assistant', 'multi_branch', 'rbac_management', 'remote_operations', 'ai_plan', 'ai_extra', 'ai_boost', 'receipt_credits', 'bundle', 'addons_other'];
+function analyticsRound2(n) {
+    const v = Number(n);
+    return Number.isFinite(v) ? Math.round(v * 100) / 100 : 0;
+}
+function analyticsMonthKeysManila(count) {
+    const keys = [];
+    const base = new Date(Date.now() + ANALYTICS_MANILA_OFFSET_MS);
+    const y = base.getUTCFullYear();
+    const m = base.getUTCMonth();
+    for (let i = count - 1; i >= 0; i--) {
+        const d = new Date(Date.UTC(y, m - i, 1));
+        keys.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`);
+    }
+    return keys;
+}
+function analyticsSubscriptionDisplayName(featureId) {
+    if (featureId === 'cloud_backup') return 'Cloud Backup';
+    const plan = MODULE_SUBSCRIPTION_PLANS[featureId] || MODULE_SUBSCRIPTION_PLANS_BASE[featureId];
+    return (plan && plan.name) || (FEATURE_CATALOG[featureId] && FEATURE_CATALOG[featureId].name) || featureId;
+}
+function analyticsLedgerBucketLabel(key) {
+    if (ANALYTICS_SUBSCRIPTION_IDS.includes(key)) return analyticsSubscriptionDisplayName(key);
+    const labels = {
+        ai_plan: 'Omni AI plan upgrades (Plus/Pro)',
+        ai_extra: 'Omni AI extra credit packs',
+        ai_boost: 'Omni AI one-day boosts',
+        receipt_credits: 'Receipt customization credits',
+        bundle: 'Bundled module purchases',
+        addons_other: 'Other add-ons (modules, themes)'
+    };
+    return labels[key] || key;
+}
+// Inuuri ang ledger note (galing sa mga INSERT sa cloud_token_ledger) papunta sa bucket. null = hindi kasama.
+function analyticsClassifyLedgerNote(note) {
+    const n = String(note || '').trim();
+    if (!n) return null;
+    if (/^Cloud Backup activation/i.test(n)) return 'cloud_backup';
+    if (/^Omni AI plan:/i.test(n)) return 'ai_plan';
+    if (/^Omni AI extra credits:/i.test(n)) return 'ai_extra';
+    if (/^Omni AI One-day Boost:/i.test(n)) return 'ai_boost';
+    if (/^Receipt Customization credit purchase/i.test(n)) return 'receipt_credits';
+    if (/^Reversal:\s*Omni AI plan /i.test(n)) return 'ai_plan';
+    if (/^Reversal:\s*extra credits /i.test(n)) return 'ai_extra';
+    if (/^Reversal:\s*One-day Boost/i.test(n)) return 'ai_boost';
+    if (/^Reversal:\s*Omni AI .+ plan could not be activated/i.test(n)) return 'ai_assistant';
+    if (n.startsWith('Purchase \u2014')) {
+        // Isang transaction na may higit sa isang module ay walang hiwalay na halaga sa note,
+        // kaya sa 'bundle' bucket ilalagay (hindi ibibigay lahat sa unang module).
+        const matched = [];
+        for (const id of MODULE_SUBSCRIPTION_FEATURE_IDS) {
+            const names = [];
+            if (MODULE_SUBSCRIPTION_PLANS[id] && MODULE_SUBSCRIPTION_PLANS[id].name) names.push(MODULE_SUBSCRIPTION_PLANS[id].name);
+            if (MODULE_SUBSCRIPTION_PLANS_BASE[id] && MODULE_SUBSCRIPTION_PLANS_BASE[id].name) names.push(MODULE_SUBSCRIPTION_PLANS_BASE[id].name);
+            if (names.some(nm => n.includes(nm))) matched.push(id);
+        }
+        if (matched.length === 1) return matched[0];
+        if (matched.length > 1) return 'bundle';
+        return 'addons_other';
+    }
+    return null;
+}
+function buildSubscriptionLicenseBreakdown() {
+    const now = Date.now();
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const SOON_MS = 7 * DAY_MS;
+    const stats = {};
+    for (const featureId of ANALYTICS_SUBSCRIPTION_IDS) {
+        stats[featureId] = {
+            featureId,
+            name: analyticsSubscriptionDisplayName(featureId),
+            activeCount: 0, graceCount: 0, lapsedCount: 0, blockedCount: 0, lifetimeCount: 0, freeCount: 0,
+            activeRevenue: 0, mrr: 0, adminMrr: 0, adminRevenue: 0, allTimeRevenue: 0, allTimeCount: 0,
+            expiringSoonCount: 0, atRiskRevenue: 0,
+            cycles: { monthly: { count: 0, revenue: 0 }, yearly: { count: 0, revenue: 0 }, custom: { count: 0, revenue: 0 } },
+            sources: { selfServe: 0, admin: 0, otp: 0, other: 0 },
+            tiers: {}
+        };
+    }
+    for (const [installationId, record] of Object.entries(issuedUnlocks || {})) {
+        const isAllowed = allowedDevices.has(installationId);
+        for (const featureId of ANALYTICS_SUBSCRIPTION_IDS) {
+            const entry = record ? record[featureId] : null;
+            if (!entry || typeof entry !== 'object') continue;
+            const s = stats[featureId];
+            const price = Number(entry.price) || 0;
+            const src = String(entry.source || '');
+            // Admin-activated: nakalista ang presyo pero walang bayad na dumaan, kaya hindi isinasama sa MRR/revenue (hiwalay na adminMrr).
+            const isGranted = src === 'admin-direct';
+            const countedPrice = isGranted ? 0 : price;
+            const hasExpiry = typeof entry.expiresAt === 'number';
+            const isExpired = hasExpiry && now > entry.expiresAt;
+            s.allTimeCount++;
+            s.allTimeRevenue += price;
+            if (!isAllowed) {
+                if (isExpired) s.lapsedCount++; else s.blockedCount++;
+                continue;
+            }
+            if (isExpired) {
+                const inGrace = isModuleSubscriptionFeature(featureId) && (now - entry.expiresAt) <= MODULE_SUBSCRIPTION_GRACE_PERIOD_MS;
+                if (inGrace) s.graceCount++; else s.lapsedCount++;
+                continue;
+            }
+            s.activeCount++;
+            s.activeRevenue += countedPrice;
+            if (price <= 0 || isGranted) s.freeCount++;
+            let monthlyEquivalent = 0;
+            let cycleKey = null;
+            if (!hasExpiry) {
+                s.lifetimeCount++;
+            } else if (entry.billingCycle === 'monthly') {
+                monthlyEquivalent = price;
+                cycleKey = 'monthly';
+            } else if (entry.billingCycle === 'yearly') {
+                monthlyEquivalent = price / 12;
+                cycleKey = 'yearly';
+            } else {
+                const issuedAt = Number(entry.issuedAt);
+                const durationDays = Number.isFinite(issuedAt) ? (entry.expiresAt - issuedAt) / DAY_MS : 0;
+                monthlyEquivalent = durationDays > 0 ? (price * 30) / durationDays : 0;
+                cycleKey = 'custom';
+            }
+            if (isGranted) { s.adminMrr += monthlyEquivalent; s.adminRevenue += price; }
+            else s.mrr += monthlyEquivalent;
+            if (cycleKey) {
+                s.cycles[cycleKey].count++;
+                s.cycles[cycleKey].revenue += countedPrice;
+            }
+            if (hasExpiry && (entry.expiresAt - now) <= SOON_MS) {
+                s.expiringSoonCount++;
+                s.atRiskRevenue += countedPrice;
+            }
+            if (src === 'cloud_token_selfserve') s.sources.selfServe++;
+            else if (src === 'admin-direct') s.sources.admin++;
+            else if (src === 'otp' || src === 'otp-bulk') s.sources.otp++;
+            else s.sources.other++;
+            if (entry.tier) {
+                const t = s.tiers[entry.tier] || (s.tiers[entry.tier] = {
+                    tier: entry.tier,
+                    name: (featureId === 'cloud_backup' && CLOUD_BACKUP_PLANS[entry.tier] && CLOUD_BACKUP_PLANS[entry.tier].name) || entry.tier,
+                    count: 0, revenue: 0, mrr: 0
+                });
+                t.count++;
+                t.revenue += countedPrice;
+                if (!isGranted) t.mrr += monthlyEquivalent;
+            }
+        }
+    }
+    const list = ANALYTICS_SUBSCRIPTION_IDS.map(featureId => {
+        const s = stats[featureId];
+        const tiers = Object.values(s.tiers).map(t => ({ ...t, revenue: analyticsRound2(t.revenue), mrr: analyticsRound2(t.mrr) })).sort((a, b) => b.mrr - a.mrr || b.count - a.count);
+        return {
+            ...s,
+            activeRevenue: analyticsRound2(s.activeRevenue),
+            mrr: analyticsRound2(s.mrr),
+            adminMrr: analyticsRound2(s.adminMrr),
+            adminRevenue: analyticsRound2(s.adminRevenue),
+            arpu: s.activeCount > 0 ? analyticsRound2(s.mrr / s.activeCount) : 0,
+            allTimeRevenue: analyticsRound2(s.allTimeRevenue),
+            atRiskRevenue: analyticsRound2(s.atRiskRevenue),
+            cycles: {
+                monthly: { count: s.cycles.monthly.count, revenue: analyticsRound2(s.cycles.monthly.revenue) },
+                yearly: { count: s.cycles.yearly.count, revenue: analyticsRound2(s.cycles.yearly.revenue) },
+                custom: { count: s.cycles.custom.count, revenue: analyticsRound2(s.cycles.custom.revenue) }
+            },
+            tiers
+        };
+    });
+    const totals = list.reduce((acc, s) => {
+        acc.activeCount += s.activeCount;
+        acc.graceCount += s.graceCount;
+        acc.lapsedCount += s.lapsedCount;
+        acc.freeCount += s.freeCount;
+        acc.activeRevenue += s.activeRevenue;
+        acc.mrr += s.mrr;
+        acc.adminMrr += s.adminMrr;
+        acc.allTimeRevenue += s.allTimeRevenue;
+        acc.expiringSoonCount += s.expiringSoonCount;
+        acc.atRiskRevenue += s.atRiskRevenue;
+        return acc;
+    }, { activeCount: 0, graceCount: 0, lapsedCount: 0, freeCount: 0, activeRevenue: 0, mrr: 0, adminMrr: 0, allTimeRevenue: 0, expiringSoonCount: 0, atRiskRevenue: 0 });
+    totals.activeRevenue = analyticsRound2(totals.activeRevenue);
+    totals.mrr = analyticsRound2(totals.mrr);
+    totals.adminMrr = analyticsRound2(totals.adminMrr);
+    totals.arr = analyticsRound2(totals.mrr * 12);
+    totals.allTimeRevenue = analyticsRound2(totals.allTimeRevenue);
+    totals.atRiskRevenue = analyticsRound2(totals.atRiskRevenue);
+    return { list, totals };
+}
+async function buildSubscriptionLedgerBreakdown(monthKeys) {
+    if (!pgPool) {
+        return { available: false, message: 'Postgres (DATABASE_URL) is not configured, so the Omni Token ledger cannot be read.' };
+    }
+    const currentKey = monthKeys[monthKeys.length - 1];
+    const lastKey = monthKeys[monthKeys.length - 2];
+    const result = await queryWithRetry(pgPool, `
+        SELECT to_char(created_at AT TIME ZONE 'Asia/Manila', 'YYYY-MM') AS ym,
+               note,
+               COALESCE(SUM(-tokens), 0) AS spent,
+               COUNT(*)::int AS n
+        FROM cloud_token_ledger
+        WHERE type = 'consume'
+          AND (category IN ('ADDON_PURCHASE', 'FEATURE_UNLOCK')
+               OR note ILIKE 'Cloud Backup activation%'
+               OR note ILIKE 'Purchase %')
+        GROUP BY 1, 2
+    `, []);
+    const buckets = {};
+    for (const key of ANALYTICS_LEDGER_BUCKET_ORDER) {
+        buckets[key] = { key, label: analyticsLedgerBucketLabel(key), allTime: 0, thisMonth: 0, lastMonth: 0, count: 0, byMonth: {} };
+    }
+    const totalByMonth = {};
+    let allTime = 0;
+    let thisMonth = 0;
+    let lastMonth = 0;
+    for (const row of result.rows) {
+        const key = analyticsClassifyLedgerNote(row.note);
+        if (!key || !buckets[key]) continue;
+        const spent = Number(row.spent) || 0;
+        const n = Number(row.n) || 0;
+        const b = buckets[key];
+        b.allTime += spent;
+        b.count += spent >= 0 ? n : -n;
+        allTime += spent;
+        if (row.ym === currentKey) { b.thisMonth += spent; thisMonth += spent; }
+        if (row.ym === lastKey) { b.lastMonth += spent; lastMonth += spent; }
+        if (monthKeys.includes(row.ym)) {
+            b.byMonth[row.ym] = (b.byMonth[row.ym] || 0) + spent;
+            totalByMonth[row.ym] = (totalByMonth[row.ym] || 0) + spent;
+        }
+    }
+    const outBuckets = {};
+    for (const key of ANALYTICS_LEDGER_BUCKET_ORDER) {
+        const b = buckets[key];
+        const byMonth = {};
+        for (const ym of Object.keys(b.byMonth)) byMonth[ym] = analyticsRound2(b.byMonth[ym]);
+        outBuckets[key] = {
+            key, label: b.label,
+            allTime: analyticsRound2(b.allTime), thisMonth: analyticsRound2(b.thisMonth), lastMonth: analyticsRound2(b.lastMonth),
+            count: Math.max(0, b.count), byMonth
+        };
+    }
+    const outTotalByMonth = {};
+    for (const ym of Object.keys(totalByMonth)) outTotalByMonth[ym] = analyticsRound2(totalByMonth[ym]);
+    return {
+        available: true,
+        bucketOrder: ANALYTICS_LEDGER_BUCKET_ORDER,
+        buckets: outBuckets,
+        totalByMonth: outTotalByMonth,
+        allTime: analyticsRound2(allTime),
+        thisMonth: analyticsRound2(thisMonth),
+        lastMonth: analyticsRound2(lastMonth)
+    };
+}
+async function buildAiSalesBreakdown(manilaMonthKey) {
+    if (!pgPoolDevices) {
+        return { available: false, message: 'Postgres (devices/AI database) is not configured, so Omni AI sales cannot be read.' };
+    }
+    const aiMonthKey = relayAiMonthKey();
+    const [tierRes, extraRes, boostRes] = await Promise.all([
+        queryWithRetry(pgPoolDevices, `
+            SELECT tier_id,
+                   MAX(tier_name) AS tier_name,
+                   COUNT(*)::int AS purchases,
+                   COALESCE(SUM(tokens_spent), 0) AS tokens,
+                   (COUNT(*) FILTER (WHERE month_key = $1))::int AS buyers_this_month,
+                   COALESCE(SUM(tokens_spent) FILTER (WHERE month_key = $1), 0) AS tokens_this_month
+            FROM relay_ai_tier_purchases
+            GROUP BY tier_id
+            ORDER BY 4 DESC
+        `, [aiMonthKey]),
+        queryWithRetry(pgPoolDevices, `
+            SELECT pack_id,
+                   MAX(pack_name) AS pack_name,
+                   COUNT(*)::int AS sales,
+                   COALESCE(SUM(price_tokens), 0) AS tokens,
+                   COALESCE(SUM(credits), 0) AS credits,
+                   (COUNT(*) FILTER (WHERE month_key = $1))::int AS sales_this_month,
+                   COALESCE(SUM(price_tokens) FILTER (WHERE month_key = $1), 0) AS tokens_this_month
+            FROM relay_ai_extra_purchases
+            GROUP BY pack_id
+            ORDER BY 4 DESC
+        `, [aiMonthKey]),
+        queryWithRetry(pgPoolDevices, `
+            SELECT boost_id,
+                   COUNT(*)::int AS sales,
+                   COALESCE(SUM(price_tokens), 0) AS tokens,
+                   COALESCE(SUM(neurons), 0) AS neurons,
+                   (COUNT(*) FILTER (WHERE to_char(created_at AT TIME ZONE 'Asia/Manila', 'YYYY-MM') = $1))::int AS sales_this_month,
+                   COALESCE(SUM(price_tokens) FILTER (WHERE to_char(created_at AT TIME ZONE 'Asia/Manila', 'YYYY-MM') = $1), 0) AS tokens_this_month
+            FROM relay_ai_day_boosts
+            GROUP BY boost_id
+            ORDER BY 3 DESC
+        `, [manilaMonthKey])
+    ]);
+    return {
+        available: true,
+        planMonthKey: aiMonthKey,
+        tiers: tierRes.rows.map(r => ({
+            tierId: r.tier_id, tierName: r.tier_name || r.tier_id,
+            purchases: Number(r.purchases) || 0, tokens: analyticsRound2(r.tokens),
+            buyersThisMonth: Number(r.buyers_this_month) || 0, tokensThisMonth: analyticsRound2(r.tokens_this_month)
+        })),
+        extras: extraRes.rows.map(r => ({
+            packId: r.pack_id, packName: r.pack_name || r.pack_id,
+            sales: Number(r.sales) || 0, tokens: analyticsRound2(r.tokens), credits: Number(r.credits) || 0,
+            salesThisMonth: Number(r.sales_this_month) || 0, tokensThisMonth: analyticsRound2(r.tokens_this_month)
+        })),
+        boosts: boostRes.rows.map(r => ({
+            boostId: r.boost_id,
+            sales: Number(r.sales) || 0, tokens: analyticsRound2(r.tokens), neurons: Number(r.neurons) || 0,
+            salesThisMonth: Number(r.sales_this_month) || 0, tokensThisMonth: analyticsRound2(r.tokens_this_month)
+        }))
+    };
+}
+async function buildTokenSalesBreakdown(monthKeys) {
+    if (!pgPool) {
+        return { available: false, message: 'Postgres (DATABASE_URL) is not configured, so Omni Token sales cannot be read.' };
+    }
+    const currentKey = monthKeys[monthKeys.length - 1];
+    const lastKey = monthKeys[monthKeys.length - 2];
+    const result = await queryWithRetry(pgPool, `
+        SELECT to_char(updated_at AT TIME ZONE 'Asia/Manila', 'YYYY-MM') AS ym,
+               COUNT(*)::int AS n,
+               COALESCE(SUM(amount_php), 0) AS php,
+               COALESCE(SUM(tokens), 0) AS tokens
+        FROM cloud_token_purchases
+        WHERE status = 'paid'
+        GROUP BY 1
+    `, []);
+    let allTime = 0;
+    let allTimeTokens = 0;
+    let count = 0;
+    let thisMonth = 0;
+    let lastMonth = 0;
+    const byMonth = {};
+    for (const row of result.rows) {
+        const php = Number(row.php) || 0;
+        allTime += php;
+        allTimeTokens += Number(row.tokens) || 0;
+        count += Number(row.n) || 0;
+        if (row.ym === currentKey) thisMonth += php;
+        if (row.ym === lastKey) lastMonth += php;
+        if (monthKeys.includes(row.ym)) byMonth[row.ym] = analyticsRound2((byMonth[row.ym] || 0) + php);
+    }
+    return {
+        available: true,
+        allTime: analyticsRound2(allTime), allTimeTokens: analyticsRound2(allTimeTokens), count,
+        thisMonth: analyticsRound2(thisMonth), lastMonth: analyticsRound2(lastMonth), byMonth
+    };
+}
+// AYOS: ang Analytics page ay nagre-refresh kada 15s. Ang ledger/AI/token queries ay may GROUP BY sa buong table,
+// kaya 60s cache ang inilagay (kada bilang ng buwan) para hindi laging ginigising/pinapagod ang Neon.
+// Hindi kasama sa cache ang licenses (in-memory, mura) at hindi kini-cache ang may pumalyang query.
+const ANALYTICS_REVENUE_CACHE_TTL_MS = 60 * 1000;
+const analyticsRevenueDbCache = new Map();
+app.get('/relay/admin/api/analytics/revenue-breakdown', requireAdminKey, async (req, res) => {
+    try {
+        const requestedMonths = parseInt(req.query.months, 10);
+        const months = Math.min(12, Math.max(3, Number.isFinite(requestedMonths) ? requestedMonths : 6));
+        const monthKeys = analyticsMonthKeysManila(months);
+        const currentKey = monthKeys[monthKeys.length - 1];
+        const licenses = buildSubscriptionLicenseBreakdown();
+        const safe = async (label, fn) => {
+            try { return await fn(); }
+            catch (err) {
+                console.error(`⚠️  revenue-breakdown (${label}) error:`, err.message);
+                return { available: false, message: `Could not read ${label}: ${err.message}` };
+            }
+        };
+        const cacheKey = `${months}:${currentKey}`;
+        const cachedDb = analyticsRevenueDbCache.get(cacheKey);
+        let dbPart;
+        if (cachedDb && (Date.now() - cachedDb.at) < ANALYTICS_REVENUE_CACHE_TTL_MS) {
+            dbPart = cachedDb.data;
+        } else {
+            const [ledgerRes, aiSalesRes, tokenSalesRes] = await Promise.all([
+                safe('the Omni Token ledger', () => buildSubscriptionLedgerBreakdown(monthKeys)),
+                safe('Omni AI sales', () => buildAiSalesBreakdown(currentKey)),
+                safe('Omni Token sales', () => buildTokenSalesBreakdown(monthKeys))
+            ]);
+            dbPart = { ledger: ledgerRes, aiSales: aiSalesRes, tokenSales: tokenSalesRes };
+            if (ledgerRes.available && aiSalesRes.available && tokenSalesRes.available) {
+                analyticsRevenueDbCache.set(cacheKey, { at: Date.now(), data: dbPart });
+                if (analyticsRevenueDbCache.size > 24) {
+                    analyticsRevenueDbCache.delete(analyticsRevenueDbCache.keys().next().value);
+                }
+            }
+        }
+        const { ledger, aiSales, tokenSales } = dbPart;
+        res.json({
+            success: true,
+            generatedAt: Date.now(),
+            months: monthKeys,
+            currentMonth: currentKey,
+            subscriptions: licenses.list,
+            totals: licenses.totals,
+            ledger,
+            aiSales,
+            tokenSales
+        });
+    } catch (err) {
+        console.error('⚠️  /relay/admin/api/analytics/revenue-breakdown error:', err.message);
+        res.status(500).json({ success: false, message: 'Could not build the revenue breakdown: ' + err.message });
+    }
+});
 app.post('/relay/admin/api/analytics/reset', requireAdminKey, (req, res) => {
     const confirm = req.query.confirm || req.body?.confirm;
     if (confirm !== 'RESET') {

@@ -1000,6 +1000,78 @@ a:focus-visible,
   100% { opacity: 1; text-shadow: 0 0 12px rgba(34,229,255,.35); }
 }
 .stat-card { isolation: isolate; }
+/* ---- Analytics: subscription revenue section ---- */
+.ana-wrap { max-width: 980px; }
+.ana-section-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin: 4px 0 12px; }
+.ana-section-head h2 { margin: 0; font-family: var(--font-ui); font-size: 17px; font-weight: 700; letter-spacing: -.01em; }
+.ana-section-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ana-range { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; background: var(--card); }
+.ana-range button { background: transparent; color: var(--muted); border: 0; padding: 7px 13px; font-family: var(--font-mono); font-size: 12px; font-weight: 600; cursor: pointer; }
+.ana-range button + button { border-left: 1px solid var(--border); }
+.ana-range button:hover { color: var(--accent-bright); }
+.ana-range button.active { background: var(--accent-soft); color: var(--accent-bright); }
+.ana-range button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ana-note { font-size: 12px; color: var(--muted); line-height: 1.65; }
+.ana-hero-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(158px, 1fr)); gap: 8px; margin-bottom: 14px; }
+.ana-hero-grid .stat-num { font-size: 20px; overflow-wrap: anywhere; }
+.ana-stat-sub { font-size: 11.5px; color: var(--muted); margin-top: 5px; line-height: 1.45; }
+.ana-up { color: var(--green); }
+.ana-down { color: var(--red); }
+.ana-sub-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; margin-bottom: 14px; }
+.ana-sub-card {
+  position: relative;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--sub-color, var(--accent));
+  border-radius: var(--radius);
+  padding: 14px 16px 16px;
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  box-shadow: var(--shadow-ambient), inset 0 1px 0 0 rgba(255,255,255,.04);
+}
+.ana-sub-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.ana-sub-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.ana-sub-icon { font-size: 21px; line-height: 1; }
+.ana-sub-name { font-weight: 700; font-size: 14.5px; line-height: 1.25; }
+.ana-sub-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.ana-sub-mrr { text-align: right; flex-shrink: 0; }
+.ana-sub-mrr b { display: block; font-family: var(--font-mono); font-size: 19px; font-weight: 700; color: var(--text); }
+.ana-sub-mrr span { font-size: 11px; color: var(--muted); }
+.ana-kv { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; margin: 14px 0 12px; }
+.ana-kv .k { font-size: 11.5px; color: var(--muted); line-height: 1.35; }
+.ana-kv .v { font-family: var(--font-mono); font-size: 13.5px; font-weight: 600; margin-top: 2px; overflow-wrap: anywhere; }
+.ana-kv .n { font-size: 11px; margin-top: 1px; }
+.ana-split { display: flex; height: 8px; border-radius: 999px; overflow: hidden; background: var(--bg-raise); border: 1px solid var(--line); }
+.ana-split span { display: block; height: 100%; }
+.ana-split-legend { font-size: 11.5px; color: var(--muted); margin-top: 5px; }
+.ana-chips { margin-top: 10px; }
+.ana-chip { display: inline-block; font-size: 11px; font-family: var(--font-mono); padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); margin: 3px 5px 0 0; }
+.ana-chip.warn { color: var(--amber); background: var(--amber-bg); border-color: var(--amber-line); }
+.ana-chip.bad { color: var(--red); background: var(--red-bg); border-color: var(--red-line); }
+.ana-chip.good { color: var(--green); background: var(--green-bg); border-color: var(--green-line); }
+.ana-h3 { font-size: 12.5px; font-weight: 700; color: var(--accent-bright); margin: 14px 0 8px; }
+.ana-chart-wrap { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.ana-chart { display: block; width: 100%; height: auto; min-width: 320px; }
+.ana-chart text { fill: var(--muted); font-family: var(--font-mono); font-size: 9.5px; }
+.ana-chart .ana-total { fill: var(--text); font-weight: 600; }
+.ana-chart line { stroke: var(--line); stroke-width: 1; }
+.ana-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px; font-size: 12px; color: var(--muted); }
+.ana-dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: baseline; }
+.ana-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.ana-row:last-child { border-bottom: none; }
+.ana-row-meta { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+.ana-row-val { text-align: right; font-family: var(--font-mono); flex-shrink: 0; }
+.ana-row-val b { font-weight: 700; }
+.ana-row.total { font-weight: 700; }
+.ana-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.ana-table { width: 100%; border-collapse: collapse; font-size: 12.5px; min-width: 520px; }
+.ana-table th, .ana-table td { padding: 8px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--line); }
+.ana-table th:first-child, .ana-table td:first-child { text-align: left; }
+.ana-table th { color: var(--muted); font-weight: 600; font-size: 11.5px; }
+.ana-table td { font-family: var(--font-mono); }
+.ana-table td:first-child { font-family: var(--font-ui); }
+.ana-table tfoot td { font-weight: 700; border-top: 1px solid var(--border-soft); border-bottom: none; }
+.ana-table .dim { color: var(--muted-dim); }
 </style>
 </head>
 <body>
@@ -1497,7 +1569,7 @@ a:focus-visible,
       <button class="icon-btn" onclick="closeAnalytics()">← Back</button>
     </div>
   </div>
-  <div class="wrap">
+  <div class="wrap ana-wrap">
     <div class="stat-strip">
       <div class="stat-card">
         <div class="stat-num" id="anaAllowed">—</div>
@@ -1524,6 +1596,53 @@ a:focus-visible,
       <div class="stat-card">
         <div class="stat-num" id="anaRevenue">—</div>
         <div class="stat-label">Revenue (active)</div>
+      </div>
+    </div>
+    <div id="anaRevenueSection">
+      <div class="ana-section-head">
+        <h2>💰 Subscription Revenue</h2>
+        <div class="ana-section-tools">
+          <div class="ana-range" id="anaRange" role="group" aria-label="Revenue period">
+            <button type="button" data-months="3" onclick="setAnaRange(3)">3M</button>
+            <button type="button" data-months="6" class="active" onclick="setAnaRange(6)">6M</button>
+            <button type="button" data-months="12" onclick="setAnaRange(12)">12M</button>
+          </div>
+          <button class="icon-btn" type="button" onclick="exportRevenueCsv()" id="anaExportBtn">⬇️ Export CSV</button>
+        </div>
+      </div>
+      <div id="anaRevStatus" class="ana-note" style="margin-bottom:10px;">Loading revenue breakdown...</div>
+      <div id="anaRevHero" class="ana-hero-grid"></div>
+      <div id="anaSubCards" class="ana-sub-grid"></div>
+      <div class="card">
+        <h2>📊 Monthly Sales Trend <span class="count-pill" id="anaTrendTotal">—</span></h2>
+        <div class="ana-note" style="margin:-6px 0 10px;">Omni Tokens spent by clients on subscriptions and add-ons, per month (1 token = ₱1), stacked by type.</div>
+        <div id="anaTrendChart" class="ana-chart-wrap"><div class="ana-note">Loading...</div></div>
+        <div id="anaTrendLegend" class="ana-legend"></div>
+      </div>
+      <div class="card">
+        <h2>🧩 Recurring Revenue Mix <span style="font-size:11px; color:var(--muted); font-weight:normal;">(share of MRR)</span></h2>
+        <div id="anaMrrMix"><div class="ana-note">Loading...</div></div>
+      </div>
+      <div class="card">
+        <h2>🤖 Omni AI Revenue</h2>
+        <div id="anaAiRevenue"><div class="ana-note">Loading...</div></div>
+      </div>
+      <div class="card">
+        <h2>🪙 Omni Token Sales <span style="font-size:11px; color:var(--muted); font-weight:normal;">(cash-in from paid purchases)</span></h2>
+        <div id="anaTokenSales"><div class="ana-note">Loading...</div></div>
+      </div>
+      <div class="card">
+        <h2>🗓️ Monthly Breakdown</h2>
+        <div id="anaMonthTable" class="ana-table-wrap"><div class="ana-note">Loading...</div></div>
+      </div>
+      <div class="card">
+        <h2>ℹ️ How these numbers are computed</h2>
+        <div class="ana-note">
+          <b>MRR</b> comes from active licenses on allowed devices: monthly plans count at full price, yearly plans at price ÷ 12, lifetime, free or admin-activated licenses add nothing (admin-activated value is shown separately on each card).<br>
+          <b>Tokens spent</b> comes from the Omni Token ledger, so it adds up over time. It does not include licenses granted by an admin or approved by OTP without tokens being spent.<br>
+          <b>All-time (latest purchase)</b> only keeps the latest payment per device, so renewals replace the older amount.<br>
+          <b>Omni Token sales</b> counts paid purchases only. Months follow Asia/Manila time.
+        </div>
       </div>
     </div>
     <div class="card">
@@ -3850,6 +3969,7 @@ async function loadAnalytics() {
   } catch (err) { return; }
   if (!data.success) { toast(data.message || 'Could not load analytics.', 'error'); return; }
   renderAnalytics(data.analytics);
+  await loadRevenueBreakdown();
 }
 async function resetAnalytics() {
   const ok = await confirmAction({
@@ -3982,6 +4102,456 @@ async function submitRevenueReset() {
   } finally {
     btn.disabled = false; btn.innerText = 'Oo, i-reset sa zero';
   }
+}
+// ===================================================================
+// ANALYTICS: Subscription revenue breakdown (per subscription, monthly
+// trend, Omni AI, Omni Token sales, CSV export). Data galing sa
+// GET /relay/admin/api/analytics/revenue-breakdown
+// ===================================================================
+let anaRevMonths = 6;
+let anaRevData = null;
+let anaRevLoading = false;
+let anaRevPending = false;
+const ANA_COLORS = {
+  cloud_backup: '#22e5ff', ai_assistant: '#ff2ee6', multi_branch: '#3ddc84', rbac_management: '#ffb545',
+  remote_operations: '#8b7bff', ai_plan: '#ff7ad9', ai_extra: '#ffa6ee', ai_boost: '#ffd0f5',
+  receipt_credits: '#5aa9ff', bundle: '#b8e986', addons_other: '#8ea3c9'
+};
+const ANA_ICONS = { cloud_backup: '☁️', ai_assistant: '🤖', multi_branch: '🏬', rbac_management: '🔐', remote_operations: '🛰️' };
+const ANA_SHORT_LABELS = {
+  cloud_backup: 'Cloud Backup', ai_assistant: 'AI Assistant', multi_branch: 'Multi-Branch', rbac_management: 'RBAC',
+  remote_operations: 'Remote Ops', ai_plan: 'AI plans', ai_extra: 'AI packs', ai_boost: 'AI boosts',
+  receipt_credits: 'Receipt credits', bundle: 'Bundles', addons_other: 'Other add-ons'
+};
+const ANA_MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function anaEsc(v) {
+  return String(v === null || v === undefined ? '' : v)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function anaPeso(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '—';
+  return '₱' + v.toLocaleString('en-PH', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+}
+function anaInt(n) {
+  const v = Number(n);
+  return Number.isFinite(v) ? v.toLocaleString('en-PH') : '—';
+}
+function anaColor(key) { return ANA_COLORS[key] || '#8ea3c9'; }
+function anaShortLabel(key, fallback) { return ANA_SHORT_LABELS[key] || fallback || key; }
+function anaMonthLabel(ym) {
+  const parts = String(ym).split('-');
+  const idx = parseInt(parts[1], 10) - 1;
+  const name = ANA_MONTH_NAMES[idx];
+  return name ? (name + ' ' + String(parts[0]).slice(2)) : String(ym);
+}
+function anaCompact(n) {
+  const v = Number(n) || 0;
+  if (v >= 1000000) return (v / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (v >= 1000) return (v / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
+  return String(Math.round(v));
+}
+function anaNiceMax(v) {
+  if (!(v > 0)) return 100;
+  const pow = Math.pow(10, Math.floor(Math.log10(v)));
+  const f = v / pow;
+  const nf = f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10;
+  return nf * pow;
+}
+function anaDelta(cur, prev) {
+  const c = Number(cur) || 0;
+  const p = Number(prev) || 0;
+  if (p > 0) {
+    const pct = ((c - p) / p) * 100;
+    if (Math.abs(pct) < 0.05) return { text: 'same as last month', cls: '' };
+    return { text: (pct > 0 ? '▲ ' : '▼ ') + Math.abs(pct).toFixed(1) + '% vs last month', cls: pct > 0 ? 'ana-up' : 'ana-down' };
+  }
+  if (c > 0) return { text: 'new this month', cls: 'ana-up' };
+  return { text: 'no sales yet this month', cls: '' };
+}
+function anaEmpty(message) {
+  return '<div class="empty">' + anaEsc(message) + '</div>';
+}
+function setAnaRange(months) {
+  anaRevMonths = months;
+  document.querySelectorAll('#anaRange button').forEach(b => {
+    b.classList.toggle('active', parseInt(b.getAttribute('data-months'), 10) === months);
+  });
+  loadRevenueBreakdown();
+}
+async function loadRevenueBreakdown() {
+  if (anaRevLoading) { anaRevPending = true; return; }
+  anaRevLoading = true;
+  const statusEl = document.getElementById('anaRevStatus');
+  try {
+    const data = await api('/relay/admin/api/analytics/revenue-breakdown?months=' + encodeURIComponent(anaRevMonths));
+    if (!data.success) {
+      if (statusEl) statusEl.innerText = data.message || 'Could not load the revenue breakdown.';
+      return;
+    }
+    // Kung nagpalit ng 3M/6M/12M habang naglo-load, huwag i-render ang lumang range; uulitin sa finally.
+    if (Array.isArray(data.months) && data.months.length !== anaRevMonths) return;
+    anaRevData = data;
+    renderRevenueBreakdown(data);
+  } catch (err) {
+    if (statusEl && !anaRevData) statusEl.innerText = 'Could not load the revenue breakdown. It will retry automatically.';
+  } finally {
+    anaRevLoading = false;
+    if (anaRevPending) { anaRevPending = false; loadRevenueBreakdown(); }
+  }
+}
+function renderRevenueBreakdown(d) {
+  const statusEl = document.getElementById('anaRevStatus');
+  if (statusEl) {
+    statusEl.innerText = 'Updated ' + new Date(d.generatedAt).toLocaleTimeString('en-PH') +
+      ' · last ' + d.months.length + ' months · Asia/Manila time';
+  }
+  renderRevHero(d);
+  renderRevSubCards(d);
+  renderRevTrend(d);
+  renderRevMix(d);
+  renderRevAi(d);
+  renderRevTokenSales(d);
+  renderRevTable(d);
+}
+function renderRevHero(d) {
+  const el = document.getElementById('anaRevHero');
+  if (!el) return;
+  const t = d.totals || {};
+  const L = d.ledger && d.ledger.available ? d.ledger : null;
+  const T = d.tokenSales && d.tokenSales.available ? d.tokenSales : null;
+  const dl = L ? anaDelta(L.thisMonth, L.lastMonth) : { text: 'Ledger unavailable', cls: '' };
+  const dt = T ? anaDelta(T.thisMonth, T.lastMonth) : { text: 'Unavailable', cls: '' };
+  const cards = [
+    { label: 'Monthly recurring revenue', value: anaPeso(t.mrr), sub: 'ARR ' + anaPeso(t.arr), cls: '' },
+    {
+      label: 'Active subscriptions', value: anaInt(t.activeCount),
+      sub: anaInt(t.graceCount) + ' in grace · ' + anaInt(t.lapsedCount) + ' lapsed' + (t.freeCount ? ' · ' + anaInt(t.freeCount) + ' free/granted' : ''),
+      cls: ''
+    },
+    { label: 'Subscription & add-on sales this month', value: L ? anaPeso(L.thisMonth) : '—', sub: dl.text, cls: dl.cls },
+    { label: 'Omni Token sales this month', value: T ? anaPeso(T.thisMonth) : '—', sub: dt.text, cls: dt.cls },
+    {
+      label: 'Renewals due in 7 days', value: anaPeso(t.atRiskRevenue),
+      sub: anaInt(t.expiringSoonCount) + ' subscription(s) expiring', cls: '', danger: (t.expiringSoonCount || 0) > 0
+    },
+    {
+      label: 'Sold via tokens, all-time', value: L ? anaPeso(L.allTime) : '—',
+      sub: 'Licenses (latest purchase per device): ' + anaPeso(t.allTimeRevenue), cls: ''
+    }
+  ];
+  el.innerHTML = cards.map(c => `
+    <div class="stat-card">
+      <div class="stat-num${c.danger ? ' stat-num-danger' : ''}">${anaEsc(c.value)}</div>
+      <div class="stat-label">${anaEsc(c.label)}</div>
+      <div class="ana-stat-sub ${c.cls || ''}">${anaEsc(c.sub)}</div>
+    </div>
+  `).join('');
+}
+function renderRevSubCards(d) {
+  const el = document.getElementById('anaSubCards');
+  if (!el) return;
+  const L = d.ledger && d.ledger.available ? d.ledger : null;
+  const subs = d.subscriptions || [];
+  if (subs.length === 0) { el.innerHTML = anaEmpty('No subscription data yet.'); return; }
+  el.innerHTML = subs.map(s => {
+    const led = L && L.buckets ? L.buckets[s.featureId] : null;
+    const color = anaColor(s.featureId);
+    const cyc = s.cycles || { monthly: { count: 0 }, yearly: { count: 0 }, custom: { count: 0 } };
+    const cycTotal = cyc.monthly.count + cyc.yearly.count + cyc.custom.count;
+    const dl = led ? anaDelta(led.thisMonth, led.lastMonth) : null;
+    let splitHtml = '';
+    if (cycTotal > 0) {
+      const seg = (count, c) => count > 0 ? `<span style="width:${(count / cycTotal) * 100}%; background:${c};"></span>` : '';
+      splitHtml = `
+        <div class="ana-split">${seg(cyc.monthly.count, '#22e5ff')}${seg(cyc.yearly.count, '#ff2ee6')}${seg(cyc.custom.count, '#ffb545')}</div>
+        <div class="ana-split-legend">Monthly ${anaInt(cyc.monthly.count)} · Yearly ${anaInt(cyc.yearly.count)}${cyc.custom.count ? ' · Custom length ' + anaInt(cyc.custom.count) : ''}${s.lifetimeCount ? ' · Lifetime ' + anaInt(s.lifetimeCount) : ''}</div>`;
+    } else if (s.lifetimeCount) {
+      splitHtml = `<div class="ana-split-legend">Lifetime ${anaInt(s.lifetimeCount)} (no recurring revenue)</div>`;
+    }
+    let tiersHtml = '';
+    if (s.tiers && s.tiers.length) {
+      const maxVal = Math.max(...s.tiers.map(t => t.mrr > 0 ? t.mrr : t.count));
+      tiersHtml = '<div class="ana-h3">By plan</div>' + s.tiers.map(t => {
+        const basis = t.mrr > 0 ? t.mrr : t.count;
+        const width = maxVal > 0 ? Math.max(6, Math.round((basis / maxVal) * 100)) : 6;
+        return `
+          <div class="abar-row">
+            <div class="abar-label"><span class="name">${anaEsc(t.name)}</span><span class="count">${anaInt(t.count)} active · ${anaPeso(t.mrr)}/mo</span></div>
+            <div class="abar-track"><div class="abar-fill" style="width:${width}%; background:${color};"></div></div>
+          </div>`;
+      }).join('');
+    }
+    const chips = [];
+    if (s.expiringSoonCount > 0) chips.push(`<span class="ana-chip warn">${anaInt(s.expiringSoonCount)} expiring in 7 days · ${anaPeso(s.atRiskRevenue)}</span>`);
+    if (s.graceCount > 0) chips.push(`<span class="ana-chip warn">${anaInt(s.graceCount)} in grace period</span>`);
+    if (s.lapsedCount > 0) chips.push(`<span class="ana-chip bad">${anaInt(s.lapsedCount)} lapsed</span>`);
+    if (s.blockedCount > 0) chips.push(`<span class="ana-chip bad">${anaInt(s.blockedCount)} device(s) not allowed</span>`);
+    if (s.adminMrr > 0) chips.push(`<span class="ana-chip">${anaPeso(s.adminMrr)}/mo from admin-activated, not counted in MRR</span>`);
+    if (s.freeCount > 0) chips.push(`<span class="ana-chip">${anaInt(s.freeCount)} free/granted</span>`);
+    if (s.sources) {
+      if (s.sources.selfServe > 0) chips.push(`<span class="ana-chip good">${anaInt(s.sources.selfServe)} self-serve (tokens)</span>`);
+      if (s.sources.admin > 0) chips.push(`<span class="ana-chip">${anaInt(s.sources.admin)} admin-activated</span>`);
+      if (s.sources.otp > 0) chips.push(`<span class="ana-chip">${anaInt(s.sources.otp)} via OTP</span>`);
+      if (s.sources.other > 0) chips.push(`<span class="ana-chip">${anaInt(s.sources.other)} other</span>`);
+    }
+    if (s.activeCount === 0 && s.allTimeCount === 0) chips.push('<span class="ana-chip">No subscribers yet</span>');
+    return `
+      <div class="ana-sub-card" style="--sub-color:${color};">
+        <div class="ana-sub-head">
+          <div class="ana-sub-title">
+            <div class="ana-sub-icon">${ANA_ICONS[s.featureId] || '📦'}</div>
+            <div>
+              <div class="ana-sub-name">${anaEsc(s.name)}</div>
+              <div class="ana-sub-meta">${anaInt(s.activeCount)} active subscriber(s)</div>
+            </div>
+          </div>
+          <div class="ana-sub-mrr"><b>${anaPeso(s.mrr)}</b><span>per month (MRR)</span></div>
+        </div>
+        <div class="ana-kv">
+          <div><div class="k">Current billing period</div><div class="v">${anaPeso(s.activeRevenue)}</div></div>
+          <div><div class="k">Per subscriber, monthly</div><div class="v">${anaPeso(s.arpu)}</div></div>
+          <div><div class="k">Yearly run-rate</div><div class="v">${anaPeso((s.mrr || 0) * 12)}</div></div>
+          <div><div class="k">Licenses, latest purchase</div><div class="v">${anaPeso(s.allTimeRevenue)}</div></div>
+          <div><div class="k">Sold via tokens, all-time</div><div class="v">${led ? anaPeso(led.allTime) : '—'}</div></div>
+          <div><div class="k">Sold via tokens, this month</div><div class="v">${led ? anaPeso(led.thisMonth) : '—'}</div>${dl ? `<div class="n ${dl.cls}">${anaEsc(dl.text)}</div>` : ''}</div>
+        </div>
+        ${splitHtml}
+        ${tiersHtml}
+        <div class="ana-chips">${chips.join('')}</div>
+      </div>`;
+  }).join('');
+}
+function renderRevTrend(d) {
+  const el = document.getElementById('anaTrendChart');
+  const legendEl = document.getElementById('anaTrendLegend');
+  const pillEl = document.getElementById('anaTrendTotal');
+  if (!el) return;
+  const L = d.ledger;
+  if (legendEl) legendEl.innerHTML = '';
+  if (pillEl) pillEl.innerText = '—';
+  if (!L || !L.available) { el.innerHTML = anaEmpty((L && L.message) || 'The Omni Token ledger is unavailable.'); return; }
+  const months = d.months || [];
+  const keys = (L.bucketOrder || []).filter(k => L.buckets[k] && months.some(m => (Number(L.buckets[k].byMonth[m]) || 0) > 0));
+  const totals = months.map(m => Number(L.totalByMonth[m]) || 0);
+  const maxV = Math.max(0, ...totals);
+  if (keys.length === 0 || maxV <= 0) {
+    el.innerHTML = anaEmpty('No subscription or add-on sales paid with Omni Tokens in this period yet.');
+    return;
+  }
+  if (pillEl) pillEl.innerText = anaPeso(totals.reduce((a, b) => a + b, 0));
+  const W = 56 + months.length * 56;
+  const H = 240;
+  const ml = 44, mr = 8, mt = 16, mb = 30;
+  const plotH = H - mt - mb;
+  const band = (W - ml - mr) / months.length;
+  const barW = Math.min(34, band * 0.62);
+  const yMax = anaNiceMax(maxV);
+  let svg = `<svg class="ana-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Monthly subscription and add-on sales, stacked by type">`;
+  for (let i = 0; i <= 4; i++) {
+    const y = mt + plotH - (plotH * i) / 4;
+    svg += `<line x1="${ml}" x2="${W - mr}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}"></line>`;
+    svg += `<text x="${ml - 6}" y="${(y + 3).toFixed(1)}" text-anchor="end">${anaCompact((yMax * i) / 4)}</text>`;
+  }
+  months.forEach((m, idx) => {
+    const x = ml + band * idx + (band - barW) / 2;
+    let yCursor = mt + plotH;
+    keys.forEach(k => {
+      const v = Math.max(0, Number(L.buckets[k].byMonth[m]) || 0);
+      if (v <= 0) return;
+      const h = (plotH * v) / yMax;
+      yCursor -= h;
+      svg += `<rect x="${x.toFixed(1)}" y="${yCursor.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" fill="${anaColor(k)}"><title>${anaEsc(anaMonthLabel(m))} · ${anaEsc(L.buckets[k].label)}: ${anaEsc(anaPeso(v))}</title></rect>`;
+    });
+    const total = totals[idx];
+    if (total > 0) {
+      svg += `<text class="ana-total" x="${(x + barW / 2).toFixed(1)}" y="${(yCursor - 4).toFixed(1)}" text-anchor="middle">${anaCompact(total)}</text>`;
+    }
+    svg += `<text x="${(x + barW / 2).toFixed(1)}" y="${H - 10}" text-anchor="middle">${anaEsc(anaMonthLabel(m))}</text>`;
+  });
+  svg += '</svg>';
+  el.innerHTML = svg;
+  if (legendEl) {
+    legendEl.innerHTML = keys.map(k =>
+      `<span><span class="ana-dot" style="background:${anaColor(k)};"></span>${anaEsc(L.buckets[k].label)}</span>`
+    ).join('');
+  }
+}
+function renderRevMix(d) {
+  const el = document.getElementById('anaMrrMix');
+  if (!el) return;
+  const subs = (d.subscriptions || []).filter(s => s.mrr > 0).sort((a, b) => b.mrr - a.mrr);
+  const total = subs.reduce((sum, s) => sum + s.mrr, 0);
+  if (subs.length === 0 || total <= 0) {
+    el.innerHTML = anaEmpty('No recurring revenue yet. There are no active paid subscriptions with a billing period.');
+    return;
+  }
+  el.innerHTML = subs.map(s => {
+    const share = (s.mrr / total) * 100;
+    return `
+      <div class="abar-row">
+        <div class="abar-label"><span class="name">${anaEsc(s.name)}</span><span class="count">${anaPeso(s.mrr)} · ${share.toFixed(1)}%</span></div>
+        <div class="abar-track"><div class="abar-fill" style="width:${Math.max(4, share).toFixed(1)}%; background:${anaColor(s.featureId)};"></div></div>
+      </div>`;
+  }).join('');
+}
+function renderRevAi(d) {
+  const el = document.getElementById('anaAiRevenue');
+  if (!el) return;
+  const L = d.ledger && d.ledger.available ? d.ledger : null;
+  const A = d.aiSales;
+  let html = '';
+  if (L) {
+    const streams = [
+      { key: 'ai_assistant', label: 'AI Assistant subscription (+ plan picked at sign-up)' },
+      { key: 'ai_plan', label: 'Plan upgrades (Plus / Pro)' },
+      { key: 'ai_extra', label: 'Extra credit packs' },
+      { key: 'ai_boost', label: 'One-day boosts' }
+    ];
+    let totalAll = 0;
+    let totalMonth = 0;
+    let totalCount = 0;
+    const rows = streams.map(st => {
+      const b = L.buckets[st.key] || { allTime: 0, thisMonth: 0, count: 0 };
+      totalAll += b.allTime;
+      totalMonth += b.thisMonth;
+      totalCount += b.count;
+      return `
+        <div class="ana-row">
+          <div><div><span class="ana-dot" style="background:${anaColor(st.key)};"></span>${anaEsc(st.label)}</div><div class="ana-row-meta">${anaInt(b.count)} purchase(s)</div></div>
+          <div class="ana-row-val"><b>${anaPeso(b.allTime)}</b><div class="ana-row-meta">${anaPeso(b.thisMonth)} this month</div></div>
+        </div>`;
+    }).join('');
+    html += `<div class="ana-h3" style="margin-top:0;">Sold via Omni Tokens</div>${rows}
+      <div class="ana-row total">
+        <div><div>Total Omni AI sales</div><div class="ana-row-meta">${anaInt(totalCount)} purchase(s)</div></div>
+        <div class="ana-row-val"><b>${anaPeso(totalAll)}</b><div class="ana-row-meta">${anaPeso(totalMonth)} this month</div></div>
+      </div>`;
+  } else {
+    html += anaEmpty((d.ledger && d.ledger.message) || 'The Omni Token ledger is unavailable.');
+  }
+  if (A && A.available) {
+    html += `<div class="ana-h3">Plan distribution (plan month ${anaEsc(A.planMonthKey)})</div>`;
+    html += A.tiers.length === 0
+      ? anaEmpty('No paid Omni AI plans sold yet.')
+      : A.tiers.map(t => `
+        <div class="ana-row">
+          <div><div>${anaEsc(t.tierName)}</div><div class="ana-row-meta">${anaInt(t.buyersThisMonth)} buyer(s) this month · ${anaInt(t.purchases)} purchase(s) all-time</div></div>
+          <div class="ana-row-val"><b>${anaPeso(t.tokens)}</b><div class="ana-row-meta">${anaPeso(t.tokensThisMonth)} this month</div></div>
+        </div>`).join('');
+    html += '<div class="ana-h3">Extra credit packs</div>';
+    html += A.extras.length === 0
+      ? anaEmpty('No extra packs sold yet.')
+      : A.extras.map(x => `
+        <div class="ana-row">
+          <div><div>${anaEsc(x.packName)}</div><div class="ana-row-meta">${anaInt(x.sales)} sold · ${anaInt(x.credits)} credits · ${anaInt(x.salesThisMonth)} this month</div></div>
+          <div class="ana-row-val"><b>${anaPeso(x.tokens)}</b><div class="ana-row-meta">${anaPeso(x.tokensThisMonth)} this month</div></div>
+        </div>`).join('');
+    html += '<div class="ana-h3">One-day boosts</div>';
+    html += A.boosts.length === 0
+      ? anaEmpty('No one-day boosts sold yet.')
+      : A.boosts.map(b => `
+        <div class="ana-row">
+          <div><div>${anaEsc(b.boostId)}</div><div class="ana-row-meta">${anaInt(b.sales)} sold · ${anaInt(b.neurons)} neurons · ${anaInt(b.salesThisMonth)} this month</div></div>
+          <div class="ana-row-val"><b>${anaPeso(b.tokens)}</b><div class="ana-row-meta">${anaPeso(b.tokensThisMonth)} this month</div></div>
+        </div>`).join('');
+    html += '<div class="ana-note" style="margin-top:10px;">Plan distribution counts the same plan payments that are already inside the totals above, so do not add the two together.</div>';
+  } else if (A) {
+    html += '<div class="ana-h3">Plan details</div>' + anaEmpty(A.message || 'Omni AI sales are unavailable.');
+  }
+  el.innerHTML = html;
+}
+function renderRevTokenSales(d) {
+  const el = document.getElementById('anaTokenSales');
+  if (!el) return;
+  const T = d.tokenSales;
+  if (!T || !T.available) { el.innerHTML = anaEmpty((T && T.message) || 'Omni Token sales are unavailable.'); return; }
+  const dt = anaDelta(T.thisMonth, T.lastMonth);
+  const months = d.months || [];
+  const maxVal = Math.max(0, ...months.map(m => Number(T.byMonth[m]) || 0));
+  const bars = months.map(m => {
+    const v = Number(T.byMonth[m]) || 0;
+    const width = maxVal > 0 ? Math.max(v > 0 ? 4 : 0, Math.round((v / maxVal) * 100)) : 0;
+    return `
+      <div class="abar-row">
+        <div class="abar-label"><span class="name">${anaEsc(anaMonthLabel(m))}</span><span class="count">${anaPeso(v)}</span></div>
+        <div class="abar-track"><div class="abar-fill" style="width:${width}%;"></div></div>
+      </div>`;
+  }).join('');
+  el.innerHTML = `
+    <div class="stat-strip">
+      <div class="stat-card"><div class="stat-num">${anaPeso(T.allTime)}</div><div class="stat-label">All-time</div><div class="ana-stat-sub">${anaInt(T.count)} paid purchase(s) · ${anaInt(T.allTimeTokens)} tokens</div></div>
+      <div class="stat-card"><div class="stat-num">${anaPeso(T.thisMonth)}</div><div class="stat-label">This month</div><div class="ana-stat-sub ${dt.cls}">${anaEsc(dt.text)}</div></div>
+      <div class="stat-card"><div class="stat-num">${anaPeso(T.lastMonth)}</div><div class="stat-label">Last month</div></div>
+    </div>
+    ${bars}`;
+}
+function renderRevTable(d) {
+  const el = document.getElementById('anaMonthTable');
+  if (!el) return;
+  const L = d.ledger;
+  if (!L || !L.available) { el.innerHTML = anaEmpty((L && L.message) || 'The Omni Token ledger is unavailable.'); return; }
+  const months = d.months || [];
+  const T = d.tokenSales && d.tokenSales.available ? d.tokenSales : null;
+  const keys = (L.bucketOrder || []).filter(k => L.buckets[k] && months.some(m => (Number(L.buckets[k].byMonth[m]) || 0) !== 0));
+  if (keys.length === 0 && !(T && months.some(m => (Number(T.byMonth[m]) || 0) > 0))) {
+    el.innerHTML = anaEmpty('No sales recorded in this period yet.');
+    return;
+  }
+  const cell = (v) => (Number(v) || 0) === 0 ? '<span class="dim">–</span>' : anaPeso(v);
+  const head = '<tr><th>Month</th>' + keys.map(k => `<th>${anaEsc(anaShortLabel(k, L.buckets[k].label))}</th>`).join('') + '<th>Total sales</th>' + (T ? '<th>Token cash-in</th>' : '') + '</tr>';
+  const rows = months.slice().reverse().map(m => {
+    return '<tr><td>' + anaEsc(anaMonthLabel(m)) + '</td>' +
+      keys.map(k => '<td>' + cell(L.buckets[k].byMonth[m]) + '</td>').join('') +
+      '<td>' + cell(L.totalByMonth[m]) + '</td>' +
+      (T ? '<td>' + cell(T.byMonth[m]) + '</td>' : '') + '</tr>';
+  }).join('');
+  const sumFor = (fn) => months.reduce((s, m) => s + (Number(fn(m)) || 0), 0);
+  const foot = '<tr><td>Total</td>' +
+    keys.map(k => '<td>' + cell(sumFor(m => L.buckets[k].byMonth[m])) + '</td>').join('') +
+    '<td>' + cell(sumFor(m => L.totalByMonth[m])) + '</td>' +
+    (T ? '<td>' + cell(sumFor(m => T.byMonth[m])) + '</td>' : '') + '</tr>';
+  el.innerHTML = `<table class="ana-table"><thead>${head}</thead><tbody>${rows}</tbody><tfoot>${foot}</tfoot></table>`;
+}
+function anaCsvCell(v) {
+  const s = String(v === null || v === undefined ? '' : v);
+  return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function exportRevenueCsv() {
+  const d = anaRevData;
+  if (!d) { toast('Revenue data is still loading. Try again in a moment.', 'error'); return; }
+  const L = d.ledger && d.ledger.available ? d.ledger : null;
+  const T = d.tokenSales && d.tokenSales.available ? d.tokenSales : null;
+  const rows = [];
+  rows.push(['Subscription summary']);
+  rows.push(['Subscription', 'Active', 'In grace', 'Lapsed', 'Free/granted', 'MRR (PHP)', 'Yearly run-rate (PHP)', 'Current billing period (PHP)', 'Licenses latest purchase (PHP)', 'Sold via tokens all-time (PHP)', 'Sold via tokens this month (PHP)', 'Expiring in 7 days', 'Renewals due in 7 days (PHP)']);
+  (d.subscriptions || []).forEach(s => {
+    const led = L && L.buckets ? L.buckets[s.featureId] : null;
+    rows.push([s.name, s.activeCount, s.graceCount, s.lapsedCount, s.freeCount, s.mrr, Math.round((s.mrr || 0) * 12 * 100) / 100, s.activeRevenue, s.allTimeRevenue, led ? led.allTime : '', led ? led.thisMonth : '', s.expiringSoonCount, s.atRiskRevenue]);
+  });
+  const t = d.totals || {};
+  rows.push(['Total', t.activeCount, t.graceCount, t.lapsedCount, t.freeCount, t.mrr, t.arr, t.activeRevenue, t.allTimeRevenue, L ? L.allTime : '', L ? L.thisMonth : '', t.expiringSoonCount, t.atRiskRevenue]);
+  rows.push([]);
+  if (L) {
+    rows.push(['Monthly sales paid with Omni Tokens (PHP)']);
+    const keys = L.bucketOrder || [];
+    rows.push(['Month'].concat(keys.map(k => L.buckets[k].label), ['Total sales'], T ? ['Omni Token cash-in'] : []));
+    (d.months || []).forEach(m => {
+      rows.push([m].concat(keys.map(k => L.buckets[k].byMonth[m] || 0), [L.totalByMonth[m] || 0], T ? [T.byMonth[m] || 0] : []));
+    });
+  }
+  const csv = '\uFEFF' + rows.map(r => r.map(anaCsvCell).join(',')).join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'relay-revenue-' + new Date().toISOString().slice(0, 10) + '.csv';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  toast('Revenue CSV downloaded.', 'success');
 }
 function renderAnalytics(a) {
   document.getElementById('anaAllowed').innerText = a.allowedCount;
@@ -4761,6 +5331,8 @@ if ('serviceWorker' in navigator) {
 (function cyborgStatCountUp() {
   if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   function animateStatNum(el, targetText) {
+    // Peso amounts and other formatted text (e.g. "₱1,250.50") are shown as-is; the count-up would strip the ₱ and separators.
+    if (/[^0-9\s-]/.test(String(targetText))) { el.textContent = targetText; return; }
     const newVal = parseInt(String(targetText).replace(/[^0-9-]/g, ''), 10);
     if (isNaN(newVal)) { el.textContent = targetText; return; }
     let oldVal = parseInt(el.getAttribute('data-cyborg-val') || '0', 10);
