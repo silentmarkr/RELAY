@@ -1424,6 +1424,18 @@ a:focus-visible,
         <button class="btn-deactivate" id="demoStopBtn" style="display:none; font-size:12px; padding:10px 12px;" onclick="stopDemoMode(currentDetailId)">⏹ Stop Now</button>
       </div>
     </div>
+    <div class="card collapsible" id="cardTokenWallet" data-card-id="tokenWallet">
+      <h2 onclick="toggleCardCollapse('cardTokenWallet')">💎 Omni Token Wallet <span style="font-size:11px; color:var(--muted); font-weight:normal;">(manual credit / override — for when online payment is down)</span><span class="collapse-chevron">▾</span></h2>
+      <div class="collapse-body">
+        <div id="tokenWalletStatusLine" class="meta">Loading...</div>
+        <div id="tokenWalletRecent" style="margin-top:8px;"></div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;">
+          <button class="btn-allow" style="font-size:12px; padding:10px 12px;" onclick="openManualTokenModal('add')">➕ Credit manual purchase</button>
+          <button class="icon-btn" onclick="openManualTokenModal('set')">✏️ Set exact balance</button>
+          <button class="icon-btn" onclick="loadTokenWalletDetail(currentDetailId)">🔄 Refresh</button>
+        </div>
+      </div>
+    </div>
     <div class="card collapsible collapsed" id="cardCloudBackup" data-card-id="cloudBackup">
       <h2 onclick="toggleCardCollapse('cardCloudBackup')">☁️ Cloud Backup <span style="font-size:11px; color:var(--muted); font-weight:normal;">(this device's full database, excluding user accounts)</span><span class="collapse-chevron">▾</span></h2>
       <div class="collapse-body">
@@ -1537,6 +1549,31 @@ a:focus-visible,
 </div>
 <div id="photoLightbox" onclick="this.style.display='none'">
   <img id="photoLightboxImg" src="" alt="Requestor photo">
+</div>
+<div id="manualTokenBackdrop" class="modal-backdrop">
+  <div class="modal-box" style="max-height:90vh; overflow-y:auto;">
+    <h3 id="mtTitle">Credit manual purchase</h3>
+    <p id="mtDesc"></p>
+    <div class="meta" style="margin-bottom:10px;">Current balance: <b id="mtCurrentBalance">—</b> tokens</div>
+    <div id="mtPendingWarn" class="meta" style="display:none; margin-bottom:10px; color:var(--amber);"></div>
+    <label for="mtTokens" id="mtTokensLabel" style="font-size:12px; color:var(--muted);">Tokens</label>
+    <input type="text" id="mtTokens" inputmode="decimal" autocomplete="off" placeholder="e.g. 500">
+    <div id="mtAddOnlyWrap">
+      <label for="mtAmountPHP" style="font-size:12px; color:var(--muted);">Amount actually received (₱) — optional, defaults to the same as tokens</label>
+      <input type="text" id="mtAmountPHP" inputmode="decimal" autocomplete="off" placeholder="same as tokens">
+      <label for="mtMethod" style="font-size:12px; color:var(--muted);">Payment method (optional, shown to the client, e.g. GCash, Bank Transfer, Cash)</label>
+      <input type="text" id="mtMethod" autocomplete="off" maxlength="60" placeholder="GCash">
+      <label style="display:flex; align-items:center; gap:8px; font-size:12px; color:var(--text); margin:2px 0 10px;">
+        <input type="checkbox" id="mtRevenue" checked> Count this as income in the finance reports
+      </label>
+    </div>
+    <label for="mtNote" style="font-size:12px; color:var(--muted);">Note (optional — the client SEES this in their Transaction History, so write it in English)</label>
+    <input type="text" id="mtNote" autocomplete="off" maxlength="200" placeholder="e.g. Ref: 1234567">
+    <div class="modal-actions" style="margin-top:6px;">
+      <button class="btn-ghost" id="mtCancelBtn" onclick="closeManualTokenModal()">Cancel</button>
+      <button class="btn-allow" id="mtSubmitBtn" onclick="submitManualToken()">Continue</button>
+    </div>
+  </div>
 </div>
 <div id="confirmBackdrop" class="modal-backdrop">
   <div class="modal-box">
@@ -3519,7 +3556,8 @@ const ACTIVITY_LABELS = {
   restore_checkin: '🔄 Checked in again (possibly hard-reset)',
   backup_checkin: '💾 Auto-backup sync (Download/RELAY_BACKUP)',
   feature_status_checked: '📡 Status checked (client synced with Relay)',
-  device_history_cleared: '🗑️ History cleared for this device'
+  device_history_cleared: '🗑️ History cleared for this device',
+  cloud_token_manual_credit: '💎 Omni Tokens manually credited/adjusted (admin)'
 };
 function activityDescription(entry) {
   const d = entry.details || {};
@@ -3538,7 +3576,178 @@ function activityDescription(entry) {
   if (entry.type === 'backup_checkin') return `${d.fileSizeBytes ? (d.fileSizeBytes / 1024).toFixed(0) + ' KB' : ''}${d.newlyAllowed ? ' — automatically allowed' : ''}`;
   if (entry.type === 'device_allowed' && d.source === 'auto_backup_checkin') return '(automatic, after a successful backup)';
   if (entry.type === 'device_history_cleared') return `${d.clearedCount || 0} old entries cleared`;
+  if (entry.type === 'cloud_token_manual_credit') return `${d.mode === 'set' ? 'Balance set' : 'Credited'}: ${d.previousBalance} → ${d.balanceAfter} tokens${d.method ? ' · ' + d.method : ''}${d.note ? ' — ' + d.note : ''}`;
   return '';
+}
+// ===================================================================
+// GAWA/BAGO: Omni Token Wallet (manual credit / override) — para kapag
+// down ang online payment at manual na ang bayad ng client.
+// ===================================================================
+let tokenWalletState = null;
+let manualTokenMode = 'add';
+let manualTokenSubmitting = false;
+function twEsc(v) {
+  return String(v == null ? '' : v).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+}
+function twNum(n) {
+  const x = Number(n);
+  return Number.isFinite(x) ? x.toLocaleString('en-PH', { maximumFractionDigits: 4 }) : '—';
+}
+async function loadTokenWalletDetail(installationId) {
+  const lineEl = document.getElementById('tokenWalletStatusLine');
+  const recentEl = document.getElementById('tokenWalletRecent');
+  if (!lineEl || !recentEl || !installationId) return;
+  lineEl.textContent = 'Loading...';
+  let data;
+  try {
+    data = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/token-wallet`);
+  } catch (err) {
+    if (installationId === currentDetailId) { lineEl.textContent = 'Could not load the wallet.'; recentEl.innerHTML = ''; }
+    return;
+  }
+  if (installationId !== currentDetailId) return;
+  if (!data || !data.success) {
+    tokenWalletState = null;
+    lineEl.textContent = (data && data.message) || 'Could not load the wallet.';
+    recentEl.innerHTML = '';
+    return;
+  }
+  tokenWalletState = data;
+  const negative = Number(data.balanceTokens) < 0;
+  let html = `<b>Balance:</b> <span style="${negative ? 'color:var(--red);' : ''}">${twNum(data.balanceTokens)}</span> tokens`;
+  if (!data.hasWallet) html += ' <span style="color:var(--muted);">(no wallet yet — it will be created on the first credit)</span>';
+  if (data.debtSince) html += `<div style="color:var(--red); margin-top:4px;">⚠️ In debt since ${twEsc(new Date(data.debtSince).toLocaleString('en-PH'))} — Cloud Backup is locked until the balance recovers.</div>`;
+  if (data.pendingPurchases > 0) html += `<div style="color:var(--amber); margin-top:4px;">⏳ ${twNum(data.pendingPurchases)} pending online payment(s) — if one is later confirmed as paid, it will ALSO credit tokens.</div>`;
+  lineEl.innerHTML = html;
+  const recent = Array.isArray(data.recent) ? data.recent : [];
+  recentEl.innerHTML = recent.length === 0
+    ? '<div class="empty">No token activity yet.</div>'
+    : '<div style="font-size:11px; color:var(--muted); margin-bottom:4px;">Latest activity</div>' + recent.map((r) => {
+        const t = Number(r.tokens);
+        const credit = t > 0;
+        const amount = r.category === 'SYNC_FRACTION' ? '~' + Math.abs(t).toFixed(3) : (credit ? '+' : '') + twNum(t);
+        return `<div class="feature-item"><div><div class="feature-name" style="font-size:13px;">${twEsc(r.note || r.category || '')}</div>` +
+          `<div class="feature-meta">${twEsc(r.created_at ? new Date(r.created_at).toLocaleString('en-PH') : '')}</div></div>` +
+          `<div class="feature-price" style="color:${credit ? 'var(--green)' : 'var(--red)'};">${twEsc(amount)}</div></div>`;
+      }).join('');
+}
+function openManualTokenModal(mode) {
+  if (!currentDetailId) return;
+  manualTokenMode = mode === 'set' ? 'set' : 'add';
+  const isAdd = manualTokenMode === 'add';
+  document.getElementById('mtTitle').textContent = isAdd ? '➕ Credit manual purchase' : '✏️ Set exact balance';
+  document.getElementById('mtDesc').textContent = isAdd
+    ? 'Adds the tokens the client paid for outside the app (e.g. direct GCash) to their current balance. It appears in their Transaction History as a Token Purchase.'
+    : 'Overrides the client\'s balance to the exact value below. The difference is recorded as a Balance Adjustment (not counted as income).';
+  document.getElementById('mtTokensLabel').textContent = isAdd ? 'Tokens to ADD' : 'NEW balance (tokens)';
+  document.getElementById('mtTokens').value = '';
+  document.getElementById('mtAmountPHP').value = '';
+  document.getElementById('mtMethod').value = '';
+  document.getElementById('mtNote').value = '';
+  document.getElementById('mtRevenue').checked = true;
+  document.getElementById('mtAddOnlyWrap').style.display = isAdd ? 'block' : 'none';
+  document.getElementById('mtSubmitBtn').textContent = 'Continue';
+  document.getElementById('mtSubmitBtn').disabled = false;
+  document.getElementById('mtCurrentBalance').textContent = tokenWalletState ? twNum(tokenWalletState.balanceTokens) : '—';
+  const warnEl = document.getElementById('mtPendingWarn');
+  if (tokenWalletState && tokenWalletState.pendingPurchases > 0) {
+    warnEl.textContent = `⚠️ This client has ${tokenWalletState.pendingPurchases} pending online payment(s). If one gets confirmed as paid later, it will credit tokens again — avoid double crediting.`;
+    warnEl.style.display = 'block';
+  } else {
+    warnEl.style.display = 'none';
+  }
+  document.getElementById('manualTokenBackdrop').style.display = 'flex';
+  setTimeout(() => { const el = document.getElementById('mtTokens'); if (el) el.focus(); }, 50);
+}
+function closeManualTokenModal() {
+  if (manualTokenSubmitting) return;
+  document.getElementById('manualTokenBackdrop').style.display = 'none';
+}
+document.getElementById('manualTokenBackdrop').addEventListener('click', (e) => {
+  if (e.target.id === 'manualTokenBackdrop') closeManualTokenModal();
+});
+function parseManualTokenNumber(raw) {
+  const cleaned = String(raw == null ? '' : raw).replace(/[,\s₱]/g, '');
+  if (cleaned === '') return NaN;
+  return Number(cleaned);
+}
+async function submitManualToken() {
+  if (manualTokenSubmitting || !currentDetailId) return;
+  const installationId = currentDetailId;
+  const isAdd = manualTokenMode === 'add';
+  const tokens = parseManualTokenNumber(document.getElementById('mtTokens').value);
+  if (!Number.isFinite(tokens) || (isAdd ? tokens <= 0 : tokens < 0)) {
+    toast(isAdd ? 'Enter a number of tokens greater than 0.' : 'Enter the new balance (0 or higher).', 'error');
+    document.getElementById('mtTokens').focus();
+    return;
+  }
+  const payload = { mode: manualTokenMode, tokens, note: document.getElementById('mtNote').value.trim() };
+  if (isAdd) {
+    payload.method = document.getElementById('mtMethod').value.trim();
+    payload.recordAsRevenue = document.getElementById('mtRevenue').checked;
+    const rawAmount = document.getElementById('mtAmountPHP').value;
+    if (String(rawAmount).trim() !== '') {
+      const amount = parseManualTokenNumber(rawAmount);
+      if (!Number.isFinite(amount) || amount < 0) {
+        toast('Amount received must be a number (0 or higher).', 'error');
+        document.getElementById('mtAmountPHP').focus();
+        return;
+      }
+      payload.amountPHP = amount;
+    }
+  }
+  const currentBal = tokenWalletState ? Number(tokenWalletState.balanceTokens) : null;
+  const summary = isAdd
+    ? `Add ${twNum(tokens)} token(s) to this client${currentBal !== null ? ` (balance ${twNum(currentBal)} → ${twNum(currentBal + tokens)})` : ''}?` +
+      (payload.recordAsRevenue ? ' It will also be recorded as income.' : ' It will NOT be recorded as income.')
+    : `Set this client's balance to exactly ${twNum(tokens)} token(s)${currentBal !== null ? ` (currently ${twNum(currentBal)})` : ''}?`;
+  const ok = await confirmAction({
+    title: isAdd ? 'Confirm manual credit' : 'Confirm balance override',
+    message: summary + ' This is written to the client\'s ledger and cannot be silently undone.',
+    confirmLabel: isAdd ? 'Yes, credit tokens' : 'Yes, set balance',
+    danger: !isAdd
+  });
+  if (!ok) return;
+  manualTokenSubmitting = true;
+  const submitBtn = document.getElementById('mtSubmitBtn');
+  submitBtn.disabled = true;
+  submitBtn.textContent = '⏳ Saving...';
+  try {
+    let res = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/manual-token-credit`, {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    if (res && res.unknownInstallation) {
+      const force = await confirmAction({
+        title: 'Unknown installation ID',
+        message: res.message || 'RELAY has never seen this installation ID.',
+        confirmLabel: 'Credit anyway',
+        danger: true
+      });
+      if (force) {
+        res = await api(`/relay/admin/api/devices/${encodeURIComponent(installationId)}/manual-token-credit`, {
+          method: 'POST',
+          body: JSON.stringify({ ...payload, force: true })
+        });
+      } else {
+        return;
+      }
+    }
+    if (res && res.success) {
+      toast(res.unchanged ? (res.message || 'Nothing changed.') : `✅ Done. New balance: ${twNum(res.balanceTokens)} tokens.`, 'success');
+      manualTokenSubmitting = false;
+      document.getElementById('manualTokenBackdrop').style.display = 'none';
+      loadTokenWalletDetail(installationId);
+      return;
+    }
+    toast((res && res.message) || 'Could not update the token balance.', 'error');
+  } catch (err) {
+    toast('Could not reach RELAY — check the wallet balance before retrying so you do not credit twice.', 'error');
+  } finally {
+    manualTokenSubmitting = false;
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Continue';
+  }
 }
 let detailPollTimer = null;
 let currentDetailId = null;
@@ -3549,9 +3758,10 @@ async function openDeviceDetail(installationId) {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   await loadDeviceDetail();
   await loadCloudBackupDetail(installationId);
+  await loadTokenWalletDetail(installationId);
   if (detailPollTimer) clearInterval(detailPollTimer);
   detailPollTimer = setInterval(withScrollPreserved(loadDeviceDetail), 8000);
-  applyStoredCardCollapse(['cardCloudBackup', 'cardUnlocked', 'cardLocked']);
+  applyStoredCardCollapse(['cardTokenWallet', 'cardCloudBackup', 'cardUnlocked', 'cardLocked']);
 }
 function closeDeviceDetail() {
   if (detailPollTimer) { clearInterval(detailPollTimer); detailPollTimer = null; }

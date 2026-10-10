@@ -3231,7 +3231,8 @@ const CLOUD_TOKEN_LEDGER_CATEGORIES = {
     SYNC_FRACTION: 'Auto-Sync Activity',    // fractional cost lang, WALANG na-deduct na buong token pa
     RESTORE_CHARGE: 'Cloud Restore Charge', // WHOLE token na na-deduct mula sa isang cloud restore (auto-charge or manual admin charge)
     STORAGE_HOLDING_FEE: 'Storage Holding Fee', // AYOS/BAGO: scheduled (hindi naka-depende sa bilang ng syncs) na bayad para sa datos na TULOY-TULOY na nakaupo sa Neon storage — naniningil kahit walang sync na naganap, dahil tuloy-tuloy din ang bayad ng developer kay Neon para sa storage na iyon
-    REFUND: 'Refund'                        // ibinalik na tokens dahil sa failed/incomplete sync
+    REFUND: 'Refund',                       // ibinalik na tokens dahil sa failed/incomplete sync
+    ADMIN_ADJUSTMENT: 'Balance Adjustment'  // GAWA/BAGO: manual na pag-set ng balance ng admin (RELAY admin > device > Omni Token Wallet > Set exact balance) — hal. itinama ang balance matapos ang manual na bayad o error
 };
 // ===================================================================
 // GAWA/BAGO: COST SAFETY NET — tingnan ang paliwanag sa itaas (malapit sa
@@ -16020,6 +16021,178 @@ app.post('/relay/admin/api/devices/:installationId/charge-restore', requireAdmin
         res.status(500).json({ success: false, message: err.message });
     }
 });
+// ===================================================================
+// GAWA/BAGO: MANUAL OMNI TOKEN OVERRIDE (admin lang)
+//
+// Para kapag pumalya/down ang online payment ng pagbili ng Omni Tokens
+// (PayMongo/Xendit/Stripe/PayPal/Dragonpay) at manual na lang ang bayaran
+// ng client (hal. direct GCash/bank transfer), puwedeng i-credit o i-set
+// ng developer ang Omni Token balance ng client mula sa RELAY admin.
+//
+//   mode 'add' -> IDAGDAG ang `tokens` sa kasalukuyang balance (parang
+//                 normal na pagbili). Naglalagay ng ledger entry na
+//                 "Token Purchase" (kaya lumalabas sa Transaction History
+//                 ng client at sa "Token Purchase" filter) at, kung hindi
+//                 pinatay (recordAsRevenue: false), isang "paid" row din sa
+//                 cloud_token_purchases (provider 'manual') para pumasok
+//                 sa finance/income reports.
+//   mode 'set' -> I-SET ang balance sa EKSAKTONG `tokens` (>= 0). Ang
+//                 pagkakaiba (delta) ang nilalagay sa ledger bilang
+//                 "Balance Adjustment". HINDI ito binibilang na kita.
+//
+// Lahat ay nasa IISANG transaksyon na may FOR UPDATE lock sa wallet row
+// (walang race laban sa sabay na sync/charge), at laging may ledger entry
+// (audit trail) at activity log. Hindi ginagalaw ang pending online
+// purchases — kapag nag-"paid" pa ang mga iyon sa webhook, ico-credit pa rin
+// sila (kaya may babala sa admin UI kapag may pending).
+// ===================================================================
+const MANUAL_TOKEN_MAX_PER_ACTION = 1000000;
+function roundManualTokenAmount(n) {
+    return Math.round(n * 10000) / 10000;
+}
+app.get('/relay/admin/api/devices/:installationId/token-wallet', requireAdminKey, async (req, res) => {
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured — the Omni Token wallet needs it.' });
+    const installationId = String(req.params.installationId || '').trim();
+    if (!installationId) return res.status(400).json({ success: false, message: 'Missing installationId.' });
+    try {
+        const walletResult = await queryWithRetry(
+            pgPool,
+            'SELECT balance_tokens, debt_since, auto_sync_enabled, updated_at FROM cloud_token_wallets WHERE installation_id = $1',
+            [installationId]
+        );
+        const wallet = walletResult.rows[0] || null;
+        const pendingResult = await queryWithRetry(
+            pgPool,
+            `SELECT COUNT(*)::int AS n FROM cloud_token_purchases WHERE installation_id = $1 AND status = 'pending'`,
+            [installationId]
+        );
+        const recent = await fetchMergedTransactionHistory(installationId, { limit: 5 });
+        res.json({
+            success: true,
+            hasWallet: !!wallet,
+            knownInstallation: !!wallet || seenDevices.has(installationId) || !!(issuedUnlocks && issuedUnlocks[installationId]),
+            balanceTokens: wallet ? Number(wallet.balance_tokens) : 0,
+            debtSince: wallet ? wallet.debt_since : null,
+            pendingPurchases: pendingResult.rows[0] ? Number(pendingResult.rows[0].n) : 0,
+            recent
+        });
+    } catch (err) {
+        console.error('⚠️  /relay/admin/api/devices/:installationId/token-wallet error:', err.message);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+app.post('/relay/admin/api/devices/:installationId/manual-token-credit', requireAdminKey, async (req, res) => {
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured — the Omni Token wallet needs it.' });
+    const installationId = String(req.params.installationId || '').trim();
+    if (!installationId || installationId.length > 200) return res.status(400).json({ success: false, message: 'Missing or invalid installationId.' });
+    const body = req.body || {};
+    const mode = body.mode === 'add' ? 'add' : (body.mode === 'set' ? 'set' : null);
+    if (!mode) return res.status(400).json({ success: false, message: "mode must be 'add' or 'set'." });
+    const rawTokens = (typeof body.tokens === 'number' || (typeof body.tokens === 'string' && body.tokens.trim() !== '')) ? Number(body.tokens) : NaN;
+    if (!Number.isFinite(rawTokens)) return res.status(400).json({ success: false, message: 'Provide a valid number of tokens.' });
+    const tokens = roundManualTokenAmount(rawTokens);
+    if (mode === 'add' && !(tokens > 0)) return res.status(400).json({ success: false, message: 'Tokens to add must be greater than 0.' });
+    if (mode === 'set' && tokens < 0) return res.status(400).json({ success: false, message: 'The new balance cannot be negative.' });
+    if (tokens > MANUAL_TOKEN_MAX_PER_ACTION) return res.status(400).json({ success: false, message: `For safety, the maximum per action is ${MANUAL_TOKEN_MAX_PER_ACTION} tokens.` });
+    // Ang note/method ay lalabas sa Transaction History ng client — linisin (isang linya, walang kakaibang whitespace).
+    const note = String(body.note || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+    const method = String(body.method || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+    const recordAsRevenue = mode === 'add' && body.recordAsRevenue !== false;
+    let amountPHP = tokens; // ₱1 = 1 Omni Token
+    if (body.amountPHP !== undefined && body.amountPHP !== null && body.amountPHP !== '') {
+        const parsedAmount = Number(body.amountPHP);
+        if (!Number.isFinite(parsedAmount) || parsedAmount < 0 || parsedAmount > MANUAL_TOKEN_MAX_PER_ACTION * 10) {
+            return res.status(400).json({ success: false, message: 'amountPHP must be a non-negative number.' });
+        }
+        amountPHP = Math.round(parsedAmount * 100) / 100;
+    }
+    const force = body.force === true;
+    try {
+        const existingWallet = await queryWithRetry(pgPool, 'SELECT 1 FROM cloud_token_wallets WHERE installation_id = $1', [installationId]);
+        const known = existingWallet.rows.length > 0 || seenDevices.has(installationId) || !!(issuedUnlocks && issuedUnlocks[installationId]);
+        if (!known && !force) {
+            return res.status(404).json({
+                success: false,
+                unknownInstallation: true,
+                message: 'This installation ID has never been seen by RELAY — check for a typo. (If you are sure it is correct, retry with force.)'
+            });
+        }
+        const result = await runPgWriteTx(pgPool, async (client) => {
+            await client.query(
+                `INSERT INTO cloud_token_wallets (installation_id, balance_tokens, auto_sync_enabled) VALUES ($1, 0, true)
+                 ON CONFLICT (installation_id) DO NOTHING`,
+                [installationId]
+            );
+            const walletRes = await client.query(
+                `SELECT balance_tokens FROM cloud_token_wallets WHERE installation_id = $1 FOR UPDATE`,
+                [installationId]
+            );
+            const previousBalance = Number(walletRes.rows[0].balance_tokens);
+            const newBalance = mode === 'add' ? roundManualTokenAmount(previousBalance + tokens) : tokens;
+            const delta = roundManualTokenAmount(newBalance - previousBalance);
+            if (mode === 'set' && delta === 0) {
+                return { unchanged: true, previousBalance, newBalance, delta: 0, purchaseId: null };
+            }
+            await client.query(
+                `UPDATE cloud_token_wallets SET balance_tokens = $2::numeric,
+                    debt_since = CASE WHEN $2::numeric >= $3::numeric THEN NULL ELSE debt_since END,
+                    updated_at = now()
+                 WHERE installation_id = $1`,
+                [installationId, newBalance, CLOUD_TOKEN_DEBT_RESUME_BUFFER_TOKENS]
+            );
+            let ledgerType;
+            let ledgerCategory;
+            let ledgerNote;
+            if (mode === 'add') {
+                ledgerType = 'purchase';
+                ledgerCategory = 'TOKEN_PURCHASE';
+                // CLIENT-FACING (English): ito ang makikita ng client sa Omni Tokens page > Transaction History.
+                ledgerNote = `Manual payment credited${method ? ` — ${method}` : ''}${note ? ` (${note})` : ''}`;
+            } else {
+                ledgerType = delta > 0 ? 'purchase' : 'consume';
+                ledgerCategory = 'ADMIN_ADJUSTMENT';
+                ledgerNote = `Balance adjustment — corrected to ${newBalance} tokens (previous balance: ${previousBalance})${note ? ` — ${note}` : ''}`;
+            }
+            await client.query(
+                `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note, category) VALUES ($1, $2, $3, $4, $5, $6)`,
+                [installationId, ledgerType, delta, newBalance, ledgerNote, ledgerCategory]
+            );
+            let purchaseId = null;
+            if (recordAsRevenue) {
+                purchaseId = `TKN-MAN-${installationId.slice(0, 8)}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+                await client.query(
+                    `INSERT INTO cloud_token_purchases (purchase_id, installation_id, package_id, tokens, amount_php, method, source_id, provider, status)
+                     VALUES ($1, $2, NULL, $3, $4, $5, NULL, 'manual', 'paid')`,
+                    [purchaseId, installationId, tokens, amountPHP, method || 'manual']
+                );
+            }
+            return { unchanged: false, previousBalance, newBalance, delta, purchaseId };
+        });
+        invalidateWalletCache(installationId);
+        if (result.unchanged) {
+            return res.json({ success: true, unchanged: true, mode, previousBalance: result.previousBalance, balanceTokens: result.newBalance, message: 'The balance is already that exact value — nothing was changed.' });
+        }
+        logActivity(installationId, 'cloud_token_manual_credit', { mode, tokens, delta: result.delta, previousBalance: result.previousBalance, balanceAfter: result.newBalance, method: method || null, note: note || null, recordedAsRevenue: !!result.purchaseId, purchaseId: result.purchaseId });
+        sendTelegramNotification(`💎 Manual Omni Tokens ${mode === 'add' ? 'credit' : 'balance set'} (admin): ${mode === 'add' ? `+${tokens} tokens` : `${result.previousBalance} → ${result.newBalance}`}${method ? ` via ${method}` : ''} — installation ${installationId.slice(0, 12)}... New balance: ${result.newBalance}`).catch(() => {});
+        const pendingResult = await queryWithRetry(
+            pgPool,
+            `SELECT COUNT(*)::int AS n FROM cloud_token_purchases WHERE installation_id = $1 AND status = 'pending'`,
+            [installationId]
+        ).catch(() => ({ rows: [] }));
+        res.json({
+            success: true,
+            mode,
+            previousBalance: result.previousBalance,
+            delta: result.delta,
+            balanceTokens: result.newBalance,
+            purchaseId: result.purchaseId,
+            pendingPurchases: pendingResult.rows[0] ? Number(pendingResult.rows[0].n) : 0
+        });
+    } catch (err) {
+        console.error('⚠️  /relay/admin/api/devices/:installationId/manual-token-credit error:', err.message);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
 app.post('/relay/admin/api/client-cost-allocation/maintenance-fee', requireAdminKey, (req, res) => {
     const { defaultFeePHP, installationId, feePHP } = req.body || {};
     if (typeof defaultFeePHP === 'number' && isFinite(defaultFeePHP) && defaultFeePHP >= 0) {
@@ -16573,7 +16746,7 @@ async function buildCloudBackupControlCenter(th) {
     };
 
     // ---------- Events (activityLog) + blocked reasons ----------
-    const isCbEvent = (e) => e && typeof e.type === 'string' && (e.type.startsWith('cloud_backup') || e.type === 'cloud_token_purchase_paid' || e.type === 'cost_safety_net_purchase_blocked');
+    const isCbEvent = (e) => e && typeof e.type === 'string' && (e.type.startsWith('cloud_backup') || e.type === 'cloud_token_purchase_paid' || e.type === 'cloud_token_manual_credit' || e.type === 'cost_safety_net_purchase_blocked');
     const log = Array.isArray(activityLog) ? activityLog : [];
     const blocked = { h24: {}, d7: {} };
     let blockedTotal24 = 0;
