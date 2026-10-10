@@ -1072,6 +1072,100 @@ a:focus-visible,
 .ana-table td:first-child { font-family: var(--font-ui); }
 .ana-table tfoot td { font-weight: 700; border-top: 1px solid var(--border-soft); border-bottom: none; }
 .ana-table .dim { color: var(--muted-dim); }
+/* ---- Neon card design (Home + Analytics) ---- */
+.stat-card { --nc: #22e5ff; --nc-rgb: 34,229,255; }
+.stat-strip .stat-card:nth-child(4n+1) { --nc: #a77bff; --nc-rgb: 167,123,255; }
+.stat-strip .stat-card:nth-child(4n+2) { --nc: #3aa8ff; --nc-rgb: 58,168,255; }
+.stat-strip .stat-card:nth-child(4n+3) { --nc: #ff2ee6; --nc-rgb: 255,46,230; }
+.stat-strip .stat-card:nth-child(4n+4) { --nc: #3ddc84; --nc-rgb: 61,220,132; }
+.stat-strip .stat-card, .ana-hero-grid .stat-card {
+  border: 1.5px solid var(--nc);
+  background: linear-gradient(160deg, rgba(var(--nc-rgb),.14), rgba(11,15,26,.72) 62%);
+  box-shadow: var(--shadow-ambient), 0 0 14px rgba(var(--nc-rgb),.28), inset 0 0 14px rgba(var(--nc-rgb),.10);
+  border-radius: 12px;
+}
+.stat-card.has-ico { padding-right: 40px; }
+.stat-strip .stat-num { overflow-wrap: anywhere; }
+@media (max-width: 480px) {
+  .stat-strip .stat-num { font-size: 17px; }
+  .stat-strip .stat-card { padding: 11px 10px; }
+  .stat-card.has-ico { padding-right: 32px; }
+  .stat-ico { right: 6px; font-size: 18px; }
+}
+.stat-strip .stat-card:hover, .ana-hero-grid .stat-card:hover {
+  border-color: var(--nc);
+  box-shadow: var(--shadow-ambient), 0 0 22px rgba(var(--nc-rgb),.45), inset 0 0 16px rgba(var(--nc-rgb),.14);
+}
+.stat-strip .stat-card::before, .ana-hero-grid .stat-card::before { background: linear-gradient(90deg, var(--nc), transparent); }
+.stat-ico {
+  position: absolute; right: 10px; bottom: 8px;
+  font-size: 22px; line-height: 1; opacity: .85;
+  filter: drop-shadow(0 0 6px rgba(var(--nc-rgb),.7));
+  pointer-events: none;
+}
+.stat-strip .stat-label { color: var(--nc); opacity: .95; }
+.ana-hero-grid { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+.ana-hero-grid .stat-card:nth-child(2) { --nc: #3aa8ff; --nc-rgb: 58,168,255; }
+.ana-hero-grid .stat-card:nth-child(3) { --nc: #ff8a2e; --nc-rgb: 255,138,46; }
+.ana-hero-grid .stat-card:nth-child(4) { --nc: #3ddc84; --nc-rgb: 61,220,132; }
+.ana-hero-grid .stat-card:nth-child(5) { --nc: #a77bff; --nc-rgb: 167,123,255; }
+.ana-hero-grid .stat-label { color: var(--nc); }
+/* Gauge hero */
+.ana-gauge-card {
+  display: grid; grid-template-columns: 1fr minmax(210px, 260px) 1fr; align-items: center; gap: 14px;
+  margin-bottom: 14px; padding: 16px 18px;
+  background: var(--card); border: 1.5px solid var(--border); border-radius: 14px;
+  box-shadow: var(--shadow-ambient), inset 0 1px 0 0 rgba(255,255,255,.04);
+}
+.ana-gauge-title { grid-column: 1 / -1; font-family: var(--font-ui); font-weight: 700; font-size: 15px; color: var(--accent-bright); text-align: center; text-transform: uppercase; letter-spacing: .04em; }
+.ana-gauge-title small { display: block; font-size: 11.5px; color: var(--muted); font-weight: 500; text-transform: none; letter-spacing: 0; margin-top: 2px; }
+.ana-gauge-side { min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+.ana-gauge-side.right { text-align: right; align-items: flex-end; }
+.ana-gauge-kv .k { font-size: 11.5px; color: var(--muted); line-height: 1.35; }
+.ana-gauge-kv .v { font-family: var(--font-mono); font-size: 20px; font-weight: 700; margin-top: 2px; overflow-wrap: anywhere; }
+.ana-gauge-kv .v.danger { color: var(--red); text-shadow: 0 0 14px rgba(255,92,114,.35); }
+.ana-gauge-kv .n { font-size: 11px; color: var(--muted); margin-top: 1px; }
+.ana-gauge-mid { position: relative; width: 100%; }
+.ana-gauge-svg { display: block; width: 100%; height: auto; }
+.ana-gauge-center {
+  position: absolute; left: 0; right: 0; top: 34%; text-align: center; padding: 0 14%;
+}
+.ana-gauge-center .gv { font-family: var(--font-mono); font-size: 24px; font-weight: 700; color: var(--green); text-shadow: 0 0 16px rgba(61,220,132,.55); overflow-wrap: anywhere; line-height: 1.15; }
+.ana-gauge-center .gl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-top: 3px; }
+.ana-gauge-center .gn { font-size: 11px; margin-top: 3px; color: var(--muted); }
+@media (max-width: 560px) {
+  .ana-gauge-card { grid-template-columns: 1fr 1fr; }
+  .ana-gauge-mid { grid-column: 1 / -1; grid-row: 2; max-width: 280px; margin: 0 auto; }
+  .ana-gauge-side { grid-row: 3; }
+}
+/* Neon subscription cards */
+.ana-sub-card {
+  border: 1.5px solid var(--sub-color, var(--accent));
+  border-left-width: 1.5px;
+  border-radius: 12px;
+  background: linear-gradient(165deg, color-mix(in srgb, var(--sub-color, #22e5ff) 14%, transparent), rgba(11,15,26,.72) 60%);
+  box-shadow: var(--shadow-ambient), 0 0 16px color-mix(in srgb, var(--sub-color, #22e5ff) 32%, transparent), inset 0 0 16px color-mix(in srgb, var(--sub-color, #22e5ff) 10%, transparent);
+}
+.ana-sub-name { color: var(--sub-color, var(--text)); }
+.ana-sub-mrr b { color: var(--sub-color, var(--text)); }
+.ana-sub-icon { filter: drop-shadow(0 0 6px var(--sub-color, #22e5ff)); }
+.ana-badge {
+  display: inline-block; margin-top: 12px; padding: 4px 12px; border-radius: 999px;
+  font-size: 11.5px; font-weight: 700;
+  color: var(--green); background: var(--green-bg); border: 1px solid var(--green-line);
+}
+.ana-badge.idle { color: var(--text); background: color-mix(in srgb, var(--sub-color, #22e5ff) 22%, transparent); border-color: color-mix(in srgb, var(--sub-color, #22e5ff) 55%, transparent); }
+/* Donut mix + empty chart */
+.ana-donut-wrap { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+.ana-donut { flex: 0 0 auto; width: 170px; height: 170px; }
+.ana-donut text { fill: var(--text); font-family: var(--font-mono); }
+.ana-donut .dl { fill: var(--muted); font-size: 8px; }
+.ana-donut .dv { font-size: 13px; font-weight: 700; }
+.ana-donut-list { flex: 1 1 220px; min-width: 0; }
+.ana-empty-chart { position: relative; padding: 26px 12px 22px; text-align: center; border-bottom: 2px solid var(--accent); box-shadow: 0 8px 14px -10px rgba(34,229,255,.7); color: var(--accent-bright); font-size: 13px; line-height: 1.5; }
+.ana-empty-donut { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; justify-content: center; color: var(--accent-bright); font-size: 13px; line-height: 1.5; text-align: center; }
+.ana-empty-donut svg { width: 120px; height: 120px; flex: 0 0 auto; }
+.ana-empty-donut > div { flex: 1 1 200px; }
 </style>
 </head>
 <body>
@@ -1164,29 +1258,35 @@ a:focus-visible,
         <div id="activationFlagsSavedNote" style="font-size:12px; color:var(--success, #69db7c); margin-top:8px; display:none;">Saved ✓</div>
       </div>
       <div class="stat-strip">
-        <div class="stat-card">
+        <div class="stat-card has-ico">
           <div class="stat-num" id="statAllowed">—</div>
           <div class="stat-label">Allowed devices</div>
+          <span class="stat-ico" aria-hidden="true">💻</span>
         </div>
-        <div class="stat-card">
+        <div class="stat-card has-ico">
           <div class="stat-num" id="statPending">—</div>
           <div class="stat-label">Pending OTPs</div>
+          <span class="stat-ico" aria-hidden="true">🔑</span>
         </div>
-        <div class="stat-card">
+        <div class="stat-card has-ico">
           <div class="stat-num" id="statSeen">—</div>
           <div class="stat-label">Seen devices</div>
+          <span class="stat-ico" aria-hidden="true">📱</span>
         </div>
-        <div class="stat-card" style="cursor:pointer;" onclick="switchTab('devices'); document.getElementById('seenFilterStatus').value='flagged'; renderSeenList(); document.getElementById('seenList').scrollIntoView({behavior:'smooth'});">
+        <div class="stat-card has-ico" style="cursor:pointer;" onclick="switchTab('devices'); document.getElementById('seenFilterStatus').value='flagged'; renderSeenList(); document.getElementById('seenList').scrollIntoView({behavior:'smooth'});">
           <div class="stat-num stat-num-danger" id="statCloneFlagged">—</div>
           <div class="stat-label">🚩 Clone flagged</div>
+          <span class="stat-ico" aria-hidden="true">🧬</span>
         </div>
-        <div class="stat-card" style="cursor:pointer;" onclick="switchTab('devices'); document.getElementById('seenFilterStatus').value='integrity'; renderSeenList(); document.getElementById('seenList').scrollIntoView({behavior:'smooth'});">
+        <div class="stat-card has-ico" style="cursor:pointer;" onclick="switchTab('devices'); document.getElementById('seenFilterStatus').value='integrity'; renderSeenList(); document.getElementById('seenList').scrollIntoView({behavior:'smooth'});">
           <div class="stat-num stat-num-danger" id="statIntegrityFlagged">—</div>
           <div class="stat-label">🛠️ Modified/missing files</div>
+          <span class="stat-ico" aria-hidden="true">🗂️</span>
         </div>
-        <div class="stat-card" style="cursor:pointer;" onclick="switchTab('devices'); document.getElementById('seenFilterStatus').value='noBaseline'; renderSeenList(); document.getElementById('seenList').scrollIntoView({behavior:'smooth'});">
+        <div class="stat-card has-ico" style="cursor:pointer;" onclick="switchTab('devices'); document.getElementById('seenFilterStatus').value='noBaseline'; renderSeenList(); document.getElementById('seenList').scrollIntoView({behavior:'smooth'});">
           <div class="stat-num" style="color:var(--amber,#f5a623);" id="statIntegrityNoBaseline">—</div>
           <div class="stat-label">⚠️ Not actually checked (no baseline)</div>
+          <span class="stat-ico" aria-hidden="true">🔍</span>
         </div>
       </div>
       <div class="card">
@@ -1571,31 +1671,37 @@ a:focus-visible,
   </div>
   <div class="wrap ana-wrap">
     <div class="stat-strip">
-      <div class="stat-card">
+      <div class="stat-card has-ico">
         <div class="stat-num" id="anaAllowed">—</div>
         <div class="stat-label">Allowed devices</div>
+        <span class="stat-ico" aria-hidden="true">💻</span>
       </div>
-      <div class="stat-card">
+      <div class="stat-card has-ico">
         <div class="stat-num" id="anaPending">—</div>
         <div class="stat-label">Pending approvals</div>
+        <span class="stat-ico" aria-hidden="true">⏳</span>
       </div>
-      <div class="stat-card">
+      <div class="stat-card has-ico">
         <div class="stat-num" id="anaSeen">—</div>
         <div class="stat-label">Seen devices</div>
+        <span class="stat-ico" aria-hidden="true">📱</span>
       </div>
     </div>
     <div class="stat-strip">
-      <div class="stat-card">
+      <div class="stat-card has-ico">
         <div class="stat-num" id="anaActiveUnlocks">—</div>
         <div class="stat-label">Active licenses</div>
+        <span class="stat-ico" aria-hidden="true">🔓</span>
       </div>
-      <div class="stat-card">
+      <div class="stat-card has-ico">
         <div class="stat-num" id="anaDemoActive">—</div>
         <div class="stat-label">Active demos</div>
+        <span class="stat-ico" aria-hidden="true">🧪</span>
       </div>
-      <div class="stat-card">
+      <div class="stat-card has-ico">
         <div class="stat-num" id="anaRevenue">—</div>
         <div class="stat-label">Revenue (active)</div>
+        <span class="stat-ico" aria-hidden="true">💵</span>
       </div>
     </div>
     <div id="anaRevenueSection">
@@ -4113,8 +4219,8 @@ let anaRevData = null;
 let anaRevLoading = false;
 let anaRevPending = false;
 const ANA_COLORS = {
-  cloud_backup: '#22e5ff', ai_assistant: '#ff2ee6', multi_branch: '#3ddc84', rbac_management: '#ffb545',
-  remote_operations: '#8b7bff', ai_plan: '#ff7ad9', ai_extra: '#ffa6ee', ai_boost: '#ffd0f5',
+  cloud_backup: '#3aa8ff', ai_assistant: '#ff8a2e', multi_branch: '#3ddc84', rbac_management: '#ffd23a',
+  remote_operations: '#a77bff', ai_plan: '#ff7ad9', ai_extra: '#ffa6ee', ai_boost: '#ffd0f5',
   receipt_credits: '#5aa9ff', bundle: '#b8e986', addons_other: '#8ea3c9'
 };
 const ANA_ICONS = { cloud_backup: '☁️', ai_assistant: '🤖', multi_branch: '🏬', rbac_management: '🔐', remote_operations: '🛰️' };
@@ -4215,6 +4321,26 @@ function renderRevenueBreakdown(d) {
   renderRevTokenSales(d);
   renderRevTable(d);
 }
+function anaGaugeSvg(frac) {
+  const f = Math.max(0, Math.min(1, Number(frac) || 0));
+  const cx = 100, cy = 100, r = 78;
+  const a0 = 135, sweep = 270;
+  const pt = (deg) => {
+    const rad = (deg * Math.PI) / 180;
+    return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)];
+  };
+  const arc = (from, span) => {
+    const [x1, y1] = pt(from);
+    const [x2, y2] = pt(from + span);
+    return `M ${x1.toFixed(2)} ${y1.toFixed(2)} A ${r} ${r} 0 ${span > 180 ? 1 : 0} 1 ${x2.toFixed(2)} ${y2.toFixed(2)}`;
+  };
+  const fillSpan = sweep * f;
+  return `<svg class="ana-gauge-svg" viewBox="0 0 200 180" role="img" aria-label="Token sales this month as a share of all-time token sales">
+    <defs><linearGradient id="anaGaugeGrad" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#3ddc84"/><stop offset="1" stop-color="#22e5ff"/></linearGradient></defs>
+    <path d="${arc(a0, sweep)}" fill="none" stroke="#1f2a44" stroke-width="16" stroke-linecap="round"></path>
+    ${fillSpan > 0.5 ? `<path d="${arc(a0, fillSpan)}" fill="none" stroke="url(#anaGaugeGrad)" stroke-width="16" stroke-linecap="round" style="filter:drop-shadow(0 0 6px rgba(61,220,132,.7));"></path>` : ''}
+  </svg>`;
+}
 function renderRevHero(d) {
   const el = document.getElementById('anaRevHero');
   if (!el) return;
@@ -4223,29 +4349,44 @@ function renderRevHero(d) {
   const T = d.tokenSales && d.tokenSales.available ? d.tokenSales : null;
   const dl = L ? anaDelta(L.thisMonth, L.lastMonth) : { text: 'Ledger unavailable', cls: '' };
   const dt = T ? anaDelta(T.thisMonth, T.lastMonth) : { text: 'Unavailable', cls: '' };
+  const gross = T ? Number(T.allTime) || 0 : 0;
+  const frac = T && gross > 0 ? (Number(T.thisMonth) || 0) / gross : 0;
+  const gaugeNote = T
+    ? (gross > 0 ? Math.round(frac * 100) + '% of all-time came this month' : 'No paid token purchases yet')
+    : 'Unavailable';
   const cards = [
-    { label: 'Monthly recurring revenue', value: anaPeso(t.mrr), sub: 'ARR ' + anaPeso(t.arr), cls: '' },
-    {
-      label: 'Active subscriptions', value: anaInt(t.activeCount),
-      sub: anaInt(t.graceCount) + ' in grace · ' + anaInt(t.lapsedCount) + ' lapsed' + (t.freeCount ? ' · ' + anaInt(t.freeCount) + ' free/granted' : ''),
-      cls: ''
-    },
-    { label: 'Subscription & add-on sales this month', value: L ? anaPeso(L.thisMonth) : '—', sub: dl.text, cls: dl.cls },
-    { label: 'Omni Token sales this month', value: T ? anaPeso(T.thisMonth) : '—', sub: dt.text, cls: dt.cls },
-    {
-      label: 'Renewals due in 7 days', value: anaPeso(t.atRiskRevenue),
-      sub: anaInt(t.expiringSoonCount) + ' subscription(s) expiring', cls: '', danger: (t.expiringSoonCount || 0) > 0
-    },
+    { label: 'Subscription & add-on sales this month', value: L ? anaPeso(L.thisMonth) : '—', sub: dl.text, cls: dl.cls, icon: '🧾' },
+    { label: 'Omni Token sales this month', value: T ? anaPeso(T.thisMonth) : '—', sub: dt.text, cls: dt.cls, icon: '💎' },
     {
       label: 'Sold via tokens, all-time', value: L ? anaPeso(L.allTime) : '—',
-      sub: 'Licenses (latest purchase per device): ' + anaPeso(t.allTimeRevenue), cls: ''
+      sub: 'Licenses (latest purchase per device): ' + anaPeso(t.allTimeRevenue), cls: '', icon: '🏆'
     }
   ];
-  el.innerHTML = cards.map(c => `
-    <div class="stat-card">
-      <div class="stat-num${c.danger ? ' stat-num-danger' : ''}">${anaEsc(c.value)}</div>
+  const gauge = `
+    <div class="ana-gauge-card" style="grid-column: 1 / -1;">
+      <div class="ana-gauge-title">💰 Kita sa Subscription<small>Last ${anaInt((d.months || []).length)} months · Asia/Manila time</small></div>
+      <div class="ana-gauge-side">
+        <div class="ana-gauge-kv"><div class="k">Monthly recurring revenue (MRR)</div><div class="v">${anaEsc(anaPeso(t.mrr))}</div><div class="n">ARR ${anaEsc(anaPeso(t.arr))}</div></div>
+        <div class="ana-gauge-kv"><div class="k">Active subscriptions</div><div class="v">${anaEsc(anaInt(t.activeCount))}</div><div class="n">${anaEsc(anaInt(t.graceCount))} in grace · ${anaEsc(anaInt(t.lapsedCount))} lapsed${t.freeCount ? ' · ' + anaEsc(anaInt(t.freeCount)) + ' free/granted' : ''}</div></div>
+      </div>
+      <div class="ana-gauge-mid">
+        ${anaGaugeSvg(frac)}
+        <div class="ana-gauge-center">
+          <div class="gv">${T ? anaEsc(anaPeso(gross)) : '—'}</div>
+          <div class="gl">Gross token sales</div>
+          <div class="gn">${anaEsc(gaugeNote)}</div>
+        </div>
+      </div>
+      <div class="ana-gauge-side right">
+        <div class="ana-gauge-kv"><div class="k">Renewals due in 7 days</div><div class="v${(t.expiringSoonCount || 0) > 0 ? ' danger' : ''}">${anaEsc(anaPeso(t.atRiskRevenue))}</div><div class="n">${anaEsc(anaInt(t.expiringSoonCount))} subscription(s) expiring</div></div>
+      </div>
+    </div>`;
+  el.innerHTML = gauge + cards.map(c => `
+    <div class="stat-card has-ico">
+      <div class="stat-num">${anaEsc(c.value)}</div>
       <div class="stat-label">${anaEsc(c.label)}</div>
       <div class="ana-stat-sub ${c.cls || ''}">${anaEsc(c.sub)}</div>
+      <span class="stat-ico" aria-hidden="true">${c.icon}</span>
     </div>
   `).join('');
 }
@@ -4320,6 +4461,9 @@ function renderRevSubCards(d) {
         ${splitHtml}
         ${tiersHtml}
         <div class="ana-chips">${chips.join('')}</div>
+        ${s.activeCount > 0
+          ? `<span class="ana-badge">${anaInt(s.activeCount)} active subscriber(s)</span>`
+          : '<span class="ana-badge idle">Walang aktibong subscriber</span>'}
       </div>`;
   }).join('');
 }
@@ -4337,7 +4481,7 @@ function renderRevTrend(d) {
   const totals = months.map(m => Number(L.totalByMonth[m]) || 0);
   const maxV = Math.max(0, ...totals);
   if (keys.length === 0 || maxV <= 0) {
-    el.innerHTML = anaEmpty('No subscription or add-on sales paid with Omni Tokens in this period yet.');
+    el.innerHTML = '<div class="ana-empty-chart">' + anaEsc('No subscription or add-on sales paid with Omni Tokens in this period yet.') + '</div>';
     return;
   }
   if (pillEl) pillEl.innerText = anaPeso(totals.reduce((a, b) => a + b, 0));
@@ -4384,17 +4528,35 @@ function renderRevMix(d) {
   const subs = (d.subscriptions || []).filter(s => s.mrr > 0).sort((a, b) => b.mrr - a.mrr);
   const total = subs.reduce((sum, s) => sum + s.mrr, 0);
   if (subs.length === 0 || total <= 0) {
-    el.innerHTML = anaEmpty('No recurring revenue yet. There are no active paid subscriptions with a billing period.');
+    el.innerHTML = `<div class="ana-empty-donut">
+      <svg viewBox="0 0 120 120" aria-hidden="true"><circle cx="60" cy="60" r="46" fill="none" stroke="#22e5ff" stroke-width="3" style="filter:drop-shadow(0 0 5px rgba(34,229,255,.7));"></circle><text x="60" y="64" text-anchor="middle" style="fill:#7cf3ff;font-family:var(--font-mono);font-size:12px;">0</text></svg>
+      <div>No recurring revenue yet. There are no active paid subscriptions with a billing period.</div>
+    </div>`;
     return;
   }
-  el.innerHTML = subs.map(s => {
+  const r = 62, C = 2 * Math.PI * r;
+  let offset = 0;
+  const rings = subs.map(s => {
+    const len = (s.mrr / total) * C;
+    const seg = `<circle cx="100" cy="100" r="${r}" fill="none" stroke="${anaColor(s.featureId)}" stroke-width="22" stroke-dasharray="${len.toFixed(2)} ${(C - len).toFixed(2)}" stroke-dashoffset="${(-offset).toFixed(2)}" transform="rotate(-90 100 100)"><title>${anaEsc(s.name)}: ${anaEsc(anaPeso(s.mrr))}</title></circle>`;
+    offset += len;
+    return seg;
+  }).join('');
+  const donut = `<svg class="ana-donut" viewBox="0 0 200 200" role="img" aria-label="Share of monthly recurring revenue by subscription">
+    <circle cx="100" cy="100" r="${r}" fill="none" stroke="#1f2a44" stroke-width="22"></circle>
+    ${rings}
+    <text class="dl" x="100" y="94" text-anchor="middle">MRR</text>
+    <text class="dv" x="100" y="112" text-anchor="middle">${anaEsc(anaCompact(total))}</text>
+  </svg>`;
+  const list = subs.map(s => {
     const share = (s.mrr / total) * 100;
     return `
       <div class="abar-row">
-        <div class="abar-label"><span class="name">${anaEsc(s.name)}</span><span class="count">${anaPeso(s.mrr)} · ${share.toFixed(1)}%</span></div>
+        <div class="abar-label"><span class="name"><span class="ana-dot" style="background:${anaColor(s.featureId)};"></span>${anaEsc(s.name)}</span><span class="count">${anaPeso(s.mrr)} · ${share.toFixed(1)}%</span></div>
         <div class="abar-track"><div class="abar-fill" style="width:${Math.max(4, share).toFixed(1)}%; background:${anaColor(s.featureId)};"></div></div>
       </div>`;
   }).join('');
+  el.innerHTML = `<div class="ana-donut-wrap">${donut}<div class="ana-donut-list">${list}</div></div>`;
 }
 function renderRevAi(d) {
   const el = document.getElementById('anaAiRevenue');
