@@ -5864,7 +5864,7 @@ function purgeCloneSplitsForInstallation(installationId) {
 // SAFETY: kailangan ng ?confirm=DELETE (o "confirm":"DELETE" sa JSON body)
 // dahil hindi na ito mababawi — hindi tulad ng revoke (na puwede pang i-allow
 // ulit), permanenteng bura na ito ng lahat ng datos ng device.
-app.post('/relay/admin/api/devices/:installationId/purge', requireAdminKey, async (req, res) => {
+async function purgeDeviceHandler(req, res) {
     const { installationId } = req.params;
     const confirm = req.query.confirm || req.body?.confirm;
     if (!installationId) {
@@ -6024,7 +6024,8 @@ app.post('/relay/admin/api/devices/:installationId/purge', requireAdminKey, asyn
         console.error('⚠️  /relay/admin/api/devices/:installationId/purge error:', err.message);
         res.status(500).json({ success: false, message: 'Hindi na-buo ang pag-purge ng device — posibleng may parte itong tapos na (tingnan ang summary sa logs).', summary });
     }
-});
+}
+app.post('/relay/admin/api/devices/:installationId/purge', requireAdminKey, purgeDeviceHandler);
 app.get('/relay/admin/api/catalog', requireAdminKey, (req, res) => {
     res.json({ success: true, catalog: FEATURE_CATALOG, tiers: UPGRADE_TIERS });
 });
@@ -6585,6 +6586,330 @@ app.post('/relay/admin/api/analytics/reset', requireAdminKey, (req, res) => {
         clearedOrphanFeatureCount,
         message: `Na-reset ang Analytics: nabura ang ${clearedActivityCount} activity-log entries, at ${clearedOrphanFeatureCount} orphan/stale na license record mula sa ${clearedOrphanDeviceCount} device na hindi na naka-Allow. Hindi ginalaw ang unlocks ng mga device na kasalukuyang naka-Allow, at hindi rin ginalaw ang device/customer database (allowed devices, labels, backup check-ins).`
     });
+});
+// ===================================================================
+// GAWA/BAGO: REVENUE & TOKEN PURCHASE COUNTERS RESET — para sa paglipat
+// mula test/dev papunta sa TOTOONG customers: ibinabalik sa ZERO ang lahat
+// ng revenue at token-purchase counting sa buong RELAY (Analytics revenue,
+// Omni Token purchases/ledger, Cloud Backup finance/reconciliation, at AI
+// plan/extra-pack/day-boost sales). Dalawang endpoint:
+//   GET  /relay/admin/api/revenue-counters/preview  -> bilang lang, walang binabago
+//   POST /relay/admin/api/revenue-counters/reset    -> kailangan ng
+//        { confirm: 'RESET REVENUE' } sa JSON body (o ?confirm=RESET%20REVENUE)
+// Options (JSON body): includeAiPurchases (default true), resetWallets (default
+// false — balance ng customer ay hindi counter; i-on lang kung test credits
+// ang laman ng mga wallet).
+// HINDI binubura: 'pending' na token purchases (baka may bayad na paparating
+// sa webhook — mawawalan ng credit ang customer kung buburahin), ang mga
+// naka-issue na license/unlock (price lang ang ginagawang 0), allowed devices,
+// labels, pricing/settings, AI cost ledger (gastos, hindi revenue), at ang
+// cloud_sync_activity (sync history, hindi purchase).
+// ===================================================================
+const REVENUE_RESET_CONFIRM_PHRASE = 'RESET REVENUE';
+const REVENUE_RESET_ACTIVITY_TYPES = new Set([
+    'cloud_token_purchase_created', 'cloud_token_purchase_paid', 'cloud_token_manual_credit',
+    'ai_plan_purchased', 'ai_extra_credits_purchased', 'ai_day_boost_purchased',
+    'receipt_credit_purchase_requested', 'receipt_credit_purchase_approved',
+    'receipt_credit_purchase_locked_out', 'receipt_credit_purchase_ticket_issued'
+]);
+async function countRevenueCounterRows(pool, sql) {
+    if (!pool) return null;
+    try {
+        const r = await queryWithRetry(pool, sql, []);
+        return Number(r.rows[0] && r.rows[0].n) || 0;
+    } catch (err) {
+        console.error('⚠️  revenue-counters count error:', err.message);
+        return null;
+    }
+}
+async function buildRevenueCountersPreview() {
+    let unlockPricedEntries = 0;
+    let unlockRevenueTotal = 0;
+    for (const record of Object.values(issuedUnlocks || {})) {
+        for (const [featureId, entry] of Object.entries(record || {})) {
+            if (featureId === DEMO_FEATURE_ID) continue;
+            if (entry && Number(entry.price) > 0) { unlockPricedEntries++; unlockRevenueTotal += Number(entry.price); }
+        }
+    }
+    const activityEntries = (activityLog || []).filter(e => e && REVENUE_RESET_ACTIVITY_TYPES.has(e.type)).length;
+    const [tokenPurchasesDone, tokenPurchasesPending, ledgerRows, walletsWithBalance, aiTier, aiExtra, aiBoosts] = await Promise.all([
+        countRevenueCounterRows(pgPool, `SELECT COUNT(*)::int AS n FROM cloud_token_purchases WHERE status <> 'pending'`),
+        countRevenueCounterRows(pgPool, `SELECT COUNT(*)::int AS n FROM cloud_token_purchases WHERE status = 'pending'`),
+        countRevenueCounterRows(pgPool, `SELECT COUNT(*)::int AS n FROM cloud_token_ledger`),
+        countRevenueCounterRows(pgPool, `SELECT COUNT(*)::int AS n FROM cloud_token_wallets WHERE balance_tokens <> 0 OR sync_fraction_accrued <> 0 OR reserved_tokens <> 0 OR debt_since IS NOT NULL`),
+        countRevenueCounterRows(pgPoolDevices, `SELECT COUNT(*)::int AS n FROM relay_ai_tier_purchases`),
+        countRevenueCounterRows(pgPoolDevices, `SELECT COUNT(*)::int AS n FROM relay_ai_extra_purchases`),
+        countRevenueCounterRows(pgPoolDevices, `SELECT COUNT(*)::int AS n FROM relay_ai_day_boosts`)
+    ]);
+    return {
+        unlockPricedEntries, unlockRevenueTotal, activityEntries,
+        tokenPurchasesDone, tokenPurchasesPending, ledgerRows, walletsWithBalance,
+        aiTierPurchases: aiTier, aiExtraPurchases: aiExtra, aiDayBoosts: aiBoosts,
+        postgresPurchasesConfigured: !!pgPool, postgresDevicesConfigured: !!pgPoolDevices
+    };
+}
+app.get('/relay/admin/api/revenue-counters/preview', requireAdminKey, async (req, res) => {
+    try {
+        res.json({ success: true, confirmPhrase: REVENUE_RESET_CONFIRM_PHRASE, preview: await buildRevenueCountersPreview() });
+    } catch (err) {
+        console.error('⚠️  /relay/admin/api/revenue-counters/preview error:', err.message);
+        res.status(500).json({ success: false, message: 'Hindi ma-compute ang preview: ' + err.message });
+    }
+});
+async function runRevenueCountersReset({ includeAiPurchases, resetWallets }) {
+    const summary = { includeAiPurchases, resetWallets, errors: {} };
+    let releaseGlobalLock = null;
+    try {
+        // 1) License price -> 0 (hindi binubura ang unlock mismo, kaya walang feature na mawawala sa customer).
+        let zeroedUnlockPrices = 0;
+        for (const record of Object.values(issuedUnlocks || {})) {
+            for (const entry of Object.values(record || {})) {
+                if (entry && typeof entry === 'object' && entry.price) { entry.price = 0; zeroedUnlockPrices++; }
+            }
+        }
+        if (zeroedUnlockPrices > 0) saveIssuedUnlocks(issuedUnlocks);
+        summary.zeroedUnlockPrices = zeroedUnlockPrices;
+
+        // 2) Omni Token purchases + ledger (+ optional wallets) — isang transaction para all-or-nothing.
+        if (pgPool) {
+            try {
+                const tokenResult = await runPgWriteTx(pgPool, async (client) => {
+                    const out = {};
+                    const pur = await client.query(`DELETE FROM cloud_token_purchases WHERE status <> 'pending'`);
+                    out.deletedTokenPurchases = pur.rowCount || 0;
+                    const pend = await client.query(`SELECT COUNT(*)::int AS n FROM cloud_token_purchases WHERE status = 'pending'`);
+                    out.keptPendingTokenPurchases = Number(pend.rows[0] && pend.rows[0].n) || 0;
+                    const led = await client.query(`DELETE FROM cloud_token_ledger`);
+                    out.deletedLedgerRows = led.rowCount || 0;
+                    if (resetWallets) {
+                        const w = await client.query(`UPDATE cloud_token_wallets SET balance_tokens = 0, sync_fraction_accrued = 0, reserved_tokens = 0, debt_since = NULL, updated_at = now() WHERE balance_tokens <> 0 OR sync_fraction_accrued <> 0 OR reserved_tokens <> 0 OR debt_since IS NOT NULL`);
+                        out.resetWalletRows = w.rowCount || 0;
+                    }
+                    return out;
+                });
+                Object.assign(summary, tokenResult);
+            } catch (err) {
+                console.error('⚠️  revenue-counters reset (token tables) error:', err.message);
+                summary.errors.tokenTables = err.message;
+            }
+        } else {
+            summary.errors.tokenTables = 'Hindi naka-configure ang Postgres (DATABASE_URL) — walang token purchase/ledger na nabura.';
+        }
+
+        // 3) AI plan / extra pack / one-day boost sales (tokens spent). Kapareho ng per-client AI reset:
+        //    hawak ang global lock, tapos linisin ang in-memory dedupe at buksan ang capacity lock kung nabakante.
+        if (includeAiPurchases) {
+            if (pgPoolDevices) {
+                try {
+                    releaseGlobalLock = await acquireAiTierGlobalLock();
+                    const aiResult = await runPgWriteTx(pgPoolDevices, async (client) => {
+                        const t = await client.query(`DELETE FROM relay_ai_tier_purchases`);
+                        const x = await client.query(`DELETE FROM relay_ai_extra_purchases`);
+                        const b = await client.query(`DELETE FROM relay_ai_day_boosts`);
+                        return { deletedAiTierPurchases: t.rowCount || 0, deletedAiExtraPurchases: x.rowCount || 0, deletedAiDayBoosts: b.rowCount || 0 };
+                    });
+                    Object.assign(summary, aiResult);
+                    aiTierPurchaseDedupe.clear();
+                    aiExtraPurchaseDedupe.clear();
+                    await releaseRelayAiLockIfFreed(relayAiMonthKey(), false);
+                } catch (err) {
+                    console.error('⚠️  revenue-counters reset (AI purchases) error:', err.message);
+                    summary.errors.aiPurchases = err.message;
+                } finally {
+                    if (releaseGlobalLock) { releaseGlobalLock(); releaseGlobalLock = null; }
+                }
+            } else {
+                summary.errors.aiPurchases = 'Hindi naka-configure ang Devices/License database — walang AI purchase na nabura.';
+            }
+        }
+
+        // 4) Activity log: alisin ang purchase/credit events (para hindi na lumabas sa Cloud Backup events/history).
+        const beforeLog = activityLog.length;
+        activityLog = activityLog.filter(e => !(e && REVENUE_RESET_ACTIVITY_TYPES.has(e.type)));
+        summary.removedActivityEntries = beforeLog - activityLog.length;
+        if (summary.removedActivityEntries > 0) saveActivityLog(activityLog);
+
+        // 5) In-memory caches na may hawak pa ng lumang revenue/purchase numbers.
+        walletResponseCache.clear();
+        relayAiClientUsageCache.at = 0; relayAiClientUsageCache.value = null;
+        relayAiBudgetCache.clear();
+        aiProfitCache = { at: 0, month: '', value: null };
+        cbccCache = { key: '', at: 0, payload: null };
+        invalidateDevicesCostAllocationCache();
+        invalidateCloudBackupClientAllocationCache();
+
+        summary.fatal = null;
+    } catch (err) {
+        if (releaseGlobalLock) releaseGlobalLock();
+        console.error('⚠️  revenue-counters reset error:', err.message);
+        summary.fatal = err.message;
+        summary.errors.fatal = err.message;
+    }
+    return summary;
+}
+app.post('/relay/admin/api/revenue-counters/reset', requireAdminKey, async (req, res) => {
+    const confirm = String((req.body && req.body.confirm) || req.query.confirm || '');
+    if (confirm !== REVENUE_RESET_CONFIRM_PHRASE) {
+        return res.status(400).json({
+            success: false,
+            message: `Safety check: kailangan ng "confirm": "${REVENUE_RESET_CONFIRM_PHRASE}" (eksaktong tama ang letra) para i-reset ang revenue at token purchase counters. Hindi na ito mababawi.`
+        });
+    }
+    const includeAiPurchases = !(req.body && req.body.includeAiPurchases === false);
+    const resetWallets = !!(req.body && req.body.resetWallets === true);
+    const summary = await runRevenueCountersReset({ includeAiPurchases, resetWallets });
+    const hasErrors = Object.keys(summary.errors).length > 0;
+    logActivity(null, 'revenue_counters_reset', summary);
+    console.log(`🔄 Revenue & token purchase counters reset via admin panel:`, JSON.stringify(summary));
+    if (summary.fatal) {
+        return res.status(500).json({ success: false, message: 'Hindi nabuo ang reset: ' + summary.fatal, summary });
+    }
+    res.json({
+        success: !hasErrors,
+        partial: hasErrors,
+        summary,
+        message: hasErrors
+            ? 'Hindi lahat ng bahagi ay na-reset — tingnan ang summary.errors (ang mga bahaging walang error ay tapos na; puwedeng ulitin ang reset).'
+            : 'Na-reset sa zero ang revenue at token purchase counters ng buong RELAY. Hindi ginalaw ang mga naka-issue na license, allowed devices, pending na token purchases, at settings.'
+    });
+});
+// ===================================================================
+// GAWA/BAGO: FRESH START — isang pindot para gawing ganap na "bago" ang
+// RELAY bago mag-allow ng unang TOTOONG client. Ginagawa nito, sunod-sunod:
+//   1) kinokolekta ang LAHAT ng kilalang installation ID (in-memory + lahat ng
+//      Neon table na may installation_id) at pino-purge ang bawat isa gamit
+//      ang parehong purgeDeviceHandler ng "Purge" button (allow-list, label,
+//      fingerprint, unlocks, wallet, purchases, ledger, AI data, Cloud Backup
+//      data, atbp.),
+//   2) runRevenueCountersReset (global — pati wallets at AI purchases),
+//   3) buburahin ang buong activity log at pending receipt-credit requests,
+//   4) magbabalik ng "remaining" counts para makita mong zero na ang lahat.
+// HINDI ginagalaw: pricing/settings, AI default settings ('__default__'),
+// admin key/keys, build/download history, AI provider config at Google/AI
+// usage stats (gastos, hindi revenue), at ang Neon actual-bill entries.
+//   GET  /relay/admin/api/fresh-start/preview
+//   POST /relay/admin/api/fresh-start   { "confirm": "FRESH START" }
+// ===================================================================
+const FRESH_START_CONFIRM_PHRASE = 'FRESH START';
+async function collectAllKnownInstallationIds() {
+    const ids = new Set();
+    const warnings = [];
+    const add = (raw) => {
+        if (typeof raw !== 'string') return;
+        const id = raw.trim();
+        if (!id || id === RELAY_AI_DEFAULT_SETTINGS_ID || id.length > 200) return;
+        ids.add(id);
+    };
+    const scan = async (pool, table) => {
+        if (!pool) return;
+        try {
+            const { rows } = await queryWithRetry(pool, `SELECT DISTINCT installation_id AS id FROM ${table}`, []);
+            rows.forEach((r) => add(r.id));
+        } catch (err) {
+            warnings.push(`${table}: ${err.message}`);
+        }
+    };
+    for (const t of ['cloud_backup_meta', 'cloud_backup_modules', 'cloud_backup_usage_hourly', 'cloud_token_wallets', 'cloud_token_purchases', 'cloud_token_ledger', 'cloud_sync_activity']) {
+        await scan(pgPool, t);
+    }
+    for (const t of ['relay_devices', 'relay_device_fingerprints', 'relay_clone_splits', 'relay_ai_credit_usage', 'relay_ai_credit_requests', 'relay_ai_credit_settings', 'relay_ai_tier_purchases', 'relay_ai_extra_purchases', 'relay_ai_day_boosts', 'relay_ai_daily_usage']) {
+        await scan(pgPoolDevices, t);
+    }
+    seenDevices.forEach((_v, id) => add(id));
+    allowedDevices.forEach((id) => add(id));
+    deviceLabels.forEach((_v, id) => add(id));
+    deviceFingerprints.forEach((_v, id) => add(id));
+    Object.keys(issuedUnlocks || {}).forEach(add);
+    Object.keys(backupCheckins || {}).forEach(add);
+    Object.keys(integrityStatus || {}).forEach(add);
+    Object.keys((clientMaintenanceFeeConfig && clientMaintenanceFeeConfig.perClientOverridePHP) || {}).forEach(add);
+    cloneSplits.forEach((rec, key) => { add(String(key).split('::')[0]); if (rec && rec.newInstallationId) add(rec.newInstallationId); });
+    return { ids: [...ids], warnings };
+}
+function invokePurgeDevice(installationId) {
+    return new Promise((resolve) => {
+        let code = 200;
+        const fakeRes = {
+            status(c) { code = c; return this; },
+            json(body) { resolve({ code, body }); return this; }
+        };
+        Promise.resolve(purgeDeviceHandler({ params: { installationId }, query: {}, body: { confirm: 'DELETE' } }, fakeRes))
+            .then(() => resolve({ code: 500, body: { success: false, message: 'Walang response mula sa purge.' } }))
+            .catch((err) => resolve({ code: 500, body: { success: false, message: err.message } }));
+    });
+}
+app.get('/relay/admin/api/fresh-start/preview', requireAdminKey, async (req, res) => {
+    try {
+        const { ids, warnings } = await collectAllKnownInstallationIds();
+        res.json({
+            success: true,
+            confirmPhrase: FRESH_START_CONFIRM_PHRASE,
+            preview: {
+                installationCount: ids.length,
+                allowedCount: allowedDevices.size,
+                activityLogEntries: (activityLog || []).length,
+                pendingReceiptCreditRequests: pendingReceiptCreditPurchases.size,
+                scanWarnings: warnings,
+                revenue: await buildRevenueCountersPreview()
+            }
+        });
+    } catch (err) {
+        console.error('⚠️  /relay/admin/api/fresh-start/preview error:', err.message);
+        res.status(500).json({ success: false, message: 'Hindi ma-compute ang preview: ' + err.message });
+    }
+});
+let freshStartRunning = false;
+app.post('/relay/admin/api/fresh-start', requireAdminKey, async (req, res) => {
+    const confirm = String((req.body && req.body.confirm) || req.query.confirm || '');
+    if (confirm !== FRESH_START_CONFIRM_PHRASE) {
+        return res.status(400).json({
+            success: false,
+            message: `Safety check: kailangan ng "confirm": "${FRESH_START_CONFIRM_PHRASE}" (eksaktong tama ang letra). Buburahin nito ang LAHAT ng device/customer data at revenue/token counters. Hindi na ito mababawi.`
+        });
+    }
+    if (freshStartRunning) {
+        return res.status(409).json({ success: false, message: 'May tumatakbo nang Fresh Start. Hintayin munang matapos.' });
+    }
+    freshStartRunning = true;
+    const summary = { purgedDevices: 0, failedDevices: [], scanWarnings: [] };
+    try {
+        const { ids, warnings } = await collectAllKnownInstallationIds();
+        summary.scanWarnings = warnings;
+        summary.installationsFound = ids.length;
+        for (const installationId of ids) {
+            const r = await invokePurgeDevice(installationId);
+            if (r.body && r.body.success) summary.purgedDevices++;
+            else summary.failedDevices.push({ installationId, message: (r.body && r.body.message) || ('HTTP ' + r.code) });
+        }
+        summary.revenueReset = await runRevenueCountersReset({ includeAiPurchases: true, resetWallets: true });
+        summary.clearedActivityEntries = activityLog.length;
+        activityLog = [];
+        saveActivityLog(activityLog);
+        summary.clearedPendingReceiptCreditRequests = pendingReceiptCreditPurchases.size;
+        pendingReceiptCreditPurchases.clear();
+        summary.remaining = {
+            installations: (await collectAllKnownInstallationIds()).ids.length,
+            allowedDevices: allowedDevices.size,
+            revenue: await buildRevenueCountersPreview()
+        };
+        const ok = summary.failedDevices.length === 0 && summary.scanWarnings.length === 0
+            && !summary.revenueReset.fatal && Object.keys(summary.revenueReset.errors || {}).length === 0;
+        logActivity(null, 'fresh_start', { purgedDevices: summary.purgedDevices, failedDevices: summary.failedDevices.length });
+        console.log('🧹 FRESH START tapos via admin panel:', JSON.stringify({ purgedDevices: summary.purgedDevices, failed: summary.failedDevices.length, warnings: summary.scanWarnings.length }));
+        res.json({
+            success: ok,
+            partial: !ok,
+            summary,
+            message: ok
+                ? `Fresh start tapos: ${summary.purgedDevices} device ang na-purge at zero na ang revenue/token counters at activity log.`
+                : 'Hindi lahat ay natapos — tingnan ang summary (failedDevices / scanWarnings / revenueReset.errors). Puwede mong ulitin ang Fresh Start.'
+        });
+    } catch (err) {
+        console.error('⚠️  /relay/admin/api/fresh-start error:', err.message);
+        res.status(500).json({ success: false, message: 'Hindi nabuo ang Fresh Start: ' + err.message, summary });
+    } finally {
+        freshStartRunning = false;
+    }
 });
 app.get('/relay/admin/api/devices/:installationId/detail', requireAdminKey, (req, res) => {
     const { installationId } = req.params;

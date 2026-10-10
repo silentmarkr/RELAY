@@ -1491,6 +1491,8 @@ a:focus-visible,
       </div>
     </div>
     <div class="topbar-actions">
+      <button class="icon-btn" onclick="openFreshStart()" id="freshStartBtn" title="Buburahin ang LAHAT ng device/customer data at ibabalik sa zero ang lahat ng revenue/token counters — para sa bagong-bagong RELAY bago ang totoong clients.">🧹 Fresh Start</button>
+      <button class="icon-btn" onclick="openRevenueReset()" id="resetRevenueBtn" title="Ibinabalik sa zero ang lahat ng revenue at token purchase counters (para sa paglipat sa totoong customers).">💸 Reset Revenue &amp; Tokens</button>
       <button class="icon-btn" onclick="resetAnalytics()" id="resetAnalyticsBtn" title="Clears the Activity/History log only — hindi ito nagagalaw sa unlocked features o sa customer/device database.">🔄 Reset Analytics</button>
       <button class="icon-btn" onclick="closeAnalytics()">← Back</button>
     </div>
@@ -1582,6 +1584,39 @@ a:focus-visible,
     <div class="modal-actions">
       <button class="btn-ghost" id="confirmCancelBtn">Cancel</button>
       <button class="btn-allow" id="confirmActionBtn">Yes, continue</button>
+    </div>
+  </div>
+</div>
+<div id="revenueResetBackdrop" class="modal-backdrop">
+  <div class="modal-box" style="max-height:90vh; overflow-y:auto;">
+    <h3>💸 Reset Revenue &amp; Token Purchase Counters</h3>
+    <p>Ibabalik sa <b>zero</b> ang lahat ng revenue at token purchase counting ng buong RELAY. <b>Hindi na ito mababawi.</b> Hindi ginagalaw ang mga naka-issue na license/unlock, allowed devices, settings, at ang mga <i>pending</i> na token purchase (para hindi mawalan ng credit ang customer na may paparating na bayad).</p>
+    <div class="meta" id="rrPreview" style="margin:8px 0 10px; line-height:1.6;">Loading...</div>
+    <label style="display:flex; align-items:center; gap:8px; font-size:12px; color:var(--text); margin:2px 0 6px;">
+      <input type="checkbox" id="rrIncludeAi" checked> Isama ang AI plan / extra pack / one-day boost purchases
+    </label>
+    <label style="display:flex; align-items:center; gap:8px; font-size:12px; color:var(--text); margin:2px 0 10px;">
+      <input type="checkbox" id="rrResetWallets"> I-zero din ang lahat ng wallet balance (huwag i-check kung may totoong customer na may laman ang wallet)
+    </label>
+    <label for="rrConfirmInput" style="font-size:12px; color:var(--muted);">I-type ang <b>RESET REVENUE</b> para magpatuloy</label>
+    <input type="text" id="rrConfirmInput" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="RESET REVENUE">
+    <div class="modal-actions" style="margin-top:6px;">
+      <button class="btn-ghost" id="rrCancelBtn" onclick="closeRevenueReset()">Cancel</button>
+      <button class="btn-revoke" id="rrSubmitBtn" onclick="submitRevenueReset()">Oo, i-reset sa zero</button>
+    </div>
+  </div>
+</div>
+<div id="freshStartBackdrop" class="modal-backdrop">
+  <div class="modal-box" style="max-height:90vh; overflow-y:auto;">
+    <h3>🧹 Fresh Start — gawing bago ang RELAY</h3>
+    <p>Pino-purge ang <b>LAHAT</b> ng device/installation (allow-list, license, wallet, purchases, AI data, Cloud Backup data), ibinabalik sa <b>zero</b> ang lahat ng revenue at token counters, at binubura ang buong activity log. <b>Hindi na ito mababawi.</b> Hindi ginagalaw ang pricing at settings.</p>
+    <div class="meta" id="fsPreview" style="margin:8px 0 10px; line-height:1.6; white-space:pre-line;">Loading...</div>
+    <label for="fsConfirmInput" style="font-size:12px; color:var(--muted);">I-type ang <b>FRESH START</b> para magpatuloy</label>
+    <input type="text" id="fsConfirmInput" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="FRESH START">
+    <div id="fsResult" class="meta" style="display:none; margin-top:8px; white-space:pre-line;"></div>
+    <div class="modal-actions" style="margin-top:6px;">
+      <button class="btn-ghost" id="fsCancelBtn" onclick="closeFreshStart()">Close</button>
+      <button class="btn-revoke" id="fsSubmitBtn" onclick="submitFreshStart()">Oo, burahin lahat</button>
     </div>
   </div>
 </div>
@@ -3837,6 +3872,115 @@ async function resetAnalytics() {
   } catch (err) {
   } finally {
     if (btn) { btn.disabled = false; btn.innerText = '🔄 Reset Analytics'; }
+  }
+}
+async function openFreshStart() {
+  const previewEl = document.getElementById('fsPreview');
+  document.getElementById('fsConfirmInput').value = '';
+  document.getElementById('fsResult').style.display = 'none';
+  previewEl.innerText = 'Loading...';
+  document.getElementById('freshStartBackdrop').style.display = 'flex';
+  try {
+    const data = await api('/relay/admin/api/fresh-start/preview');
+    if (!data.success) { previewEl.innerText = data.message || 'Could not load preview.'; return; }
+    const p = data.preview;
+    const r = p.revenue || {};
+    previewEl.innerText =
+      `Installations na ipa-purge: ${rrFmt(p.installationCount)} (naka-Allow: ${rrFmt(p.allowedCount)})\n` +
+      `License revenue: ₱${rrFmt(r.unlockRevenueTotal)} · Token purchases: ${rrFmt(r.tokenPurchasesDone)} (+${rrFmt(r.tokenPurchasesPending)} pending) · Ledger rows: ${rrFmt(r.ledgerRows)}\n` +
+      `AI plan: ${rrFmt(r.aiTierPurchases)} · extra packs: ${rrFmt(r.aiExtraPurchases)} · day boosts: ${rrFmt(r.aiDayBoosts)}\n` +
+      `Activity log entries: ${rrFmt(p.activityLogEntries)}` +
+      ((p.scanWarnings && p.scanWarnings.length) ? `\n⚠️ Hindi nabasa ang ilang table (posibleng may hindi mahanap na device): ${p.scanWarnings.join(' | ')}` : '');
+  } catch (err) {
+    previewEl.innerText = 'Could not load preview.';
+  }
+}
+function closeFreshStart() {
+  document.getElementById('freshStartBackdrop').style.display = 'none';
+}
+async function submitFreshStart() {
+  const phrase = document.getElementById('fsConfirmInput').value.trim();
+  if (phrase !== 'FRESH START') {
+    toast('I-type nang eksakto ang FRESH START para magpatuloy.', 'error');
+    return;
+  }
+  const btn = document.getElementById('fsSubmitBtn');
+  const resultEl = document.getElementById('fsResult');
+  btn.disabled = true; btn.innerText = '⏳ Binubura... (huwag isara)';
+  try {
+    const data = await api('/relay/admin/api/fresh-start', { method: 'POST', body: JSON.stringify({ confirm: phrase }) });
+    const sm = data.summary || {};
+    const rem = sm.remaining || {};
+    const rev = rem.revenue || {};
+    resultEl.style.display = 'block';
+    resultEl.innerText =
+      (data.message || '') + '\n' +
+      `Natira: installations ${rrFmt(rem.installations)} · allowed ${rrFmt(rem.allowedDevices)} · license revenue ₱${rrFmt(rev.unlockRevenueTotal)} · token purchases ${rrFmt(rev.tokenPurchasesDone)} · ledger ${rrFmt(rev.ledgerRows)} · AI plan ${rrFmt(rev.aiTierPurchases)}` +
+      ((sm.failedDevices && sm.failedDevices.length) ? `\n❌ Hindi na-purge: ${sm.failedDevices.map(f => f.installationId + ' (' + f.message + ')').join('; ')}` : '');
+    toast(data.success ? '✅ Fresh Start tapos.' : (data.message || 'Hindi natapos ang Fresh Start.'), data.success ? 'success' : 'error');
+    loadAnalytics();
+  } catch (err) {
+  } finally {
+    btn.disabled = false; btn.innerText = 'Oo, burahin lahat';
+  }
+}
+function rrFmt(n) { return (n === null || n === undefined) ? '—' : Number(n).toLocaleString('en-PH'); }
+async function openRevenueReset() {
+  const backdrop = document.getElementById('revenueResetBackdrop');
+  const previewEl = document.getElementById('rrPreview');
+  document.getElementById('rrConfirmInput').value = '';
+  document.getElementById('rrIncludeAi').checked = true;
+  document.getElementById('rrResetWallets').checked = false;
+  previewEl.innerText = 'Loading...';
+  backdrop.style.display = 'flex';
+  try {
+    const data = await api('/relay/admin/api/revenue-counters/preview');
+    if (!data.success) { previewEl.innerText = data.message || 'Could not load preview.'; return; }
+    const p = data.preview;
+    previewEl.innerText =
+      `License revenue na buburahin: ₱${rrFmt(p.unlockRevenueTotal)} (${rrFmt(p.unlockPricedEntries)} license)\n` +
+      `Token purchases (paid/failed): ${rrFmt(p.tokenPurchasesDone)} · pending na itatago: ${rrFmt(p.tokenPurchasesPending)}\n` +
+      `Token ledger rows: ${rrFmt(p.ledgerRows)} · Wallets na may laman: ${rrFmt(p.walletsWithBalance)}\n` +
+      `AI plan: ${rrFmt(p.aiTierPurchases)} · extra packs: ${rrFmt(p.aiExtraPurchases)} · day boosts: ${rrFmt(p.aiDayBoosts)}\n` +
+      `Purchase/credit activity entries: ${rrFmt(p.activityEntries)}`;
+    previewEl.style.whiteSpace = 'pre-line';
+  } catch (err) {
+    previewEl.innerText = 'Could not load preview.';
+  }
+}
+function closeRevenueReset() {
+  document.getElementById('revenueResetBackdrop').style.display = 'none';
+}
+async function submitRevenueReset() {
+  const phrase = document.getElementById('rrConfirmInput').value.trim();
+  if (phrase !== 'RESET REVENUE') {
+    toast('I-type nang eksakto ang RESET REVENUE para magpatuloy.', 'error');
+    return;
+  }
+  const btn = document.getElementById('rrSubmitBtn');
+  btn.disabled = true; btn.innerText = '⏳ Ni-reresetan...';
+  try {
+    const data = await api('/relay/admin/api/revenue-counters/reset', {
+      method: 'POST',
+      body: JSON.stringify({
+        confirm: phrase,
+        includeAiPurchases: document.getElementById('rrIncludeAi').checked,
+        resetWallets: document.getElementById('rrResetWallets').checked
+      })
+    });
+    if (data.success) {
+      closeRevenueReset();
+      toast('✅ Na-reset sa zero ang revenue at token purchase counters.', 'success');
+      loadAnalytics();
+    } else if (data.partial) {
+      toast('⚠️ Partial lang ang reset: ' + Object.values((data.summary && data.summary.errors) || {}).join(' | '), 'error');
+      loadAnalytics();
+    } else {
+      toast(data.message || 'Could not reset counters.', 'error');
+    }
+  } catch (err) {
+  } finally {
+    btn.disabled = false; btn.innerText = 'Oo, i-reset sa zero';
   }
 }
 function renderAnalytics(a) {
