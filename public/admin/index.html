@@ -1270,6 +1270,111 @@ a:focus-visible,
   #tabPanel-home .card { padding: 10px 12px; margin-bottom: 6px; }
   #tabPanel-home .card h2 { font-size: 12.5px; }
 }
+
+/* =========================================================
+   Devices tab — compact rows, prominent label, icon-only action
+   buttons with a hover/focus tooltip showing the button name.
+   Scoped to #tabPanel-devices only.
+   ========================================================= */
+#tabPanel-devices .empty:has(> .row) {
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  overflow: visible;
+}
+#tabPanel-devices .empty:has(> .row)::after { display: none; }
+#tabPanel-devices .row {
+  padding: 8px 10px;
+  gap: 8px;
+  margin-bottom: 6px;
+  flex-wrap: nowrap;
+  align-items: center;
+}
+#tabPanel-devices .row-info { flex: 1 1 0; min-width: 0; }
+#tabPanel-devices .id { font-size: 11px; line-height: 1.35; }
+#tabPanel-devices .meta { font-size: 11px; line-height: 1.35; margin-top: 1px; }
+#tabPanel-devices .row .badge { font-size: 9.5px; padding: 1px 6px; margin-left: 4px; }
+#tabPanel-devices .dev-label {
+  display: inline-block;
+  max-width: 100%;
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--text);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 1px 10px;
+  margin-bottom: 3px;
+  overflow-wrap: anywhere;
+  box-shadow: 0 0 10px rgba(34,229,255,.25);
+}
+#tabPanel-devices .row-actions {
+  flex-direction: row;
+  flex-wrap: nowrap;
+  gap: 5px;
+  width: auto;
+  flex: 0 0 auto;
+}
+#tabPanel-devices .row-actions button.act-ico {
+  flex: 0 0 auto;
+  min-width: 0;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  position: relative;
+  overflow: visible !important;
+}
+#tabPanel-devices .row-actions button.act-ico::before { display: none; }
+#tabPanel-devices .row-actions button.act-ico::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  background: var(--bg-raise);
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0;
+  box-shadow: 0 4px 14px rgba(0,0,0,.5);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .12s ease;
+  z-index: 20;
+}
+#tabPanel-devices .row-actions button.act-ico:first-child::after { left: 0; transform: none; }
+#tabPanel-devices .row-actions button.act-ico:last-child::after { left: auto; right: 0; transform: none; }
+#tabPanel-devices .row-actions button.act-ico:only-child::after { left: 50%; right: auto; transform: translateX(-50%); }
+#tabPanel-devices .row-actions button.act-ico:hover::after,
+#tabPanel-devices .row-actions button.act-ico:focus-visible::after { opacity: 1; }
+/* Seen list can have up to 8 actions: keep them on their own compact line under the info */
+#tabPanel-devices .row-seen { flex-wrap: wrap; }
+#tabPanel-devices .row-seen .row-info { flex: 1 1 100%; }
+#tabPanel-devices .row-seen .row-actions { flex-wrap: wrap; width: 100%; }
+#tabPanel-devices #bulkResetBar { gap: 8px !important; margin-bottom: 8px !important; }
+#tabPanel-devices #bulkResetBar button { padding: 6px 10px; font-size: 11.5px; }
+
+/* Sponsor Donations card (Home tab) */
+.sponsor-totals { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+.sponsor-totals .badge { margin-left: 0; }
+.sponsor-who { font-family: var(--font-ui); font-size: 13px; font-weight: 700; color: var(--text); }
+.sponsor-amt { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; font-family: var(--font-mono); font-size: 15px; font-weight: 700; color: var(--green); flex: 0 0 auto; }
+.sponsor-amt .badge { margin-left: 0; font-size: 9.5px; padding: 1px 6px; }
+#cardSponsorDonations .row { flex-wrap: nowrap; padding: 8px 10px; margin-bottom: 6px; }
 </style>
 </head>
 <body>
@@ -1354,6 +1459,7 @@ a:focus-visible,
         <button type="button" class="home-chip" onclick="homeNavGo('cardReceiptResets')">🧾 Receipt resets</button>
         <button type="button" class="home-chip" onclick="homeNavGo('cardReceiptCredits')">💰 Credits</button>
         <button type="button" class="home-chip" onclick="homeNavGo('cardManualAdd')">➕ Add device</button>
+        <button type="button" class="home-chip" onclick="homeNavGo('cardSponsorDonations')">💝 Sponsors</button>
         <span class="home-nav-spacer"></span>
         <button type="button" class="home-chip ghost" onclick="homeToggleAll(true)">Expand all</button>
         <button type="button" class="home-chip ghost" onclick="homeToggleAll(false)">Collapse all</button>
@@ -1446,6 +1552,14 @@ a:focus-visible,
         <div class="collapse-body">
           <input type="text" id="manualIdInput" placeholder="Paste installation ID here">
           <button class="btn-primary" onclick="manualAllow()">+ Allow</button>
+        </div>
+      </div>
+      <div class="card collapsible collapsed" id="cardSponsorDonations" data-card-id="homeSponsorDonations">
+        <h2 onclick="toggleCardCollapse('cardSponsorDonations'); loadSponsorDonations();">💝 Sponsor Donations <span class="count-pill" id="sponsorCountPill">0</span><span class="collapse-chevron">▾</span></h2>
+        <div class="collapse-body">
+          <div class="backup-note">Boluntaryong donasyon galing sa mga installation (Omni Tokens o online payment). Hindi ito nagdadagdag sa token balance ng customer — talaan lang. Pinakabagong 200 ang ipinapakita.</div>
+          <div id="sponsorTotals" class="sponsor-totals"></div>
+          <div id="sponsorList" class="empty">Loading...</div>
         </div>
       </div>
     </div>
@@ -2079,7 +2193,7 @@ function resetCollapsedCardsOnLogin() {
 }
 // Home: compressed na mga card (kagaya ng Omni AI / Control Center). Naka-collapse bilang default;
 // kusang bubukas ang mga "Pending ..." card kapag may laman (maliban kung ikaw mismo ang nag-collapse/nag-expand nito).
-const HOME_CARD_IDS = ['cardActivationFlags', 'cardFeatureAvailability', 'cardPendingOtps', 'cardAdminResets', 'cardReceiptResets', 'cardReceiptCredits', 'cardManualAdd'];
+const HOME_CARD_IDS = ['cardActivationFlags', 'cardFeatureAvailability', 'cardPendingOtps', 'cardAdminResets', 'cardReceiptResets', 'cardReceiptCredits', 'cardManualAdd', 'cardSponsorDonations'];
 function homeSetCardCollapsed(cardId, collapsed) {
   const card = document.getElementById(cardId);
   if (!card) return;
@@ -3468,22 +3582,27 @@ async function loadDevices() {
       const seen = data.seenDevices.find(d => d.installationId === id);
       const devLabel = (data.deviceLabels && data.deviceLabels[id]) || (seen ? seen.label : null);
       const fallback = seen ? (seen.storeName || 'No name') : 'No requests seen yet';
-      const displayName = devLabel ? `🏷️ ${devLabel}` : fallback;
+      const metaParts = [];
+      if (!devLabel) metaParts.push(fallback);
+      else if (seen) metaParts.push(seen.storeName || 'no self-reported name');
+      if (seen) metaParts.push(timeAgo(seen.lastSeenAt));
+      const metaText = metaParts.join(' · ');
       const revokeName = devLabel || fallback;
       const online = !!(seen && seen.online);
       const checked = selectedForReset.has(id) ? 'checked' : '';
       return `<div class="row">
         <input type="checkbox" class="device-select-checkbox" data-id="${escapeAttr(id)}" ${checked} onchange="onDeviceCheckboxChange('${escapeAttr(id)}', this.checked)" style="flex:0 0 auto; width:16px; height:16px; cursor:pointer;">
         <div class="row-info">
+          ${devLabel ? `<div class="dev-label">🏷️ ${devLabel}</div>` : ''}
           <div class="id">${id}
             <span class="badge" style="${online ? 'background:var(--green-bg,#0f2e1c); color:var(--green,#4ade80);' : 'background:var(--gray-bg,#2a2a2a); color:var(--gray,#888);'}">${online ? '🟢 ONLINE' : '⚪ OFFLINE'}</span>
           </div>
-          <div class="meta">${displayName}${devLabel && seen ? ' · ' + (seen.storeName || 'no self-reported name') : ''}${seen ? ' · ' + timeAgo(seen.lastSeenAt) : ''}</div>
+          ${metaText ? `<div class="meta">${metaText}</div>` : ''}
         </div>
         <div class="row-actions">
-          <button class="btn-detail" onclick="openDeviceDetail('${id}')">Details</button>
-          <button class="btn-ghost" onclick="editLabel('${id}', '${(devLabel || '').replace(/'/g, "\\'")}')">🏷️ Label</button>
-          <button class="btn-revoke" onclick="revoke('${id}', '${(revokeName || '').replace(/'/g, "\\'")}')">Remove</button>
+          <button class="btn-detail act-ico" data-tip="Details" aria-label="Details" onclick="openDeviceDetail('${id}')">📋</button>
+          <button class="btn-ghost act-ico" data-tip="Label" aria-label="Label" onclick="editLabel('${id}', '${(devLabel || '').replace(/'/g, "\\'")}')">🏷️</button>
+          <button class="btn-revoke act-ico" data-tip="Remove" aria-label="Remove" onclick="revoke('${id}', '${(revokeName || '').replace(/'/g, "\\'")}')">🚫</button>
         </div>
       </div>`;
     }).join('');
@@ -3503,6 +3622,61 @@ async function loadDevices() {
   await loadSubscriptions();
   updateTabBadges();
   applyStoredCardCollapse(['cardAllowedDevices', 'cardRecentlySeen']);
+  const sponsorCardEl = document.getElementById('cardSponsorDonations');
+  if (!sponsorDonationsLoadedOnce || (sponsorCardEl && !sponsorCardEl.classList.contains('collapsed'))) loadSponsorDonations();
+}
+let sponsorDonationsLoadedOnce = false;
+function sponsorEsc(v) {
+  return String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+async function loadSponsorDonations() {
+  let data;
+  try {
+    data = await api('/relay/admin/api/sponsor-donations');
+  } catch (err) {
+    return;
+  }
+  if (!data || !data.success) {
+    const el = document.getElementById('sponsorList');
+    if (el) el.innerHTML = '<div class="empty">' + sponsorEsc((data && data.message) || 'Could not load donations.') + '</div>';
+    return;
+  }
+  sponsorDonationsLoadedOnce = true;
+  const donations = data.donations || [];
+  let grandTotal = 0, grandCount = 0;
+  const bySource = { tokens: { n: 0, php: 0 }, online: { n: 0, php: 0 } };
+  (data.totals || []).forEach(t => {
+    grandTotal += t.totalPHP; grandCount += t.count;
+    if (bySource[t.source]) bySource[t.source] = { n: t.count, php: t.totalPHP };
+  });
+  const fmt = (n) => '₱' + Number(n).toLocaleString(undefined, { maximumFractionDigits: 2 });
+  document.getElementById('sponsorCountPill').innerText = grandCount;
+  document.getElementById('sponsorTotals').innerHTML =
+    '<span class="badge badge-allowed">TOTAL ' + fmt(grandTotal) + ' · ' + grandCount + '</span>' +
+    '<span class="badge">💎 TOKENS ' + fmt(bySource.tokens.php) + ' · ' + bySource.tokens.n + '</span>' +
+    '<span class="badge">💳 ONLINE ' + fmt(bySource.online.php) + ' · ' + bySource.online.n + '</span>';
+  const listEl = document.getElementById('sponsorList');
+  if (donations.length === 0) {
+    listEl.className = 'empty';
+    listEl.innerHTML = 'No donations yet.';
+    return;
+  }
+  listEl.className = '';
+  listEl.innerHTML = donations.map(d => {
+    const seen = (lastLoadedDevices || []).find(x => x.installationId === d.installationId);
+    const who = seen ? (seen.label || seen.storeName || '') : '';
+    const isTokens = d.source === 'tokens';
+    const when = d.createdAt ? new Date(d.createdAt) : null;
+    return '<div class="row">' +
+      '<div class="row-info">' +
+        (who ? '<div class="sponsor-who">' + sponsorEsc(who) + '</div>' : '') +
+        '<div class="id">' + sponsorEsc(d.installationId) + '</div>' +
+        '<div class="meta">' + (when ? sponsorEsc(timeAgo(when.getTime())) + ' · ' + sponsorEsc(when.toLocaleString()) : '') +
+        (d.method && !isTokens ? ' · ' + sponsorEsc(d.method) : '') + '</div>' +
+      '</div>' +
+      '<div class="sponsor-amt">' + fmt(d.amountPHP) + '<span class="badge ' + (isTokens ? '' : 'badge-allowed') + '">' + (isTokens ? '💎 TOKENS' : '💳 ONLINE') + '</span></div>' +
+    '</div>';
+  }).join('');
 }
 let lastLoadedSubscriptions = [];
 async function loadSubscriptions() {
@@ -3610,8 +3784,9 @@ function renderSeenList() {
     return;
   }
   seenEl.innerHTML = list.map(d => `
-    <div class="row" ${(d.cloneFlagged || d.integrityFlagged) ? 'style="border:1px solid var(--red);"' : ''}>
+    <div class="row row-seen" ${(d.cloneFlagged || d.integrityFlagged) ? 'style="border:1px solid var(--red);"' : ''}>
       <div class="row-info">
+        ${d.label ? `<div class="dev-label">🏷️ ${d.label}</div>` : ''}
         <div class="id">${d.installationId}
           <span class="badge ${d.allowed ? 'badge-allowed' : 'badge-blocked'}">${d.allowed ? 'ALLOWED' : 'BLOCKED'}</span>
           <span class="badge" style="${d.online ? 'background:var(--green-bg,#0f2e1c); color:var(--green,#4ade80);' : 'background:var(--gray-bg,#2a2a2a); color:var(--gray,#888);'}">${d.online ? '🟢 ONLINE' : '⚪ OFFLINE'}</span>
@@ -3621,23 +3796,23 @@ function renderSeenList() {
           ${(!d.integrityFlagged && d.integrityHasBaseline === false) ? `<span class="badge" style="background:var(--amber-bg,#3a2c0f); color:var(--amber,#f5a623);">⚠️ NOT ACTUALLY CHECKED (no baseline for v${d.integrityBaselineVersion || '?'})</span>` : ''}
           ${d.integrityWatcherActive === false ? `<span class="badge" style="background:var(--amber-bg,#3a2c0f); color:var(--amber,#f5a623);">🐢 REAL-TIME WATCHER OFF</span>` : ''}
         </div>
-        <div class="meta">${d.label ? `🏷️ <strong>${d.label}</strong> · ` : ''}${d.storeName || 'No self-reported name'} · ${d.username || '—'} · ${timeAgo(d.lastSeenAt)} · ${d.requestCount} request(s) · ${d.unlockedCount || 0}/${d.totalCatalogCount} unlocked</div>
+        <div class="meta">${d.storeName || 'No self-reported name'} · ${d.username || '—'} · ${timeAgo(d.lastSeenAt)} · ${d.requestCount} request(s) · ${d.unlockedCount || 0}/${d.totalCatalogCount} unlocked</div>
         ${d.cloneFlagged ? '<div class="meta" style="color:var(--red);">⚠️ Two different devices used the same installation ID — the app folder was likely copied/moved to another unit.</div>' : ''}
         ${d.integrityFlagged ? `<div class="meta" style="color:var(--red);">⚠️ Modified/deleted files found vs. the original release — ${timeAgo(d.integrityCheckedAt)}. Click "View Changed Files" for details.</div>` : ''}
         ${(!d.integrityFlagged && d.integrityHasBaseline === false) ? `<div class="meta" style="color:var(--amber,#f5a623);">⚠️ This device HAS checked in, but there's no published baseline for version "${d.integrityBaselineVersion || 'unknown'}" on this Relay — so nothing has actually been compared yet. Run "Build Release" for this version on Relay (or check REDIS_URL/persistent disk if a baseline was lost after a redeploy).</div>` : ''}
         ${d.integrityWatcherActive === false ? `<div class="meta" style="color:var(--amber,#f5a623);">🐢 This device's real-time file watcher is NOT active (fs.watch likely failed to start — common on Termux/Android permission limits, or DISABLE_INTEGRITY_MONITOR is set). It's falling back to the 55s-after-startup + 24h scheduled check-in only — changes here will NOT be near-instant. Use "🔄 Check Now" to force an immediate check, and check that device's logs/env for the cause.</div>` : ''}
       </div>
       <div class="row-actions">
-        <button class="btn-detail" onclick="openDeviceDetail('${d.installationId}')">Details</button>
-        <button class="btn-ghost" onclick="editLabel('${d.installationId}', '${(d.label || '').replace(/'/g, "\\'")}')">🏷️ Label</button>
-        ${d.cloneFlagged ? `<button class="btn-revoke" onclick="resetCloneFlag('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🚩 Reset Clone Flag</button>` : ''}
-        ${d.cloneFlagged ? `<button class="btn-ghost" onclick="splitClone('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🔀 Split as New Device</button>` : ''}
-        ${d.integrityFlagged ? `<button class="btn-revoke" onclick="showIntegrityDetail('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🛠️ View Changed Files</button>` : ''}
-        <button class="btn-ghost" onclick="requestIntegrityCheckNow('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🔄 Check Now</button>
+        <button class="btn-detail act-ico" data-tip="Details" aria-label="Details" onclick="openDeviceDetail('${d.installationId}')">📋</button>
+        <button class="btn-ghost act-ico" data-tip="Label" aria-label="Label" onclick="editLabel('${d.installationId}', '${(d.label || '').replace(/'/g, "\\'")}')">🏷️</button>
+        ${d.cloneFlagged ? `<button class="btn-revoke act-ico" data-tip="Reset Clone Flag" aria-label="Reset Clone Flag" onclick="resetCloneFlag('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🚩</button>` : ''}
+        ${d.cloneFlagged ? `<button class="btn-ghost act-ico" data-tip="Split as New Device" aria-label="Split as New Device" onclick="splitClone('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🔀</button>` : ''}
+        ${d.integrityFlagged ? `<button class="btn-revoke act-ico" data-tip="View Changed Files" aria-label="View Changed Files" onclick="showIntegrityDetail('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🛠️</button>` : ''}
+        <button class="btn-ghost act-ico" data-tip="Check Now" aria-label="Check Now" onclick="requestIntegrityCheckNow('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🔄</button>
         ${d.allowed
-          ? `<button class="btn-revoke" onclick="revoke('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">Remove</button>`
-          : `<button class="btn-allow" onclick="allow('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">Allow</button>`}
-        <button class="btn-revoke" style="background:linear-gradient(135deg,#5a0f1a,#2b0605);" onclick="purgeDevice('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')" title="Permanently delete this device everywhere, including its Cloud Backup data. Use for old/duplicate installation IDs (e.g. after uninstall+reinstall).">🗑️ Purge (permanent)</button>
+          ? `<button class="btn-revoke act-ico" data-tip="Remove" aria-label="Remove" onclick="revoke('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🚫</button>`
+          : `<button class="btn-allow act-ico" data-tip="Allow" aria-label="Allow" onclick="allow('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">✅</button>`}
+        <button class="btn-revoke act-ico" style="background:linear-gradient(135deg,#5a0f1a,#2b0605);" data-tip="Purge (permanent)" aria-label="Purge (permanent) — permanently delete this device everywhere, including its Cloud Backup data. Use for old/duplicate installation IDs (e.g. after uninstall+reinstall)." onclick="purgeDevice('${d.installationId}', '${(d.label || d.storeName || '').replace(/'/g, "\\'")}')">🗑️</button>
       </div>
     </div>
   `).join('');

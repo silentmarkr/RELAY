@@ -2672,7 +2672,7 @@ async function creditPaidPaymentIntent(paymentIntentId, { failed = false } = {})
     if (!claimResult.rows[0]) return; // naunahan na ng ibang concurrent/duplicate webhook delivery
     const newBalance = await creditCloudTokens(purchase.installation_id, Number(purchase.tokens), `Purchase ${purchase.purchase_id} (${purchase.method})`);
     logActivity(purchase.installation_id, 'cloud_token_purchase_paid', { purchaseId: purchase.purchase_id, tokens: Number(purchase.tokens), newBalance });
-    sendTelegramNotification(`💎 Omni Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via ${purchase.method} — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
+    if (!isDonationPurchase(purchase)) sendTelegramNotification(`💎 Omni Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via ${purchase.method} — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
 }
 // Kina-verify ang "Paymongo-Signature" header (t=<timestamp>,te=<hmac>,li=<hmac live>)
 // laban sa raw request body, gamit ang PAYMONGO_WEBHOOK_SECRET — pinipigilan nito
@@ -3126,6 +3126,20 @@ async function ensureCloudTokenSchema() {
     // Xendit, Stripe, PayPal, ...) ang gumawa ng source_id/providerRefId na
     // naka-imbak sa row na ito.
     await pgPool.query(`ALTER TABLE cloud_token_purchases ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'paymongo';`);
+    // BAGO: talaan ng Sponsor/Donation (tokens man o online payment). Hindi ito
+    // nagdadagdag sa balance ng customer — log lang para sa developer.
+    await pgPool.query(`
+        CREATE TABLE IF NOT EXISTS sponsor_donations (
+            id              BIGSERIAL PRIMARY KEY,
+            installation_id TEXT NOT NULL,
+            amount_php      NUMERIC NOT NULL,
+            source          TEXT NOT NULL,
+            method          TEXT,
+            purchase_id     TEXT UNIQUE,
+            note            TEXT,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+    `);
     // AYOS/BUGFIX: dating Math.ceil ang laging ginagamit para sa presyo
     // (tokens) kada isang sync — kaya lagi at lagi itong LUMALAGO kumpara
     // sa advertised monthly price ng tier (hal. Pro tier: dapat ₱399/buwan
@@ -3227,6 +3241,7 @@ async function ensureCloudTokenSchema() {
 const CLOUD_TOKEN_LEDGER_CATEGORIES = {
     TOKEN_PURCHASE: 'Token Purchase',       // bumili ng Omni Tokens gamit totoong pera (GCash/atbp.)
     FEATURE_UNLOCK: 'Feature Activation',   // nag-activate ng bagong paid plan/feature (hal. Cloud Backup) gamit tokens
+    DONATION: 'Sponsor / Donation',         // BAGO: nag-donate/nag-sponsor gamit Omni Tokens — HINDI ito nagdadagdag ng kahit anong balance/benepisyo sa customer, talaan lang
     ADDON_PURCHASE: 'Add-on Purchase',      // bumili ng karagdagang module/feature (à la carte) gamit tokens
     SYNC_CHARGE: 'Cloud Sync Charge',       // WHOLE token na na-deduct mula sa isang sync (manual o auto)
     SYNC_FRACTION: 'Auto-Sync Activity',    // fractional cost lang, WALANG na-deduct na buong token pa
@@ -3520,7 +3535,34 @@ async function getOrCreateCloudTokenWallet(installationId) {
     );
     return inserted.rows[0];
 }
+// BAGO: ang mga online payment na may purchase_id na nagsisimula sa "DON-" ay DONATION —
+// hindi ito dapat magdagdag ng tokens sa balance. Lahat ng provider webhook (PayMongo, Xendit,
+// Stripe, PayPal, Dragonpay) ay dumadaan sa creditCloudTokens(), kaya dito ang iisang lugar
+// kung saan ito sinasala.
+function isDonationPurchase(purchase) {
+    return !!purchase && typeof purchase.purchase_id === 'string' && purchase.purchase_id.startsWith('DON-');
+}
+async function recordOnlineDonationPaid(installationId, purchaseId, method) {
+    const pur = await queryWithRetry(pgPool, `SELECT amount_php FROM cloud_token_purchases WHERE purchase_id = $1`, [purchaseId]);
+    const amountPHP = pur.rows[0] ? Number(pur.rows[0].amount_php) : 0;
+    const ins = await queryWithRetry(
+        pgPool,
+        `INSERT INTO sponsor_donations (installation_id, amount_php, source, method, purchase_id, note)
+         VALUES ($1, $2, 'online', $3, $4, 'Online payment donation') ON CONFLICT (purchase_id) DO NOTHING RETURNING id`,
+        [installationId, amountPHP, method || null, purchaseId]
+    );
+    if (ins.rows[0]) {
+        logActivity(installationId, 'sponsor_donation_online', { purchaseId, amountPHP, method });
+        sendTelegramNotification(`💝 Sponsor donation (online): ₱${amountPHP} via ${method || 'online payment'} — installation ${String(installationId).slice(0, 12)}...`).catch(() => {});
+    }
+    const bal = await queryWithRetry(pgPool, 'SELECT balance_tokens FROM cloud_token_wallets WHERE installation_id = $1', [installationId]);
+    return bal.rows[0] ? Number(bal.rows[0].balance_tokens) : 0;
+}
 async function creditCloudTokens(installationId, tokens, note, category = 'TOKEN_PURCHASE') {
+    if (category === 'TOKEN_PURCHASE' && typeof note === 'string') {
+        const donMatch = note.match(/^Purchase (DON-\S+) \((.*)\)$/);
+        if (donMatch) return recordOnlineDonationPaid(installationId, donMatch[1], donMatch[2]);
+    }
     await getOrCreateCloudTokenWallet(installationId);
     const result = await queryWithRetry(
         pgPool,
@@ -7053,7 +7095,7 @@ async function buildTokenSalesBreakdown(monthKeys) {
                COALESCE(SUM(amount_php), 0) AS php,
                COALESCE(SUM(tokens), 0) AS tokens
         FROM cloud_token_purchases
-        WHERE status = 'paid'
+        WHERE status = 'paid' AND COALESCE(package_id, '') <> 'DONATION'
         GROUP BY 1
     `, []);
     let allTime = 0;
@@ -14911,7 +14953,7 @@ app.get('/relay/cloud-tokens/wallet', requireApiKey, requireAllowedDevice, rateL
         const pendingResult = await queryWithRetry(
             pgPool,
             `SELECT purchase_id, package_id, tokens, amount_php, method, status, created_at FROM cloud_token_purchases
-             WHERE installation_id = $1 AND status = 'pending' ORDER BY created_at DESC LIMIT 5`,
+             WHERE installation_id = $1 AND status = 'pending' AND COALESCE(package_id, '') <> 'DONATION' ORDER BY created_at DESC LIMIT 5`,
             [installationId]
         );
         // AYOS/BUGFIX: idinagdag ang TOTOONG (data-size-based, hindi na
@@ -15088,8 +15130,15 @@ app.post('/relay/cloud-tokens/purchase/create', requireApiKey, requireAllowedDev
 // lang ang OMNIPOS admin panel.
 app.get('/relay/cloud-tokens/return', (req, res) => {
     const result = req.query.result === 'success' ? 'success' : 'failed';
-    const title = result === 'success' ? 'Payment Received' : 'Payment Not Completed';
-    const message = result === 'success'
+    const isDonationReturn = String(req.query.purchaseId || '').startsWith('DON-');
+    const title = isDonationReturn
+        ? (result === 'success' ? 'Thank You for Your Support!' : 'Donation Not Completed')
+        : (result === 'success' ? 'Payment Received' : 'Payment Not Completed');
+    const message = isDonationReturn
+        ? (result === 'success'
+            ? 'Maraming salamat sa iyong suporta! Kinukumpirma pa ng system ang donasyon mo. Hindi ito nagdadagdag ng token sa balance mo — makikita lang ito sa log. Maaari mo nang isara ang page na ito at bumalik sa OmniPOS.'
+            : 'Hindi natapos o kinansela ang donasyon. Wala kang nabayaran. Pwede mo ulit subukan anumang oras sa OmniPOS (Support Developer).')
+        : result === 'success'
         ? 'Salamat! Kinukumpirma pa ng system ang bayad na ito — makikita ang updated token balance sa OmniPOS admin panel (Omni Tokens page) sa loob ng ilang segundo hanggang isang minuto.'
         : 'Hindi natapos o kinansela ang bayad na ito. Wala pang na-deduct/na-charge. Pwede mo ulit subukan sa OmniPOS admin panel (Omni Tokens page).';
     res.set('Content-Type', 'text/html; charset=utf-8').send(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title>
@@ -15098,6 +15147,189 @@ app.get('/relay/cloud-tokens/return', (req, res) => {
 h1{font-size:1.25rem;margin:0 0 12px;color:${result === 'success' ? '#4ade80' : '#f87171'};}
 p{line-height:1.5;color:#cbd5e1;}</style></head>
 <body><div class="card"><h1>${result === 'success' ? '✅' : '⚠️'} ${title}</h1><p>${message}</p></div></body></html>`);
+});
+
+// ===================================================================
+// BAGO: SPONSOR / DONATE TO THE DEVELOPER
+// Boluntaryong donasyon para sa pagpapaganda ng system. HINDI ito
+// nagdadagdag ng token/balance/benepisyo sa customer — talaan (log) lang.
+//   1) donate-tokens      -> binabawasan ang Omni Token wallet (ledger category DONATION)
+//   2) donate-online      -> online payment (GCash/Maya/Card/atbp.). Ginagamit ang parehong
+//                            checkout/webhook ng token purchase pero ang purchase_id ay "DON-..."
+//                            kaya HINDI nagkakredit ng tokens (tingnan ang creditCloudTokens).
+//   3) donation-status    -> tinitingnan ng OMNIPOS kung bayad na ang online donation
+//   4) /admin/api/sponsor-donations -> listahan para sa developer
+// ===================================================================
+const SPONSOR_MIN_PHP = 50;
+const SPONSOR_MAX_PHP = 100000;
+const sponsorInFlight = new Set();
+const sponsorDedupe = new Map();
+function parseSponsorAmount(raw) {
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return null;
+    const whole = Math.floor(n);
+    if (whole !== n) return null;
+    if (whole < SPONSOR_MIN_PHP || whole > SPONSOR_MAX_PHP) return null;
+    return whole;
+}
+app.post('/relay/sponsor/donate-tokens', requireApiKey, requireAllowedDevice, rateLimit('sponsor-donate-tokens', 20, 10 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    if (!ACTIVATION_FLAGS.omniTokenActivationEnabled) {
+        return res.status(503).json({ success: false, message: '\"Activate via Omni Tokens\" is temporarily disabled (maintenance/upgrade). You can still donate via online payment.' });
+    }
+    const installationId = String(req.body?.installationId || '').trim();
+    const clientRequestId = String(req.body?.clientRequestId || '').trim().slice(0, 120);
+    const amount = parseSponsorAmount(req.body?.amount);
+    if (!installationId) return res.status(400).json({ success: false, message: 'Missing installationId.' });
+    if (amount === null) return res.status(400).json({ success: false, message: `Please enter a whole-number amount from ${SPONSOR_MIN_PHP} to ${SPONSOR_MAX_PHP}.` });
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Postgres is not configured — the Omni Token wallet needs it.' });
+    const dedupeKey = clientRequestId ? `${installationId}:${clientRequestId}` : null;
+    if (dedupeKey && sponsorDedupe.has(dedupeKey)) {
+        const cached = sponsorDedupe.get(dedupeKey);
+        if (cached.expiresAt > Date.now()) return res.status(cached.status).json(cached.body);
+        sponsorDedupe.delete(dedupeKey);
+    }
+    if (sponsorInFlight.has(installationId)) {
+        return res.status(429).json({ success: false, message: 'A donation is already in progress for this device. Please wait for it to finish.' });
+    }
+    sponsorInFlight.add(installationId);
+    let tokensDeducted = 0;
+    try {
+        await getOrCreateCloudTokenWallet(installationId);
+        const safetyNet = await getCostSafetyNetFloor(installationId);
+        const effectiveFloor = safetyNet.floor;
+        const deduct = await queryWithRetry(
+            pgPool,
+            `UPDATE cloud_token_wallets SET balance_tokens = balance_tokens - $2, updated_at = now()
+             WHERE installation_id = $1 AND balance_tokens - $2 >= $3 RETURNING balance_tokens`,
+            [installationId, amount, effectiveFloor]
+        );
+        if (!deduct.rows[0]) {
+            const cur = await queryWithRetry(pgPool, 'SELECT balance_tokens FROM cloud_token_wallets WHERE installation_id = $1', [installationId]);
+            const currentBalance = cur.rows[0] ? Number(cur.rows[0].balance_tokens) : 0;
+            const reserveProtected = currentBalance >= amount && effectiveFloor > 0;
+            return res.status(402).json({
+                success: false, insufficient: true, reserveProtected,
+                balanceTokens: currentBalance, requiredTokens: amount,
+                message: reserveProtected
+                    ? `This donation is blocked by this account's cost safety net (${effectiveFloor} token buffer). You can donate via online payment instead.`
+                    : `Insufficient Omni Tokens. ${amount} token(s) are needed. You can donate via online payment instead.`
+            });
+        }
+        tokensDeducted = amount;
+        const balanceAfter = Number(deduct.rows[0].balance_tokens);
+        invalidateWalletCache(installationId);
+        // BUGFIX: dati, ang INSERT sa cloud_token_ledger ay nasa LABAS ng try/catch na may refund —
+        // kung pumalya ito pagkatapos ng deduct, nabawasan na ang tokens pero walang ledger row,
+        // walang donation record, at walang refund. Ngayon, parehong INSERT (ledger + sponsor_donations)
+        // ay nasa iisang guarded block: kapag alinman ang pumalya, ibabalik ang tokens.
+        try {
+            await queryWithRetry(pgPool,
+                `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note, category) VALUES ($1, 'consume', $2, $3, $4, 'DONATION')`,
+                [installationId, -amount, balanceAfter, 'Sponsor donation — thank you for supporting the developer!']);
+            await queryWithRetry(pgPool,
+                `INSERT INTO sponsor_donations (installation_id, amount_php, source, method, note) VALUES ($1, $2, 'tokens', 'omni_tokens', 'Omni Tokens donation')`,
+                [installationId, amount]);
+        } catch (insErr) {
+            try {
+                await creditCloudTokens(installationId, tokensDeducted, 'Refund — donation could not be recorded', 'REFUND');
+            } catch (revErr) { console.error('⚠️ Sponsor donation reversal failed:', revErr.message); }
+            throw insErr;
+        }
+        logActivity(installationId, 'sponsor_donation_tokens', { amountPHP: amount, balanceAfter });
+        sendTelegramNotification(`💝 Sponsor donation (Omni Tokens): ${amount} tokens — installation ${installationId.slice(0, 12)}... Balance now: ${balanceAfter}`).catch(() => {});
+        const body = { success: true, message: `Maraming salamat sa suporta! ${amount} Omni Tokens ang naibigay bilang donasyon.`, amount, tokensSpent: amount, balanceTokens: balanceAfter };
+        if (dedupeKey) {
+            // BUGFIX: nabubura lang dati ang expired entry kapag ginamit ulit ang parehong key (hindi na mangyayari,
+            // dahil bagong UUID ang bawat request) — kaya tumatambak ang Map. Linisin ang expired dito.
+            const nowTs = Date.now();
+            for (const [k, v] of sponsorDedupe) { if (v.expiresAt <= nowTs) sponsorDedupe.delete(k); }
+            sponsorDedupe.set(dedupeKey, { status: 200, body, expiresAt: nowTs + 15 * 60 * 1000 });
+        }
+        return res.json(body);
+    } catch (err) {
+        console.error('⚠️ RELAY sponsor donate-tokens error:', err.message);
+        return res.status(500).json({ success: false, message: 'Could not complete the donation. You were not charged (or it was refunded). Please try again.' });
+    } finally {
+        sponsorInFlight.delete(installationId);
+    }
+});
+app.post('/relay/sponsor/donate-online/create', requireApiKey, requireAllowedDevice, rateLimit('sponsor-donate-online-create', 20, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    const { installationId, method, returnBaseUrl } = req.body || {};
+    const amount = parseSponsorAmount(req.body?.amount);
+    if (!installationId) return res.status(400).json({ success: false, message: 'Missing installationId.' });
+    if (amount === null) return res.status(400).json({ success: false, message: `Please enter a whole-number amount from ${SPONSOR_MIN_PHP} to ${SPONSOR_MAX_PHP}.` });
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured.' });
+    await refreshPaymongoCapabilities(false);
+    if (!isPaymentMethodAvailable(method)) {
+        const available = getAvailablePaymentMethods().map((m) => m.label).join(', ') || 'no payment method configured yet';
+        return res.status(400).json({ success: false, message: `This payment method is invalid or unavailable. Currently available: ${available}.` });
+    }
+    const purchaseId = `DON-${String(installationId).slice(0, 8)}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+    const base = (returnBaseUrl && /^https?:\/\//.test(returnBaseUrl)) ? String(returnBaseUrl).replace(/\/$/, '') : `${req.protocol}://${req.get('host')}`;
+    try {
+        const checkout = await createPaymentCheckout({
+            method,
+            amountPHP: amount,
+            purchaseId,
+            base,
+            description: `OmniPOS Sponsor Donation (PHP ${amount})`
+        });
+        await queryWithRetry(
+            pgPool,
+            `INSERT INTO cloud_token_purchases (purchase_id, installation_id, package_id, tokens, amount_php, method, source_id, provider, status)
+             VALUES ($1, $2, 'DONATION', 0, $3, $4, $5, $6, 'pending')`,
+            [purchaseId, installationId, amount, method, checkout.providerRefId, checkout.provider]
+        );
+        logActivity(installationId, 'sponsor_donation_created', { purchaseId, amountPHP: amount, method, provider: checkout.provider });
+        res.json({ success: true, purchaseId, checkoutUrl: checkout.checkoutUrl || null, qrCodeImageUrl: checkout.qrCodeImageUrl || null, expiresAt: checkout.expiresAt || null, amountPHP: amount });
+    } catch (err) {
+        const isConfigErr = /_NOT_CONFIGURED$/.test(String(err.code || '')) || err.code === 'PROVIDER_NOT_CONFIGURED';
+        res.status(isConfigErr ? 503 : 502).json({ success: false, message: err.message });
+    }
+});
+// BUGFIX: sa webhook, ina-update muna ang purchase sa 'paid' bago i-insert sa sponsor_donations. Kung pumalya
+// ang insert na iyon (DB hiccup), 'paid' na ang purchase kaya "alreadyProcessed" na ang retry ng provider at
+// hindi na ito mairerekord kailanman. Idempotent na backfill ito (UNIQUE purchase_id) — tinatawag sa status
+// check at sa admin list para kusang maibalik ang nawawalang donation record.
+async function backfillPaidOnlineDonations() {
+    await queryWithRetry(
+        pgPool,
+        `INSERT INTO sponsor_donations (installation_id, amount_php, source, method, purchase_id, note)
+         SELECT installation_id, amount_php, 'online', method, purchase_id, 'Online payment donation (recovered)'
+         FROM cloud_token_purchases
+         WHERE status = 'paid' AND COALESCE(package_id, '') = 'DONATION' AND purchase_id LIKE 'DON-%'
+         ON CONFLICT (purchase_id) DO NOTHING`,
+        []
+    );
+}
+app.get('/relay/sponsor/donation-status', requireApiKey, requireAllowedDevice, rateLimit('sponsor-donation-status', 300, 60 * 60 * 1000, (req) => req.query?.installationId), async (req, res) => {
+    const installationId = String(req.query.installationId || '').trim();
+    const purchaseId = String(req.query.purchaseId || '').trim();
+    if (!installationId || !purchaseId.startsWith('DON-')) return res.status(400).json({ success: false, message: 'Missing installationId or invalid purchaseId.' });
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured.' });
+    try {
+        const r = await queryWithRetry(pgPool, `SELECT status, amount_php, method FROM cloud_token_purchases WHERE purchase_id = $1 AND installation_id = $2`, [purchaseId, installationId]);
+        if (!r.rows[0]) return res.status(404).json({ success: false, message: 'Donation not found.' });
+        if (r.rows[0].status === 'paid') { try { await backfillPaidOnlineDonations(); } catch (bfErr) { console.error('⚠️ Sponsor donation backfill failed:', bfErr.message); } }
+        res.json({ success: true, status: r.rows[0].status, amountPHP: Number(r.rows[0].amount_php), method: r.rows[0].method });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+app.get('/relay/admin/api/sponsor-donations', requireAdminKey, async (req, res) => {
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured.' });
+    try {
+        try { await backfillPaidOnlineDonations(); } catch (bfErr) { console.error('⚠️ Sponsor donation backfill failed:', bfErr.message); }
+        const rows = await queryWithRetry(pgPool, `SELECT id, installation_id, amount_php, source, method, purchase_id, created_at FROM sponsor_donations ORDER BY created_at DESC LIMIT 200`, []);
+        const totals = await queryWithRetry(pgPool, `SELECT source, COUNT(*)::int AS n, COALESCE(SUM(amount_php), 0) AS total FROM sponsor_donations GROUP BY source`, []);
+        res.json({
+            success: true,
+            donations: rows.rows.map((r) => ({ id: Number(r.id), installationId: r.installation_id, amountPHP: Number(r.amount_php), source: r.source, method: r.method, purchaseId: r.purchase_id, createdAt: r.created_at })),
+            totals: totals.rows.map((r) => ({ source: r.source, count: r.n, totalPHP: Number(r.total) }))
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, message: err.message });
+    }
 });
 app.post('/relay/webhooks/paymongo', express.raw({ type: '*/*', limit: '1mb' }), async (req, res) => {
     const rawBody = req.body ? req.body.toString('utf8') : '';
@@ -15129,7 +15361,7 @@ app.post('/relay/webhooks/paymongo', express.raw({ type: '*/*', limit: '1mb' }),
             const payment = await paymongoCreatePayment({
                 sourceId,
                 amountPHP: Number(purchase.amount_php),
-                description: `OmniPOS Cloud Backup Tokens (${purchase.tokens} token/s)`
+                description: isDonationPurchase(purchase) ? `OmniPOS Sponsor Donation (PHP ${purchase.amount_php})` : `OmniPOS Cloud Backup Tokens (${purchase.tokens} token/s)`
             });
             const paymentStatus = payment && payment.attributes && payment.attributes.status;
             if (paymentStatus === 'paid') {
@@ -15148,7 +15380,7 @@ app.post('/relay/webhooks/paymongo', express.raw({ type: '*/*', limit: '1mb' }),
                 }
                 const newBalance = await creditCloudTokens(purchase.installation_id, Number(purchase.tokens), `Purchase ${purchase.purchase_id} (${purchase.method})`);
                 logActivity(purchase.installation_id, 'cloud_token_purchase_paid', { purchaseId: purchase.purchase_id, tokens: Number(purchase.tokens), newBalance });
-                sendTelegramNotification(`💎 Omni Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via ${purchase.method} — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
+                if (!isDonationPurchase(purchase)) sendTelegramNotification(`💎 Omni Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via ${purchase.method} — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
             } else {
                 await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'failed', updated_at = now() WHERE purchase_id = $1 AND status = 'pending'`, [purchase.purchase_id]);
             }
@@ -15252,7 +15484,7 @@ app.post('/relay/webhooks/xendit', async (req, res) => {
             }
             const newBalance = await creditCloudTokens(purchase.installation_id, Number(purchase.tokens), `Purchase ${purchase.purchase_id} (${purchase.method})`);
             logActivity(purchase.installation_id, 'cloud_token_purchase_paid', { purchaseId: purchase.purchase_id, tokens: Number(purchase.tokens), newBalance });
-            sendTelegramNotification(`💎 Omni Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via Xendit (${purchase.method}) — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
+            if (!isDonationPurchase(purchase)) sendTelegramNotification(`💎 Omni Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via Xendit (${purchase.method}) — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
         } else if (status === 'EXPIRED') {
             await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'failed', updated_at = now() WHERE purchase_id = $1 AND status = 'pending'`, [purchase.purchase_id]);
         }
@@ -15296,7 +15528,7 @@ app.post('/relay/webhooks/stripe', express.raw({ type: '*/*', limit: '1mb' }), a
                 }
                 const newBalance = await creditCloudTokens(purchase.installation_id, Number(purchase.tokens), `Purchase ${purchase.purchase_id} (${purchase.method})`);
                 logActivity(purchase.installation_id, 'cloud_token_purchase_paid', { purchaseId: purchase.purchase_id, tokens: Number(purchase.tokens), newBalance });
-                sendTelegramNotification(`💎 Omni Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via Stripe (card) — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
+                if (!isDonationPurchase(purchase)) sendTelegramNotification(`💎 Omni Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via Stripe (card) — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
             }
         } else if (event.type === 'checkout.session.expired' && session && session.id) {
             await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'failed', updated_at = now() WHERE source_id = $1 AND provider = 'stripe' AND status = 'pending'`, [session.id]);
@@ -15338,7 +15570,7 @@ app.post('/relay/webhooks/paypal', async (req, res) => {
                 }
                 const newBalance = await creditCloudTokens(purchase.installation_id, Number(purchase.tokens), `Purchase ${purchase.purchase_id} (${purchase.method})`);
                 logActivity(purchase.installation_id, 'cloud_token_purchase_paid', { purchaseId: purchase.purchase_id, tokens: Number(purchase.tokens), newBalance });
-                sendTelegramNotification(`💎 Omni Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via PayPal — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
+                if (!isDonationPurchase(purchase)) sendTelegramNotification(`💎 Omni Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via PayPal — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
             } else {
                 await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'failed', updated_at = now() WHERE purchase_id = $1 AND status = 'pending'`, [purchase.purchase_id]);
             }
@@ -15386,7 +15618,7 @@ app.post(DRAGONPAY_WEBHOOK_PATH, express.urlencoded({ extended: false, limit: '2
             }
             const newBalance = await creditCloudTokens(purchase.installation_id, Number(purchase.tokens), `Purchase ${purchase.purchase_id} (${purchase.method})`);
             logActivity(purchase.installation_id, 'cloud_token_purchase_paid', { purchaseId: purchase.purchase_id, tokens: Number(purchase.tokens), newBalance });
-            sendTelegramNotification(`💎 Omni Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via Dragonpay (refno ${refno || 'n/a'}) — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
+            if (!isDonationPurchase(purchase)) sendTelegramNotification(`💎 Omni Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via Dragonpay (refno ${refno || 'n/a'}) — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
         } else if (status === 'F' || status === 'V' || status === 'K') {
             await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'failed', updated_at = now() WHERE purchase_id = $1 AND status = 'pending'`, [purchase.purchase_id]);
         }
@@ -17289,9 +17521,9 @@ async function buildCloudBackupControlCenter(th) {
              GROUP BY 1, 2 ORDER BY 3 DESC`), { rows: [] }),
         safe('purchases', q(
             `SELECT
-                COUNT(*) FILTER (WHERE status = 'paid')::int AS paid_n,
-                COALESCE(SUM(amount_php) FILTER (WHERE status = 'paid'), 0)::float8 AS paid_php,
-                COALESCE(SUM(tokens) FILTER (WHERE status = 'paid'), 0)::float8 AS paid_tokens,
+                COUNT(*) FILTER (WHERE status = 'paid' AND COALESCE(package_id, '') <> 'DONATION')::int AS paid_n,
+                COALESCE(SUM(amount_php) FILTER (WHERE status = 'paid' AND COALESCE(package_id, '') <> 'DONATION'), 0)::float8 AS paid_php,
+                COALESCE(SUM(tokens) FILTER (WHERE status = 'paid' AND COALESCE(package_id, '') <> 'DONATION'), 0)::float8 AS paid_tokens,
                 COUNT(*) FILTER (WHERE status = 'failed')::int AS failed_n,
                 COUNT(*) FILTER (WHERE status = 'pending' AND created_at < now() - interval '1 hour')::int AS stuck_pending_n
              FROM cloud_token_purchases
