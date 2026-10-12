@@ -712,6 +712,32 @@ a:focus-visible,
 .backup-lastexport { font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); margin-top: 6px; }
 .auto-backup-toggle { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-top: 12px; cursor: pointer; user-select: none; }
 .auto-backup-toggle input { width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent); }
+/* Feature Availability card — theme variables lang, walang hardcoded na kulay */
+.feature-avail-item { border-top: 1px solid var(--line); padding: 10px 0; }
+.feature-avail-msg {
+  display: block; width: 100%; box-sizing: border-box; margin-top: 8px; padding: 10px 12px; resize: vertical;
+  border-radius: var(--radius-sm); border: 1px solid var(--border-soft);
+  background: var(--bg-raise); color: var(--text);
+  font-family: var(--font-mono); font-size: 13px; line-height: 1.45;
+  transition: border-color .2s var(--ease), box-shadow .2s var(--ease), background .2s var(--ease);
+}
+.feature-avail-msg::placeholder { color: var(--muted-dim); font-family: var(--font-ui); }
+.feature-avail-msg:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.feature-avail-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; flex-wrap: wrap; }
+.feature-avail-hint { font-size: 12px; color: var(--muted); }
+.feature-avail-saved { font-size: 12px; color: var(--green); margin-top: 8px; }
+/* Home — compressed na mga card + chip nav (kagaya ng Omni AI / Control Center) */
+.card h2 .count-pill.warn { background: var(--amber-bg); color: var(--amber); border-color: var(--amber-line); white-space: nowrap; flex: 0 0 auto; }
+.tab-panel .card.collapsible { scroll-margin-top: 130px; }
+.home-nav { display: flex; gap: 6px; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; padding: 2px 0 12px; }
+.home-nav::-webkit-scrollbar { display: none; }
+.home-chip {
+  flex: 0 0 auto; white-space: nowrap; background: transparent; border: 1.5px solid var(--border); color: var(--muted);
+  border-radius: 999px; padding: 6px 13px; cursor: pointer; font-family: var(--font-ui); font-size: .8rem;
+}
+.home-chip:hover { border-color: var(--border-soft); color: var(--text); }
+.home-chip.ghost { border-style: dashed; }
+.home-nav-spacer { flex: 1 1 auto; }
 .tier-row { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
 .btn-tier {
   flex: 1; min-width: 100px; background: var(--accent-soft); color: var(--accent-bright);
@@ -1166,6 +1192,84 @@ a:focus-visible,
 .ana-empty-donut { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; justify-content: center; color: var(--accent-bright); font-size: 13px; line-height: 1.5; text-align: center; }
 .ana-empty-donut svg { width: 120px; height: 120px; flex: 0 0 auto; }
 .ana-empty-donut > div { flex: 1 1 200px; }
+
+/* =========================================================
+   Relay Home tab — compress vertical rhythm (same treatment as
+   OmniPOS Overview / OmniAI). Scoped to #tabPanel-home only, so
+   the shared .card / .stat-card / .home-chip classes used by the
+   Devices, Downloads and Subscriptions tabs are not affected.
+   ========================================================= */
+#tabPanel-home .status-line {
+  padding: 7px 11px;
+  font-size: 11.5px;
+  margin-bottom: 8px;
+}
+#tabPanel-home .home-nav {
+  gap: 5px;
+  padding: 0 0 8px;
+}
+#tabPanel-home .home-chip {
+  padding: 4px 10px;
+  font-size: .72rem;
+  border-width: 1px;
+}
+#tabPanel-home .stat-strip {
+  gap: 6px;
+  margin-bottom: 10px;
+}
+#tabPanel-home .stat-strip .stat-card {
+  padding: 8px 9px;
+  border-width: 1px;
+  border-radius: 10px;
+}
+#tabPanel-home .stat-strip .stat-card::before { left: 10px; right: 10px; }
+#tabPanel-home .stat-strip .stat-card.has-ico { padding-right: 28px; }
+#tabPanel-home .stat-strip .stat-num { font-size: 17px; line-height: 1.15; }
+#tabPanel-home .stat-strip .stat-label {
+  font-size: 9px;
+  line-height: 1.25;
+  margin-top: 2px;
+  letter-spacing: .04em;
+}
+#tabPanel-home .stat-strip .stat-ico {
+  right: 6px;
+  bottom: 6px;
+  font-size: 15px;
+}
+#tabPanel-home .card {
+  padding: 12px 14px;
+  margin-bottom: 8px;
+}
+#tabPanel-home .card h2 {
+  font-size: 13px;
+  margin: 0 0 8px;
+  gap: 6px;
+}
+#tabPanel-home .card.collapsible h2 { margin-bottom: 0; }
+#tabPanel-home .card h2 .count-pill {
+  font-size: 10px;
+  padding: 0 7px;
+}
+#tabPanel-home .card.collapsible .collapse-body { margin-top: 10px; }
+#tabPanel-home .backup-note {
+  font-size: 11.5px;
+  line-height: 1.45;
+  margin-top: 4px;
+}
+#tabPanel-home .auto-backup-toggle {
+  font-size: 12.5px;
+  margin-top: 8px !important;
+}
+@media (max-width: 480px) {
+  #tabPanel-home .stat-strip { gap: 5px; margin-bottom: 8px; }
+  #tabPanel-home .stat-strip .stat-card { padding: 7px 8px; }
+  #tabPanel-home .stat-strip .stat-card.has-ico { padding-right: 24px; }
+  #tabPanel-home .stat-strip .stat-num { font-size: 15px; }
+  #tabPanel-home .stat-strip .stat-label { font-size: 8.5px; }
+  #tabPanel-home .stat-strip .stat-ico { font-size: 13px; right: 5px; bottom: 5px; }
+  #tabPanel-home .card { padding: 10px 12px; margin-bottom: 6px; }
+  #tabPanel-home .card h2 { font-size: 12.5px; }
+}
 </style>
 </head>
 <body>
@@ -1242,8 +1346,21 @@ a:focus-visible,
   <div class="wrap">
     <div class="tab-panel" id="tabPanel-home">
       <div id="restrictionStatus" class="status-line"></div>
-      <div class="card" id="cardActivationFlags" style="border: 1px solid var(--red-line, #f5c2c7);">
-        <h2>⚙️ System Controls — Unlock/Activation Switches</h2>
+      <div class="home-nav" id="homeNav">
+        <button type="button" class="home-chip" onclick="homeNavGo('cardActivationFlags')">⚙️ Controls</button>
+        <button type="button" class="home-chip" onclick="homeNavGo('cardFeatureAvailability')">🚧 Availability</button>
+        <button type="button" class="home-chip" onclick="homeNavGo('cardPendingOtps')">🔑 OTPs</button>
+        <button type="button" class="home-chip" onclick="homeNavGo('cardAdminResets')">🔐 Admin resets</button>
+        <button type="button" class="home-chip" onclick="homeNavGo('cardReceiptResets')">🧾 Receipt resets</button>
+        <button type="button" class="home-chip" onclick="homeNavGo('cardReceiptCredits')">💰 Credits</button>
+        <button type="button" class="home-chip" onclick="homeNavGo('cardManualAdd')">➕ Add device</button>
+        <span class="home-nav-spacer"></span>
+        <button type="button" class="home-chip ghost" onclick="homeToggleAll(true)">Expand all</button>
+        <button type="button" class="home-chip ghost" onclick="homeToggleAll(false)">Collapse all</button>
+      </div>
+      <div class="card collapsible collapsed" id="cardActivationFlags" data-card-id="homeActivationFlags" style="border: 1px solid var(--red-line);">
+        <h2 onclick="toggleCardCollapse('cardActivationFlags')">⚙️ System Controls — Unlock/Activation Switches <span class="count-pill warn" id="activationFlagsOffPill" style="display:none;"></span><span class="collapse-chevron">▾</span></h2>
+        <div class="collapse-body">
         <div class="backup-note">
           Emergency kill-switches. I-disable ang "Send Request" kung hindi ka available para mag-manual approve ng mga unlock OTP (mananatiling bukas ang Omni Tokens kung gusto mong doon lang muna sila). I-disable naman ang "Activate via Omni Tokens" kung may problema/maintenance sa token wallet system. Pareho itong agad na sinusunod ng lahat ng device — hindi na kailangan mag-restart o mag-redeploy.
         </div>
@@ -1255,15 +1372,18 @@ a:focus-visible,
           <input type="checkbox" id="omniTokenActivationEnabledToggle" onchange="onActivationFlagToggleChange('omniTokenActivationEnabled', this.checked)">
           💎 Allow "Activate via Omni Tokens" (self-service token activation)
         </label>
-        <div id="activationFlagsSavedNote" style="font-size:12px; color:var(--success, #69db7c); margin-top:8px; display:none;">Saved ✓</div>
+        <div id="activationFlagsSavedNote" class="feature-avail-saved" style="display:none;">Saved ✓</div>
+        </div>
       </div>
-      <div class="card" id="cardFeatureAvailability" style="border: 1px solid var(--line, #3a3f4b);">
-        <h2>🚧 Feature Availability — "Not available yet"</h2>
+      <div class="card collapsible collapsed" id="cardFeatureAvailability" data-card-id="homeFeatureAvailability">
+        <h2 onclick="toggleCardCollapse('cardFeatureAvailability')">🚧 Feature Availability — "Not available yet" <span class="count-pill warn" id="featureAvailabilityOffPill" style="display:none;"></span><span class="collapse-chevron">▾</span></h2>
+        <div class="collapse-body">
         <div class="backup-note">
           I-OFF ang "Available to customers" para sabihan ang client na hindi pa available ang feature kapag sinubukan niyang i-unlock o i-subscribe ito (Send Request o Omni Tokens). Ang mga client na dati nang may feature ay pwede pa ring mag-renew. Ang mensahe sa baba ang ipapakita sa client.
         </div>
         <div id="featureAvailabilityList" style="margin-top:10px;"></div>
-        <div id="featureAvailabilitySavedNote" style="font-size:12px; color:var(--success, #69db7c); margin-top:8px; display:none;">Saved ✓</div>
+        <div id="featureAvailabilitySavedNote" class="feature-avail-saved" style="display:none;">Saved ✓</div>
+        </div>
       </div>
       <div class="stat-strip">
         <div class="stat-card has-ico">
@@ -1292,31 +1412,41 @@ a:focus-visible,
           <span class="stat-ico" aria-hidden="true">🗂️</span>
         </div>
         <div class="stat-card has-ico" style="cursor:pointer;" onclick="switchTab('devices'); document.getElementById('seenFilterStatus').value='noBaseline'; renderSeenList(); document.getElementById('seenList').scrollIntoView({behavior:'smooth'});">
-          <div class="stat-num" style="color:var(--amber,#f5a623);" id="statIntegrityNoBaseline">—</div>
+          <div class="stat-num" style="color:var(--amber);" id="statIntegrityNoBaseline">—</div>
           <div class="stat-label">⚠️ Not actually checked (no baseline)</div>
           <span class="stat-ico" aria-hidden="true">🔍</span>
         </div>
       </div>
-      <div class="card">
-        <h2>🔑 Pending OTP requests <span class="count-pill" id="otpCountPill">0</span></h2>
-        <div id="otpList" class="empty">Loading...</div>
+      <div class="card collapsible collapsed" id="cardPendingOtps" data-card-id="homePendingOtps">
+        <h2 onclick="toggleCardCollapse('cardPendingOtps')">🔑 Pending OTP requests <span class="count-pill" id="otpCountPill">0</span><span class="collapse-chevron">▾</span></h2>
+        <div class="collapse-body">
+          <div id="otpList" class="empty">Loading...</div>
+        </div>
       </div>
-      <div class="card">
-        <h2>🔐 Pending Admin Password Resets <span class="count-pill" id="adminResetCountPill">0</span></h2>
-        <div id="adminResetList" class="empty">Loading...</div>
+      <div class="card collapsible collapsed" id="cardAdminResets" data-card-id="homeAdminResets">
+        <h2 onclick="toggleCardCollapse('cardAdminResets')">🔐 Pending Admin Password Resets <span class="count-pill" id="adminResetCountPill">0</span><span class="collapse-chevron">▾</span></h2>
+        <div class="collapse-body">
+          <div id="adminResetList" class="empty">Loading...</div>
+        </div>
       </div>
-      <div class="card">
-        <h2>🧾 Pending Receipt Customization Resets <span class="count-pill" id="receiptResetCountPill">0</span></h2>
-        <div id="receiptResetList" class="empty">Loading...</div>
+      <div class="card collapsible collapsed" id="cardReceiptResets" data-card-id="homeReceiptResets">
+        <h2 onclick="toggleCardCollapse('cardReceiptResets')">🧾 Pending Receipt Customization Resets <span class="count-pill" id="receiptResetCountPill">0</span><span class="collapse-chevron">▾</span></h2>
+        <div class="collapse-body">
+          <div id="receiptResetList" class="empty">Loading...</div>
+        </div>
       </div>
-      <div class="card">
-        <h2>💰 Pending Receipt Customization Credit Purchases <span class="count-pill" id="receiptCreditCountPill">0</span></h2>
-        <div id="receiptCreditList" class="empty">Loading...</div>
+      <div class="card collapsible collapsed" id="cardReceiptCredits" data-card-id="homeReceiptCredits">
+        <h2 onclick="toggleCardCollapse('cardReceiptCredits')">💰 Pending Receipt Customization Credit Purchases <span class="count-pill" id="receiptCreditCountPill">0</span><span class="collapse-chevron">▾</span></h2>
+        <div class="collapse-body">
+          <div id="receiptCreditList" class="empty">Loading...</div>
+        </div>
       </div>
-      <div class="card">
-        <h2>Manually add a device</h2>
-        <input type="text" id="manualIdInput" placeholder="Paste installation ID here">
-        <button class="btn-primary" onclick="manualAllow()">+ Allow</button>
+      <div class="card collapsible collapsed" id="cardManualAdd" data-card-id="homeManualAdd">
+        <h2 onclick="toggleCardCollapse('cardManualAdd')">Manually add a device<span class="collapse-chevron">▾</span></h2>
+        <div class="collapse-body">
+          <input type="text" id="manualIdInput" placeholder="Paste installation ID here">
+          <button class="btn-primary" onclick="manualAllow()">+ Allow</button>
+        </div>
       </div>
     </div>
     <div class="tab-panel" id="tabPanel-devices" style="display:none;">
@@ -1947,6 +2077,49 @@ function resetCollapsedCardsOnLogin() {
     keysToRemove.forEach(key => sessionStorage.removeItem(key));
   } catch (err) {   }
 }
+// Home: compressed na mga card (kagaya ng Omni AI / Control Center). Naka-collapse bilang default;
+// kusang bubukas ang mga "Pending ..." card kapag may laman (maliban kung ikaw mismo ang nag-collapse/nag-expand nito).
+const HOME_CARD_IDS = ['cardActivationFlags', 'cardFeatureAvailability', 'cardPendingOtps', 'cardAdminResets', 'cardReceiptResets', 'cardReceiptCredits', 'cardManualAdd'];
+function homeSetCardCollapsed(cardId, collapsed) {
+  const card = document.getElementById(cardId);
+  if (!card) return;
+  card.classList.toggle('collapsed', collapsed);
+  try {
+    sessionStorage.setItem(COLLAPSE_STORAGE_PREFIX + (card.dataset.cardId || cardId), collapsed ? '1' : '0');
+  } catch (err) {   }
+}
+function homeNavGo(cardId) {
+  const card = document.getElementById(cardId);
+  if (!card) return;
+  homeSetCardCollapsed(cardId, false);
+  card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+function homeToggleAll(expand) {
+  HOME_CARD_IDS.forEach((cardId) => homeSetCardCollapsed(cardId, !expand));
+}
+(function initHomePendingAutoExpand() {
+  const pillToCard = {
+    otpCountPill: 'cardPendingOtps',
+    adminResetCountPill: 'cardAdminResets',
+    receiptResetCountPill: 'cardReceiptResets',
+    receiptCreditCountPill: 'cardReceiptCredits'
+  };
+  const sync = () => {
+    Object.keys(pillToCard).forEach((pillId) => {
+      const pill = document.getElementById(pillId);
+      const card = document.getElementById(pillToCard[pillId]);
+      if (!pill || !card) return;
+      if ((parseInt(pill.textContent, 10) || 0) <= 0) return;
+      let stored = null;
+      try { stored = sessionStorage.getItem(COLLAPSE_STORAGE_PREFIX + (card.dataset.cardId || card.id)); } catch (err) {   }
+      if (stored === null) card.classList.remove('collapsed');
+    });
+  };
+  Object.keys(pillToCard).forEach((pillId) => {
+    const pill = document.getElementById(pillId);
+    if (pill) new MutationObserver(sync).observe(pill, { childList: true, characterData: true, subtree: true });
+  });
+})();
 function onDeviceCheckboxChange(id, checked) {
   if (checked) selectedForReset.add(id);
   else selectedForReset.delete(id);
@@ -3019,6 +3192,16 @@ function renderAutoBackupToggle() {
 // sa Home tab. Server-side ang totoong pinagbabatayan nito (RELAY mismo
 // ang tumatanggi sa mga request kapag naka-disable, hindi lang UI-level),
 // kaya ligtas na i-refresh kahit anong oras.
+// Kapag naka-collapse ang System Controls, makita pa rin kung may kill-switch na naka-OFF.
+function renderActivationFlagsPill() {
+  const pill = document.getElementById('activationFlagsOffPill');
+  if (!pill) return;
+  const otpEl = document.getElementById('otpRequestsEnabledToggle');
+  const tokensEl = document.getElementById('omniTokenActivationEnabledToggle');
+  const off = (otpEl && !otpEl.checked ? 1 : 0) + (tokensEl && !tokensEl.checked ? 1 : 0);
+  pill.textContent = off ? off + ' OFF' : '';
+  pill.style.display = off ? '' : 'none';
+}
 async function loadActivationFlags() {
   let data;
   try {
@@ -3031,6 +3214,7 @@ async function loadActivationFlags() {
   const tokensEl = document.getElementById('omniTokenActivationEnabledToggle');
   if (otpEl) otpEl.checked = data.activationFlags.otpRequestsEnabled !== false;
   if (tokensEl) tokensEl.checked = data.activationFlags.omniTokenActivationEnabled !== false;
+  renderActivationFlagsPill();
 }
 async function onActivationFlagToggleChange(flagName, checked) {
   const note = document.getElementById('activationFlagsSavedNote');
@@ -3055,8 +3239,17 @@ async function onActivationFlagToggleChange(flagName, checked) {
     note.style.display = 'block';
     setTimeout(() => { note.style.display = 'none'; }, 2500);
   }
+  renderActivationFlagsPill();
   const label = flagName === 'otpRequestsEnabled' ? '"Send Request"' : '"Activate via Omni Tokens"';
   toast(`${label} is now ${checked ? 'ENABLED' : 'DISABLED'} for all devices.`, checked ? 'success' : 'warning');
+}
+let featureAvailabilityState = {};
+function renderFeatureAvailabilityPill() {
+  const pill = document.getElementById('featureAvailabilityOffPill');
+  if (!pill) return;
+  const off = Object.keys(featureAvailabilityState).filter((id) => featureAvailabilityState[id] === false).length;
+  pill.textContent = off ? off + ' OFF' : '';
+  pill.style.display = off ? '' : 'none';
 }
 // BAGO: "Not available yet" switch kada feature — tingnan ang cardFeatureAvailability sa Home tab.
 // Server-side ang totoong pagpapatupad (RELAY mismo ang tumatanggi sa unlock/subscribe request).
@@ -3077,10 +3270,13 @@ async function loadFeatureAvailabilityAdmin() {
     if (b.featureId === 'marketplace_hub') return 1;
     return (a.available === b.available ? 0 : (a.available ? 1 : -1)) || String(a.name).localeCompare(String(b.name));
   });
+  featureAvailabilityState = {};
+  items.forEach((item) => { featureAvailabilityState[item.featureId] = item.available !== false; });
+  renderFeatureAvailabilityPill();
   list.textContent = '';
   for (const item of items) {
     const box = document.createElement('div');
-    box.style.cssText = 'border-top:1px solid var(--line, #3a3f4b); padding:10px 0;';
+    box.className = 'feature-avail-item';
     const label = document.createElement('label');
     label.className = 'auto-backup-toggle';
     const cb = document.createElement('input');
@@ -3095,15 +3291,16 @@ async function loadFeatureAvailabilityAdmin() {
     ta.rows = 3;
     ta.value = item.message || '';
     ta.placeholder = 'Message shown to the customer when this feature is not available yet';
-    ta.style.cssText = 'width:100%; margin-top:8px; box-sizing:border-box;';
+    ta.className = 'feature-avail-msg';
     const row = document.createElement('div');
-    row.style.cssText = 'display:flex; gap:8px; align-items:center; margin-top:6px;';
+    row.className = 'feature-avail-row';
     const btn = document.createElement('button');
     btn.type = 'button';
+    btn.className = 'btn-detail';
     btn.textContent = 'Save';
     btn.onclick = () => saveFeatureAvailabilityAdmin(item.featureId);
     const hint = document.createElement('span');
-    hint.style.cssText = 'font-size:12px; opacity:.7;';
+    hint.className = 'feature-avail-hint';
     hint.textContent = 'Max ' + max + ' characters. Leave empty to use the default message.';
     row.appendChild(btn);
     row.appendChild(hint);
@@ -3136,6 +3333,8 @@ async function saveFeatureAvailabilityAdmin(featureId) {
     return;
   }
   ta.value = data.message || '';
+  featureAvailabilityState[featureId] = data.available !== false;
+  renderFeatureAvailabilityPill();
   if (note) {
     note.style.display = 'block';
     setTimeout(() => { note.style.display = 'none'; }, 2500);
@@ -5496,6 +5695,7 @@ function promptForLabel(currentLabel) {
 }
 let dbStatusPollTimer = null;
 function startPolling() {
+  applyStoredCardCollapse(HOME_CARD_IDS);
   loadDevices();
   loadDownloadCodes();
   loadBuildHistory();
