@@ -1641,7 +1641,8 @@ const FEATURE_CATALOG_BASE = {
     multi_branch: { name: 'Multi-Branch Dashboard', price: null, category: 'module', isSubscription: true },
     ai_assistant: { name: 'OmniPOS AI Assistant', price: null, category: 'module', isSubscription: true },
     cloud_backup: { name: 'Cloud Backup (Postgres)', price: null, category: 'module', isSubscription: true },
-    remote_operations: { name: 'Remote Operations & Attendance', price: null, category: 'module', isSubscription: true }
+    remote_operations: { name: 'Remote Operations & Attendance', price: null, category: 'module', isSubscription: true },
+    marketplace_hub: { name: 'Marketplace Hub (Shopee, Lazada & TikTok Shop)', price: null, category: 'module', isSubscription: true }
 };
 const CLOUD_BACKUP_PLANS_BASE = {
     // AYOS: idinagdag ang autoBackupIntervalMs bilang bahagi ng plan config
@@ -3538,7 +3539,7 @@ async function creditCloudTokens(installationId, tokens, note, category = 'TOKEN
     invalidateWalletCache(installationId);
     return balanceAfter;
 }
-const MODULE_SUBSCRIPTION_FEATURE_IDS = ['rbac_management', 'multi_branch', 'ai_assistant', 'remote_operations'];
+const MODULE_SUBSCRIPTION_FEATURE_IDS = ['rbac_management', 'multi_branch', 'ai_assistant', 'remote_operations', 'marketplace_hub'];
 function isModuleSubscriptionFeature(featureId) {
     return MODULE_SUBSCRIPTION_FEATURE_IDS.includes(featureId);
 }
@@ -3565,6 +3566,14 @@ const MODULE_SUBSCRIPTION_PLANS_BASE = {
         id: 'remote_operations',
         name: 'Remote Operations & Attendance',
         price: { monthly: 249, yearly: 2490 }
+    },
+    // Marketplace Hub: Shopee + Lazada + TikTok Shop (order sync, stock/price sync, shipping labels).
+    // Subscription (hindi one-time) dahil may tuloy-tuloy na gastos/maintenance ang marketplace APIs
+    // (token refresh, API version changes). Editable sa admin panel (Feature Pricing).
+    marketplace_hub: {
+        id: 'marketplace_hub',
+        name: 'Marketplace Hub (Shopee, Lazada & TikTok Shop)',
+        price: { monthly: 399, yearly: 3990 }
     }
 };
 const MODULE_SUBSCRIPTION_BILLING_DAYS = { monthly: 30, yearly: 365 };
@@ -6570,9 +6579,9 @@ app.get('/relay/admin/api/analytics', requireAdminKey, (req, res) => {
 //      ng Omni AI at ang cash-in galing sa pagbebenta ng Omni Tokens.
 // Buwan ay nakabatay sa Asia/Manila (UTC+8). Walang binabago sa data.
 // ===================================================================
-const ANALYTICS_SUBSCRIPTION_IDS = ['cloud_backup', 'ai_assistant', 'multi_branch', 'rbac_management', 'remote_operations'];
+const ANALYTICS_SUBSCRIPTION_IDS = ['cloud_backup', 'ai_assistant', 'multi_branch', 'rbac_management', 'remote_operations', 'marketplace_hub'];
 const ANALYTICS_MANILA_OFFSET_MS = 8 * 60 * 60 * 1000;
-const ANALYTICS_LEDGER_BUCKET_ORDER = ['cloud_backup', 'ai_assistant', 'multi_branch', 'rbac_management', 'remote_operations', 'ai_plan', 'ai_extra', 'ai_boost', 'receipt_credits', 'bundle', 'addons_other'];
+const ANALYTICS_LEDGER_BUCKET_ORDER = ['cloud_backup', 'ai_assistant', 'multi_branch', 'rbac_management', 'remote_operations', 'marketplace_hub', 'ai_plan', 'ai_extra', 'ai_boost', 'receipt_credits', 'bundle', 'addons_other'];
 function analyticsRound2(n) {
     const v = Number(n);
     return Number.isFinite(v) ? Math.round(v * 100) / 100 : 0;
@@ -19780,6 +19789,7 @@ const RELEASE_SERVER_TARGETS = new Set([
     'verify-gmail-connection.js',
     'webauthn.js',
     'cloud-snapshot.js',
+    'marketplace-sync.js', // OMNIPOS Marketplace Hub server module
 ]);
 const RELEASE_CLIENT_TARGETS = new Set([
     path.join('public', 'app.js'),
@@ -19788,6 +19798,7 @@ const RELEASE_CLIENT_TARGETS = new Set([
     // Nakaligtaan din dito kahit proprietary code rin ito na kasabay ng
     // app.js, kaya na-e-excempt sa obfuscation sa remote build path.
     path.join('public', 'app1.js'),
+    path.join('public', 'marketplace-ui.js'), // OMNIPOS Marketplace Hub UI
     path.join('public', 'bt-printer.js'),
     // Printer Device Settings (Bluetooth brand presets + WiFi/LAN network
     // printing) — proprietary code, must ship/obfuscate alongside bt-printer.js.
@@ -20710,6 +20721,16 @@ async function bootstrapStores() {
             : `ℹ️  Na-load mula sa lokal na JSON files: ${allowedDevices.size} allowed device(s), ${Object.keys(issuedUnlocks).length} device(s) may naka-unlock.`
     );
 }
+// ===================================================================
+// MARKETPLACE HUB (Shopee / Lazada / TikTok Shop) — tingnan ang marketplace.js
+// Ang partner keys/app secrets ay NASA RELAY LANG (env), hindi sa client.
+// ===================================================================
+require('./marketplace').registerMarketplaceRoutes(app, {
+    requireApiKey, requireAllowedDevice, rateLimit, isFeatureCurrentlyUnlocked, logActivity,
+    getPersistentJSON, setPersistentJSON,
+    getSubscriptionPrice: () => MODULE_SUBSCRIPTION_PLANS.marketplace_hub.price,
+    featureName: () => FEATURE_CATALOG_BASE.marketplace_hub.name
+});
 bootstrapStores()
     .then(async () => {
         await loadReceiptCreditPricing();

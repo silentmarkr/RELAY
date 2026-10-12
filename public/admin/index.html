@@ -1538,6 +1538,7 @@ a:focus-visible,
             <option value="multi_branch">🌿 Multi-Branch only</option>
             <option value="ai_assistant">🤖 AI Assistant only</option>
             <option value="remote_operations">📱 Remote Operations only</option>
+            <option value="marketplace_hub">🛒 Marketplace Hub only</option>
           </select>
           <select id="subSortBy" onchange="renderSubscriptionsList()">
             <option value="expiry">Sort: Soonest to expire</option>
@@ -3256,7 +3257,7 @@ function renderSubscriptionsList() {
     listEl.innerHTML = '<div class="empty">No active subscriptions match this filter.</div>';
     return;
   }
-  const featureIcon = { cloud_backup: '☁️', rbac_management: '🔐', multi_branch: '🌿', ai_assistant: '🤖', remote_operations: '📱' };
+  const featureIcon = { cloud_backup: '☁️', rbac_management: '🔐', multi_branch: '🌿', ai_assistant: '🤖', remote_operations: '📱', marketplace_hub: '🛒' };
   listEl.innerHTML = list.map(s => {
     const cycleLabel = s.billingCycle === 'yearly' ? 'Yearly' : (s.billingCycle === 'monthly' ? 'Monthly' : '');
     let daysLabel, urgency;
@@ -3424,7 +3425,7 @@ function renderOtps(list) {
 async function approveOtp(key, featureLabel, storeName, featureId, presetDurationDays, presetPrice, presetBillingCycle) {
   const isDemo = featureId === '__demo__';
   const isCloudBackup = featureId === 'cloud_backup';
-  const isModuleSubscription = featureId === 'rbac_management' || featureId === 'multi_branch' || featureId === 'ai_assistant' || featureId === 'remote_operations';
+  const isModuleSubscription = featureId === 'rbac_management' || featureId === 'multi_branch' || featureId === 'ai_assistant' || featureId === 'remote_operations' || featureId === 'marketplace_hub';
   // Cloud Backup, RBAC, and Multi-Branch are all subscription features
   // (monthly/yearly billing) — they must all get the same plan-summary
   // box and the same billing-cycle-aware duration default below, or the
@@ -4220,13 +4221,13 @@ let anaRevLoading = false;
 let anaRevPending = false;
 const ANA_COLORS = {
   cloud_backup: '#3aa8ff', ai_assistant: '#ff8a2e', multi_branch: '#3ddc84', rbac_management: '#ffd23a',
-  remote_operations: '#a77bff', ai_plan: '#ff7ad9', ai_extra: '#ffa6ee', ai_boost: '#ffd0f5',
+  remote_operations: '#a77bff', marketplace_hub: '#35c2a1', ai_plan: '#ff7ad9', ai_extra: '#ffa6ee', ai_boost: '#ffd0f5',
   receipt_credits: '#5aa9ff', bundle: '#b8e986', addons_other: '#8ea3c9'
 };
-const ANA_ICONS = { cloud_backup: '☁️', ai_assistant: '🤖', multi_branch: '🏬', rbac_management: '🔐', remote_operations: '🛰️' };
+const ANA_ICONS = { cloud_backup: '☁️', ai_assistant: '🤖', multi_branch: '🏬', rbac_management: '🔐', remote_operations: '🛰️', marketplace_hub: '🛒' };
 const ANA_SHORT_LABELS = {
   cloud_backup: 'Cloud Backup', ai_assistant: 'AI Assistant', multi_branch: 'Multi-Branch', rbac_management: 'RBAC',
-  remote_operations: 'Remote Ops', ai_plan: 'AI plans', ai_extra: 'AI packs', ai_boost: 'AI boosts',
+  remote_operations: 'Remote Ops', marketplace_hub: 'Marketplace', ai_plan: 'AI plans', ai_extra: 'AI packs', ai_boost: 'AI boosts',
   receipt_credits: 'Receipt credits', bundle: 'Bundles', addons_other: 'Other add-ons'
 };
 const ANA_MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -4942,7 +4943,7 @@ async function toggleAllowFromDetail(installationId, currentlyAllowed) {
 }
 async function activateFeature(installationId, featureId, featureName, presetTier, presetBillingCycle) {
   const isCloudBackup = featureId === 'cloud_backup';
-  const isModuleSubscription = featureId === 'rbac_management' || featureId === 'multi_branch' || featureId === 'ai_assistant' || featureId === 'remote_operations';
+  const isModuleSubscription = featureId === 'rbac_management' || featureId === 'multi_branch' || featureId === 'ai_assistant' || featureId === 'remote_operations' || featureId === 'marketplace_hub';
   const note = await promptForNote(`Activate "${featureName}" for this device right now — no OTP needed. Only use this if you ALREADY HAVE A REFERENCE (already paid/previously unlocked).`);
   if (note === null) return; 
   let tier = null, billingCycle = null, durationDays, aiTierId = null;
