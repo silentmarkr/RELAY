@@ -6463,6 +6463,151 @@ function saveActivationFlags(value) {
         console.error('Hindi ma-save ang activation-flags.json:', err);
     }
 }
+// ===================================================================
+// FEATURE AVAILABILITY ("Not available yet" switch)
+// Pinapatay nito ang pag-unlock/pag-subscribe ng isang feature habang hindi pa
+// ito handa (hal. Marketplace Hub habang hindi pa aprubado ang Shopee/Lazada/
+// TikTok app). Server-side ang pagpapatupad (request-unlock, request-unlock-bulk,
+// activate-purchase), kaya hindi ito ma-bypass sa OMNIPOS client. Ang mga
+// installation na dati nang may record ng feature ay pwede pa ring mag-renew.
+// Naka-toggle sa Home tab ng admin dashboard (Feature Availability card).
+// ===================================================================
+const FEATURE_AVAILABILITY_DEFAULT_MESSAGE = 'This feature is not available yet. We are still finishing its setup and will let you know as soon as it is ready. Thank you for your patience!';
+const FEATURE_AVAILABILITY_DEFAULTS = {
+    marketplace_hub: {
+        available: false,
+        message: 'Marketplace Hub (Shopee, Lazada & TikTok Shop) is not available yet. We are still waiting for the marketplaces to approve our integration. We will let you know as soon as it is ready. Thank you for your patience!'
+    }
+};
+const FEATURE_AVAILABILITY_MESSAGE_MAX = 300;
+// Lahat ng subscription: ang 4-5 module subscriptions + Cloud Backup (hiwalay ang plans nito).
+const FEATURE_AVAILABILITY_EXTRA_SUBSCRIPTION_IDS = ['cloud_backup'];
+// FIX: "own property" lang ang tinatanggap — kung hindi, ang mga pangalang galing sa Object.prototype
+// (hal. 'constructor', '__proto__', 'toString') ay lumalabas na "valid featureId" at nasasave pa sa store.
+function featureAvailabilityHasOwn(obj, key) {
+    return !!obj && typeof key === 'string' && Object.prototype.hasOwnProperty.call(obj, key);
+}
+function isFeatureAvailabilityConfigurable(featureId) {
+    return !!(featureAvailabilityHasOwn(FEATURE_CATALOG, featureId) || featureAvailabilityHasOwn(MODULE_SUBSCRIPTION_PLANS, featureId) || FEATURE_AVAILABILITY_EXTRA_SUBSCRIPTION_IDS.includes(featureId));
+}
+function featureAvailabilityDisplayName(featureId) {
+    if (featureId === 'cloud_backup') return 'Cloud Backup';
+    const cat = (featureAvailabilityHasOwn(FEATURE_CATALOG, featureId) && FEATURE_CATALOG[featureId])
+        || (featureAvailabilityHasOwn(MODULE_SUBSCRIPTION_PLANS, featureId) && MODULE_SUBSCRIPTION_PLANS[featureId])
+        || null;
+    return (cat && cat.name) || featureId;
+}
+const FEATURE_AVAILABILITY_PATH = path.join(__dirname, 'feature-availability.json');
+let FEATURE_AVAILABILITY = {}; // stored overrides only: { [featureId]: { available, message } }
+function normalizeFeatureAvailabilityEntry(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const entry = {};
+    if (typeof raw.available === 'boolean') entry.available = raw.available;
+    if (typeof raw.message === 'string') entry.message = raw.message.trim().slice(0, FEATURE_AVAILABILITY_MESSAGE_MAX);
+    return Object.keys(entry).length ? entry : null;
+}
+function normalizeFeatureAvailabilityMap(raw) {
+    const out = {};
+    if (!raw || typeof raw !== 'object') return out;
+    for (const featureId of Object.keys(raw)) {
+        if (featureId === '__proto__' || featureId === 'constructor' || featureId === 'prototype') continue;
+        const entry = normalizeFeatureAvailabilityEntry(raw[featureId]);
+        if (entry) out[featureId] = entry;
+    }
+    return out;
+}
+async function loadFeatureAvailability() {
+    try {
+        const fromStore = await getPersistentJSON('feature-availability', null);
+        if (fromStore && typeof fromStore === 'object') return normalizeFeatureAvailabilityMap(fromStore);
+    } catch (err) {   }
+    try {
+        return normalizeFeatureAvailabilityMap(JSON.parse(fs.readFileSync(FEATURE_AVAILABILITY_PATH, 'utf8')));
+    } catch (err) {   }
+    return {};
+}
+function saveFeatureAvailability(value) {
+    if (pgPoolDevices || pgPool || redisClient) {
+        setPersistentJSON('feature-availability', value);
+        return;
+    }
+    try {
+        fs.writeFileSync(FEATURE_AVAILABILITY_PATH, JSON.stringify(value, null, 2));
+    } catch (err) {
+        console.error('Hindi ma-save ang feature-availability.json:', err);
+    }
+}
+function getFeatureAvailabilityEffective(featureId) {
+    const base = (featureAvailabilityHasOwn(FEATURE_AVAILABILITY_DEFAULTS, featureId) && FEATURE_AVAILABILITY_DEFAULTS[featureId]) || { available: true, message: FEATURE_AVAILABILITY_DEFAULT_MESSAGE };
+    const stored = (featureAvailabilityHasOwn(FEATURE_AVAILABILITY, featureId) && FEATURE_AVAILABILITY[featureId]) || {};
+    return {
+        available: typeof stored.available === 'boolean' ? stored.available : base.available !== false,
+        message: (typeof stored.message === 'string' && stored.message) ? stored.message : (base.message || FEATURE_AVAILABILITY_DEFAULT_MESSAGE)
+    };
+}
+// null = available; otherwise { message } to show the customer.
+function getFeatureUnavailability(featureId) {
+    const eff = getFeatureAvailabilityEffective(featureId);
+    return eff.available ? null : { message: eff.message };
+}
+function publicFeatureAvailability() {
+    const ids = new Set([...Object.keys(FEATURE_AVAILABILITY_DEFAULTS), ...Object.keys(FEATURE_AVAILABILITY)]);
+    const out = {};
+    for (const featureId of ids) {
+        const info = getFeatureUnavailability(featureId);
+        if (info) out[featureId] = { available: false, message: info.message };
+    }
+    return out;
+}
+// Returns true (and sends the 409 reply) when one of the features cannot be unlocked/subscribed right now.
+function rejectIfFeatureUnavailable(res, installationId, featureIds) {
+    const ids = Array.isArray(featureIds) ? featureIds : [featureIds];
+    for (const featureId of ids) {
+        if (!featureId) continue;
+        const info = getFeatureUnavailability(String(featureId));
+        if (!info) continue;
+        const hadBefore = !!(issuedUnlocks[installationId] && featureAvailabilityHasOwn(issuedUnlocks[installationId], String(featureId)) && issuedUnlocks[installationId][featureId]);
+        if (hadBefore) continue; // existing customers can still renew
+        try { logActivity(installationId, 'feature_unavailable_blocked', { featureId }); } catch (_) {   }
+        res.status(409).json({ success: false, featureUnavailable: true, featureId, message: info.message });
+        return true;
+    }
+    return false;
+}
+app.get('/relay/admin/api/feature-availability', requireAdminKey, (req, res) => {
+    const ids = new Set([...MODULE_SUBSCRIPTION_FEATURE_IDS, ...FEATURE_AVAILABILITY_EXTRA_SUBSCRIPTION_IDS, ...Object.keys(FEATURE_AVAILABILITY_DEFAULTS), ...Object.keys(FEATURE_AVAILABILITY)]);
+    const items = [...ids].filter(isFeatureAvailabilityConfigurable).map((featureId) => {
+        const eff = getFeatureAvailabilityEffective(featureId);
+        return { featureId, name: featureAvailabilityDisplayName(featureId), available: eff.available, message: eff.message };
+    });
+    res.json({ success: true, items, maxMessageLength: FEATURE_AVAILABILITY_MESSAGE_MAX });
+});
+app.post('/relay/admin/api/feature-availability', requireAdminKey, (req, res) => {
+    const { featureId, available, message } = req.body || {};
+    if (typeof featureId !== 'string' || !featureId || !isFeatureAvailabilityConfigurable(featureId)) {
+        return res.status(400).json({ success: false, message: 'Unknown featureId.' });
+    }
+    if (available !== undefined && typeof available !== 'boolean') {
+        return res.status(400).json({ success: false, message: 'available must be true or false.' });
+    }
+    if (message !== undefined && typeof message !== 'string') {
+        return res.status(400).json({ success: false, message: 'message must be text.' });
+    }
+    if (typeof message === 'string' && message.trim().length > FEATURE_AVAILABILITY_MESSAGE_MAX) {
+        return res.status(400).json({ success: false, message: `The message is too long (max ${FEATURE_AVAILABILITY_MESSAGE_MAX} characters).` });
+    }
+    const next = { ...(featureAvailabilityHasOwn(FEATURE_AVAILABILITY, featureId) ? FEATURE_AVAILABILITY[featureId] : {}) };
+    if (typeof available === 'boolean') next.available = available;
+    if (typeof message === 'string') {
+        const m = message.trim();
+        if (m) next.message = m; else delete next.message; // empty = back to the default message
+    }
+    FEATURE_AVAILABILITY = { ...FEATURE_AVAILABILITY, [featureId]: next };
+    saveFeatureAvailability(FEATURE_AVAILABILITY);
+    const eff = getFeatureAvailabilityEffective(featureId);
+    console.log(`⚙️  Feature availability updated via admin panel: ${featureId} available=${eff.available}.`);
+    res.json({ success: true, featureId, available: eff.available, message: eff.message });
+});
 app.get('/relay/admin/api/activation-flags', requireAdminKey, (req, res) => {
     res.json({ success: true, activationFlags: ACTIVATION_FLAGS });
 });
@@ -13388,6 +13533,8 @@ app.get('/relay/pricing', requireApiKey, rateLimit('pricing', 120, 60 * 60 * 100
         // permanently deleted in Xd" countdown sa Settings > Cloud Backup.
         cloudBackupDataRetentionDays: CLOUD_BACKUP_DATA_RETENTION_DAYS,
         activationFlags: ACTIVATION_FLAGS,
+        // Features that cannot be unlocked/subscribed yet ("Not available yet") + the message to show the customer.
+        featureAvailability: publicFeatureAvailability(),
         // Support desk signal (see SUPPORT DESK SWITCH). "updateSeq" is sent
         // for known/allowed devices even while the desk is closed, so replies
         // the developer already wrote still reach the store. It is served from
@@ -15358,6 +15505,7 @@ app.post('/relay/cloud-tokens/activate-cloud-backup', requireApiKey, requireAllo
     if (!installationId || !tier || !billingCycle) {
         return res.status(400).json({ success: false, message: 'Missing installationId, tier, or billingCycle.' });
     }
+    if (rejectIfFeatureUnavailable(res, installationId, ['cloud_backup'])) return;
     if (!pgPool) {
         return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured — the Omni Token wallet needs it.' });
     }
@@ -15560,6 +15708,7 @@ app.post('/relay/cloud-tokens/activate-purchase', requireApiKey, requireAllowedD
         return res.status(400).json({ success: false, message: 'A subscription module must be activated on its own, separate from other items.' });
     }
     const isModuleSubscriptionPurchase = moduleSubIds.length === 1;
+    if (rejectIfFeatureUnavailable(res, installationId, featureIds)) return;
     if (!pgPool) {
         return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured — the Omni Token wallet needs it.' });
     }
@@ -18187,6 +18336,7 @@ app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit
     if (!installationId || !featureId) {
         return res.status(400).json({ success: false, message: 'Kulang ang installationId o featureId.' });
     }
+    if (rejectIfFeatureUnavailable(res, installationId, [featureId])) return;
     const isCloudBackup = featureId === 'cloud_backup';
     const isModuleSubscription = isModuleSubscriptionFeature(featureId);
     // Omni AI: optional chosen plan (Base / Plus / Pro / Business). The price is decided HERE, never by the client.
@@ -18546,6 +18696,7 @@ app.post('/relay/request-unlock-bulk', requireApiKey, requireAllowedDevice, rate
     if (!installationId || !Array.isArray(featureIds) || featureIds.length === 0) {
         return res.status(400).json({ success: false, message: 'Kulang ang installationId o featureIds.' });
     }
+    if (rejectIfFeatureUnavailable(res, installationId, featureIds)) return;
     const subscriptionIdsInBulk = featureIds.filter(id => isSubscriptionOnlyFeature(id));
     if (subscriptionIdsInBulk.length) {
         return res.status(400).json({ success: false, message: `These are subscription features and cannot be bundled into a one-time bulk unlock: ${subscriptionIdsInBulk.join(', ')}. Please use the subscribe/renew flow for each of them instead.` });
@@ -20668,6 +20819,7 @@ async function bootstrapStores() {
         loadAiUsageStats()
     ]);
     recomputeFeatureCatalog();
+    FEATURE_AVAILABILITY = await loadFeatureAvailability();
     if (Object.keys(featureCatalogOverrides).length > 0) {
         console.log(`🆕 Na-load ang ${Object.keys(featureCatalogOverrides).length} dating auto-learned na feature(s) papunta sa catalog mirror: ${Object.keys(featureCatalogOverrides).join(', ')}.`);
     }

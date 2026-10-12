@@ -1257,6 +1257,14 @@ a:focus-visible,
         </label>
         <div id="activationFlagsSavedNote" style="font-size:12px; color:var(--success, #69db7c); margin-top:8px; display:none;">Saved ✓</div>
       </div>
+      <div class="card" id="cardFeatureAvailability" style="border: 1px solid var(--line, #3a3f4b);">
+        <h2>🚧 Feature Availability — "Not available yet"</h2>
+        <div class="backup-note">
+          I-OFF ang "Available to customers" para sabihan ang client na hindi pa available ang feature kapag sinubukan niyang i-unlock o i-subscribe ito (Send Request o Omni Tokens). Ang mga client na dati nang may feature ay pwede pa ring mag-renew. Ang mensahe sa baba ang ipapakita sa client.
+        </div>
+        <div id="featureAvailabilityList" style="margin-top:10px;"></div>
+        <div id="featureAvailabilitySavedNote" style="font-size:12px; color:var(--success, #69db7c); margin-top:8px; display:none;">Saved ✓</div>
+      </div>
       <div class="stat-strip">
         <div class="stat-card has-ico">
           <div class="stat-num" id="statAllowed">—</div>
@@ -3049,6 +3057,92 @@ async function onActivationFlagToggleChange(flagName, checked) {
   }
   const label = flagName === 'otpRequestsEnabled' ? '"Send Request"' : '"Activate via Omni Tokens"';
   toast(`${label} is now ${checked ? 'ENABLED' : 'DISABLED'} for all devices.`, checked ? 'success' : 'warning');
+}
+// BAGO: "Not available yet" switch kada feature — tingnan ang cardFeatureAvailability sa Home tab.
+// Server-side ang totoong pagpapatupad (RELAY mismo ang tumatanggi sa unlock/subscribe request).
+async function loadFeatureAvailabilityAdmin() {
+  const list = document.getElementById('featureAvailabilityList');
+  if (!list) return;
+  let data;
+  try {
+    data = await api('/relay/admin/api/feature-availability');
+  } catch (err) {
+    return;
+  }
+  if (!data || !data.success || !Array.isArray(data.items)) return;
+  const max = data.maxMessageLength || 300;
+  // Ang mga hindi pa available ang unang ipakita; Marketplace Hub ang pinaka-una.
+  const items = data.items.slice().sort((a, b) => {
+    if (a.featureId === 'marketplace_hub') return -1;
+    if (b.featureId === 'marketplace_hub') return 1;
+    return (a.available === b.available ? 0 : (a.available ? 1 : -1)) || String(a.name).localeCompare(String(b.name));
+  });
+  list.textContent = '';
+  for (const item of items) {
+    const box = document.createElement('div');
+    box.style.cssText = 'border-top:1px solid var(--line, #3a3f4b); padding:10px 0;';
+    const label = document.createElement('label');
+    label.className = 'auto-backup-toggle';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = item.available !== false;
+    cb.id = 'featureAvail_' + item.featureId;
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(' ' + item.name + ' — Available to customers'));
+    const ta = document.createElement('textarea');
+    ta.id = 'featureAvailMsg_' + item.featureId;
+    ta.maxLength = max;
+    ta.rows = 3;
+    ta.value = item.message || '';
+    ta.placeholder = 'Message shown to the customer when this feature is not available yet';
+    ta.style.cssText = 'width:100%; margin-top:8px; box-sizing:border-box;';
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex; gap:8px; align-items:center; margin-top:6px;';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = 'Save';
+    btn.onclick = () => saveFeatureAvailabilityAdmin(item.featureId);
+    const hint = document.createElement('span');
+    hint.style.cssText = 'font-size:12px; opacity:.7;';
+    hint.textContent = 'Max ' + max + ' characters. Leave empty to use the default message.';
+    row.appendChild(btn);
+    row.appendChild(hint);
+    box.appendChild(label);
+    box.appendChild(ta);
+    box.appendChild(row);
+    list.appendChild(box);
+  }
+}
+async function saveFeatureAvailabilityAdmin(featureId) {
+  const cb = document.getElementById('featureAvail_' + featureId);
+  const ta = document.getElementById('featureAvailMsg_' + featureId);
+  if (!cb || !ta) return;
+  const note = document.getElementById('featureAvailabilitySavedNote');
+  if (note) note.style.display = 'none';
+  let data;
+  try {
+    data = await api('/relay/admin/api/feature-availability', {
+      method: 'POST',
+      body: JSON.stringify({ featureId, available: cb.checked, message: ta.value })
+    });
+  } catch (err) {
+    toast('Could not save this setting — please try again.', 'error');
+    loadFeatureAvailabilityAdmin();
+    return;
+  }
+  if (!data || !data.success) {
+    toast((data && data.message) || 'Could not save this setting.', 'error');
+    loadFeatureAvailabilityAdmin();
+    return;
+  }
+  ta.value = data.message || '';
+  if (note) {
+    note.style.display = 'block';
+    setTimeout(() => { note.style.display = 'none'; }, 2500);
+  }
+  toast(data.available
+    ? 'This feature is now AVAILABLE to customers.'
+    : 'This feature will now show "not available yet" to customers who try to unlock it.', data.available ? 'success' : 'warning');
 }
 function onAutoBackupToggleChange() {
   const el = document.getElementById('autoBackupOnAllowToggle');
@@ -5407,6 +5501,7 @@ function startPolling() {
   loadBuildHistory();
   loadDbStatus();
   loadActivationFlags();
+  loadFeatureAvailabilityAdmin();
   if (pollTimer) clearInterval(pollTimer);
   const loadDevicesNoJump = withScrollPreserved(loadDevices);
   pollTimer = setInterval(() => { if (adminKey) loadDevicesNoJump(); }, 8000);
