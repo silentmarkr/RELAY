@@ -15160,7 +15160,8 @@ p{line-height:1.5;color:#cbd5e1;}</style></head>
 //   3) donation-status    -> tinitingnan ng OMNIPOS kung bayad na ang online donation
 //   4) /admin/api/sponsor-donations -> listahan para sa developer
 // ===================================================================
-const SPONSOR_MIN_PHP = 50;
+const SPONSOR_MIN_PHP = 1;
+const SPONSOR_ONLINE_MIN_PHP = 50; // online payment lang ang may minimum; Omni Tokens ay ₱1 pataas
 const SPONSOR_MAX_PHP = 100000;
 const sponsorInFlight = new Set();
 const sponsorDedupe = new Map();
@@ -15258,6 +15259,7 @@ app.post('/relay/sponsor/donate-online/create', requireApiKey, requireAllowedDev
     const amount = parseSponsorAmount(req.body?.amount);
     if (!installationId) return res.status(400).json({ success: false, message: 'Missing installationId.' });
     if (amount === null) return res.status(400).json({ success: false, message: `Please enter a whole-number amount from ${SPONSOR_MIN_PHP} to ${SPONSOR_MAX_PHP}.` });
+    if (amount < SPONSOR_ONLINE_MIN_PHP) return res.status(400).json({ success: false, message: `Online payment donations start at ₱${SPONSOR_ONLINE_MIN_PHP}. For a smaller amount, donate using Omni Tokens.` });
     if (!pgPool) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured.' });
     await refreshPaymongoCapabilities(false);
     if (!isPaymentMethodAvailable(method)) {
