@@ -20284,15 +20284,12 @@ const releaseClientObfOptions = {
     controlFlowFlatteningThreshold: 0.3,
     deadCodeInjectionThreshold: 0.1,
 };
-// Huwag ituring na sapat ang simpleng pagbaba ng thresholds sa malalaking file:
-// control-flow flattening + dead-code injection + self-defending ay maaaring
-// magpalobo nang husto ng CPU/RAM at magmukhang walang katapusang build sa
-// malalaking app.js/server.js. Sa large-file profile, nananatili ang pangunahing
-// obfuscation (identifier/string-array) pero pinapatay ang pinakamabibigat na
-// transforms. Walang hard size limit ang obfuscation; ito ay resource/time issue.
-const LARGE_FILE_BYTES = 100 * 1024;
+const LARGE_FILE_BYTES = 100 * 1024; 
 const largeServerObfOptions = {
     ...releaseServerObfOptions,
+    // Large files can make control-flow flattening/dead-code injection
+    // disproportionately expensive. Keep compact/string-array protection,
+    // but disable the transforms most likely to stall a release build.
     controlFlowFlattening: false,
     controlFlowFlatteningThreshold: 0,
     deadCodeInjection: false,
@@ -20314,49 +20311,45 @@ const largeClientObfOptions = {
     stringArrayThreshold: 0.5,
 };
 function pickReleaseObfOptions(fullPath, isClient) {
-    const fileBytes = fs.statSync(fullPath).size;
-    const isLarge = fileBytes >= LARGE_FILE_BYTES;
-    if (isLarge) {
-        console.log(`🔐 Large-file obfuscation profile: ${path.relative(__dirname, fullPath)} (${fileBytes} bytes; heavy transforms disabled).`);
-    }
+    const fileSize = fs.statSync(fullPath).size;
+    const isLarge = fileSize >= LARGE_FILE_BYTES;
+    if (isLarge) console.log(`🔎 Large-file obfuscation profile: ${path.relative(__dirname, fullPath)} (${fileSize} bytes).`);
     if (isClient) return isLarge ? largeClientObfOptions : releaseClientObfOptions;
     return isLarge ? largeServerObfOptions : releaseServerObfOptions;
 }
+const DEFAULT_OBFUSCATION_WORKER_TIMEOUT_MS = 15 * 60 * 1000;
+function getObfuscationWorkerTimeoutMs() {
+    const raw = Number(process.env.OBFUSCATION_WORKER_TIMEOUT_MS);
+    return Number.isFinite(raw) && raw >= 60000 ? Math.floor(raw) : DEFAULT_OBFUSCATION_WORKER_TIMEOUT_MS;
+}
 function obfuscateInWorker({ code, srcPath, destPath, options }) {
     return new Promise((resolve, reject) => {
-        const label = srcPath || '(inline script)';
-        const timeoutMs = Math.max(60_000, Number.parseInt(process.env.OBFUSCATION_WORKER_TIMEOUT_MS, 10) || 15 * 60 * 1000);
+        const worker = new Worker(path.join(__dirname, 'obfuscate-worker.js'), {
+            workerData: { code, srcPath, destPath, options }
+        });
         let settled = false;
-        let timeout;
-        let worker;
+        const timeoutMs = getObfuscationWorkerTimeoutMs();
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            worker.terminate().catch(() => {});
+            reject(new Error(`Nag-timeout ang obfuscation worker pagkalipas ng ${Math.round(timeoutMs / 60000)} minuto para sa ${srcPath || '(inline script)'}. Maaari itong mangyari sa sobrang bigat na file o obfuscation settings.`));
+        }, timeoutMs);
         const finish = (err, value) => {
             if (settled) return;
             settled = true;
-            if (timeout) clearTimeout(timeout);
-            if (err) reject(err);
-            else resolve(value);
+            clearTimeout(timer);
+            if (err) reject(err); else resolve(value);
         };
-        try {
-            worker = new Worker(path.join(__dirname, 'obfuscate-worker.js'), {
-                workerData: { code, srcPath, destPath, options }
-            });
-            timeout = setTimeout(() => {
-                console.error(`⏱️ Obfuscation worker timed out after ${timeoutMs}ms: ${label}`);
-                worker.terminate().catch(() => {});
-                finish(new Error(`Nag-timeout ang obfuscation sa ${label} matapos ang ${Math.round(timeoutMs / 60000)} minuto. Gumamit ng large-file profile/mas magaan na options o itakda ang OBFUSCATION_WORKER_TIMEOUT_MS kung kailangan ng mas mahabang oras.`));
-            }, timeoutMs);
-            worker.on('message', (msg) => {
-                if (msg && msg.ok) finish(null, msg.obfuscatedCode);
-                else finish(new Error((msg && msg.error) || `Nabigo ang obfuscate worker para sa ${label}.`));
-            });
-            worker.on('error', (err) => finish(new Error(`Obfuscation worker error (${label}): ${err.message}`)));
-            worker.on('exit', (exitCode) => {
-                if (exitCode !== 0) finish(new Error(`Ang obfuscate worker para sa ${label} ay lumabas nang code ${exitCode}.`));
-                else if (!settled) finish(new Error(`Natapos ang obfuscate worker para sa ${label} nang walang resulta.`));
-            });
-        } catch (err) {
-            finish(err);
-        }
+        worker.on('message', (msg) => {
+            if (msg && msg.ok) finish(null, msg.obfuscatedCode);
+            else finish(new Error((msg && msg.error) || 'Nabigo ang obfuscate worker.'));
+        });
+        worker.on('error', (err) => finish(err));
+        worker.on('exit', (exitCode) => {
+            if (exitCode !== 0) finish(new Error(`Ang obfuscate worker para sa ${srcPath || '(inline script)'} ay lumabas nang code ${exitCode}.`));
+            else if (!settled) finish(new Error(`Natapos ang obfuscate worker para sa ${srcPath || '(inline script)'} nang walang resulta.`));
+        });
     });
 }
 async function obfuscateFileInPlace(fullPath, options) {
@@ -20422,31 +20415,154 @@ function planReleaseTree(tmpDir) {
     walk(tmpDir, '');
     return items;
 }
-async function obfuscateReleaseTree(tmpDir, onProgress, shouldObfuscate = true) {
+const OBFUSCATION_CACHE_MANIFEST_KEY = 'obfuscation-cache-manifest-v1';
+const OBFUSCATION_CACHE_MANIFEST_PATH = path.join(path.dirname(RELEASE_PACKAGE_PATH), 'obfuscation-cache-manifest.json');
+function sha256Buffer(value) {
+    return crypto.createHash('sha256').update(value).digest('hex');
+}
+function releaseItemOptionsHash(type, fullPath) {
+    let profile;
+    if (type === 'server') profile = pickReleaseObfOptions(fullPath, false);
+    else if (type === 'client' || type === 'html') profile = pickReleaseObfOptions(fullPath, true);
+    else profile = { transform: 'strip-css-comments-v1' };
+    // A cache hit is only valid for the same file type, transform options,
+    // and obfuscator version. Resolve package metadata robustly in case the
+    // package does not expose package.json through its exports map.
+    let obfuscatorVersion = 'unknown';
+    try {
+        let cursor = path.dirname(require.resolve('javascript-obfuscator'));
+        for (let i = 0; i < 6; i += 1) {
+            const candidate = path.join(cursor, 'package.json');
+            if (fs.existsSync(candidate)) {
+                try {
+                    const pkg = JSON.parse(fs.readFileSync(candidate, 'utf8'));
+                    if (pkg.name === 'javascript-obfuscator' && pkg.version) {
+                        obfuscatorVersion = pkg.version;
+                        break;
+                    }
+                } catch (_) {}
+            }
+            const parent = path.dirname(cursor);
+            if (parent === cursor) break;
+            cursor = parent;
+        }
+    } catch (_) {}
+    return sha256Buffer(Buffer.from(JSON.stringify({ schema: 1, type, profile, obfuscatorVersion, nodeMajor: process.versions.node.split('.')[0] })));
+}
+async function loadObfuscationCacheManifest() {
+    const fromDb = await buildKvGetJSON(OBFUSCATION_CACHE_MANIFEST_KEY, null);
+    let local = null;
+    try {
+        const parsed = JSON.parse(fs.readFileSync(OBFUSCATION_CACHE_MANIFEST_PATH, 'utf8'));
+        if (parsed && parsed.schemaVersion === 1 && parsed.entries && typeof parsed.entries === 'object') local = parsed;
+    } catch (_) {}
+    const validDb = fromDb && fromDb.schemaVersion === 1 && fromDb.entries && typeof fromDb.entries === 'object' ? fromDb : null;
+    // A local manifest may be newer if the database write temporarily failed.
+    // Output hashes are still verified against the ZIP before any reuse.
+    if (validDb && local) return (Number(local.generatedAt) > Number(validDb.generatedAt)) ? local : validDb;
+    return validDb || local || { schemaVersion: 1, generatedAt: 0, commitSha: null, entries: {} };
+}
+async function saveObfuscationCacheManifest(manifest) {
+    let localSaved = false;
+    try {
+        const dir = path.dirname(OBFUSCATION_CACHE_MANIFEST_PATH);
+        fs.mkdirSync(dir, { recursive: true });
+        const tempPath = `${OBFUSCATION_CACHE_MANIFEST_PATH}.${process.pid}.tmp`;
+        fs.writeFileSync(tempPath, JSON.stringify(manifest), 'utf8');
+        fs.renameSync(tempPath, OBFUSCATION_CACHE_MANIFEST_PATH);
+        localSaved = true;
+    } catch (err) {
+        console.warn(`⚠️  Hindi ma-save ang lokal na obfuscation cache manifest: ${err.message}`);
+    }
+    const dbSaved = await buildKvSetJSON(OBFUSCATION_CACHE_MANIFEST_KEY, manifest);
+    return { localSaved, dbSaved };
+}
+function readPreviousReleaseEntry(relPath) {
+    if (!fs.existsSync(RELEASE_PACKAGE_PATH)) return null;
+    try {
+        return execFileSync('unzip', ['-p', RELEASE_PACKAGE_PATH, relPath], {
+            encoding: 'buffer', maxBuffer: 100 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore']
+        });
+    } catch (_) {
+        return null;
+    }
+}
+async function obfuscateReleaseTree(tmpDir, onProgress, shouldObfuscate = true, commitSha = null) {
     const items = planReleaseTree(tmpDir);
     const totalItems = items.length;
-    let obfuscatedCount = 0;
-    for (const { type, full } of items) {
-        if (type === 'server') {
-            if (shouldObfuscate) await obfuscateFileInPlace(full, pickReleaseObfOptions(full, false));
-        } else if (type === 'client') {
-            if (shouldObfuscate) await obfuscateFileInPlace(full, pickReleaseObfOptions(full, true));
-        } else if (type === 'html') {
-            let html = fs.readFileSync(full, 'utf8');
-            html = stripHtmlComments(html);
-            if (shouldObfuscate) html = await obfuscateHtmlInlineScripts(html, pickReleaseObfOptions(full, true));
-            fs.writeFileSync(full, html, 'utf8');
-        } else if (type === 'css') {
-            const css = fs.readFileSync(full, 'utf8');
-            fs.writeFileSync(full, stripCssComments(css), 'utf8');
+    let processedCount = 0;
+    let newlyProcessedCount = 0;
+    let reusedCount = 0;
+    const newCacheEntries = {};
+    const oldManifest = shouldObfuscate ? await loadObfuscationCacheManifest() : null;
+
+    // Restore the previous release ZIP from the configured build database when
+    // possible. If it is unavailable/corrupt, cache misses safely fall back to
+    // a normal full obfuscation pass.
+    if (shouldObfuscate) {
+        try { await ensureReleasePackageFreshOnDisk(); } catch (err) {
+            console.warn(`⚠️  Hindi ma-refresh ang dating release para sa obfuscation cache: ${err.message}`);
         }
-        obfuscatedCount += 1;
+    }
+
+    for (const { type, full } of items) {
+        const relPath = path.relative(tmpDir, full).split(path.sep).join('/');
+        const sourceBuffer = fs.readFileSync(full);
+        const sourceHash = sha256Buffer(sourceBuffer);
+        const optionsHash = shouldObfuscate ? releaseItemOptionsHash(type, full) : null;
+        let reused = false;
+
+        if (shouldObfuscate && oldManifest && oldManifest.entries[relPath]) {
+            const cached = oldManifest.entries[relPath];
+            if (cached.sourceHash === sourceHash && cached.optionsHash === optionsHash && cached.outputHash) {
+                const priorOutput = readPreviousReleaseEntry(relPath);
+                if (priorOutput && sha256Buffer(priorOutput) === cached.outputHash) {
+                    fs.writeFileSync(full, priorOutput);
+                    newCacheEntries[relPath] = { sourceHash, optionsHash, outputHash: cached.outputHash, type };
+                    reusedCount += 1;
+                    reused = true;
+                }
+            }
+        }
+
+        if (!reused) {
+            if (type === 'server') {
+                if (shouldObfuscate) await obfuscateFileInPlace(full, pickReleaseObfOptions(full, false));
+            } else if (type === 'client') {
+                if (shouldObfuscate) await obfuscateFileInPlace(full, pickReleaseObfOptions(full, true));
+            } else if (type === 'html') {
+                let html = fs.readFileSync(full, 'utf8');
+                html = stripHtmlComments(html);
+                if (shouldObfuscate) html = await obfuscateHtmlInlineScripts(html, pickReleaseObfOptions(full, true));
+                fs.writeFileSync(full, html, 'utf8');
+            } else if (type === 'css') {
+                const css = fs.readFileSync(full, 'utf8');
+                fs.writeFileSync(full, stripCssComments(css), 'utf8');
+            }
+            if (shouldObfuscate) {
+                const outputHash = sha256Buffer(fs.readFileSync(full));
+                newCacheEntries[relPath] = { sourceHash, optionsHash, outputHash, type };
+                newlyProcessedCount += 1;
+            }
+        }
+
+        processedCount += 1;
         if (typeof onProgress === 'function') {
-            try { onProgress(obfuscatedCount, totalItems); } catch (_) {   }
+            try { onProgress(processedCount, totalItems); } catch (_) {}
         }
         await yieldToEventLoop();
     }
-    return obfuscatedCount;
+    return {
+        processedCount,
+        newlyProcessedCount,
+        reusedCount,
+        cacheManifest: shouldObfuscate ? {
+            schemaVersion: 1,
+            generatedAt: Date.now(),
+            commitSha: commitSha || null,
+            entries: newCacheEntries
+        } : null
+    };
 }
 async function encryptClientEnvAndPatchLoader(tmpDir, envContent) {
     const loaderPath = path.join(tmpDir, RELEASE_ENV_LOADER_FILENAME);
@@ -20726,11 +20842,13 @@ async function performBuildReleaseInner(reqBody, req, publishOverride) {
         setBuildProgress({ stage: 'obfuscate', percent: BUILD_STEP_END_PERCENT.env, message: shouldObfuscate ? 'Ino-obfuscate ang mga file...' : 'Inihahanda ang mga file (obfuscation OFF)...' });
         const obfuscateStart = BUILD_STEP_END_PERCENT.env;
         const obfuscateEnd = BUILD_STEP_END_PERCENT.obfuscate;
-        const obfuscatedCount = await obfuscateReleaseTree(tmpDir, (done, total) => {
+        const obfuscationStats = await obfuscateReleaseTree(tmpDir, (done, total) => {
             const pct = total > 0 ? obfuscateStart + ((done / total) * (obfuscateEnd - obfuscateStart)) : obfuscateStart;
-            const msg = shouldObfuscate ? `Ino-obfuscate ang mga file... (${done}/${total})` : `Inihahanda ang mga file (obfuscation OFF)... (${done}/${total})`;
+            const msg = shouldObfuscate ? `Sinusuri ang cache / ino-obfuscate ang mga file... (${done}/${total})` : `Inihahanda ang mga file (obfuscation OFF)... (${done}/${total})`;
             setBuildProgress({ stage: 'obfuscate', percent: Math.round(pct * 10) / 10, message: msg });
-        }, shouldObfuscate);
+        }, shouldObfuscate, commitSha);
+        const obfuscatedCount = obfuscationStats.processedCount;
+        console.log(`🔐 Obfuscation summary: ${obfuscationStats.newlyProcessedCount} file(s) na kailangang i-process, ${obfuscationStats.reusedCount} cached output reused, ${obfuscatedCount} total file(s) processed.`);
         setBuildProgress({ stage: 'zip', percent: BUILD_STEP_END_PERCENT.obfuscate, message: 'Ginagawa ang zip package...' });
         const releaseDir = path.dirname(RELEASE_PACKAGE_PATH);
         if (!fs.existsSync(releaseDir)) fs.mkdirSync(releaseDir, { recursive: true });
@@ -20768,6 +20886,12 @@ async function performBuildReleaseInner(reqBody, req, publishOverride) {
         const stats = fs.statSync(RELEASE_PACKAGE_PATH);
         setBuildProgress({ stage: 'verify', percent: BUILD_STEP_END_PERCENT.verify, message: 'Sine-save ang release package sa Neon build DB...' });
         const persistedToNeon = await saveReleasePackageToBuildDb(RELEASE_PACKAGE_PATH);
+        let obfuscationCachePersisted = false;
+        if (shouldObfuscate && obfuscationStats.cacheManifest) {
+            const cacheSave = await saveObfuscationCacheManifest(obfuscationStats.cacheManifest);
+            obfuscationCachePersisted = pgPoolBuild ? cacheSave.dbSaved : cacheSave.localSaved;
+            if (!obfuscationCachePersisted) console.warn('⚠️  Hindi na-save ang obfuscation cache manifest; magiging full obfuscation ang susunod na build kung walang valid cache.');
+        }
         if (!persistedToNeon && pgPoolBuild) {
             // Nabuo ang zip at nasa lokal na disk NG INSTANCE NA ITO, pero
             // HINDI ito na-save sa Neon build DB (hal. temporary connectivity
@@ -20781,6 +20905,8 @@ async function performBuildReleaseInner(reqBody, req, publishOverride) {
             ref,
             sizeBytes: stats.size,
             obfuscatedFiles: obfuscatedCount,
+            newlyProcessedFiles: obfuscationStats.newlyProcessedCount,
+            reusedCachedFiles: obfuscationStats.reusedCount,
             obfuscated: shouldObfuscate,
             envEncrypted: envResult.encrypted
         });
@@ -20802,6 +20928,8 @@ async function performBuildReleaseInner(reqBody, req, publishOverride) {
             builtAt,
             sizeBytes: stats.size,
             obfuscatedFiles: obfuscatedCount,
+            newlyProcessedFiles: obfuscationStats.newlyProcessedCount,
+            reusedCachedFiles: obfuscationStats.reusedCount,
             obfuscated: shouldObfuscate,
             envEncrypted: envResult.encrypted,
             fileName: 'omnipos-client.zip'
@@ -20811,7 +20939,7 @@ async function performBuildReleaseInner(reqBody, req, publishOverride) {
         }
         setBuildProgress({ stage: 'done', percent: 100, message: 'Tapos na ang build.', done: true });
         const obfMsgPart = shouldObfuscate
-            ? `Na-obfuscate ang ${obfuscatedCount} file(s)`
+            ? `Na-process ang ${obfuscatedCount} file(s): ${obfuscationStats.newlyProcessedCount} kailangang muling i-process, ${obfuscationStats.reusedCount} ginamit mula sa cache`
             : `Nagawa nang HINDI obfuscated (${obfuscatedCount} file(s) na-process)`;
         // Kolektahin ang lahat ng "hindi na-persist sa Neon" na warning (zip
         // mismo, integrity baseline, build history) sa IISANG warning string —
@@ -20821,6 +20949,7 @@ async function performBuildReleaseInner(reqBody, req, publishOverride) {
         if (!persistedToNeon && pgPoolBuild) persistWarnings.push('release zip');
         if (!baselinePersisted && pgPoolBuild) persistWarnings.push('integrity baseline');
         if (!historyPersisted && pgPoolBuild) persistWarnings.push('build history entry');
+        if (shouldObfuscate && pgPoolBuild && !obfuscationCachePersisted) persistWarnings.push('obfuscation cache manifest');
         let warning;
         if (persistWarnings.length > 0) {
             warning = `PAALALA: Nabuo ang release pero HINDI na-save sa Neon build DB ang: ${persistWarnings.join(', ')}. Kung ma-restart/ma-redeploy ang RELAY bago ito ma-retry, posibleng mawala/mababalik sa luma ang mga ito. I-retry ang build o suriin ang RELAY_BUILD_DATABASE_URL connection.`;
@@ -20833,6 +20962,9 @@ async function performBuildReleaseInner(reqBody, req, publishOverride) {
                 : `Nagawa ang bagong release package. ${obfMsgPart}. PAALALA: walang env-loader.js sa repo mo — plaintext pa rin ang .env.`,
             sizeBytes: stats.size,
             obfuscatedFiles: obfuscatedCount,
+            newlyProcessedFiles: obfuscationStats.newlyProcessedCount,
+            reusedCachedFiles: obfuscationStats.reusedCount,
+            obfuscationCachePersisted,
             obfuscated: shouldObfuscate,
             envEncrypted: envResult.encrypted,
             builtAt,
