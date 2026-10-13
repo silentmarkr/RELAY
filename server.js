@@ -19711,6 +19711,14 @@ function isReleaseVersionNewer(candidate, current) {
     }
     return false;
 }
+// Susunod na patch version (hal. "1.1.59" -> "1.1.60", "1.3" -> "1.3.1"). Ginagamit sa AUTO-BUMP kapag
+// blangko ang version at hindi na-bump ang package.json sa git push.
+function bumpPatchVersion(raw) {
+    const parts = String(raw || '0').trim().replace(/^[vV]/, '').split(/[-+]/)[0].split('.').map((n) => parseInt(n, 10) || 0);
+    while (parts.length < 3) parts.push(0);
+    parts[2] += 1;
+    return parts.join('.');
+}
 app.post('/relay/admin/api/system/publish-version', requireAdminKey, async (req, res) => {
     const { version, changelog, installationId } = req.body || {};
     const trimmedVersion = normalizeReleaseVersion(version);
@@ -20276,35 +20284,79 @@ const releaseClientObfOptions = {
     controlFlowFlatteningThreshold: 0.3,
     deadCodeInjectionThreshold: 0.1,
 };
-const LARGE_FILE_BYTES = 100 * 1024; 
+// Huwag ituring na sapat ang simpleng pagbaba ng thresholds sa malalaking file:
+// control-flow flattening + dead-code injection + self-defending ay maaaring
+// magpalobo nang husto ng CPU/RAM at magmukhang walang katapusang build sa
+// malalaking app.js/server.js. Sa large-file profile, nananatili ang pangunahing
+// obfuscation (identifier/string-array) pero pinapatay ang pinakamabibigat na
+// transforms. Walang hard size limit ang obfuscation; ito ay resource/time issue.
+const LARGE_FILE_BYTES = 100 * 1024;
 const largeServerObfOptions = {
     ...releaseServerObfOptions,
-    controlFlowFlatteningThreshold: 0.1,
-    deadCodeInjectionThreshold: 0.04,
+    controlFlowFlattening: false,
+    controlFlowFlatteningThreshold: 0,
+    deadCodeInjection: false,
+    deadCodeInjectionThreshold: 0,
+    selfDefending: false,
+    numbersToExpressions: false,
+    transformObjectKeys: false,
+    stringArrayThreshold: 0.5,
 };
 const largeClientObfOptions = {
     ...releaseClientObfOptions,
-    controlFlowFlatteningThreshold: 0.08,
-    deadCodeInjectionThreshold: 0.03,
+    controlFlowFlattening: false,
+    controlFlowFlatteningThreshold: 0,
+    deadCodeInjection: false,
+    deadCodeInjectionThreshold: 0,
+    selfDefending: false,
+    numbersToExpressions: false,
+    transformObjectKeys: false,
+    stringArrayThreshold: 0.5,
 };
 function pickReleaseObfOptions(fullPath, isClient) {
-    const isLarge = fs.statSync(fullPath).size >= LARGE_FILE_BYTES;
+    const fileBytes = fs.statSync(fullPath).size;
+    const isLarge = fileBytes >= LARGE_FILE_BYTES;
+    if (isLarge) {
+        console.log(`🔐 Large-file obfuscation profile: ${path.relative(__dirname, fullPath)} (${fileBytes} bytes; heavy transforms disabled).`);
+    }
     if (isClient) return isLarge ? largeClientObfOptions : releaseClientObfOptions;
     return isLarge ? largeServerObfOptions : releaseServerObfOptions;
 }
 function obfuscateInWorker({ code, srcPath, destPath, options }) {
     return new Promise((resolve, reject) => {
-        const worker = new Worker(path.join(__dirname, 'obfuscate-worker.js'), {
-            workerData: { code, srcPath, destPath, options }
-        });
-        worker.on('message', (msg) => {
-            if (msg && msg.ok) resolve(msg.obfuscatedCode);
-            else reject(new Error((msg && msg.error) || 'Nabigo ang obfuscate worker.'));
-        });
-        worker.on('error', reject);
-        worker.on('exit', (exitCode) => {
-            if (exitCode !== 0) reject(new Error(`Ang obfuscate worker para sa ${srcPath || '(inline script)'} ay lumabas nang code ${exitCode}.`));
-        });
+        const label = srcPath || '(inline script)';
+        const timeoutMs = Math.max(60_000, Number.parseInt(process.env.OBFUSCATION_WORKER_TIMEOUT_MS, 10) || 15 * 60 * 1000);
+        let settled = false;
+        let timeout;
+        let worker;
+        const finish = (err, value) => {
+            if (settled) return;
+            settled = true;
+            if (timeout) clearTimeout(timeout);
+            if (err) reject(err);
+            else resolve(value);
+        };
+        try {
+            worker = new Worker(path.join(__dirname, 'obfuscate-worker.js'), {
+                workerData: { code, srcPath, destPath, options }
+            });
+            timeout = setTimeout(() => {
+                console.error(`⏱️ Obfuscation worker timed out after ${timeoutMs}ms: ${label}`);
+                worker.terminate().catch(() => {});
+                finish(new Error(`Nag-timeout ang obfuscation sa ${label} matapos ang ${Math.round(timeoutMs / 60000)} minuto. Gumamit ng large-file profile/mas magaan na options o itakda ang OBFUSCATION_WORKER_TIMEOUT_MS kung kailangan ng mas mahabang oras.`));
+            }, timeoutMs);
+            worker.on('message', (msg) => {
+                if (msg && msg.ok) finish(null, msg.obfuscatedCode);
+                else finish(new Error((msg && msg.error) || `Nabigo ang obfuscate worker para sa ${label}.`));
+            });
+            worker.on('error', (err) => finish(new Error(`Obfuscation worker error (${label}): ${err.message}`)));
+            worker.on('exit', (exitCode) => {
+                if (exitCode !== 0) finish(new Error(`Ang obfuscate worker para sa ${label} ay lumabas nang code ${exitCode}.`));
+                else if (!settled) finish(new Error(`Natapos ang obfuscate worker para sa ${label} nang walang resulta.`));
+            });
+        } catch (err) {
+            finish(err);
+        }
     });
 }
 async function obfuscateFileInPlace(fullPath, options) {
@@ -20594,12 +20646,15 @@ async function performBuildReleaseInner(reqBody, req, publishOverride) {
                 throw err;
             }
             const forced = !!(reqBody && (reqBody.force === true || reqBody.force === 'true'));
-            if (!publishOverride.targetInstallationId && !forced && !isReleaseVersionNewer(repoVersion, systemVersionInfo.version)) {
-                const err = new Error(`Ang version sa git (v${repoVersion}) ay hindi mas bago sa kasalukuyang published (v${systemVersionInfo.version || '0.0.0'}). I-bump ang "version" sa package.json bago mag-push, o mag-type ng version manu-mano para i-force.`);
-                err.statusCode = 409;
-                throw err;
-            }
             resolvedVersion = repoVersion;
+            if (!publishOverride.targetInstallationId && !forced && !isReleaseVersionNewer(repoVersion, systemVersionInfo.version)) {
+                // BUGFIX: dati, nire-reject (HTTP 409) ang build kapag hindi na-bump ang package.json
+                // sa git push — kaya HINDI nabubuo ang bagong omnipos-client.zip. Ngayon, AUTO-BUMP
+                // ang patch mula sa mas mataas sa dalawa (git version o kasalukuyang published).
+                const base = isReleaseVersionNewer(systemVersionInfo.version, repoVersion) ? systemVersionInfo.version : repoVersion;
+                resolvedVersion = bumpPatchVersion(base);
+                console.log(`ℹ️  Auto-bump: git v${repoVersion} ay hindi mas bago sa published v${systemVersionInfo.version || '0.0.0'} — ginamit ang v${resolvedVersion}.`);
+            }
         } else {
             resolvedVersion = systemVersionInfo.version || '0.0.0';
         }

@@ -1640,7 +1640,7 @@ a:focus-visible,
             One button, two steps: (1) builds a fresh <code>omnipos-client.zip</code> from the latest code in your repo, and (2) immediately announces this new version/changelog to existing clients (they'll see it in their "Check for Update"). If the build fails, the version publish will NOT proceed.
           </div>
           <div class="backup-row">
-            <input type="text" id="publishVersionInput" placeholder="Version (blangko = kukunin sa git package.json)" style="flex:1; min-width:140px;">
+            <input type="text" id="publishVersionInput" placeholder="Version (blangko = git package.json; auto-bump kung hindi mas bago)" style="flex:1; min-width:140px;">
             <input type="text" id="publishRepoUrlInput" placeholder="repoUrl (optional — leave blank if OMNIPOS_REPO_URL is already set)" style="flex:2; min-width:220px;">
             <input type="text" id="publishRefInput" placeholder="branch/ref (default: main)" style="flex:1; min-width:120px;">
           </div>
@@ -2753,6 +2753,8 @@ async function publishRelease() {
       toast(data.message || 'The release could not be published.', 'error');
     }
   } catch (err) {
+    publishProgressCtl.setTarget({ percent: 100, message: 'Could not reach RELAY.', stage: 'error', done: true });
+    toast('Could not reach RELAY to publish: ' + ((err && err.message) || 'unknown error'), 'error');
   } finally {
     publishProgressCtl.stop();
     publishProgressCtl.hide();
