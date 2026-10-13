@@ -6060,6 +6060,10 @@ async function purgeDeviceHandler(req, res) {
         await purgeRows(pgPoolDevices, 'relay_ai_extra_purchases');
         await purgeRows(pgPoolDevices, 'relay_ai_day_boosts');
         await purgeRows(pgPoolDevices, 'relay_ai_daily_usage');
+        // The Google cost ledger must go with the device, otherwise its cost keeps counting in "Profit this month".
+        await purgeRows(pgPoolDevices, 'relay_ai_cost_ledger');
+        relayAiBudgetCache.delete(installationId);
+        aiProfitCache = { at: 0, month: '', value: null };
         clearRelayAiPurchaseMemory(installationId);
         await releaseRelayAiLockIfFreed(relayAiMonthKey(), true);
         await purgeRows(pgPoolDevices, 'relay_device_fingerprints');
@@ -7407,9 +7411,12 @@ app.post('/relay/admin/api/revenue-counters/reset', requireAdminKey, async (req,
 //   2) runRevenueCountersReset (global — pati wallets at AI purchases),
 //   3) buburahin ang buong activity log at pending receipt-credit requests,
 //   4) magbabalik ng "remaining" counts para makita mong zero na ang lahat.
+// 2b) FIX: the Omni AI cost ledger (relay_ai_cost_ledger = Google cost per
+//     client per month) is wiped too, so "Profit this month" no longer shows
+//     a leftover negative number (e.g. -P14.86) after a fresh start.
 // HINDI ginagalaw: pricing/settings, AI default settings ('__default__'),
-// admin key/keys, build/download history, AI provider config at Google/AI
-// usage stats (gastos, hindi revenue), at ang Neon actual-bill entries.
+// admin key/keys, build/download history, AI provider config, at ang Neon
+// actual-bill entries.
 //   GET  /relay/admin/api/fresh-start/preview
 //   POST /relay/admin/api/fresh-start   { "confirm": "FRESH START" }
 // ===================================================================
@@ -7435,7 +7442,7 @@ async function collectAllKnownInstallationIds() {
     for (const t of ['cloud_backup_meta', 'cloud_backup_modules', 'cloud_backup_usage_hourly', 'cloud_token_wallets', 'cloud_token_purchases', 'cloud_token_ledger', 'cloud_sync_activity']) {
         await scan(pgPool, t);
     }
-    for (const t of ['relay_devices', 'relay_device_fingerprints', 'relay_clone_splits', 'relay_ai_credit_usage', 'relay_ai_credit_requests', 'relay_ai_credit_settings', 'relay_ai_tier_purchases', 'relay_ai_extra_purchases', 'relay_ai_day_boosts', 'relay_ai_daily_usage']) {
+    for (const t of ['relay_devices', 'relay_device_fingerprints', 'relay_clone_splits', 'relay_ai_credit_usage', 'relay_ai_credit_requests', 'relay_ai_credit_settings', 'relay_ai_tier_purchases', 'relay_ai_extra_purchases', 'relay_ai_day_boosts', 'relay_ai_daily_usage', 'relay_ai_cost_ledger']) {
         await scan(pgPoolDevices, t);
     }
     seenDevices.forEach((_v, id) => add(id));
@@ -7473,6 +7480,7 @@ app.get('/relay/admin/api/fresh-start/preview', requireAdminKey, async (req, res
                 activityLogEntries: (activityLog || []).length,
                 pendingReceiptCreditRequests: pendingReceiptCreditPurchases.size,
                 scanWarnings: warnings,
+                aiCostLedgerRows: await countRevenueCounterRows(pgPoolDevices, `SELECT COUNT(*)::int AS n FROM relay_ai_cost_ledger`),
                 revenue: await buildRevenueCountersPreview()
             }
         });
@@ -7505,6 +7513,19 @@ app.post('/relay/admin/api/fresh-start', requireAdminKey, async (req, res) => {
             else summary.failedDevices.push({ installationId, message: (r.body && r.body.message) || ('HTTP ' + r.code) });
         }
         summary.revenueReset = await runRevenueCountersReset({ includeAiPurchases: true, resetWallets: true });
+        // Wipe the whole Omni AI cost ledger too (also catches orphan rows of clients that were already purged),
+        // so the "Profit this month" card starts again from zero.
+        if (pgPoolDevices) {
+            try {
+                const ledgerRes = await queryWithRetry(pgPoolDevices, 'DELETE FROM relay_ai_cost_ledger', []);
+                summary.clearedAiCostLedgerRows = ledgerRes.rowCount || 0;
+            } catch (err) {
+                console.error('⚠️  fresh-start: could not clear relay_ai_cost_ledger:', err.message);
+                summary.aiCostLedgerError = err.message;
+            }
+        }
+        relayAiBudgetCache.clear();
+        aiProfitCache = { at: 0, month: '', value: null };
         summary.clearedActivityEntries = activityLog.length;
         activityLog = [];
         saveActivityLog(activityLog);
@@ -7513,10 +7534,12 @@ app.post('/relay/admin/api/fresh-start', requireAdminKey, async (req, res) => {
         summary.remaining = {
             installations: (await collectAllKnownInstallationIds()).ids.length,
             allowedDevices: allowedDevices.size,
+            aiCostLedgerRows: await countRevenueCounterRows(pgPoolDevices, `SELECT COUNT(*)::int AS n FROM relay_ai_cost_ledger`),
             revenue: await buildRevenueCountersPreview()
         };
         const ok = summary.failedDevices.length === 0 && summary.scanWarnings.length === 0
-            && !summary.revenueReset.fatal && Object.keys(summary.revenueReset.errors || {}).length === 0;
+            && !summary.revenueReset.fatal && Object.keys(summary.revenueReset.errors || {}).length === 0
+            && !summary.aiCostLedgerError;
         logActivity(null, 'fresh_start', { purgedDevices: summary.purgedDevices, failedDevices: summary.failedDevices.length });
         console.log('🧹 FRESH START tapos via admin panel:', JSON.stringify({ purgedDevices: summary.purgedDevices, failed: summary.failedDevices.length, warnings: summary.scanWarnings.length }));
         res.json({

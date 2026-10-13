@@ -4584,7 +4584,7 @@ async function openFreshStart() {
       `Installations na ipa-purge: ${rrFmt(p.installationCount)} (naka-Allow: ${rrFmt(p.allowedCount)})\n` +
       `License revenue: ₱${rrFmt(r.unlockRevenueTotal)} · Token purchases: ${rrFmt(r.tokenPurchasesDone)} (+${rrFmt(r.tokenPurchasesPending)} pending) · Ledger rows: ${rrFmt(r.ledgerRows)}\n` +
       `AI plan: ${rrFmt(r.aiTierPurchases)} · extra packs: ${rrFmt(r.aiExtraPurchases)} · day boosts: ${rrFmt(r.aiDayBoosts)}\n` +
-      `Activity log entries: ${rrFmt(p.activityLogEntries)}` +
+      `Activity log entries: ${rrFmt(p.activityLogEntries)} · Omni AI Google cost rows: ${rrFmt(p.aiCostLedgerRows)}` +
       ((p.scanWarnings && p.scanWarnings.length) ? `\n⚠️ Hindi nabasa ang ilang table (posibleng may hindi mahanap na device): ${p.scanWarnings.join(' | ')}` : '');
   } catch (err) {
     previewEl.innerText = 'Could not load preview.';
@@ -4610,7 +4610,7 @@ async function submitFreshStart() {
     resultEl.style.display = 'block';
     resultEl.innerText =
       (data.message || '') + '\n' +
-      `Natira: installations ${rrFmt(rem.installations)} · allowed ${rrFmt(rem.allowedDevices)} · license revenue ₱${rrFmt(rev.unlockRevenueTotal)} · token purchases ${rrFmt(rev.tokenPurchasesDone)} · ledger ${rrFmt(rev.ledgerRows)} · AI plan ${rrFmt(rev.aiTierPurchases)}` +
+      `Natira: installations ${rrFmt(rem.installations)} · allowed ${rrFmt(rem.allowedDevices)} · license revenue ₱${rrFmt(rev.unlockRevenueTotal)} · token purchases ${rrFmt(rev.tokenPurchasesDone)} · ledger ${rrFmt(rev.ledgerRows)} · AI plan ${rrFmt(rev.aiTierPurchases)} · AI cost rows ${rrFmt(rem.aiCostLedgerRows)}` +
       ((sm.failedDevices && sm.failedDevices.length) ? `\n❌ Hindi na-purge: ${sm.failedDevices.map(f => f.installationId + ' (' + f.message + ')').join('; ')}` : '');
     toast(data.success ? '✅ Fresh Start tapos.' : (data.message || 'Hindi natapos ang Fresh Start.'), data.success ? 'success' : 'error');
     loadAnalytics();
