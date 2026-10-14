@@ -2676,7 +2676,7 @@ async function creditPaidPaymentIntent(paymentIntentId, { failed = false } = {})
     if (!purchase) return;
     const claimResult = await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'paid', updated_at = now() WHERE purchase_id = $1 AND status = 'pending' RETURNING *`, [purchase.purchase_id]);
     if (!claimResult.rows[0]) return; // naunahan na ng ibang concurrent/duplicate webhook delivery
-    const newBalance = await creditCloudTokens(purchase.installation_id, Number(purchase.tokens), `Purchase ${purchase.purchase_id} (${purchase.method})`);
+    const newBalance = await creditClaimedPurchase(purchase);
     logActivity(purchase.installation_id, 'cloud_token_purchase_paid', { purchaseId: purchase.purchase_id, tokens: Number(purchase.tokens), newBalance });
     if (!isDonationPurchase(purchase)) sendTelegramNotification(`💎 Omni Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via ${purchase.method} — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
 }
@@ -3579,13 +3579,41 @@ async function creditCloudTokens(installationId, tokens, note, category = 'TOKEN
         [installationId, tokens, CLOUD_TOKEN_DEBT_RESUME_BUFFER_TOKENS]
     );
     const balanceAfter = result.rows[0] ? Number(result.rows[0].balance_tokens) : null;
-    await queryWithRetry(
-        pgPool,
-        `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note, category) VALUES ($1, 'purchase', $2, $3, $4, $5)`,
-        [installationId, tokens, balanceAfter, note || null, category]
-    );
+    // Na-credit na ang wallet sa puntong ito. Kapag pumalya lang ang ledger INSERT, huwag nang i-throw:
+    // babalik kasi sa 'pending' ang purchase (tingnan ang creditClaimedPurchase) at made-double-credit ang tokens.
+    // Mas mahalagang may tokens ang customer; ang nawawalang ledger row ay ilo-log lang.
+    let ledgerWritten = false;
+    for (let attempt = 1; attempt <= 2 && !ledgerWritten; attempt++) {
+        try {
+            await queryWithRetry(
+                pgPool,
+                `INSERT INTO cloud_token_ledger (installation_id, type, tokens, balance_after, note, category) VALUES ($1, 'purchase', $2, $3, $4, $5)`,
+                [installationId, tokens, balanceAfter, note || null, category]
+            );
+            ledgerWritten = true;
+        } catch (ledgerErr) {
+            console.error(`⚠️  creditCloudTokens: hindi na-save ang ledger row (attempt ${attempt}/2) para sa ${installationId} — ${note || ''}: ${ledgerErr.message}`);
+        }
+    }
     invalidateWalletCache(installationId);
     return balanceAfter;
+}
+// Ginagamit ng mga payment webhook matapos i-claim ang purchase (pending -> paid). Kapag pumalya ang pag-credit
+// BAGO ma-update ang wallet (hal. pansamantalang DB error), ibinabalik sa 'pending' ang purchase para ang
+// retry ng payment provider ay makapag-credit pa rin — dati, 'paid' na ito pero walang tokens at hindi na mababawi.
+// Ligtas ito laban sa double-credit: pumapasok lang dito ang error kung hindi pa na-credit ang wallet.
+async function creditClaimedPurchase(purchase) {
+    try {
+        return await creditCloudTokens(purchase.installation_id, Number(purchase.tokens), `Purchase ${purchase.purchase_id} (${purchase.method})`);
+    } catch (err) {
+        try {
+            await queryWithRetry(pgPool, `UPDATE cloud_token_purchases SET status = 'pending', updated_at = now() WHERE purchase_id = $1 AND status = 'paid'`, [purchase.purchase_id]);
+            console.error(`⚠️  Hindi na-credit ang purchase ${purchase.purchase_id}; ibinalik sa 'pending' para sa retry: ${err.message}`);
+        } catch (releaseErr) {
+            console.error(`🔴 Hindi na-credit AT hindi naibalik sa pending ang purchase ${purchase.purchase_id} — MANUAL NA I-CREDIT: ${err.message} / ${releaseErr.message}`);
+        }
+        throw err;
+    }
 }
 const MODULE_SUBSCRIPTION_FEATURE_IDS = ['rbac_management', 'multi_branch', 'ai_assistant', 'remote_operations', 'marketplace_hub'];
 function isModuleSubscriptionFeature(featureId) {
@@ -5496,8 +5524,14 @@ async function loadDownloadCodes() {
     if (fromBuildDb !== null) return new Map(Object.entries(fromBuildDb));
     try {
         const raw = fs.readFileSync(DOWNLOAD_CODES_PATH, 'utf8');
-        return new Map(Object.entries(JSON.parse(raw)));
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('hindi object ang laman');
+        return new Map(Object.entries(parsed));
     } catch (err) {
+        // Wala pang file (ENOENT) = normal. Sira/hindi-valid na file = i-log para hindi tahimik na mawala ang mga code.
+        if (!err || err.code !== 'ENOENT') {
+            console.error(`⚠️  Sira o hindi valid ang download-codes.json (${err && err.message}) — magsisimula sa walang laman. Dating laman (unang 80 char): ${JSON.stringify(String(fs.existsSync(DOWNLOAD_CODES_PATH) ? fs.readFileSync(DOWNLOAD_CODES_PATH, 'utf8') : '').slice(0, 80))}`);
+        }
         return new Map();
     }
 }
@@ -5506,7 +5540,10 @@ async function saveDownloadCodes(map) {
         return await buildKvSetJSON('download-codes', Object.fromEntries(map));
     }
     try {
-        fs.writeFileSync(DOWNLOAD_CODES_PATH, JSON.stringify(Object.fromEntries(map), null, 2));
+        // Atomic write (tmp + rename): hindi nasisira ang file kung maputol ang proseso sa gitna ng pagsulat.
+        const tmpPath = `${DOWNLOAD_CODES_PATH}.tmp`;
+        fs.writeFileSync(tmpPath, JSON.stringify(Object.fromEntries(map), null, 2));
+        fs.renameSync(tmpPath, DOWNLOAD_CODES_PATH);
         return true;
     } catch (err) {
         console.error('Hindi ma-save ang download-codes.json:', err);
@@ -15409,7 +15446,7 @@ app.post('/relay/webhooks/paymongo', express.raw({ type: '*/*', limit: '1mb' }),
                     // dapat gawin dito, huwag nang mag-double-credit.
                     return res.json({ success: true, alreadyProcessed: true });
                 }
-                const newBalance = await creditCloudTokens(purchase.installation_id, Number(purchase.tokens), `Purchase ${purchase.purchase_id} (${purchase.method})`);
+                const newBalance = await creditClaimedPurchase(purchase);
                 logActivity(purchase.installation_id, 'cloud_token_purchase_paid', { purchaseId: purchase.purchase_id, tokens: Number(purchase.tokens), newBalance });
                 if (!isDonationPurchase(purchase)) sendTelegramNotification(`💎 Omni Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via ${purchase.method} — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
             } else {
@@ -15513,7 +15550,7 @@ app.post('/relay/webhooks/xendit', async (req, res) => {
             if (!claimResult.rows[0]) {
                 return res.json({ success: true, alreadyProcessed: true });
             }
-            const newBalance = await creditCloudTokens(purchase.installation_id, Number(purchase.tokens), `Purchase ${purchase.purchase_id} (${purchase.method})`);
+            const newBalance = await creditClaimedPurchase(purchase);
             logActivity(purchase.installation_id, 'cloud_token_purchase_paid', { purchaseId: purchase.purchase_id, tokens: Number(purchase.tokens), newBalance });
             if (!isDonationPurchase(purchase)) sendTelegramNotification(`💎 Omni Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via Xendit (${purchase.method}) — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
         } else if (status === 'EXPIRED') {
@@ -15557,7 +15594,7 @@ app.post('/relay/webhooks/stripe', express.raw({ type: '*/*', limit: '1mb' }), a
                 if (!claimResult.rows[0]) {
                     return res.json({ success: true, alreadyProcessed: true });
                 }
-                const newBalance = await creditCloudTokens(purchase.installation_id, Number(purchase.tokens), `Purchase ${purchase.purchase_id} (${purchase.method})`);
+                const newBalance = await creditClaimedPurchase(purchase);
                 logActivity(purchase.installation_id, 'cloud_token_purchase_paid', { purchaseId: purchase.purchase_id, tokens: Number(purchase.tokens), newBalance });
                 if (!isDonationPurchase(purchase)) sendTelegramNotification(`💎 Omni Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via Stripe (card) — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
             }
@@ -15599,7 +15636,7 @@ app.post('/relay/webhooks/paypal', async (req, res) => {
                 if (!claimResult.rows[0]) {
                     return res.json({ success: true, alreadyProcessed: true });
                 }
-                const newBalance = await creditCloudTokens(purchase.installation_id, Number(purchase.tokens), `Purchase ${purchase.purchase_id} (${purchase.method})`);
+                const newBalance = await creditClaimedPurchase(purchase);
                 logActivity(purchase.installation_id, 'cloud_token_purchase_paid', { purchaseId: purchase.purchase_id, tokens: Number(purchase.tokens), newBalance });
                 if (!isDonationPurchase(purchase)) sendTelegramNotification(`💎 Omni Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via PayPal — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
             } else {
@@ -15647,7 +15684,7 @@ app.post(DRAGONPAY_WEBHOOK_PATH, express.urlencoded({ extended: false, limit: '2
             if (!claimResult.rows[0]) {
                 return res.type('text/plain').send('result=OK');
             }
-            const newBalance = await creditCloudTokens(purchase.installation_id, Number(purchase.tokens), `Purchase ${purchase.purchase_id} (${purchase.method})`);
+            const newBalance = await creditClaimedPurchase(purchase);
             logActivity(purchase.installation_id, 'cloud_token_purchase_paid', { purchaseId: purchase.purchase_id, tokens: Number(purchase.tokens), newBalance });
             if (!isDonationPurchase(purchase)) sendTelegramNotification(`💎 Omni Tokens bought: ${purchase.tokens} tokens (₱${purchase.amount_php}) via Dragonpay (refno ${refno || 'n/a'}) — installation ${purchase.installation_id.slice(0, 12)}... New balance: ${newBalance}`).catch(() => {});
         } else if (status === 'F' || status === 'V' || status === 'K') {
