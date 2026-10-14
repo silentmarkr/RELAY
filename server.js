@@ -54,11 +54,17 @@ const { promisify } = require('util');
 // binago sa format/logic — parehong gzip output/input pa rin.
 const gzipAsync = promisify(zlib.gzip);
 const gunzipAsync = promisify(zlib.gunzip);
+// BUG FIX: ginagamit ng readPreviousReleaseEntry() sa obfuscation cache
+// (sa ibaba) — dating execFileSync ito (synchronous, hinaharang ang buong
+// event loop kada file habang binabasa ang dating release ZIP), salungat
+// sa layunin ng worker-thread fix para sa obfuscation mismo. Async na ito
+// ngayon gamit ang execFile.
+const execFileAsync = promisify(execFile);
 const nodemailer = require('nodemailer');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { execSync, execFileSync, spawn } = require('child_process');
+const { execSync, execFileSync, execFile, spawn } = require('child_process');
 process.on('uncaughtException', (err) => {
     console.error('🔥 UNCAUGHT EXCEPTION (RELAY stayed up — this should be investigated):', err);
 });
@@ -20206,6 +20212,13 @@ const RELEASE_SERVER_TARGETS = new Set([
     'webauthn.js',
     'cloud-snapshot.js',
     'marketplace-sync.js', // OMNIPOS Marketplace Hub server module
+    // BUG FIX: idinagdag ang bir-compliance.js at uom-pricing.js — pareho
+    // itong direktang require()-d ng OMNIPOS server.js (BIR compliance +
+    // UOM/price-level math) at nasa SERVER_TARGETS na ng OMNIPOS's lokal
+    // build-release.js, pero nakaligtaan dati dito, kaya plaintext sila sa
+    // omnipos-client.zip na ginawa ng remote build na ito.
+    'bir-compliance.js',
+    'uom-pricing.js',
 ]);
 const RELEASE_CLIENT_TARGETS = new Set([
     path.join('public', 'app.js'),
@@ -20228,12 +20241,22 @@ const RELEASE_CLIENT_TARGETS = new Set([
     // plain/readable pa rin ito sa loob ng omnipos-client.zip kahit
     // obfuscated na ang lahat ng kapatid nitong public/*.js files.
     path.join('public', 'service-worker.js'),
+    // BUG FIX: idinagdag ang public/offline-storage.js — wala ito sa dating
+    // listahan kahit naka-load ito sa index.html, kaya plaintext ito sa
+    // client. Itinugma sa CLIENT_TARGETS ng OMNIPOS (build-release.js), na
+    // dinagdagan din ng parehong entry.
+    path.join('public', 'offline-storage.js'),
 ]);
 const RELEASE_ENV_LOADER_FILENAME = 'env-loader.js';
 const RELEASE_ENV_KEY_FILENAME = '.env.key';
 const RELEASE_HTML_TARGETS = new Set([
     path.join('public', 'index.html'),
     path.join('public', 'customer-display.html'),
+    // BUG FIX: idinagdag ang public/inventory-tools.html (110KB, may inline
+    // <script>) — nakaligtaan dati, kaya plaintext ang business logic nito
+    // sa release package. Itinugma sa HTML_TARGETS ng OMNIPOS
+    // (build-release.js), na dinagdagan din ng parehong entry.
+    path.join('public', 'inventory-tools.html'),
 ]);
 const THIRD_PARTY_CSS = new Set([
     path.join('public', 'fontawesome.min.css'),
@@ -20420,11 +20443,33 @@ const OBFUSCATION_CACHE_MANIFEST_PATH = path.join(path.dirname(RELEASE_PACKAGE_P
 function sha256Buffer(value) {
     return crypto.createHash('sha256').update(value).digest('hex');
 }
-function releaseItemOptionsHash(type, fullPath) {
+// BUG FIX: pinangalanan ang mga transform version na ito (dating
+// literal/inline lang ang 'strip-css-comments-v1' sa loob ng
+// releaseItemOptionsHash, at walang katumbas na version ang HTML-strip
+// transform — stripHtmlComments()). Kapag binago ang logic ng alinman sa
+// dalawang transform na ito, i-bump ang kaukulang version string sa ibaba
+// para ma-invalidate ang obfuscation cache (kahit hindi nagbago ang source
+// file o obfuscation options).
+const HTML_STRIP_VERSION = 'strip-html-comments-v1';
+const CSS_STRIP_VERSION = 'strip-css-comments-v1';
+// BUG FIX: dating tinatawag ang pickReleaseObfOptions() nang dalawang beses
+// kada file (isang beses dito para sa cache hash, at isa pa sa loob ng
+// obfuscateReleaseTree() kapag talagang ino-obfuscate) — kaya dalawang
+// beses lumalabas ang "Large-file obfuscation profile" log kada malaking
+// file. Ang function na ito ngayon ang tanging tumatawag sa
+// pickReleaseObfOptions() kada item; ang resulta nito ay ipinapasa na lang
+// pababa (options hash at aktwal na obfuscation) sa halip na kalkulahin
+// ulit.
+function getReleaseObfProfile(type, fullPath) {
+    if (type === 'server') return pickReleaseObfOptions(fullPath, false);
+    if (type === 'client' || type === 'html') return pickReleaseObfOptions(fullPath, true);
+    return null; // 'css' has no JS obfuscation profile
+}
+function releaseItemOptionsHash(type, obfProfile) {
     let profile;
-    if (type === 'server') profile = pickReleaseObfOptions(fullPath, false);
-    else if (type === 'client' || type === 'html') profile = pickReleaseObfOptions(fullPath, true);
-    else profile = { transform: 'strip-css-comments-v1' };
+    if (type === 'html') profile = { htmlStripVersion: HTML_STRIP_VERSION, obf: obfProfile };
+    else if (type === 'css') profile = { transform: CSS_STRIP_VERSION };
+    else profile = obfProfile; // 'server' or 'client'
     // A cache hit is only valid for the same file type, transform options,
     // and obfuscator version. Resolve package metadata robustly in case the
     // package does not expose package.json through its exports map.
@@ -20477,12 +20522,13 @@ async function saveObfuscationCacheManifest(manifest) {
     const dbSaved = await buildKvSetJSON(OBFUSCATION_CACHE_MANIFEST_KEY, manifest);
     return { localSaved, dbSaved };
 }
-function readPreviousReleaseEntry(relPath) {
+async function readPreviousReleaseEntry(relPath) {
     if (!fs.existsSync(RELEASE_PACKAGE_PATH)) return null;
     try {
-        return execFileSync('unzip', ['-p', RELEASE_PACKAGE_PATH, relPath], {
-            encoding: 'buffer', maxBuffer: 100 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore']
+        const { stdout } = await execFileAsync('unzip', ['-p', RELEASE_PACKAGE_PATH, relPath], {
+            encoding: 'buffer', maxBuffer: 100 * 1024 * 1024
         });
+        return stdout;
     } catch (_) {
         return null;
     }
@@ -20509,13 +20555,19 @@ async function obfuscateReleaseTree(tmpDir, onProgress, shouldObfuscate = true, 
         const relPath = path.relative(tmpDir, full).split(path.sep).join('/');
         const sourceBuffer = fs.readFileSync(full);
         const sourceHash = sha256Buffer(sourceBuffer);
-        const optionsHash = shouldObfuscate ? releaseItemOptionsHash(type, full) : null;
+        // BUG FIX: isang beses lang tinatawag ang pickReleaseObfOptions() dito
+        // (sa loob ng getReleaseObfProfile) kada item — ang resulta nito
+        // (obfProfile) ang ginagamit kapwa ng options hash at ng aktwal na
+        // obfuscation sa ibaba, sa halip na tawagan ulit ito (na dating
+        // nagdudulot ng dobleng "Large-file obfuscation profile" log).
+        const obfProfile = shouldObfuscate ? getReleaseObfProfile(type, full) : null;
+        const optionsHash = shouldObfuscate ? releaseItemOptionsHash(type, obfProfile) : null;
         let reused = false;
 
         if (shouldObfuscate && oldManifest && oldManifest.entries[relPath]) {
             const cached = oldManifest.entries[relPath];
             if (cached.sourceHash === sourceHash && cached.optionsHash === optionsHash && cached.outputHash) {
-                const priorOutput = readPreviousReleaseEntry(relPath);
+                const priorOutput = await readPreviousReleaseEntry(relPath);
                 if (priorOutput && sha256Buffer(priorOutput) === cached.outputHash) {
                     fs.writeFileSync(full, priorOutput);
                     newCacheEntries[relPath] = { sourceHash, optionsHash, outputHash: cached.outputHash, type };
@@ -20527,13 +20579,13 @@ async function obfuscateReleaseTree(tmpDir, onProgress, shouldObfuscate = true, 
 
         if (!reused) {
             if (type === 'server') {
-                if (shouldObfuscate) await obfuscateFileInPlace(full, pickReleaseObfOptions(full, false));
+                if (shouldObfuscate) await obfuscateFileInPlace(full, obfProfile);
             } else if (type === 'client') {
-                if (shouldObfuscate) await obfuscateFileInPlace(full, pickReleaseObfOptions(full, true));
+                if (shouldObfuscate) await obfuscateFileInPlace(full, obfProfile);
             } else if (type === 'html') {
                 let html = fs.readFileSync(full, 'utf8');
                 html = stripHtmlComments(html);
-                if (shouldObfuscate) html = await obfuscateHtmlInlineScripts(html, pickReleaseObfOptions(full, true));
+                if (shouldObfuscate) html = await obfuscateHtmlInlineScripts(html, obfProfile);
                 fs.writeFileSync(full, html, 'utf8');
             } else if (type === 'css') {
                 const css = fs.readFileSync(full, 'utf8');
