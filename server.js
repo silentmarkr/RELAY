@@ -42,6 +42,7 @@ const express = require('express');
 const crypto = require('crypto');
 const zlib = require('zlib');
 const { promisify } = require('util');
+const { execSync, execFileSync, execFile, spawn } = require('child_process');
 // AYOS/BAGO: async (thread-pool) na bersyon ng gzip/gunzip sa halip na
 // ang *Sync variants. Ang zlib.gzipSync/gunzipSync ay tumatakbo sa main
 // thread mismo — kaya habang malaki ang binu-buo/dini-decompress na
@@ -64,7 +65,6 @@ const nodemailer = require('nodemailer');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { execSync, execFileSync, execFile, spawn } = require('child_process');
 process.on('uncaughtException', (err) => {
     console.error('🔥 UNCAUGHT EXCEPTION (RELAY stayed up — this should be investigated):', err);
 });
