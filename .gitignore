@@ -30,3 +30,9 @@ relay-private-key.pem
 
 # Misc runtime logs
 *.log
+
+# Safety copies written by the atomic state-file writer (atomicWriteFileSync / readStateFileSync in server.js).
+# They hold the same customer/device data as the JSON files above, so they must never be committed either.
+*.json.bak
+*.json.tmp
+*.json.corrupt-*

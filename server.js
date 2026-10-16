@@ -64,6 +64,106 @@ const execFileAsync = promisify(execFile);
 const nodemailer = require('nodemailer');
 const path = require('path');
 const fs = require('fs');
+
+// ---------------------------------------------------------------------------
+// ATOMIC JSON STATE FILES
+//
+// Problem: every state file (allowed-devices, issued-unlocks, activity-log, ...) used to be written with a plain
+// fs.writeFileSync. If the process was cut off (restart/crash/power loss) in the middle of a write, the file was
+// left truncated; the loader then fell back to empty/env defaults and the next save overwrote everything.
+//  - atomicWriteFileSync: writes to a .tmp file (fsync'ed) and renames it over the target, so readers only ever
+//    see the old file or the new file, never a half-written one. It also keeps a .bak copy of the last good file.
+//  - readStateFileSync: if the JSON is corrupt, moves the bad file to .corrupt-<ts> (evidence is kept) and
+//    restores the .bak copy when it is valid.
+// ---------------------------------------------------------------------------
+const _stateBakLastAt = new Map();
+const STATE_BAK_MIN_INTERVAL_MS = 30 * 1000;
+const STATE_BAK_ALWAYS_MAX_BYTES = 512 * 1024;
+const STATE_CORRUPT_KEEP = 5; // how many .corrupt-<ts> copies to keep per file
+function _atomicWriteCore(filePath, data) {
+    const tmpPath = `${filePath}.tmp`; // fixed name: writes are synchronous so there is no clash, and a crash never piles up tmp files
+    // Keep the permissions of the existing file (e.g. 0600 on sensitive state): the rename replaces the inode,
+    // so without copying the mode the file would silently go back to the default (0644).
+    let existingMode = null;
+    try { existingMode = fs.statSync(filePath).mode & 0o777; } catch (_e) { /* new file: default mode as before */ }
+    const fd = existingMode === null ? fs.openSync(tmpPath, 'w') : fs.openSync(tmpPath, 'w', existingMode);
+    try {
+        if (existingMode !== null) { try { fs.fchmodSync(fd, existingMode); } catch (_e) {} }
+        fs.writeFileSync(fd, data);
+        try { fs.fsyncSync(fd); } catch (_e) { /* some filesystems have no fsync */ }
+    } finally {
+        fs.closeSync(fd);
+    }
+    try {
+        const now = Date.now();
+        if (fs.existsSync(filePath)) {
+            // Small file (<= 512 KB): .bak on EVERY write, so the backup is always the immediately previous version.
+            // Large file (activity-log, ...): at most once per 30s so the extra I/O stays light.
+            const size = fs.statSync(filePath).size;
+            if (size <= STATE_BAK_ALWAYS_MAX_BYTES || now - (_stateBakLastAt.get(filePath) || 0) >= STATE_BAK_MIN_INTERVAL_MS) {
+                // only copy the old file if it is still valid JSON (never back up a corrupt file)
+                const prev = fs.readFileSync(filePath, 'utf8');
+                JSON.parse(prev);
+                const bakPath = `${filePath}.bak`;
+                fs.writeFileSync(bakPath, prev, existingMode === null ? undefined : { mode: existingMode });
+                // writeFileSync only applies `mode` when it CREATES the file, so an existing .bak would keep old permissions
+                if (existingMode !== null) { try { fs.chmodSync(bakPath, existingMode); } catch (_e) {} }
+                _stateBakLastAt.set(filePath, now);
+            }
+        }
+    } catch (_e) { /* the .bak copy is best-effort only */ }
+    fs.renameSync(tmpPath, filePath);
+}
+// Fallback: if a .tmp file / rename cannot be done in the folder (read-only folder but writable file, e.g. some
+// mounts) the old direct write is used so saving does not stop completely.
+// It does NOT fall back on ENOSPC/EIO: the original file is still intact there (only the .tmp failed).
+const _ATOMIC_FALLBACK_CODES = new Set(['EACCES', 'EPERM', 'EROFS', 'EBUSY', 'EXDEV', 'ENOTSUP', 'EISDIR']);
+function atomicWriteFileSync(filePath, data) {
+    try {
+        _atomicWriteCore(filePath, data);
+    } catch (err) {
+        try { fs.unlinkSync(`${filePath}.tmp`); } catch (_e) {}
+        if (err && _ATOMIC_FALLBACK_CODES.has(err.code)) {
+            console.error(`⚠️  Atomic write is not possible for ${path.basename(filePath)} (${err.code}) — using a direct write instead.`);
+            fs.writeFileSync(filePath, data);
+            return;
+        }
+        throw err;
+    }
+}
+
+const _stateValidated = new Map(); // path -> "mtimeMs:size" of the last validated version (avoids re-parsing on every read)
+function readStateFileSync(filePath) {
+    const raw = fs.readFileSync(filePath, 'utf8'); // ENOENT: let it throw like before
+    let sig = null;
+    try { const st = fs.statSync(filePath); sig = `${st.mtimeMs}:${st.size}`; } catch (_e) {}
+    if (sig && _stateValidated.get(filePath) === sig) return raw;
+    try {
+        JSON.parse(raw);
+        if (sig) _stateValidated.set(filePath, sig);
+        return raw;
+    } catch (parseErr) {
+        _stateValidated.delete(filePath);
+        console.error(`⚠️  The JSON of ${path.basename(filePath)} is corrupt (${parseErr.message}) — trying to restore it from .bak`);
+        let originalMode = null;
+        try { originalMode = fs.statSync(filePath).mode & 0o777; } catch (_e) {}
+        try { fs.renameSync(filePath, `${filePath}.corrupt-${Date.now()}`); } catch (_e) {}
+        try { // do not let corrupt copies fill the disk: keep only the newest few
+            const dir = path.dirname(filePath), prefix = `${path.basename(filePath)}.corrupt-`;
+            fs.readdirSync(dir).filter((f) => f.startsWith(prefix)).sort().reverse().slice(STATE_CORRUPT_KEEP)
+                .forEach((f) => { try { fs.unlinkSync(path.join(dir, f)); } catch (_e) {} });
+        } catch (_e) {}
+        try {
+            const bak = fs.readFileSync(`${filePath}.bak`, 'utf8');
+            JSON.parse(bak);
+            fs.writeFileSync(filePath, bak, originalMode === null ? undefined : { mode: originalMode });
+            console.error(`✅ ${path.basename(filePath)} was restored from .bak`);
+            return bak;
+        } catch (_bakErr) {
+            throw parseErr; // no good backup: the caller's existing fallback applies
+        }
+    }
+}
 const os = require('os');
 process.on('uncaughtException', (err) => {
     console.error('🔥 UNCAUGHT EXCEPTION (RELAY stayed up — this should be investigated):', err);
@@ -1385,7 +1485,7 @@ async function loadAllowedDevices() {
         }
     }
     try {
-        const raw = fs.readFileSync(DEVICE_STORE_PATH, 'utf8');
+        const raw = readStateFileSync(DEVICE_STORE_PATH);
         return new Set(JSON.parse(raw));
     } catch (err) {
         const seed = (process.env.RELAY_ALLOWED_DEVICES || '')
@@ -1414,7 +1514,7 @@ function saveAllowedDevices(set) {
         return;
     }
     try {
-        fs.writeFileSync(DEVICE_STORE_PATH, JSON.stringify([...set], null, 2));
+        atomicWriteFileSync(DEVICE_STORE_PATH, JSON.stringify([...set], null, 2));
     } catch (err) {
         console.error('Hindi ma-save ang allowed-devices.json:', err);
     }
@@ -1431,7 +1531,7 @@ async function loadDeviceLabels() {
         }
     }
     try {
-        const raw = fs.readFileSync(DEVICE_LABELS_PATH, 'utf8');
+        const raw = readStateFileSync(DEVICE_LABELS_PATH);
         return new Map(Object.entries(JSON.parse(raw)));
     } catch (err) {
         return new Map();
@@ -1456,7 +1556,7 @@ function saveDeviceLabels(map) {
         return;
     }
     try {
-        fs.writeFileSync(DEVICE_LABELS_PATH, JSON.stringify(Object.fromEntries(map), null, 2));
+        atomicWriteFileSync(DEVICE_LABELS_PATH, JSON.stringify(Object.fromEntries(map), null, 2));
     } catch (err) {
         console.error('Hindi ma-save ang device-labels.json:', err);
     }
@@ -1484,7 +1584,7 @@ async function loadDeviceFingerprints() {
         }
     }
     try {
-        const raw = fs.readFileSync(DEVICE_FINGERPRINTS_PATH, 'utf8');
+        const raw = readStateFileSync(DEVICE_FINGERPRINTS_PATH);
         return new Map(Object.entries(JSON.parse(raw)));
     } catch (err) {
         return new Map();
@@ -1516,7 +1616,7 @@ function saveDeviceFingerprints(map) {
         return;
     }
     try {
-        fs.writeFileSync(DEVICE_FINGERPRINTS_PATH, JSON.stringify(Object.fromEntries(map), null, 2));
+        atomicWriteFileSync(DEVICE_FINGERPRINTS_PATH, JSON.stringify(Object.fromEntries(map), null, 2));
     } catch (err) {
         console.error('Hindi ma-save ang device-fingerprints.json:', err);
     }
@@ -1536,7 +1636,7 @@ async function loadCloneSplits() {
         }
     }
     try {
-        const raw = fs.readFileSync(CLONE_SPLITS_PATH, 'utf8');
+        const raw = readStateFileSync(CLONE_SPLITS_PATH);
         return new Map(Object.entries(JSON.parse(raw)));
     } catch (err) {
         return new Map();
@@ -1562,7 +1662,7 @@ function saveCloneSplits(map) {
         return;
     }
     try {
-        fs.writeFileSync(CLONE_SPLITS_PATH, JSON.stringify(Object.fromEntries(map), null, 2));
+        atomicWriteFileSync(CLONE_SPLITS_PATH, JSON.stringify(Object.fromEntries(map), null, 2));
     } catch (err) {
         console.error('Hindi ma-save ang clone-splits.json:', err);
     }
@@ -1673,7 +1773,7 @@ async function loadCloudBackupPlanOverrides() {
     const fromStore = await getPersistentJSON('cloud-backup-plan-overrides', null);
     if (fromStore !== null) return fromStore;
     try {
-        return JSON.parse(fs.readFileSync(CLOUD_BACKUP_PLAN_OVERRIDES_PATH, 'utf8'));
+        return JSON.parse(readStateFileSync(CLOUD_BACKUP_PLAN_OVERRIDES_PATH));
     } catch (err) {
         return {};
     }
@@ -1684,7 +1784,7 @@ function saveCloudBackupPlanOverrides(obj) {
         return;
     }
     try {
-        fs.writeFileSync(CLOUD_BACKUP_PLAN_OVERRIDES_PATH, JSON.stringify(obj, null, 2));
+        atomicWriteFileSync(CLOUD_BACKUP_PLAN_OVERRIDES_PATH, JSON.stringify(obj, null, 2));
     } catch (err) {
         console.error('Hindi ma-save ang cloud-backup-plan-overrides.json:', err);
     }
@@ -3678,7 +3778,7 @@ async function loadSubscriptionGracePeriodSettings() {
     const fromStore = await getPersistentJSON('subscription-grace-period-settings', null);
     if (fromStore !== null) return fromStore;
     try {
-        return JSON.parse(fs.readFileSync(SUBSCRIPTION_GRACE_PERIOD_SETTINGS_PATH, 'utf8'));
+        return JSON.parse(readStateFileSync(SUBSCRIPTION_GRACE_PERIOD_SETTINGS_PATH));
     } catch (err) {
         return {};
     }
@@ -3689,7 +3789,7 @@ function saveSubscriptionGracePeriodSettings(obj) {
         return;
     }
     try {
-        fs.writeFileSync(SUBSCRIPTION_GRACE_PERIOD_SETTINGS_PATH, JSON.stringify(obj, null, 2));
+        atomicWriteFileSync(SUBSCRIPTION_GRACE_PERIOD_SETTINGS_PATH, JSON.stringify(obj, null, 2));
     } catch (err) {
         console.error('Could not save subscription-grace-period-settings.json:', err);
     }
@@ -3718,7 +3818,7 @@ async function loadModuleSubscriptionOverrides() {
     const fromStore = await getPersistentJSON('module-subscription-overrides', null);
     if (fromStore !== null) return fromStore;
     try {
-        return JSON.parse(fs.readFileSync(MODULE_SUBSCRIPTION_OVERRIDES_PATH, 'utf8'));
+        return JSON.parse(readStateFileSync(MODULE_SUBSCRIPTION_OVERRIDES_PATH));
     } catch (err) {
         return {};
     }
@@ -3729,7 +3829,7 @@ function saveModuleSubscriptionOverrides(obj) {
         return;
     }
     try {
-        fs.writeFileSync(MODULE_SUBSCRIPTION_OVERRIDES_PATH, JSON.stringify(obj, null, 2));
+        atomicWriteFileSync(MODULE_SUBSCRIPTION_OVERRIDES_PATH, JSON.stringify(obj, null, 2));
     } catch (err) {
         console.error('Could not save module-subscription-overrides.json:', err);
     }
@@ -3881,7 +3981,7 @@ async function loadNeonPricingOverrides() {
     const fromStore = await getPersistentJSON('neon-pricing-overrides', null);
     if (fromStore !== null) return fromStore;
     try {
-        return JSON.parse(fs.readFileSync(NEON_PRICING_OVERRIDES_PATH, 'utf8'));
+        return JSON.parse(readStateFileSync(NEON_PRICING_OVERRIDES_PATH));
     } catch (err) {
         return {};
     }
@@ -3892,7 +3992,7 @@ function saveNeonPricingOverrides(obj) {
         return;
     }
     try {
-        fs.writeFileSync(NEON_PRICING_OVERRIDES_PATH, JSON.stringify(obj, null, 2));
+        atomicWriteFileSync(NEON_PRICING_OVERRIDES_PATH, JSON.stringify(obj, null, 2));
     } catch (err) {
         console.error('Hindi ma-save ang neon-pricing-overrides.json:', err);
     }
@@ -4018,7 +4118,7 @@ async function loadNeonConfiguredPlans() {
     const fromStore = await getPersistentJSON('neon-configured-plans', null);
     if (fromStore !== null) return fromStore;
     try {
-        return JSON.parse(fs.readFileSync(NEON_CONFIGURED_PLAN_PATH, 'utf8'));
+        return JSON.parse(readStateFileSync(NEON_CONFIGURED_PLAN_PATH));
     } catch (err) {
         return { cloudBackup: 'free', devices: 'free', build: 'free' };
     }
@@ -4039,7 +4139,7 @@ function saveNeonConfiguredPlans(obj) {
         setPersistentJSON('neon-configured-plans', obj);
     }
     try {
-        fs.writeFileSync(NEON_CONFIGURED_PLAN_PATH, JSON.stringify(obj, null, 2));
+        atomicWriteFileSync(NEON_CONFIGURED_PLAN_PATH, JSON.stringify(obj, null, 2));
     } catch (err) {
         console.error('Hindi ma-save ang neon-configured-plans.json:', err);
     }
@@ -4082,7 +4182,7 @@ async function loadCostSafetyNetSimulatedTier() {
     const fromStore = await getPersistentJSON('cost-safety-net-simulated-tier', null);
     if (fromStore !== null) return (fromStore && fromStore.tier) || null;
     try {
-        const parsed = JSON.parse(fs.readFileSync(COST_SAFETY_NET_SIMULATED_TIER_PATH, 'utf8'));
+        const parsed = JSON.parse(readStateFileSync(COST_SAFETY_NET_SIMULATED_TIER_PATH));
         return (parsed && parsed.tier) || null;
     } catch (err) {
         return null;
@@ -4094,7 +4194,7 @@ function saveCostSafetyNetSimulatedTier(tierOrNull) {
         setPersistentJSON('cost-safety-net-simulated-tier', obj);
     }
     try {
-        fs.writeFileSync(COST_SAFETY_NET_SIMULATED_TIER_PATH, JSON.stringify(obj, null, 2));
+        atomicWriteFileSync(COST_SAFETY_NET_SIMULATED_TIER_PATH, JSON.stringify(obj, null, 2));
     } catch (err) {
         console.error('Hindi ma-save ang cost-safety-net-simulated-tier.json:', err);
     }
@@ -4126,7 +4226,7 @@ async function loadDevicesCostReferenceTier() {
         tier = fromStore && fromStore.tier;
     } else {
         try {
-            tier = JSON.parse(fs.readFileSync(DEVICES_REFERENCE_TIER_PATH, 'utf8')).tier;
+            tier = JSON.parse(readStateFileSync(DEVICES_REFERENCE_TIER_PATH)).tier;
         } catch (err) {
             tier = null;
         }
@@ -4139,7 +4239,7 @@ function saveDevicesCostReferenceTier(tier) {
         setPersistentJSON('devices-cost-reference-tier', obj);
     }
     try {
-        fs.writeFileSync(DEVICES_REFERENCE_TIER_PATH, JSON.stringify(obj, null, 2));
+        atomicWriteFileSync(DEVICES_REFERENCE_TIER_PATH, JSON.stringify(obj, null, 2));
     } catch (err) {
         console.error('Hindi ma-save ang devices-cost-reference-tier.json:', err);
     }
@@ -4165,7 +4265,7 @@ async function loadClientMaintenanceFeeConfig() {
     const fromStore = await getPersistentJSON('client-maintenance-fee', null);
     if (fromStore !== null) return fromStore;
     try {
-        return JSON.parse(fs.readFileSync(CLIENT_MAINTENANCE_FEE_PATH, 'utf8'));
+        return JSON.parse(readStateFileSync(CLIENT_MAINTENANCE_FEE_PATH));
     } catch (err) {
         return JSON.parse(JSON.stringify(CLIENT_MAINTENANCE_FEE_DEFAULT));
     }
@@ -4176,7 +4276,7 @@ function saveClientMaintenanceFeeConfig(obj) {
         return;
     }
     try {
-        fs.writeFileSync(CLIENT_MAINTENANCE_FEE_PATH, JSON.stringify(obj, null, 2));
+        atomicWriteFileSync(CLIENT_MAINTENANCE_FEE_PATH, JSON.stringify(obj, null, 2));
     } catch (err) {
         console.error('Hindi ma-save ang client-maintenance-fee.json:', err);
     }
@@ -4200,7 +4300,7 @@ async function loadClientMaintenanceFeePaidUntil() {
     const fromStore = await getPersistentJSON('client-maintenance-fee-paid-until', null);
     if (fromStore !== null) return fromStore;
     try {
-        return JSON.parse(fs.readFileSync(CLIENT_MAINTENANCE_FEE_PAID_UNTIL_PATH, 'utf8'));
+        return JSON.parse(readStateFileSync(CLIENT_MAINTENANCE_FEE_PAID_UNTIL_PATH));
     } catch (err) {
         return {};
     }
@@ -4211,7 +4311,7 @@ function saveClientMaintenanceFeePaidUntil(obj) {
         return;
     }
     try {
-        fs.writeFileSync(CLIENT_MAINTENANCE_FEE_PAID_UNTIL_PATH, JSON.stringify(obj, null, 2));
+        atomicWriteFileSync(CLIENT_MAINTENANCE_FEE_PAID_UNTIL_PATH, JSON.stringify(obj, null, 2));
     } catch (err) {
         console.error('Hindi ma-save ang client-maintenance-fee-paid-until.json:', err);
     }
@@ -4952,7 +5052,7 @@ async function loadFeatureCatalogOverrides() {
     const fromStore = await getPersistentJSON('feature-catalog-overrides', null);
     if (fromStore !== null) return fromStore;
     try {
-        return JSON.parse(fs.readFileSync(FEATURE_CATALOG_OVERRIDES_PATH, 'utf8'));
+        return JSON.parse(readStateFileSync(FEATURE_CATALOG_OVERRIDES_PATH));
     } catch (err) {
         return {};
     }
@@ -4963,7 +5063,7 @@ function saveFeatureCatalogOverrides(obj) {
         return;
     }
     try {
-        fs.writeFileSync(FEATURE_CATALOG_OVERRIDES_PATH, JSON.stringify(obj, null, 2));
+        atomicWriteFileSync(FEATURE_CATALOG_OVERRIDES_PATH, JSON.stringify(obj, null, 2));
     } catch (err) {
         console.error('Hindi ma-save ang feature-catalog-overrides.json:', err);
     }
@@ -4974,7 +5074,7 @@ async function loadFeaturePricingOverrides() {
     const fromStore = await getPersistentJSON('feature-pricing-overrides', null);
     if (fromStore !== null) return fromStore;
     try {
-        return JSON.parse(fs.readFileSync(FEATURE_PRICING_OVERRIDES_PATH, 'utf8'));
+        return JSON.parse(readStateFileSync(FEATURE_PRICING_OVERRIDES_PATH));
     } catch (err) {
         return {};
     }
@@ -4985,7 +5085,7 @@ function saveFeaturePricingOverrides(obj) {
         return;
     }
     try {
-        fs.writeFileSync(FEATURE_PRICING_OVERRIDES_PATH, JSON.stringify(obj, null, 2));
+        atomicWriteFileSync(FEATURE_PRICING_OVERRIDES_PATH, JSON.stringify(obj, null, 2));
     } catch (err) {
         console.error('Hindi ma-save ang feature-pricing-overrides.json:', err);
     }
@@ -4996,7 +5096,7 @@ async function loadUpgradeTierPricingOverrides() {
     const fromStore = await getPersistentJSON('upgrade-tier-pricing-overrides', null);
     if (fromStore !== null) return fromStore;
     try {
-        return JSON.parse(fs.readFileSync(UPGRADE_TIER_PRICING_OVERRIDES_PATH, 'utf8'));
+        return JSON.parse(readStateFileSync(UPGRADE_TIER_PRICING_OVERRIDES_PATH));
     } catch (err) {
         return {};
     }
@@ -5007,7 +5107,7 @@ function saveUpgradeTierPricingOverrides(obj) {
         return;
     }
     try {
-        fs.writeFileSync(UPGRADE_TIER_PRICING_OVERRIDES_PATH, JSON.stringify(obj, null, 2));
+        atomicWriteFileSync(UPGRADE_TIER_PRICING_OVERRIDES_PATH, JSON.stringify(obj, null, 2));
     } catch (err) {
         console.error('Hindi ma-save ang upgrade-tier-pricing-overrides.json:', err);
     }
@@ -5087,7 +5187,7 @@ async function loadIssuedUnlocks() {
     const fromStore = await getPersistentJSON('issued-unlocks', null);
     if (fromStore !== null) return fromStore;
     try {
-        return JSON.parse(fs.readFileSync(ISSUED_UNLOCKS_PATH, 'utf8'));
+        return JSON.parse(readStateFileSync(ISSUED_UNLOCKS_PATH));
     } catch (err) {
         return {};
     }
@@ -5098,7 +5198,7 @@ function saveIssuedUnlocks(obj) {
         return;
     }
     try {
-        fs.writeFileSync(ISSUED_UNLOCKS_PATH, JSON.stringify(obj, null, 2));
+        atomicWriteFileSync(ISSUED_UNLOCKS_PATH, JSON.stringify(obj, null, 2));
     } catch (err) {
         console.error('Hindi ma-save ang issued-unlocks.json:', err);
     }
@@ -5127,7 +5227,7 @@ async function loadActivityLog() {
     const fromStore = await getPersistentJSON('activity-log', null);
     if (fromStore !== null) return fromStore;
     try {
-        return JSON.parse(fs.readFileSync(ACTIVITY_LOG_PATH, 'utf8'));
+        return JSON.parse(readStateFileSync(ACTIVITY_LOG_PATH));
     } catch (err) {
         return [];
     }
@@ -5138,7 +5238,7 @@ function saveActivityLog(arr) {
         return;
     }
     try {
-        fs.writeFileSync(ACTIVITY_LOG_PATH, JSON.stringify(arr, null, 2));
+        atomicWriteFileSync(ACTIVITY_LOG_PATH, JSON.stringify(arr, null, 2));
     } catch (err) {
         console.error('Hindi ma-save ang activity-log.json:', err);
     }
@@ -5194,7 +5294,7 @@ async function loadBackupCheckins() {
     const fromStore = await getPersistentJSON('backup-checkins', null);
     if (fromStore !== null) return fromStore;
     try {
-        return JSON.parse(fs.readFileSync(BACKUP_CHECKINS_PATH, 'utf8'));
+        return JSON.parse(readStateFileSync(BACKUP_CHECKINS_PATH));
     } catch (err) {
         return {};
     }
@@ -5205,7 +5305,7 @@ function saveBackupCheckins(obj) {
         return;
     }
     try {
-        fs.writeFileSync(BACKUP_CHECKINS_PATH, JSON.stringify(obj, null, 2));
+        atomicWriteFileSync(BACKUP_CHECKINS_PATH, JSON.stringify(obj, null, 2));
     } catch (err) {
         console.error('Hindi ma-save ang backup-checkins.json:', err);
     }
@@ -5216,7 +5316,7 @@ async function loadBranchSummaries() {
     const fromStore = await getPersistentJSON('branch-summaries', null);
     if (fromStore !== null) return fromStore;
     try {
-        return JSON.parse(fs.readFileSync(BRANCH_SUMMARIES_PATH, 'utf8'));
+        return JSON.parse(readStateFileSync(BRANCH_SUMMARIES_PATH));
     } catch (err) {
         return {};
     }
@@ -5227,7 +5327,7 @@ function saveBranchSummaries(obj) {
         return;
     }
     try {
-        fs.writeFileSync(BRANCH_SUMMARIES_PATH, JSON.stringify(obj, null, 2));
+        atomicWriteFileSync(BRANCH_SUMMARIES_PATH, JSON.stringify(obj, null, 2));
     } catch (err) {
         console.error('Could not save branch-summaries.json:', err);
     }
@@ -5299,7 +5399,7 @@ async function loadBranchHistory() {
     const fromStore = await getPersistentJSON('branch-history', null);
     if (fromStore !== null) return fromStore;
     try {
-        return JSON.parse(fs.readFileSync(BRANCH_HISTORY_PATH, 'utf8'));
+        return JSON.parse(readStateFileSync(BRANCH_HISTORY_PATH));
     } catch (err) {
         return {};
     }
@@ -5310,7 +5410,7 @@ function saveBranchHistory(obj) {
         return;
     }
     try {
-        fs.writeFileSync(BRANCH_HISTORY_PATH, JSON.stringify(obj, null, 2));
+        atomicWriteFileSync(BRANCH_HISTORY_PATH, JSON.stringify(obj, null, 2));
     } catch (err) {
         console.error('Could not save branch-history.json:', err);
     }
@@ -5334,7 +5434,7 @@ async function loadBranchTransfers() {
     const fromStore = await getPersistentJSON('branch-transfers', null);
     if (fromStore !== null) return fromStore;
     try {
-        return JSON.parse(fs.readFileSync(BRANCH_TRANSFERS_PATH, 'utf8'));
+        return JSON.parse(readStateFileSync(BRANCH_TRANSFERS_PATH));
     } catch (err) {
         return {};
     }
@@ -5345,7 +5445,7 @@ function saveBranchTransfers(obj) {
         return;
     }
     try {
-        fs.writeFileSync(BRANCH_TRANSFERS_PATH, JSON.stringify(obj, null, 2));
+        atomicWriteFileSync(BRANCH_TRANSFERS_PATH, JSON.stringify(obj, null, 2));
     } catch (err) {
         console.error('Could not save branch-transfers.json:', err);
     }
@@ -5401,7 +5501,7 @@ async function loadReleaseBaselines() {
     const fromBuildDb = await buildKvGetJSON('release-baselines', null);
     if (fromBuildDb !== null) return new Map(Object.entries(fromBuildDb));
     try {
-        return new Map(Object.entries(JSON.parse(fs.readFileSync(RELEASE_BASELINES_PATH, 'utf8'))));
+        return new Map(Object.entries(JSON.parse(readStateFileSync(RELEASE_BASELINES_PATH))));
     } catch (err) {
         return new Map();
     }
@@ -5412,7 +5512,7 @@ async function saveReleaseBaselines(map) {
         return await buildKvSetJSON('release-baselines', obj);
     }
     try {
-        fs.writeFileSync(RELEASE_BASELINES_PATH, JSON.stringify(obj, null, 2));
+        atomicWriteFileSync(RELEASE_BASELINES_PATH, JSON.stringify(obj, null, 2));
         return true;
     } catch (err) {
         console.error('Hindi ma-save ang release-baselines.json:', err);
@@ -5425,7 +5525,7 @@ async function loadIntegrityStatus() {
     const fromBuildDb = await buildKvGetJSON('integrity-status', null);
     if (fromBuildDb !== null) return fromBuildDb;
     try {
-        return JSON.parse(fs.readFileSync(INTEGRITY_STATUS_PATH, 'utf8'));
+        return JSON.parse(readStateFileSync(INTEGRITY_STATUS_PATH));
     } catch (err) {
         return {};
     }
@@ -5436,7 +5536,7 @@ function saveIntegrityStatus(obj) {
         return;
     }
     try {
-        fs.writeFileSync(INTEGRITY_STATUS_PATH, JSON.stringify(obj, null, 2));
+        atomicWriteFileSync(INTEGRITY_STATUS_PATH, JSON.stringify(obj, null, 2));
     } catch (err) {
         console.error('Hindi ma-save ang integrity-status.json:', err);
     }
@@ -5477,7 +5577,7 @@ async function loadSystemVersionInfo() {
     const fromBuildDb = await buildKvGetJSON('system-version', null);
     if (fromBuildDb !== null) return fromBuildDb;
     try {
-        return JSON.parse(fs.readFileSync(SYSTEM_VERSION_PATH, 'utf8'));
+        return JSON.parse(readStateFileSync(SYSTEM_VERSION_PATH));
     } catch (err) {
         return { ...DEFAULT_SYSTEM_VERSION_INFO };
     }
@@ -5488,7 +5588,7 @@ function saveSystemVersionInfo(obj) {
         return;
     }
     try {
-        fs.writeFileSync(SYSTEM_VERSION_PATH, JSON.stringify(obj, null, 2));
+        atomicWriteFileSync(SYSTEM_VERSION_PATH, JSON.stringify(obj, null, 2));
     } catch (err) {
         console.error('Hindi ma-save ang system-version.json:', err);
     }
@@ -5499,7 +5599,7 @@ async function loadTargetedReleases() {
     const fromBuildDb = await buildKvGetJSON('targeted-releases', null);
     if (fromBuildDb !== null) return new Map(Object.entries(fromBuildDb));
     try {
-        const raw = fs.readFileSync(TARGETED_RELEASES_PATH, 'utf8');
+        const raw = readStateFileSync(TARGETED_RELEASES_PATH);
         return new Map(Object.entries(JSON.parse(raw)));
     } catch (err) {
         return new Map();
@@ -5510,7 +5610,7 @@ async function saveTargetedReleases(map) {
         return await buildKvSetJSON('targeted-releases', Object.fromEntries(map));
     }
     try {
-        fs.writeFileSync(TARGETED_RELEASES_PATH, JSON.stringify(Object.fromEntries(map), null, 2));
+        atomicWriteFileSync(TARGETED_RELEASES_PATH, JSON.stringify(Object.fromEntries(map), null, 2));
         return true;
     } catch (err) {
         console.error('Hindi ma-save ang targeted-releases.json:', err);
@@ -5523,7 +5623,7 @@ async function loadDownloadCodes() {
     const fromBuildDb = await buildKvGetJSON('download-codes', null);
     if (fromBuildDb !== null) return new Map(Object.entries(fromBuildDb));
     try {
-        const raw = fs.readFileSync(DOWNLOAD_CODES_PATH, 'utf8');
+        const raw = readStateFileSync(DOWNLOAD_CODES_PATH);
         const parsed = JSON.parse(raw);
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('hindi object ang laman');
         return new Map(Object.entries(parsed));
@@ -5540,10 +5640,8 @@ async function saveDownloadCodes(map) {
         return await buildKvSetJSON('download-codes', Object.fromEntries(map));
     }
     try {
-        // Atomic write (tmp + rename): hindi nasisira ang file kung maputol ang proseso sa gitna ng pagsulat.
-        const tmpPath = `${DOWNLOAD_CODES_PATH}.tmp`;
-        fs.writeFileSync(tmpPath, JSON.stringify(Object.fromEntries(map), null, 2));
-        fs.renameSync(tmpPath, DOWNLOAD_CODES_PATH);
+        // Atomic write (tmp + fsync + rename, with a .bak copy): the file cannot be left half-written if the process is cut off.
+        atomicWriteFileSync(DOWNLOAD_CODES_PATH, JSON.stringify(Object.fromEntries(map), null, 2));
         return true;
     } catch (err) {
         console.error('Hindi ma-save ang download-codes.json:', err);
@@ -5559,7 +5657,7 @@ async function loadBuildHistory() {
     const fromBuildDb = await buildKvGetJSON('build-history', null);
     if (fromBuildDb !== null) return Array.isArray(fromBuildDb) ? fromBuildDb : [];
     try {
-        const raw = fs.readFileSync(BUILD_HISTORY_PATH, 'utf8');
+        const raw = readStateFileSync(BUILD_HISTORY_PATH);
         const parsed = JSON.parse(raw);
         return Array.isArray(parsed) ? parsed : [];
     } catch (err) {
@@ -5571,7 +5669,7 @@ async function saveBuildHistory(list) {
         return await buildKvSetJSON('build-history', list);
     }
     try {
-        fs.writeFileSync(BUILD_HISTORY_PATH, JSON.stringify(list, null, 2));
+        atomicWriteFileSync(BUILD_HISTORY_PATH, JSON.stringify(list, null, 2));
         return true;
     } catch (err) {
         console.error('Hindi ma-save ang build-history.json:', err);
@@ -6388,7 +6486,7 @@ async function loadSuggestedDiscountPercent() {
     const fromStore = await getPersistentJSON('suggested-discount-percent', null);
     if (fromStore !== null && typeof fromStore === 'number') return fromStore;
     try {
-        const parsed = JSON.parse(fs.readFileSync(SUGGESTED_DISCOUNT_PERCENT_PATH, 'utf8'));
+        const parsed = JSON.parse(readStateFileSync(SUGGESTED_DISCOUNT_PERCENT_PATH));
         if (typeof parsed === 'number') return parsed;
     } catch (err) {   }
     return 30;
@@ -6399,7 +6497,7 @@ function saveSuggestedDiscountPercent(value) {
         return;
     }
     try {
-        fs.writeFileSync(SUGGESTED_DISCOUNT_PERCENT_PATH, JSON.stringify(value));
+        atomicWriteFileSync(SUGGESTED_DISCOUNT_PERCENT_PATH, JSON.stringify(value));
     } catch (err) {
         console.error('Hindi ma-save ang suggested-discount-percent.json:', err);
     }
@@ -6531,7 +6629,7 @@ async function loadActivationFlags() {
         };
     }
     try {
-        const parsed = JSON.parse(fs.readFileSync(ACTIVATION_FLAGS_PATH, 'utf8'));
+        const parsed = JSON.parse(readStateFileSync(ACTIVATION_FLAGS_PATH));
         if (parsed && typeof parsed === 'object') {
             return {
                 otpRequestsEnabled: parsed.otpRequestsEnabled !== false,
@@ -6547,7 +6645,7 @@ function saveActivationFlags(value) {
         return;
     }
     try {
-        fs.writeFileSync(ACTIVATION_FLAGS_PATH, JSON.stringify(value));
+        atomicWriteFileSync(ACTIVATION_FLAGS_PATH, JSON.stringify(value));
     } catch (err) {
         console.error('Hindi ma-save ang activation-flags.json:', err);
     }
@@ -6611,7 +6709,7 @@ async function loadFeatureAvailability() {
         if (fromStore && typeof fromStore === 'object') return normalizeFeatureAvailabilityMap(fromStore);
     } catch (err) {   }
     try {
-        return normalizeFeatureAvailabilityMap(JSON.parse(fs.readFileSync(FEATURE_AVAILABILITY_PATH, 'utf8')));
+        return normalizeFeatureAvailabilityMap(JSON.parse(readStateFileSync(FEATURE_AVAILABILITY_PATH)));
     } catch (err) {   }
     return {};
 }
@@ -6621,7 +6719,7 @@ function saveFeatureAvailability(value) {
         return;
     }
     try {
-        fs.writeFileSync(FEATURE_AVAILABILITY_PATH, JSON.stringify(value, null, 2));
+        atomicWriteFileSync(FEATURE_AVAILABILITY_PATH, JSON.stringify(value, null, 2));
     } catch (err) {
         console.error('Hindi ma-save ang feature-availability.json:', err);
     }
@@ -13018,7 +13116,7 @@ async function loadSupportDesk() {
     const fromStore = await getPersistentJSON('support-desk', null);
     if (fromStore && typeof fromStore === 'object') return normalize(fromStore);
     try {
-        return normalize(JSON.parse(fs.readFileSync(SUPPORT_DESK_PATH, 'utf8')));
+        return normalize(JSON.parse(readStateFileSync(SUPPORT_DESK_PATH)));
     } catch (err) { /* first run: stay closed */ }
     return { open: false, message: '' };
 }
@@ -13028,7 +13126,7 @@ function saveSupportDesk(value) {
         return;
     }
     try {
-        fs.writeFileSync(SUPPORT_DESK_PATH, JSON.stringify(value));
+        atomicWriteFileSync(SUPPORT_DESK_PATH, JSON.stringify(value));
     } catch (err) {
         console.error('Could not save support-desk.json:', err);
     }
@@ -16597,7 +16695,7 @@ async function loadCloudBackupActualBills() {
     const fromStore = await getPersistentJSON('cloud-backup-actual-bills', null);
     if (fromStore !== null) return fromStore;
     try {
-        return JSON.parse(fs.readFileSync(CLOUD_BACKUP_ACTUAL_BILLS_PATH, 'utf8'));
+        return JSON.parse(readStateFileSync(CLOUD_BACKUP_ACTUAL_BILLS_PATH));
     } catch (err) {
         return {};
     }
@@ -16612,7 +16710,7 @@ function saveCloudBackupActualBills(obj) {
         setPersistentJSON('cloud-backup-actual-bills', obj);
     }
     try {
-        fs.writeFileSync(CLOUD_BACKUP_ACTUAL_BILLS_PATH, JSON.stringify(obj, null, 2));
+        atomicWriteFileSync(CLOUD_BACKUP_ACTUAL_BILLS_PATH, JSON.stringify(obj, null, 2));
     } catch (err) {
         console.error('Hindi ma-save ang cloud-backup-actual-bills.json:', err);
     }
@@ -20535,7 +20633,7 @@ async function loadObfuscationCacheManifest() {
     const fromDb = await buildKvGetJSON(OBFUSCATION_CACHE_MANIFEST_KEY, null);
     let local = null;
     try {
-        const parsed = JSON.parse(fs.readFileSync(OBFUSCATION_CACHE_MANIFEST_PATH, 'utf8'));
+        const parsed = JSON.parse(readStateFileSync(OBFUSCATION_CACHE_MANIFEST_PATH));
         if (parsed && parsed.schemaVersion === 1 && parsed.entries && typeof parsed.entries === 'object') local = parsed;
     } catch (_) {}
     const validDb = fromDb && fromDb.schemaVersion === 1 && fromDb.entries && typeof fromDb.entries === 'object' ? fromDb : null;
