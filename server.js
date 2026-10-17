@@ -21036,6 +21036,33 @@ async function performBuildReleaseInner(reqBody, req, publishOverride) {
         }, shouldObfuscate, commitSha);
         const obfuscatedCount = obfuscationStats.processedCount;
         console.log(`🔐 Obfuscation summary: ${obfuscationStats.newlyProcessedCount} file(s) na kailangang i-process, ${obfuscationStats.reusedCount} cached output reused, ${obfuscatedCount} total file(s) processed.`);
+        // RELEASE SAFETY: bago i-zip at i-publish, siguraduhing hindi sira ang mismong code na ipapadala sa mga client
+        // (SyntaxError matapos ang obfuscation, o nawawalang ./module). Dati, unzip -t lang ang check kaya sirang
+        // server.js ay napupunta sa lahat ng client at nag-crash-loop ang POS nila.
+        {
+            for (const jsName of ['server.js', 'db.js']) {
+                const jsPath = path.join(tmpDir, jsName);
+                if (!fs.existsSync(jsPath)) continue;
+                try {
+                    execSync(`node --check "${jsPath}"`, { stdio: 'pipe' });
+                } catch (syntaxErr) {
+                    throw new Error(`HINDI ipa-publish ang release: may syntax error ang ${jsName} sa nabuong package. ${String(syntaxErr.stderr || syntaxErr.message).split('\n').slice(0, 4).join(' ')}`);
+                }
+            }
+            const releaseServerPath = path.join(tmpDir, 'server.js');
+            if (!fs.existsSync(releaseServerPath) || !fs.existsSync(path.join(tmpDir, 'package.json'))) {
+                throw new Error('HINDI ipa-publish ang release: walang server.js o package.json sa nabuong package.');
+            }
+            const releaseSrc = fs.readFileSync(releaseServerPath, 'utf8');
+            const missingLocalFiles = [];
+            for (const m of releaseSrc.matchAll(/require\(\s*['"](\.\/[A-Za-z0-9_.\/-]+)['"]\s*\)/g)) {
+                const rel = m[1];
+                if (![rel, rel + '.js', rel + '.json'].some(c => fs.existsSync(path.join(tmpDir, c))) && !missingLocalFiles.includes(rel)) missingLocalFiles.push(rel);
+            }
+            if (missingLocalFiles.length) {
+                throw new Error(`HINDI ipa-publish ang release: kulang ang mga file na kailangan ng server.js: ${missingLocalFiles.join(', ')}.`);
+            }
+        }
         setBuildProgress({ stage: 'zip', percent: BUILD_STEP_END_PERCENT.obfuscate, message: 'Ginagawa ang zip package...' });
         const releaseDir = path.dirname(RELEASE_PACKAGE_PATH);
         if (!fs.existsSync(releaseDir)) fs.mkdirSync(releaseDir, { recursive: true });
