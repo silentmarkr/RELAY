@@ -888,13 +888,17 @@ async function ensureReleasePackageFreshOnDisk() {
 // lang sa pgPoolBuild (hiwalay na Neon database) — walang Redis fallback
 // dito dahil sadyang isolated na dapat itong storage, at walang
 // pag-fallback sa pgPool/pgPoolDevices (iyon mismo ang iniiwasan).
-async function buildKvGetJSON(key, fallback) {
+async function buildKvGetJSON(key, fallback, { strict = false } = {}) {
     if (pgPoolBuild) {
         try {
             const result = await queryWithRetry(pgPoolBuild, 'SELECT value FROM relay_build_kv_store WHERE key = $1', [key]);
             if (result.rows.length > 0) return result.rows[0].value; 
         } catch (err) {
             console.error(`⚠️  Hindi mabasa sa Build Postgres store ang key "${key}":`, err.message);
+            // CRITICAL FIX (kapareho ng getPersistentJSON strict): ang build-history, download-codes, release-baselines,
+            // targeted-releases, integrity-status at system-version ay HINDI puwedeng magsimula nang blangko dahil lang
+            // pumalya ang pagbasa (Neon cold start/outage) — ang susunod na save ay MAGOOVERWRITE sa totoong datos.
+            if (strict) throw new Error(`Hindi mabasa sa Build Postgres ang kritikal na key "${key}": ${err.message}`);
         }
         return fallback;
     }
@@ -917,7 +921,7 @@ function buildKvSetJSON(key, value) {
         return false;
     });
 }
-async function getPersistentJSON(key, fallback) {
+async function getPersistentJSON(key, fallback, { strict = false } = {}) {
     // 1) Neon Postgres — pangunahing storage ngayon, laging persistent.
     const pool = pgPoolDevices || pgPool;
     if (pool) {
@@ -926,6 +930,12 @@ async function getPersistentJSON(key, fallback) {
             if (result.rows.length > 0) return result.rows[0].value; 
         } catch (err) {
             console.error(`⚠️  Hindi mabasa sa Postgres KV store ang key "${key}":`, err.message);
+            // CRITICAL FIX: sa strict mode (mga datos na PINAKAMAHALAGA, hal. issued-unlocks) HINDI puwedeng
+            // magpanggap na "walang laman" ang store dahil lang pumalya ang pagbasa (Neon cold start/outage).
+            // Kapag ginawa iyon, magbo-boot ang RELAY nang walang lisensya at (1) iko-lock ng bawat OMNIPOS client
+            // ang binayarang features nila at (2) ang susunod na save ay MAGOOVERWRITE sa totoong datos sa Postgres.
+            // Mas mabuting mag-fail ang boot (auto-restart ng host) kaysa magsimula sa maling blangkong estado.
+            if (strict) throw new Error(`Hindi mabasa sa Postgres ang kritikal na key "${key}": ${err.message}`);
         }
     }
     // 2) Redis — fallback lang ngayon (kung meron pang lumang datos dito
@@ -1481,7 +1491,10 @@ async function loadAllowedDevices() {
             const result = await queryWithRetry(pgPoolDevices, 'SELECT installation_id FROM relay_devices WHERE allowed = true', []);
             return new Set(result.rows.map(r => r.installation_id));
         } catch (err) {
-            console.error('⚠️  Hindi mabasa sa Postgres ang allowed-devices, babalik sa lokal na file:', err.message);
+            console.error('⚠️  Hindi mabasa sa Postgres ang allowed-devices:', err.message);
+            // CRITICAL FIX: huwag mag-fallback sa blangko/lumang lokal na file kapag naka-configure ang Postgres —
+            // ang susunod na save ay buburahin ang lahat ng totoong rows (UPDATE/DELETE batay sa in-memory na estado).
+            throw new Error('Hindi mabasa sa Postgres ang allowed-devices: ' + err.message);
         }
     }
     try {
@@ -1527,7 +1540,10 @@ async function loadDeviceLabels() {
             const result = await queryWithRetry(pgPoolDevices, 'SELECT installation_id, label FROM relay_devices WHERE label IS NOT NULL', []);
             return new Map(result.rows.map(r => [r.installation_id, r.label]));
         } catch (err) {
-            console.error('⚠️  Hindi mabasa sa Postgres ang device-labels, babalik sa lokal na file:', err.message);
+            console.error('⚠️  Hindi mabasa sa Postgres ang device-labels:', err.message);
+            // CRITICAL FIX: huwag mag-fallback sa blangko/lumang lokal na file kapag naka-configure ang Postgres —
+            // ang susunod na save ay buburahin ang lahat ng totoong rows (UPDATE/DELETE batay sa in-memory na estado).
+            throw new Error('Hindi mabasa sa Postgres ang device-labels: ' + err.message);
         }
     }
     try {
@@ -1580,7 +1596,10 @@ async function loadDeviceFingerprints() {
             const result = await queryWithRetry(pgPoolDevices, 'SELECT * FROM relay_device_fingerprints', []);
             return new Map(result.rows.map(r => [r.installation_id, fingerprintRowToRecord(r)]));
         } catch (err) {
-            console.error('⚠️  Hindi mabasa sa Postgres ang device-fingerprints, babalik sa lokal na file:', err.message);
+            console.error('⚠️  Hindi mabasa sa Postgres ang device-fingerprints:', err.message);
+            // CRITICAL FIX: huwag mag-fallback sa blangko/lumang lokal na file kapag naka-configure ang Postgres —
+            // ang susunod na save ay buburahin ang lahat ng totoong rows (UPDATE/DELETE batay sa in-memory na estado).
+            throw new Error('Hindi mabasa sa Postgres ang device-fingerprints: ' + err.message);
         }
     }
     try {
@@ -1632,7 +1651,10 @@ async function loadCloneSplits() {
                 splitAt: r.split_at ? new Date(r.split_at).getTime() : undefined
             }]));
         } catch (err) {
-            console.error('⚠️  Hindi mabasa sa Postgres ang clone-splits, babalik sa lokal na file:', err.message);
+            console.error('⚠️  Hindi mabasa sa Postgres ang clone-splits:', err.message);
+            // CRITICAL FIX: huwag mag-fallback sa blangko/lumang lokal na file kapag naka-configure ang Postgres —
+            // ang susunod na save ay buburahin ang lahat ng totoong rows (UPDATE/DELETE batay sa in-memory na estado).
+            throw new Error('Hindi mabasa sa Postgres ang clone-splits: ' + err.message);
         }
     }
     try {
@@ -1770,7 +1792,7 @@ const CLOUD_BACKUP_MAX_AUTO_BACKUP_INTERVAL_MS = 30 * 24 * 60 * 60 * 1000;
 const CLOUD_BACKUP_BILLING_DAYS = { monthly: 30, yearly: 365 };
 const CLOUD_BACKUP_PLAN_OVERRIDES_PATH = path.join(__dirname, 'cloud-backup-plan-overrides.json');
 async function loadCloudBackupPlanOverrides() {
-    const fromStore = await getPersistentJSON('cloud-backup-plan-overrides', null);
+    const fromStore = await getPersistentJSON('cloud-backup-plan-overrides', null, { strict: true });
     if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(readStateFileSync(CLOUD_BACKUP_PLAN_OVERRIDES_PATH));
@@ -3775,7 +3797,7 @@ const SUBSCRIPTION_GRACE_PERIOD_DEFAULTS = {
 };
 const SUBSCRIPTION_GRACE_PERIOD_SETTINGS_PATH = path.join(__dirname, 'subscription-grace-period-settings.json');
 async function loadSubscriptionGracePeriodSettings() {
-    const fromStore = await getPersistentJSON('subscription-grace-period-settings', null);
+    const fromStore = await getPersistentJSON('subscription-grace-period-settings', null, { strict: true });
     if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(readStateFileSync(SUBSCRIPTION_GRACE_PERIOD_SETTINGS_PATH));
@@ -3815,7 +3837,7 @@ function recomputeSubscriptionGracePeriodSettings() {
 }
 const MODULE_SUBSCRIPTION_OVERRIDES_PATH = path.join(__dirname, 'module-subscription-overrides.json');
 async function loadModuleSubscriptionOverrides() {
-    const fromStore = await getPersistentJSON('module-subscription-overrides', null);
+    const fromStore = await getPersistentJSON('module-subscription-overrides', null, { strict: true });
     if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(readStateFileSync(MODULE_SUBSCRIPTION_OVERRIDES_PATH));
@@ -3978,7 +4000,7 @@ const NEON_PRICING_BASE = {
 };
 const NEON_PRICING_OVERRIDES_PATH = path.join(__dirname, 'neon-pricing-overrides.json');
 async function loadNeonPricingOverrides() {
-    const fromStore = await getPersistentJSON('neon-pricing-overrides', null);
+    const fromStore = await getPersistentJSON('neon-pricing-overrides', null, { strict: true });
     if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(readStateFileSync(NEON_PRICING_OVERRIDES_PATH));
@@ -4115,7 +4137,7 @@ function recomputeNeonPricing() {
 // (kung free) o rate (kung paid) ang dapat gamitin sa computation.
 const NEON_CONFIGURED_PLAN_PATH = path.join(__dirname, 'neon-configured-plans.json');
 async function loadNeonConfiguredPlans() {
-    const fromStore = await getPersistentJSON('neon-configured-plans', null);
+    const fromStore = await getPersistentJSON('neon-configured-plans', null, { strict: true });
     if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(readStateFileSync(NEON_CONFIGURED_PLAN_PATH));
@@ -4179,7 +4201,7 @@ let neonConfiguredPlans = { cloudBackup: 'free', devices: 'free', build: 'free' 
 // ===================================================================
 const COST_SAFETY_NET_SIMULATED_TIER_PATH = path.join(__dirname, 'cost-safety-net-simulated-tier.json');
 async function loadCostSafetyNetSimulatedTier() {
-    const fromStore = await getPersistentJSON('cost-safety-net-simulated-tier', null);
+    const fromStore = await getPersistentJSON('cost-safety-net-simulated-tier', null, { strict: true });
     if (fromStore !== null) return (fromStore && fromStore.tier) || null;
     try {
         const parsed = JSON.parse(readStateFileSync(COST_SAFETY_NET_SIMULATED_TIER_PATH));
@@ -4221,7 +4243,7 @@ const DEVICES_REFERENCE_TIER_DEFAULT = 'scale';
 let devicesCostReferenceTier = DEVICES_REFERENCE_TIER_DEFAULT;
 async function loadDevicesCostReferenceTier() {
     let tier = null;
-    const fromStore = await getPersistentJSON('devices-cost-reference-tier', null);
+    const fromStore = await getPersistentJSON('devices-cost-reference-tier', null, { strict: true });
     if (fromStore !== null) {
         tier = fromStore && fromStore.tier;
     } else {
@@ -4262,7 +4284,7 @@ function isValidDevicesReferenceTier(tierId) {
 const CLIENT_MAINTENANCE_FEE_PATH = path.join(__dirname, 'client-maintenance-fee.json');
 const CLIENT_MAINTENANCE_FEE_DEFAULT = { defaultFeePHP: 150, perClientOverridePHP: {} };
 async function loadClientMaintenanceFeeConfig() {
-    const fromStore = await getPersistentJSON('client-maintenance-fee', null);
+    const fromStore = await getPersistentJSON('client-maintenance-fee', null, { strict: true });
     if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(readStateFileSync(CLIENT_MAINTENANCE_FEE_PATH));
@@ -4297,7 +4319,7 @@ function getMaintenanceFeeForClient(installationId) {
 // lang mismo (Date.now() vs paidUntil) ang sinusunod.
 const CLIENT_MAINTENANCE_FEE_PAID_UNTIL_PATH = path.join(__dirname, 'client-maintenance-fee-paid-until.json');
 async function loadClientMaintenanceFeePaidUntil() {
-    const fromStore = await getPersistentJSON('client-maintenance-fee-paid-until', null);
+    const fromStore = await getPersistentJSON('client-maintenance-fee-paid-until', null, { strict: true });
     if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(readStateFileSync(CLIENT_MAINTENANCE_FEE_PAID_UNTIL_PATH));
@@ -5049,7 +5071,7 @@ async function computeClientCostAllocation(simulatedTierOverride) {
 }
 const FEATURE_CATALOG_OVERRIDES_PATH = path.join(__dirname, 'feature-catalog-overrides.json');
 async function loadFeatureCatalogOverrides() {
-    const fromStore = await getPersistentJSON('feature-catalog-overrides', null);
+    const fromStore = await getPersistentJSON('feature-catalog-overrides', null, { strict: true });
     if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(readStateFileSync(FEATURE_CATALOG_OVERRIDES_PATH));
@@ -5071,7 +5093,7 @@ function saveFeatureCatalogOverrides(obj) {
 let featureCatalogOverrides = {}; 
 const FEATURE_PRICING_OVERRIDES_PATH = path.join(__dirname, 'feature-pricing-overrides.json');
 async function loadFeaturePricingOverrides() {
-    const fromStore = await getPersistentJSON('feature-pricing-overrides', null);
+    const fromStore = await getPersistentJSON('feature-pricing-overrides', null, { strict: true });
     if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(readStateFileSync(FEATURE_PRICING_OVERRIDES_PATH));
@@ -5093,7 +5115,7 @@ function saveFeaturePricingOverrides(obj) {
 const UPGRADE_TIER_BUNDLE_PRICE_BASE = { basic: 999, standard: 1999, pro: 3599 };
 const UPGRADE_TIER_PRICING_OVERRIDES_PATH = path.join(__dirname, 'upgrade-tier-pricing-overrides.json');
 async function loadUpgradeTierPricingOverrides() {
-    const fromStore = await getPersistentJSON('upgrade-tier-pricing-overrides', null);
+    const fromStore = await getPersistentJSON('upgrade-tier-pricing-overrides', null, { strict: true });
     if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(readStateFileSync(UPGRADE_TIER_PRICING_OVERRIDES_PATH));
@@ -5184,7 +5206,7 @@ function registerFeatureIfUnknown(featureId, meta = {}, installationId = null) {
 }
 const ISSUED_UNLOCKS_PATH = path.join(__dirname, 'issued-unlocks.json');
 async function loadIssuedUnlocks() {
-    const fromStore = await getPersistentJSON('issued-unlocks', null);
+    const fromStore = await getPersistentJSON('issued-unlocks', null, { strict: true });
     if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(readStateFileSync(ISSUED_UNLOCKS_PATH));
@@ -5224,7 +5246,7 @@ function recordIssuedUnlock(installationId, featureId, token, meta = {}) {
 const ACTIVITY_LOG_PATH = path.join(__dirname, 'activity-log.json');
 const ACTIVITY_LOG_MAX = 500;
 async function loadActivityLog() {
-    const fromStore = await getPersistentJSON('activity-log', null);
+    const fromStore = await getPersistentJSON('activity-log', null, { strict: true });
     if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(readStateFileSync(ACTIVITY_LOG_PATH));
@@ -5291,7 +5313,7 @@ function logActivity(installationId, type, details = {}) {
 }
 const BACKUP_CHECKINS_PATH = path.join(__dirname, 'backup-checkins.json');
 async function loadBackupCheckins() {
-    const fromStore = await getPersistentJSON('backup-checkins', null);
+    const fromStore = await getPersistentJSON('backup-checkins', null, { strict: true });
     if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(readStateFileSync(BACKUP_CHECKINS_PATH));
@@ -5313,7 +5335,7 @@ function saveBackupCheckins(obj) {
 let backupCheckins = {}; 
 const BRANCH_SUMMARIES_PATH = path.join(__dirname, 'branch-summaries.json');
 async function loadBranchSummaries() {
-    const fromStore = await getPersistentJSON('branch-summaries', null);
+    const fromStore = await getPersistentJSON('branch-summaries', null, { strict: true });
     if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(readStateFileSync(BRANCH_SUMMARIES_PATH));
@@ -5396,7 +5418,7 @@ function sanitizeEncryptedBlob(raw) {
 // === Multi-Branch: hourly trend history (PRO) ===
 const BRANCH_HISTORY_PATH = path.join(__dirname, 'branch-history.json');
 async function loadBranchHistory() {
-    const fromStore = await getPersistentJSON('branch-history', null);
+    const fromStore = await getPersistentJSON('branch-history', null, { strict: true });
     if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(readStateFileSync(BRANCH_HISTORY_PATH));
@@ -5431,7 +5453,7 @@ function appendBranchHistoryPoint(groupKeyHash, installationId, summary) {
 // === Multi-Branch: stock transfer requests (PRO) ===
 const BRANCH_TRANSFERS_PATH = path.join(__dirname, 'branch-transfers.json');
 async function loadBranchTransfers() {
-    const fromStore = await getPersistentJSON('branch-transfers', null);
+    const fromStore = await getPersistentJSON('branch-transfers', null, { strict: true });
     if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(readStateFileSync(BRANCH_TRANSFERS_PATH));
@@ -5498,7 +5520,7 @@ function buildFileManifest(rootDir) {
 }
 const RELEASE_BASELINES_PATH = path.join(__dirname, 'release-baselines.json');
 async function loadReleaseBaselines() {
-    const fromBuildDb = await buildKvGetJSON('release-baselines', null);
+    const fromBuildDb = await buildKvGetJSON('release-baselines', null, { strict: true });
     if (fromBuildDb !== null) return new Map(Object.entries(fromBuildDb));
     try {
         return new Map(Object.entries(JSON.parse(readStateFileSync(RELEASE_BASELINES_PATH))));
@@ -5522,7 +5544,7 @@ async function saveReleaseBaselines(map) {
 let releaseBaselines = new Map(); 
 const INTEGRITY_STATUS_PATH = path.join(__dirname, 'integrity-status.json');
 async function loadIntegrityStatus() {
-    const fromBuildDb = await buildKvGetJSON('integrity-status', null);
+    const fromBuildDb = await buildKvGetJSON('integrity-status', null, { strict: true });
     if (fromBuildDb !== null) return fromBuildDb;
     try {
         return JSON.parse(readStateFileSync(INTEGRITY_STATUS_PATH));
@@ -5574,7 +5596,7 @@ const pendingIntegrityChecks = new Set();
 const SYSTEM_VERSION_PATH = path.join(__dirname, 'system-version.json');
 const DEFAULT_SYSTEM_VERSION_INFO = { version: '0.0.0', changelog: '', publishedAt: null };
 async function loadSystemVersionInfo() {
-    const fromBuildDb = await buildKvGetJSON('system-version', null);
+    const fromBuildDb = await buildKvGetJSON('system-version', null, { strict: true });
     if (fromBuildDb !== null) return fromBuildDb;
     try {
         return JSON.parse(readStateFileSync(SYSTEM_VERSION_PATH));
@@ -5596,7 +5618,7 @@ function saveSystemVersionInfo(obj) {
 let systemVersionInfo = { ...DEFAULT_SYSTEM_VERSION_INFO }; 
 const TARGETED_RELEASES_PATH = path.join(__dirname, 'targeted-releases.json');
 async function loadTargetedReleases() {
-    const fromBuildDb = await buildKvGetJSON('targeted-releases', null);
+    const fromBuildDb = await buildKvGetJSON('targeted-releases', null, { strict: true });
     if (fromBuildDb !== null) return new Map(Object.entries(fromBuildDb));
     try {
         const raw = readStateFileSync(TARGETED_RELEASES_PATH);
@@ -5620,7 +5642,7 @@ async function saveTargetedReleases(map) {
 let targetedReleases = new Map(); 
 const DOWNLOAD_CODES_PATH = path.join(__dirname, 'download-codes.json');
 async function loadDownloadCodes() {
-    const fromBuildDb = await buildKvGetJSON('download-codes', null);
+    const fromBuildDb = await buildKvGetJSON('download-codes', null, { strict: true });
     if (fromBuildDb !== null) return new Map(Object.entries(fromBuildDb));
     try {
         const raw = readStateFileSync(DOWNLOAD_CODES_PATH);
@@ -5654,7 +5676,7 @@ const RELEASE_PACKAGE_TMP_PATH = path.join(__dirname, 'release', '.omnipos-clien
 const BUILD_HISTORY_PATH = path.join(__dirname, 'build-history.json');
 const BUILD_HISTORY_MAX_ENTRIES = 100;
 async function loadBuildHistory() {
-    const fromBuildDb = await buildKvGetJSON('build-history', null);
+    const fromBuildDb = await buildKvGetJSON('build-history', null, { strict: true });
     if (fromBuildDb !== null) return Array.isArray(fromBuildDb) ? fromBuildDb : [];
     try {
         const raw = readStateFileSync(BUILD_HISTORY_PATH);
@@ -6483,7 +6505,7 @@ app.post('/relay/admin/api/pricing/features/reset', requireAdminKey, (req, res) 
 let SUGGESTED_DISCOUNT_PERCENT = 30;
 const SUGGESTED_DISCOUNT_PERCENT_PATH = path.join(__dirname, 'suggested-discount-percent.json');
 async function loadSuggestedDiscountPercent() {
-    const fromStore = await getPersistentJSON('suggested-discount-percent', null);
+    const fromStore = await getPersistentJSON('suggested-discount-percent', null, { strict: true });
     if (fromStore !== null && typeof fromStore === 'number') return fromStore;
     try {
         const parsed = JSON.parse(readStateFileSync(SUGGESTED_DISCOUNT_PERCENT_PATH));
@@ -6621,7 +6643,7 @@ app.post('/relay/admin/api/pricing/suggested-discount-percent', requireAdminKey,
 let ACTIVATION_FLAGS = { otpRequestsEnabled: true, omniTokenActivationEnabled: true };
 const ACTIVATION_FLAGS_PATH = path.join(__dirname, 'activation-flags.json');
 async function loadActivationFlags() {
-    const fromStore = await getPersistentJSON('activation-flags', null);
+    const fromStore = await getPersistentJSON('activation-flags', null, { strict: true });
     if (fromStore && typeof fromStore === 'object') {
         return {
             otpRequestsEnabled: fromStore.otpRequestsEnabled !== false,
@@ -6704,8 +6726,9 @@ function normalizeFeatureAvailabilityMap(raw) {
     return out;
 }
 async function loadFeatureAvailability() {
+    // strict: kapag pumalya ang pagbasa sa Postgres, HUWAG magpanggap na walang laman (mao-overwrite ang totoong datos sa susunod na save).
+    const fromStore = await getPersistentJSON('feature-availability', null, { strict: true });
     try {
-        const fromStore = await getPersistentJSON('feature-availability', null);
         if (fromStore && typeof fromStore === 'object') return normalizeFeatureAvailabilityMap(fromStore);
     } catch (err) {   }
     try {
@@ -8701,11 +8724,24 @@ function normalizeAiProviderConfig(src) {
         }
     };
 }
-async function getAiProviderConfig() {
+// Binabasa ang isang AI setting nang STRICT. { ok:false } = pumalya ang pagbasa sa Postgres (hindi ito ang "wala pang laman").
+async function readAiSettingStrict(key) {
+    try { return { ok: true, value: await getPersistentJSON(key, null, { strict: true }) }; }
+    catch (err) { return { ok: false, value: null }; }
+}
+// CRITICAL FIX: dati, kapag pumalya ang pagbasa (Neon blip), ang DEFAULT na settings ang naka-cache hanggang mag-restart ang RELAY,
+// at ang susunod na save ng admin (na bumabase sa cache) ay MAGOOVERWRITE sa totoong settings (plan/neuron splits, presyo, atbp.).
+// Ngayon: hindi na-cache ang default kapag pumalya ang pagbasa (susubukan ulit sa susunod), at ang SAVE ({ forSave: true })
+// ay tumatanggi (503) hangga't hindi nababasa nang tama ang kasalukuyang settings.
+async function getAiProviderConfig({ forSave = false } = {}) {
     if (aiProviderConfigCache) return aiProviderConfigCache;
-    let stored = null;
-    try { stored = await getPersistentJSON('ai-provider-config', null); } catch (_) { stored = null; }
-    aiProviderConfigCache = normalizeAiProviderConfig(stored);
+    const r = await readAiSettingStrict('ai-provider-config');
+    const normalized = normalizeAiProviderConfig(r.value);
+    if (!r.ok) {
+        if (forSave) throw new Error('Hindi mabasa ang kasalukuyang AI provider settings — hindi ligtas mag-save ngayon.');
+        return normalized;
+    }
+    aiProviderConfigCache = normalized;
     return aiProviderConfigCache;
 }
 function googleModelId(cfg, key) {
@@ -11532,7 +11568,7 @@ app.post('/relay/admin/api/ai-providers/restore-model', requireAdminKey, async (
         const trash = await getAiModelTrash();
         const idx = trash.findIndex((t) => t.key === key);
         if (idx < 0) return res.status(404).json({ success: false, message: 'That model is no longer in the deleted list (deleted models are kept for 24 hours).' });
-        const cur = await getAiProviderConfig();
+        const cur = await getAiProviderConfig({ forSave: true });
         const item = trash[idx];
         let newKey = item.key;
         if (cur.google.models[newKey]) newKey = (String(item.key).slice(0, 48) + '_r' + Date.now().toString(36)).slice(0, 60);
@@ -11572,7 +11608,7 @@ app.get('/relay/admin/api/ai-providers', requireAdminKey, async (req, res) => {
 });
 app.post('/relay/admin/api/ai-providers/settings', requireAdminKey, async (req, res) => {
     try {
-        const cur = await getAiProviderConfig();
+        const cur = await getAiProviderConfig({ forSave: true });
         const b = (req.body && typeof req.body === 'object') ? req.body : {};
         const bg = (b.google && typeof b.google === 'object') ? b.google : {};
         const bm = (bg.models && typeof bg.models === 'object' && !Array.isArray(bg.models)) ? bg.models : {};
@@ -11857,11 +11893,15 @@ function normalizeAiEconSettings(src) {
     };
 }
 let aiEconSettingsCache = null;
-async function getAiEconSettings() {
+async function getAiEconSettings({ forSave = false } = {}) {
     if (aiEconSettingsCache) return aiEconSettingsCache;
-    let stored = null;
-    try { stored = await getPersistentJSON('ai-econ-settings', null); } catch (_) { stored = null; }
-    aiEconSettingsCache = normalizeAiEconSettings(stored);
+    const r = await readAiSettingStrict('ai-econ-settings');
+    const normalized = normalizeAiEconSettings(r.value);
+    if (!r.ok) {
+        if (forSave) throw new Error('Hindi mabasa ang kasalukuyang AI economics settings — hindi ligtas mag-save ngayon.');
+        return normalized;
+    }
+    aiEconSettingsCache = normalized;
     return aiEconSettingsCache;
 }
 let aiFxState = { rate: 0, at: 0, lastTryAt: 0, error: '' };
@@ -12410,7 +12450,7 @@ app.post('/relay/admin/api/ai-providers/economics', requireAdminKey, async (req,
     try {
         const b = (req.body && typeof req.body === 'object') ? req.body : {};
         const cfg = await getAiProviderConfig();
-        const stored = await getAiEconSettings();
+        const stored = await getAiEconSettings({ forSave: b.save === true });
         const settings = normalizeAiEconSettings({ ...stored, ...((b.settings && typeof b.settings === 'object') ? b.settings : {}) });
         if (b.save === true) {
             await recordAiProviderAudit(req, 'calculator', diffAiPrimitiveFields('Calculator', stored, settings));
@@ -12611,11 +12651,15 @@ function normalizeAiNeuronSettings(src) {
         outputNeuronsPerM: num(s.outputNeuronsPerM, AI_NEURON_DEFAULTS.outputNeuronsPerM, 0, 100000000)
     };
 }
-async function getAiNeuronSettings() {
+async function getAiNeuronSettings({ forSave = false } = {}) {
     if (aiNeuronSettingsCache) return aiNeuronSettingsCache;
-    let stored = null;
-    try { stored = await getPersistentJSON('ai-neuron-settings', null); } catch (_) { stored = null; }
-    aiNeuronSettingsCache = normalizeAiNeuronSettings(stored);
+    const r = await readAiSettingStrict('ai-neuron-settings');
+    const normalized = normalizeAiNeuronSettings(r.value);
+    if (!r.ok) {
+        if (forSave) throw new Error('Hindi mabasa ang kasalukuyang neuron settings — hindi ligtas mag-save ngayon.');
+        return normalized;
+    }
+    aiNeuronSettingsCache = normalized;
     return aiNeuronSettingsCache;
 }
 function aiNeuronsPerQuestion(s) {
@@ -12702,7 +12746,7 @@ app.get('/relay/admin/api/ai-neurons', requireAdminKey, async (req, res) => {
 });
 app.post('/relay/admin/api/ai-neurons/settings', requireAdminKey, async (req, res) => {
     try {
-        const cur = await getAiNeuronSettings();
+        const cur = await getAiNeuronSettings({ forSave: true });
         const b = req.body || {};
         const ranges = {
             paidDailyNeurons: [CF_FREE_NEURONS_PER_DAY, 1000000000],
@@ -12787,8 +12831,10 @@ function ensureAiUsageDay() {
     scheduleAiUsageSave();
 }
 async function loadAiUsageStats() {
+    // CRITICAL FIX: strict — kapag pumalya ang pagbasa (Neon blip), HUWAG magsimula sa 0 neurons ngayong araw: ang susunod na
+    // save ay magbubura sa totoong bilang at mapapalampas ang 10k neuron/day na limit ng Cloudflare. Mas mabuting mag-fail ang boot.
+    const v = await getPersistentJSON('ai-usage-stats', null, { strict: true });
     try {
-        const v = await getPersistentJSON('ai-usage-stats', null);
         // Kung may nauna nang request na nabilang bago natapos ang load na ito, huwag nang i-overwrite.
         if (v && typeof v === 'object' && v.stats && typeof v.stats === 'object' && aiUsageStats.questions === 0 && aiUsageStats.failed === 0 && aiUsageStats.neurons === 0) {
             const st = v.stats;
@@ -13113,7 +13159,7 @@ async function loadSupportDesk() {
         open: !!(v && v.open === true),
         message: (v && typeof v.message === 'string') ? v.message.trim().slice(0, 300) : ''
     });
-    const fromStore = await getPersistentJSON('support-desk', null);
+    const fromStore = await getPersistentJSON('support-desk', null, { strict: true });
     if (fromStore && typeof fromStore === 'object') return normalize(fromStore);
     try {
         return normalize(JSON.parse(readStateFileSync(SUPPORT_DESK_PATH)));
@@ -16692,7 +16738,7 @@ app.post('/relay/admin/api/cost-safety-net/simulated-tier', requireAdminKey, (re
 // ===================================================================
 const CLOUD_BACKUP_ACTUAL_BILLS_PATH = path.join(__dirname, 'cloud-backup-actual-bills.json');
 async function loadCloudBackupActualBills() {
-    const fromStore = await getPersistentJSON('cloud-backup-actual-bills', null);
+    const fromStore = await getPersistentJSON('cloud-backup-actual-bills', null, { strict: true });
     if (fromStore !== null) return fromStore;
     try {
         return JSON.parse(readStateFileSync(CLOUD_BACKUP_ACTUAL_BILLS_PATH));
@@ -19505,7 +19551,7 @@ const RECEIPT_CREDIT_PRICING_DEFAULT = {
 };
 let receiptCreditPricing = { ...RECEIPT_CREDIT_PRICING_DEFAULT };
 async function loadReceiptCreditPricing() {
-    const stored = await getPersistentJSON(RECEIPT_CREDIT_PRICING_KEY, null);
+    const stored = await getPersistentJSON(RECEIPT_CREDIT_PRICING_KEY, null, { strict: true });
     if (stored && typeof stored === 'object') receiptCreditPricing = { ...RECEIPT_CREDIT_PRICING_DEFAULT, ...stored };
     return receiptCreditPricing;
 }
