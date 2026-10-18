@@ -84,23 +84,76 @@ function sniffMime(buf) {
 }
 
 // ------------------------------------------------------------ token encryption
-function tokenKey() {
-    const secret = process.env.MARKETPLACE_TOKEN_KEY || process.env.RELAY_API_KEY || 'omnipos-dev-only-key';
+function keyFromSecret(secret) {
     return crypto.createHash('sha256').update(String(secret)).digest();
+}
+// SECURITY FIX: dati ay may hardcoded na fallback na 'omnipos-dev-only-key' — kapag nakalimutang i-set ang env sa production,
+// lahat ng seller token ay naka-encrypt gamit ang key na nasa source code. Ngayon, sa production ay REQUIRED ang
+// MARKETPLACE_TOKEN_KEY (o RELAY_API_KEY bilang huling pagpipilian, may babala); ang dev key ay para lang sa non-production.
+// KEY ROTATION: ang MARKETPLACE_TOKEN_KEY_PREVIOUS (comma-separated) ay sinusubukan lang sa pag-decrypt, para hindi mawala ang lahat
+// ng naka-save na token kapag nagpalit ng key o ng RELAY_API_KEY.
+let tokenKeyWarned = false;
+// "Production-like": NODE_ENV=production, O may DATABASE_URL (ibig sabihin totoong deployment ito at hindi dev laptop). Kung hindi
+// naka-set ang NODE_ENV sa host, nawawalan ng silbi ang production check — kaya idinagdag ang DATABASE_URL signal.
+// MARKETPLACE_ALLOW_DEV_KEY=1 lang ang paraan para pilitin ang dev key sa ganitong deployment (huwag gamitin sa live).
+function isProductionLike() {
+    if (String(process.env.NODE_ENV || '').toLowerCase() === 'production') return true;
+    return !!process.env.DATABASE_URL && String(process.env.MARKETPLACE_ALLOW_DEV_KEY || '') !== '1';
+}
+const LEGACY_DEV_TOKEN_SECRET = 'omnipos-dev-only-key';
+function tokenKeys() {
+    const primary = process.env.MARKETPLACE_TOKEN_KEY || process.env.RELAY_API_KEY;
+    if (!primary) {
+        // Malinaw na 503 (hindi generic na 500) para alam ng admin kung ano ang kulang.
+        if (isProductionLike()) throw new MarketplaceError('Marketplace token encryption is not configured on the server (set MARKETPLACE_TOKEN_KEY).', { code: 'NOT_CONFIGURED', status: 503 });
+        if (!tokenKeyWarned) { tokenKeyWarned = true; console.warn('⚠️ Marketplace: walang MARKETPLACE_TOKEN_KEY — dev-only key ang gamit (HUWAG sa production).'); }
+    } else if (!process.env.MARKETPLACE_TOKEN_KEY && !tokenKeyWarned) {
+        tokenKeyWarned = true;
+        console.warn('⚠️ Marketplace: walang MARKETPLACE_TOKEN_KEY — RELAY_API_KEY ang gamit na pang-encrypt. Mawawala ang access sa mga token kapag nagpalit ng RELAY_API_KEY. Mag-set ng hiwalay na MARKETPLACE_TOKEN_KEY.');
+    }
+    const secrets = [primary || LEGACY_DEV_TOKEN_SECRET];
+    String(process.env.MARKETPLACE_TOKEN_KEY_PREVIOUS || '').split(',').map((x) => x.trim()).filter(Boolean).forEach((x) => secrets.push(x));
+    if (process.env.MARKETPLACE_TOKEN_KEY && process.env.RELAY_API_KEY) secrets.push(process.env.RELAY_API_KEY);
+    // MIGRATION: ang mga token na na-encrypt ng lumang bersyon na walang naka-set na key ay gumamit ng 'omnipos-dev-only-key'. Para hindi
+    // sila mawala (at kailanganing mag-reconnect ang lahat ng seller) kapag nag-set na ng tamang key, sinusubukan din ito PERO PARA SA
+    // PAG-DECRYPT LAMANG — hindi ito kailanman ginagamit na pang-encrypt, at ang token ay awtomatikong ire-re-encrypt gamit ang bagong key
+    // pagkatapos ng unang matagumpay na paggamit. I-disable gamit ang MARKETPLACE_DISABLE_LEGACY_DEV_KEY=1 kapag wala nang lumang token.
+    if (String(process.env.MARKETPLACE_DISABLE_LEGACY_DEV_KEY || '') !== '1') secrets.push(LEGACY_DEV_TOKEN_SECRET);
+    const seen = new Set();
+    const keys = [];
+    for (const secret of secrets) {
+        const key = keyFromSecret(secret);
+        const id = key.toString('hex');
+        if (seen.has(id)) continue;
+        seen.add(id);
+        keys.push(key);
+    }
+    return keys;
 }
 function encryptSecret(plain) {
     if (!plain) return null;
     const iv = crypto.randomBytes(12);
-    const c = crypto.createCipheriv('aes-256-gcm', tokenKey(), iv);
+    const c = crypto.createCipheriv('aes-256-gcm', tokenKeys()[0], iv);
     const ct = Buffer.concat([c.update(String(plain), 'utf8'), c.final()]);
     return Buffer.concat([iv, c.getAuthTag(), ct]).toString('base64');
 }
-function decryptSecret(blob) {
-    if (!blob) return null;
+// keyIndex 0 = pangunahing key; > 0 = lumang key (kailangan i-re-encrypt gamit ang bagong key).
+function decryptSecretMeta(blob) {
+    if (!blob) return { value: null, keyIndex: 0 };
     const raw = Buffer.from(String(blob), 'base64');
-    const d = crypto.createDecipheriv('aes-256-gcm', tokenKey(), raw.slice(0, 12));
-    d.setAuthTag(raw.slice(12, 28));
-    return Buffer.concat([d.update(raw.slice(28)), d.final()]).toString('utf8');
+    let lastErr = null;
+    const keys = tokenKeys();
+    for (let i = 0; i < keys.length; i++) {
+        try {
+            const d = crypto.createDecipheriv('aes-256-gcm', keys[i], raw.slice(0, 12));
+            d.setAuthTag(raw.slice(12, 28));
+            return { value: Buffer.concat([d.update(raw.slice(28)), d.final()]).toString('utf8'), keyIndex: i };
+        } catch (e) { lastErr = e; }
+    }
+    throw lastErr || new Error('Cannot decrypt stored marketplace secret.');
+}
+function decryptSecret(blob) {
+    return decryptSecretMeta(blob).value;
 }
 
 // --------------------------------------------------------------- status maps
@@ -123,7 +176,8 @@ const TIKTOK_STATUS = {
 // ============================================================ SHOPEE ADAPTER
 const shopee = {
     id: 'shopee',
-    label: 'Shopee',
+    // BUGFIX: dating `label: 'Shopee'` — nabubura ito ng `async label(...)` (shipping label) sa parehong object, kaya function source ang lumalabas sa mga mensahe.
+    title: 'Shopee',
     cfg() {
         return {
             partnerId: process.env.SHOPEE_PARTNER_ID || '',
@@ -349,7 +403,8 @@ const shopee = {
 // ============================================================ LAZADA ADAPTER
 const lazada = {
     id: 'lazada',
-    label: 'Lazada',
+    // BUGFIX: dating `label: 'Lazada'` — nabubura ito ng `async label(...)` (shipping label) sa parehong object, kaya function source ang lumalabas sa mga mensahe.
+    title: 'Lazada',
     cfg() {
         return {
             appKey: process.env.LAZADA_APP_KEY || '',
@@ -542,7 +597,8 @@ const lazada = {
 // ======================================================== TIKTOK SHOP ADAPTER
 const tiktok = {
     id: 'tiktok',
-    label: 'TikTok Shop',
+    // BUGFIX: dating `label: 'TikTok Shop'` — nabubura ito ng `async label(...)` (shipping label) sa parehong object, kaya function source ang lumalabas sa mga mensahe.
+    title: 'TikTok Shop',
     cfg() {
         return {
             appKey: process.env.TIKTOK_APP_KEY || '',
@@ -746,7 +802,14 @@ function registerMarketplaceRoutes(app, deps) {
         try { return await fn(); } finally { release(); if (locks.get(key) === mine) locks.delete(key); }
     }
 
-    function stateSecret() { return process.env.MARKETPLACE_STATE_SECRET || process.env.RELAY_API_KEY || 'omnipos-dev-state'; }
+    // SECURITY FIX: dati may hardcoded na 'omnipos-dev-state' kapag walang env — sa production, mapepeke ng sinuman ang OAuth `state`
+    // (na nagbibigkis ng token ng seller sa isang installation). Ngayon, sa production ay kailangan ng secret; 503 ang sagot kung wala.
+    function stateSecret() {
+        const secret = process.env.MARKETPLACE_STATE_SECRET || process.env.RELAY_API_KEY;
+        if (secret) return secret;
+        if (isProductionLike()) throw new MarketplaceError('Marketplace OAuth signing secret is not configured on the server (set MARKETPLACE_STATE_SECRET).', { code: 'NOT_CONFIGURED', status: 503 });
+        return 'omnipos-dev-state';
+    }
     const usedNonces = new Map();
     function signState(payload) {
         const body = b64url(JSON.stringify(payload));
@@ -770,7 +833,11 @@ function registerMarketplaceRoutes(app, deps) {
         platform: c.platform, shopId: c.shopId, shopName: c.shopName, connectedAt: c.connectedAt, status: c.status,
         accessExpiresAt: c.accessExpiresAt, lastError: c.lastError || null, region: (c.extra && c.extra.region) || ''
     });
-    const unpack = (c) => ({ ...c, accessToken: decryptSecret(c.accessTokenEnc), refreshToken: decryptSecret(c.refreshTokenEnc), extra: c.extra || {} });
+    const unpack = (c) => {
+        const at = decryptSecretMeta(c.accessTokenEnc);
+        const rt = decryptSecretMeta(c.refreshTokenEnc);
+        return { ...c, accessToken: at.value, refreshToken: rt.value, extra: c.extra || {}, _needsKeyRotation: at.keyIndex > 0 || rt.keyIndex > 0 };
+    };
     function pack(platform, plain, prev = {}) {
         return {
             platform, shopId: String(plain.shopId), shopName: plain.shopName || prev.shopName || '',
@@ -798,14 +865,34 @@ function registerMarketplaceRoutes(app, deps) {
     async function withConnection(installationId, platform, shopId, fn) {
         const adapter = ADAPTERS[platform];
         if (!adapter) throw new MarketplaceError('Unknown marketplace.', { status: 400 });
-        if (!adapter.configured()) throw new MarketplaceError(`${adapter.label} is not configured on the server yet.`, { code: 'NOT_CONFIGURED', status: 503 });
+        if (!adapter.configured()) throw new MarketplaceError(`${adapter.title} is not configured on the server yet.`, { code: 'NOT_CONFIGURED', status: 503 });
         await loadStore();
         const key = connKey(platform, shopId);
         return withLock(`${installationId}|${key}`, async () => {
             const rec = (store[installationId] || {})[key];
-            if (!rec) throw new MarketplaceError(`${adapter.label} is not connected.`, { code: 'NOT_CONNECTED', status: 404 });
-            if (rec.status === 'reauth_required') throw new MarketplaceError(`${adapter.label} needs to be reconnected.`, { code: 'REAUTH', status: 401, reauthRequired: true });
-            let plain = unpack(rec);
+            if (!rec) throw new MarketplaceError(`${adapter.title} is not connected.`, { code: 'NOT_CONNECTED', status: 404 });
+            if (rec.status === 'reauth_required') throw new MarketplaceError(`${adapter.title} needs to be reconnected.`, { code: 'REAUTH', status: 401, reauthRequired: true });
+            let plain;
+            try {
+                plain = unpack(rec);
+            } catch (decryptErr) {
+                if (decryptErr instanceof MarketplaceError) throw decryptErr;
+                // HINDI minamarkahang 'reauth_required' (pwedeng pansamantalang maling env lang ito): kapag naayos ang key, gagana ulit lahat nang
+                // hindi na kailangang mag-reconnect ang mga seller.
+                console.error(`🔴 Marketplace: cannot decrypt the stored ${adapter.title} credentials for ${installationId} — check MARKETPLACE_TOKEN_KEY / MARKETPLACE_TOKEN_KEY_PREVIOUS.`);
+                throw new MarketplaceError(`${adapter.title} credentials cannot be read with the server's current encryption key. This is a server configuration problem — the shop does NOT need to be reconnected yet.`, { code: 'KEY_MISMATCH', status: 503 });
+            }
+            const needsKeyRotation = !!plain._needsKeyRotation;
+            delete plain._needsKeyRotation;
+            if (needsKeyRotation) {
+                // Lumang key ang nakabasa: i-save agad gamit ang pangunahing key para puwede nang tanggalin ang lumang key balang-araw.
+                try {
+                    const savedShopName = rec.shopName;
+                    store[installationId][key] = pack(platform, plain, rec);
+                    store[installationId][key].shopName = savedShopName;
+                    saveStore();
+                } catch (rotateErr) { console.error('Marketplace key re-encryption skipped:', rotateErr && rotateErr.message); }
+            }
             const doRefresh = async () => {
                 try {
                     const next = await adapter.refresh(plain);
@@ -841,7 +928,7 @@ function registerMarketplaceRoutes(app, deps) {
         await loadStore();
         res.json({
             success: true,
-            platforms: PLATFORMS.map((p) => ({ id: p, label: ADAPTERS[p].label, configured: ADAPTERS[p].configured() })),
+            platforms: PLATFORMS.map((p) => ({ id: p, label: ADAPTERS[p].title, configured: ADAPTERS[p].configured() })),
             connections: Object.values(store[id] || {}).map(toPublic)
         });
     });
@@ -851,10 +938,16 @@ function registerMarketplaceRoutes(app, deps) {
         const platform = String(req.body.platform || '');
         const adapter = ADAPTERS[platform];
         if (!adapter) return res.status(400).json({ success: false, message: 'Unknown marketplace.' });
-        if (!adapter.configured()) return res.status(503).json({ success: false, code: 'NOT_CONFIGURED', message: `${adapter.label} is not configured on the server yet. The developer must add the ${adapter.label} app credentials to RELAY first.` });
-        const state = signState({ i: id, p: platform, n: crypto.randomBytes(12).toString('hex'), e: Date.now() + 15 * 60 * 1000 });
-        const redirectUri = `${publicBase(req)}/relay/marketplace/callback/${platform}`;
-        res.json({ success: true, url: adapter.authUrl({ redirectUri, state }), redirectUri });
+        if (!adapter.configured()) return res.status(503).json({ success: false, code: 'NOT_CONFIGURED', message: `${adapter.title} is not configured on the server yet. The developer must add the ${adapter.title} app credentials to RELAY first.` });
+        // Ang signState() ay pwedeng magtapon ng MarketplaceError (503) kung walang signing secret sa production. Dapat may try/catch: ang
+        // async handler na walang catch ay nagiging unhandled rejection (nakabitin ang request, at pwedeng bumagsak ang proseso sa Node 22).
+        try {
+            const state = signState({ i: id, p: platform, n: crypto.randomBytes(12).toString('hex'), e: Date.now() + 15 * 60 * 1000 });
+            const redirectUri = `${publicBase(req)}/relay/marketplace/callback/${platform}`;
+            res.json({ success: true, url: adapter.authUrl({ redirectUri, state }), redirectUri });
+        } catch (e) {
+            fail(res, e);
+        }
     });
 
     app.get('/relay/marketplace/callback/:platform', rateLimit('mp-callback', 30, 10 * 60 * 1000), async (req, res) => {
@@ -872,7 +965,7 @@ function registerMarketplaceRoutes(app, deps) {
             if (!st || st.p !== platform) return page(false, 'This link has expired or is invalid. Please start the connection again from OmniPOS.');
             if (!isFeatureCurrentlyUnlocked(st.i, FEATURE_ID)) return page(false, 'The Marketplace Hub subscription is not active for this device.');
             const conn = await adapter.exchange({ query: req.query });
-            let info; try { info = await adapter.describe(conn); } catch (_) { info = { shopName: `${adapter.label} ${conn.shopId}`, extra: {} }; }
+            let info; try { info = await adapter.describe(conn); } catch (_) { info = { shopName: `${adapter.title} ${conn.shopId}`, extra: {} }; }
             conn.shopName = info.shopName;
             conn.extra = { ...(conn.extra || {}), ...(info.extra || {}) };
             await loadStore();
@@ -927,5 +1020,5 @@ function registerMarketplaceRoutes(app, deps) {
 module.exports = {
     FEATURE_ID, PLATFORMS, ADAPTERS, MarketplaceError, registerMarketplaceRoutes,
     // exported for tests
-    _internal: { encryptSecret, decryptSecret, hmacHex, SHOPEE_STATUS, LAZADA_STATUS, TIKTOK_STATUS }
+    _internal: { encryptSecret, decryptSecret, decryptSecretMeta, tokenKeys, hmacHex, SHOPEE_STATUS, LAZADA_STATUS, TIKTOK_STATUS }
 };
