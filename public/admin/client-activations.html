@@ -1,14 +1,264 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#05070d"><title>Client Activation — RELAY Admin</title>
 <style>
-:root{color-scheme:dark;--bg:#05070d;--card:#101625;--line:#26334f;--text:#eafcff;--muted:#9aabc9;--accent:#22e5ff;--green:#3ddc84;--red:#ff5c72}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px system-ui,sans-serif}main{max-width:1200px;margin:auto;padding:20px}h1{margin:0 0 6px;font-size:26px}p,.muted{color:var(--muted)}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin:16px 0}.row{display:flex;gap:10px;flex-wrap:wrap;align-items:end}.field{display:flex;flex-direction:column;gap:6px;flex:1;min-width:180px}input,button{font:inherit;border-radius:8px;padding:10px;border:1px solid var(--line);background:#080d18;color:var(--text)}button{cursor:pointer;background:#12313a;border-color:#1b7785}button.danger{background:#35141d;border-color:#79313d}button:disabled{opacity:.5;cursor:wait}table{border-collapse:collapse;width:100%;min-width:800px}th,td{text-align:left;padding:10px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-size:12px;text-transform:uppercase}.table-wrap{overflow:auto}.status{font-weight:700}.status.revoked,.status.expired{color:var(--red)}.status.activated{color:var(--green)}.output{white-space:pre-wrap;overflow-wrap:anywhere;background:#070b12;border:1px dashed #3a5675;padding:12px;border-radius:8px;margin-top:12px}.small{font-size:12px}.actions{display:flex;gap:6px;flex-wrap:wrap}.hidden{display:none}.error{color:var(--red)}a{color:var(--accent)}
+:root{color-scheme:dark;--bg:#05070d;--card:#101625;--line:#26334f;--text:#eafcff;--muted:#9aabc9;--accent:#22e5ff;--green:#3ddc84;--red:#ff5c72}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px system-ui,sans-serif}main{max-width:1200px;margin:auto;padding:20px}h1{margin:0 0 6px;font-size:26px}p,.muted{color:var(--muted)}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin:16px 0}.row{display:flex;gap:10px;flex-wrap:wrap;align-items:end}.field{display:flex;flex-direction:column;gap:6px;flex:1;min-width:180px}input,button{font:inherit;border-radius:8px;padding:10px;border:1px solid var(--line);background:#080d18;color:var(--text)}button{cursor:pointer;background:#12313a;border-color:#1b7785}button.danger{background:#35141d;border-color:#79313d}button.ghost{background:#080d18;border-color:var(--line)}button:disabled{opacity:.5;cursor:wait}table{border-collapse:collapse;width:100%;min-width:800px}th,td{text-align:left;padding:10px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-size:12px;text-transform:uppercase}.table-wrap{overflow:auto}.status{font-weight:700}.status.revoked,.status.expired{color:var(--red)}.status.activated{color:var(--green)}.output{white-space:pre-wrap;overflow-wrap:anywhere;background:#070b12;border:1px dashed #3a5675;padding:12px;border-radius:8px;margin-top:12px}.small{font-size:12px}.actions{display:flex;gap:6px;flex-wrap:wrap}.hidden{display:none}.error{color:var(--red)}a{color:var(--accent)}tr.busy td{opacity:.6}.presets{display:flex;gap:6px;flex-wrap:wrap}.modal-back{position:fixed;inset:0;background:rgba(2,4,9,.78);display:flex;align-items:center;justify-content:center;padding:16px;z-index:50}.modal{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;width:100%;max-width:440px;display:flex;flex-direction:column;gap:12px}.modal h3{margin:0}.modal .btns{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}.modal-err{min-height:18px;font-size:13px}
 </style></head><body><main>
 <p><a href="index.html">← RELAY Admin</a></p><h1>Client Activation & Device Licensing</h1><p>Issue one-time activation keys, inspect license status, renew or revoke licenses, reissue a lost credential for the same registered device, and approve device replacement requests.</p>
 <section class="card"><h2>Admin authentication</h2><div class="row"><label class="field">RELAY admin key<input id="adminKey" type="password" autocomplete="current-password" placeholder="Enter ADMIN_KEY"></label><button id="connect">Connect & load licenses</button></div><p class="small">The key is held only in this page's memory and is not saved in local storage.</p><div id="notice" role="status" aria-live="polite"></div></section>
-<section class="card"><h2>Issue activation key</h2><div class="row"><label class="field">Customer name<input id="customerName" maxlength="160" placeholder="Customer / business name"></label><label class="field">Branch / terminal label (optional)<input id="label" maxlength="120" placeholder="e.g. Main branch"></label><label class="field">Count<input id="count" type="number" min="1" max="100" value="1"></label><label class="field">Expiration (optional)<input id="expiresAt" type="date"></label><button id="issue">Generate key(s)</button></div><div id="issued" class="output hidden"></div></section>
+<section class="card"><h2>Issue activation key</h2><div class="row"><label class="field">Customer name<input id="customerName" maxlength="160" placeholder="Customer / business name"></label><label class="field">Branch / terminal label (optional)<input id="label" maxlength="120" placeholder="e.g. Main branch"></label><label class="field">Count<input id="count" type="number" min="1" max="100" value="1"></label><label class="field">Expiration date & time (optional)<input id="expiresAt" type="datetime-local"></label><button id="issue">Generate key(s)</button></div><div id="issued" class="output hidden"></div></section>
 <section class="card"><div class="row"><div style="flex:1"><h2>Licenses</h2><p class="small">Activation keys are never listed again after issuance. Reissue only works for the license-bound installation.</p></div><button id="refresh">Refresh</button></div><div class="table-wrap"><table><thead><tr><th>Customer / License</th><th>Status</th><th>Installation</th><th>Expiry</th><th>Credentials</th><th>Actions</th></tr></thead><tbody id="licenses"><tr><td colspan="6" class="muted">Connect to load licenses.</td></tr></tbody></table></div></section>
 <section class="card"><div class="row"><div style="flex:1"><h2>Pending device replacements</h2><p class="small">Approve only after confirming the customer's device replacement.</p></div><button id="pendingRefresh">Refresh pending</button></div><div class="table-wrap"><table><thead><tr><th>License</th><th>Current installation</th><th>Requested installation</th><th>Requested</th><th>Action</th></tr></thead><tbody id="pending"><tr><td colspan="5" class="muted">Connect to load requests.</td></tr></tbody></table></div></section>
-</main><script>
-(() => {let adminKey='';const $=id=>document.getElementById(id);const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));const fmt=v=>v?new Date(v).toLocaleString():'—';function say(msg,bad=false){$('notice').textContent=msg;$('notice').className=bad?'error':''}async function api(path,method='GET',body){const r=await fetch('/relay/admin/api/'+path,{method,headers:{'x-relay-admin-key':adminKey,'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});const d=await r.json().catch(()=>({success:false,message:'Invalid server response'}));if(!r.ok||d.success===false)throw new Error(d.message||`HTTP ${r.status}`);return d}async function load(){const d=await api('client-activations');const counts={};d.licenses.forEach(x=>{counts[x.customerId]=(counts[x.customerId]||0)+1});d.licenses.sort((a,b)=>String(a.customerName||'').localeCompare(String(b.customerName||''))||((b.createdAt||0)-(a.createdAt||0)));$('licenses').innerHTML=d.licenses.length?d.licenses.map(x=>`<tr><td><strong>${esc(x.customerName||'Unnamed customer')}</strong>${x.label?`<div class="small">${esc(x.label)}</div>`:''}<div class="small muted">${esc(counts[x.customerId]||1)} license(s) under this customer</div><div class="small muted">${esc(x.licenseId)}</div><div class="small muted">Created ${esc(fmt(x.createdAt))}</div></td><td class="status ${esc(x.status)}">${esc(x.status)}</td><td>${esc(x.installationId||'Not activated')}</td><td>${esc(fmt(x.expiresAt))}</td><td>${esc(x.credentialCount)}</td><td><div class="actions">${x.status!=='revoked'?`<button data-action="edit" data-id="${esc(x.licenseId)}" data-name="${esc(x.customerName||'')}" data-label="${esc(x.label||'')}">Edit</button><button data-action="renew" data-id="${esc(x.licenseId)}">Renew</button><button data-action="reissue" data-id="${esc(x.licenseId)}" data-install="${esc(x.installationId||'')}">Reissue credential</button><button class="danger" data-action="revoke" data-id="${esc(x.licenseId)}">Revoke</button>`:`<button class="danger" data-action="delete" data-id="${esc(x.licenseId)}">Delete</button>`}</div></td></tr>`).join(''):'<tr><td colspan="6">No licenses issued yet.</td></tr>';await loadPending()}async function loadPending(){const d=await api('client-device-replacements/pending');$('pending').innerHTML=d.pending.length?d.pending.map(x=>`<tr><td>${esc(x.licenseId)}</td><td>${esc(x.currentInstallationId||'—')}</td><td>${esc(x.requestedInstallationId)}</td><td>${esc(fmt(x.requestedAt))}</td><td><button data-approve="1" data-id="${esc(x.licenseId)}" data-install="${esc(x.requestedInstallationId)}" data-fingerprint="${esc(x.requestedFingerprint)}">Approve replacement</button></td></tr>`).join(''):'<tr><td colspan="5">No pending requests.</td></tr>'}function requireKey(){if(!adminKey)throw new Error('Connect with the RELAY admin key first.')}$('connect').onclick=async()=>{adminKey=$('adminKey').value.trim();if(!adminKey){say('Enter the RELAY admin key.',true);return}try{await load();say('Connected.');}catch(e){adminKey='';say(e.message,true)}};$('refresh').onclick=async()=>{try{requireKey();await load();say('License list refreshed.')}catch(e){say(e.message,true)}};$('pendingRefresh').onclick=async()=>{try{requireKey();await loadPending();say('Pending requests refreshed.')}catch(e){say(e.message,true)}};$('issue').onclick=async()=>{try{requireKey();const body={customerName:$('customerName').value.trim(),label:$('label').value.trim(),count:Number($('count').value)||1};if($('expiresAt').value)body.expiresAt=new Date($('expiresAt').value+'T23:59:59').toISOString();const d=await api('client-activations','POST',body);$('issued').classList.remove('hidden');$('issued').textContent='Save these activation key(s) now — they are shown only once:\n\n'+d.issued.map(x=>`${x.customerName||'Customer'} | ${x.licenseId}\n${x.activationKey}\nExpires: ${fmt(x.expiresAt)}`).join('\n\n');await load();say('Activation key(s) issued. Copy and deliver securely.')}catch(e){say(e.message,true)}};document.addEventListener('click',async e=>{const b=e.target.closest('button[data-action],button[data-approve]');if(!b)return;try{requireKey();if(b.dataset.approve){if(!confirm('Approve this device replacement? The old device credential will be revoked.'))return;await api('client-device-replacements/approve','POST',{licenseId:b.dataset.id,newInstallationId:b.dataset.install,newFingerprint:b.dataset.fingerprint});say('Replacement approved; the new device must activate again.');await load();return}const id=b.dataset.id;switch(b.dataset.action){case'edit':{const nm=prompt('Customer name (branches of the same customer must have the same name):',b.dataset.name||'');if(nm===null)return;const lb=prompt('Branch / terminal label:',b.dataset.label||'');if(lb===null)return;await api('client-activations/update','POST',{licenseId:id,customerName:nm,label:lb});say('License updated.');break}case'revoke':if(!confirm('Revoke this license and its credentials?'))return;await api('client-activations/revoke','POST',{licenseId:id});say('License revoked.');break;case'delete':if(!confirm('Permanently delete this revoked license from the list? This cannot be undone.'))return;await api('client-activations/delete','POST',{licenseId:id});say('License deleted.');break;case'renew':{const date=prompt('New expiration date (YYYY-MM-DD):');if(!date)return;const exp=new Date(date+'T23:59:59').toISOString();await api('client-activations/renew','POST',{licenseId:id,expiresAt:exp});say('License renewed.');break}case'reissue':{const install=b.dataset.install;if(!install){say('This license has no registered installation yet.',true);return}if(!confirm('Reissue a credential for this same registered device and revoke the old credential?'))return;const d=await api('client-credentials/reissue','POST',{licenseId:id,installationId:install});$('issued').classList.remove('hidden');$('issued').textContent=`New client credential (shown once):\n${d.credential}\nInstallation: ${d.installationId}\nExpires: ${fmt(d.expiresAt)}`;say('Credential reissued. Deliver securely to the customer.');break}}await load()}catch(err){say(err.message,true)}});
+</main>
+<div id="modalRoot"></div>
+<script>
+(() => {
+  'use strict';
+  // The admin key lives only in memory (never written to any browser storage).
+  let adminKey = '';
+  let licenses = [];
+  let pending = [];
+  let loaded = false;
+  const busy = new Set();          // licenseIds that currently have an action in flight
+  let queue = Promise.resolve();   // actions are sent one at a time, in click order (the server serializes them anyway)
+
+  const $ = id => document.getElementById(id);
+  const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const fmt = v => v ? new Date(v).toLocaleString() : '—';
+  const pad = n => String(n).padStart(2, '0');
+  const toLocalInput = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const normName = n => String(n || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const statusOf = x => x.revokedAt ? 'revoked' : (x.expiresAt && x.expiresAt <= Date.now() ? 'expired' : (x.installationId ? 'activated' : 'unused'));
+  const findLicense = id => licenses.find(x => x.licenseId === id);
+
+  function say(msg, bad = false) { $('notice').textContent = msg; $('notice').className = bad ? 'error' : ''; }
+
+  async function api(pathName, method = 'GET', body) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 45000);
+    try {
+      const r = await fetch('/relay/admin/api/' + pathName, { method, headers: { 'x-relay-admin-key': adminKey, 'Content-Type': 'application/json' }, signal: ctrl.signal, ...(body ? { body: JSON.stringify(body) } : {}) });
+      const d = await r.json().catch(() => ({ success: false, message: 'Invalid server response' }));
+      if (!r.ok || d.success === false) throw new Error(d.message || `HTTP ${r.status}`);
+      return d;
+    } catch (e) {
+      if (e && e.name === 'AbortError') throw new Error('The request timed out. Press Refresh to check the current state.');
+      throw e;
+    } finally { clearTimeout(timer); }
+  }
+
+  // ---------- rendering ----------
+  function renderLicenses() {
+    const counts = {};
+    licenses.forEach(x => { counts[x.customerId] = (counts[x.customerId] || 0) + 1; });
+    const rows = licenses.slice().sort((a, b) => String(a.customerName || '').localeCompare(String(b.customerName || '')) || ((b.createdAt || 0) - (a.createdAt || 0)));
+    $('licenses').innerHTML = rows.length ? rows.map(x => {
+      const st = statusOf(x);
+      const off = busy.has(x.licenseId) ? ' disabled' : '';
+      const actions = st !== 'revoked'
+        ? `<button data-action="edit" data-id="${esc(x.licenseId)}"${off}>Edit</button><button data-action="renew" data-id="${esc(x.licenseId)}"${off}>Renew</button><button data-action="reissue" data-id="${esc(x.licenseId)}"${off}>Reissue credential</button><button class="danger" data-action="revoke" data-id="${esc(x.licenseId)}"${off}>Revoke</button>`
+        : `<button class="danger" data-action="delete" data-id="${esc(x.licenseId)}"${off}>Delete</button>`;
+      return `<tr class="${busy.has(x.licenseId) ? 'busy' : ''}"><td><strong>${esc(x.customerName || 'Unnamed customer')}</strong>${x.label ? `<div class="small">${esc(x.label)}</div>` : ''}<div class="small muted">${esc(counts[x.customerId] || 1)} license(s) under this customer</div><div class="small muted">${esc(x.licenseId)}</div><div class="small muted">Created ${esc(fmt(x.createdAt))}</div></td><td class="status ${esc(st)}">${esc(st)}</td><td>${esc(x.installationId || 'Not activated')}</td><td>${esc(fmt(x.expiresAt))}</td><td>${esc(x.credentialCount)}</td><td><div class="actions">${actions}</div></td></tr>`;
+    }).join('') : '<tr><td colspan="6">No licenses issued yet.</td></tr>';
+  }
+  function renderPending() {
+    $('pending').innerHTML = pending.length ? pending.map(x => {
+      const off = busy.has(x.licenseId) ? ' disabled' : '';
+      return `<tr><td>${esc(x.licenseId)}</td><td>${esc(x.currentInstallationId || '—')}</td><td>${esc(x.requestedInstallationId)}</td><td>${esc(fmt(x.requestedAt))}</td><td><button data-approve="1" data-id="${esc(x.licenseId)}"${off}>Approve replacement</button></td></tr>`;
+    }).join('') : '<tr><td colspan="5">No pending requests.</td></tr>';
+  }
+  function render() { if (loaded) { renderLicenses(); renderPending(); } }
+  function applySnapshot(d) {
+    if (d && Array.isArray(d.licenses)) licenses = d.licenses;
+    if (d && Array.isArray(d.pending)) pending = d.pending;
+    loaded = true;
+    render();
+  }
+
+  // ---------- loading (one request returns both lists) ----------
+  async function load() { applySnapshot(await api('client-activations')); }
+  async function withButton(btn, workingLabel, fn) {
+    const original = btn.textContent;
+    btn.disabled = true; btn.textContent = workingLabel;
+    try { return await fn(); } finally { btn.disabled = false; btn.textContent = original; }
+  }
+  function requireKey() { if (!adminKey) throw new Error('Connect with the RELAY admin key first.'); }
+
+  // ---------- optimistic actions ----------
+  // The row changes instantly; the server's fresh snapshot (returned by every action) then replaces local state, so no manual Refresh is needed.
+  function runAction(id, workingMsg, doneMsg, optimistic, request) {
+    busy.add(id);
+    optimistic && optimistic();
+    render();
+    say(workingMsg);
+    queue = queue.then(async () => {
+      try {
+        const d = await request();
+        applySnapshot(d);
+        say(typeof doneMsg === 'function' ? doneMsg(d) : doneMsg);
+      } catch (err) {
+        say(err.message, true);
+        try { await load(); } catch (_) { /* keep what is on screen; user can press Refresh */ }
+      } finally {
+        busy.delete(id);
+        render();
+      }
+    });
+    return queue;
+  }
+
+  // ---------- dialogs ----------
+  function openModal({ title, bodyHtml, submitText, onOpen, onSubmit }) {
+    const root = $('modalRoot');
+    const previouslyFocused = document.activeElement;
+    root.innerHTML = `<div class="modal-back" id="mBack"><div class="modal" role="dialog" aria-modal="true" aria-label="${esc(title)}"><h3>${esc(title)}</h3>${bodyHtml}<div id="mErr" class="modal-err error" role="alert"></div><div class="btns"><button type="button" class="ghost" id="mCancel">Cancel</button><button type="button" id="mOk">${esc(submitText)}</button></div></div></div>`;
+    const close = () => { root.innerHTML = ''; document.removeEventListener('keydown', onKey, true); if (previouslyFocused && previouslyFocused.focus) try { previouslyFocused.focus(); } catch (_) {} };
+    const submit = () => {
+      $('mErr').textContent = '';
+      try { const keep = onSubmit(); if (keep === false) return; close(); } catch (e) { $('mErr').textContent = e.message; }
+    };
+    function onKey(e) {
+      if (e.key === 'Escape') { e.preventDefault(); close(); }
+      else if (e.key === 'Enter' && e.target && e.target.tagName === 'INPUT') { e.preventDefault(); submit(); }
+    }
+    document.addEventListener('keydown', onKey, true);
+    $('mCancel').onclick = close;
+    $('mOk').onclick = submit;
+    $('mBack').addEventListener('mousedown', e => { if (e.target.id === 'mBack') close(); });
+    if (onOpen) onOpen();
+    const first = root.querySelector('input'); if (first) first.focus();
+  }
+
+  function openEdit(lic) {
+    openModal({
+      title: 'Edit license',
+      bodyHtml: `<label class="field">Customer name (branches of the same customer must have the same name)<input id="eName" maxlength="160" value="${esc(lic.customerName || '')}"></label><label class="field">Branch / terminal label<input id="eLabel" maxlength="120" value="${esc(lic.label || '')}"></label>`,
+      submitText: 'Save',
+      onSubmit: () => {
+        const nm = $('eName').value.trim(), lb = $('eLabel').value.trim();
+        if (nm === (lic.customerName || '') && lb === (lic.label || '')) return true;
+        runAction(lic.licenseId, 'Saving changes…', 'License updated.', () => {
+          const x = findLicense(lic.licenseId); if (!x) return;
+          x.customerName = nm; x.label = lb;
+          const other = licenses.find(o => o !== x && normName(o.customerName) === normName(nm) && normName(nm));
+          x.customerId = other ? other.customerId : 'pending:' + x.licenseId;   // mirrors the server's grouping; the snapshot confirms it
+        }, () => api('client-activations/update', 'POST', { licenseId: lic.licenseId, customerName: nm, label: lb }));
+        return true;
+      }
+    });
+  }
+
+  function openRenew(lic) {
+    const now = Date.now();
+    const curFuture = lic.expiresAt && lic.expiresAt > now;
+    const preset = days => {
+      const d = new Date(curFuture ? lic.expiresAt : now);
+      d.setDate(d.getDate() + days);
+      if (!curFuture) d.setHours(23, 59, 0, 0);
+      return d;
+    };
+    openModal({
+      title: 'Renew license',
+      bodyHtml: `<div class="small muted">Current expiry: ${esc(lic.expiresAt ? fmt(lic.expiresAt) : 'none (no expiration)')}</div><label class="field">New expiration date & time<input id="rAt" type="datetime-local"></label><div class="presets"><button type="button" class="ghost" data-days="30">+30 days</button><button type="button" class="ghost" data-days="90">+90 days</button><button type="button" class="ghost" data-days="365">+1 year</button></div>`,
+      submitText: 'Renew',
+      onOpen: () => {
+        $('rAt').value = toLocalInput(preset(30));
+        document.querySelectorAll('.presets button').forEach(b => { b.onclick = () => { $('rAt').value = toLocalInput(preset(Number(b.dataset.days))); }; });
+      },
+      onSubmit: () => {
+        const raw = $('rAt').value;
+        if (!raw) throw new Error('Choose the new expiration date and time.');
+        const ts = new Date(raw).getTime();
+        if (!Number.isFinite(ts)) throw new Error('That date and time is not valid.');
+        if (ts <= Date.now()) throw new Error('The new expiration must be in the future.');
+        runAction(lic.licenseId, 'Renewing…', 'License renewed until ' + fmt(ts) + '.', () => {
+          const x = findLicense(lic.licenseId); if (x) x.expiresAt = ts;
+        }, () => api('client-activations/renew', 'POST', { licenseId: lic.licenseId, expiresAt: new Date(ts).toISOString() }));
+        return true;
+      }
+    });
+  }
+
+  // ---------- top-level handlers ----------
+  $('connect').onclick = async () => {
+    const key = $('adminKey').value.trim();
+    if (!key) { say('Enter the RELAY admin key.', true); return; }
+    adminKey = key;
+    try { await withButton($('connect'), 'Connecting…', load); say('Connected.'); }
+    catch (e) { adminKey = ''; loaded = false; say(e.message, true); }
+  };
+  $('adminKey').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('connect').click(); } });
+
+  $('refresh').onclick = async () => {
+    try { requireKey(); await withButton($('refresh'), 'Refreshing…', load); say('License list refreshed.'); }
+    catch (e) { say(e.message, true); }
+  };
+  $('pendingRefresh').onclick = async () => {
+    try { requireKey(); await withButton($('pendingRefresh'), 'Refreshing…', load); say('Pending requests refreshed.'); }
+    catch (e) { say(e.message, true); }
+  };
+
+  $('issue').onclick = async () => {
+    try {
+      requireKey();
+      const body = { customerName: $('customerName').value.trim(), label: $('label').value.trim(), count: Math.max(1, Math.min(100, Math.floor(Number($('count').value)) || 1)) };
+      if ($('expiresAt').value) {
+        const ts = new Date($('expiresAt').value).getTime();
+        if (!Number.isFinite(ts) || ts <= Date.now()) throw new Error('The expiration must be a valid future date and time.');
+        body.expiresAt = new Date(ts).toISOString();
+      }
+      await withButton($('issue'), 'Generating…', async () => {
+        const d = await api('client-activations', 'POST', body);
+        $('issued').classList.remove('hidden');
+        $('issued').textContent = 'Save these activation key(s) now — they are shown only once:\n\n' + d.issued.map(x => `${x.customerName || 'Customer'} | ${x.licenseId}\n${x.activationKey}\nExpires: ${fmt(x.expiresAt)}`).join('\n\n');
+        applySnapshot(d);
+      });
+      say('Activation key(s) issued. Copy and deliver securely.');
+    } catch (e) { say(e.message, true); }
+  };
+
+  document.addEventListener('click', e => {
+    const b = e.target.closest('button[data-action],button[data-approve]');
+    if (!b || b.disabled) return;
+    try {
+      requireKey();
+      const id = b.dataset.id;
+      if (b.dataset.approve) {
+        const req = pending.find(x => x.licenseId === id);
+        if (!req) { say('That request is no longer pending. Refresh the list.', true); return; }
+        if (!confirm('Approve this device replacement? The old device credential will be revoked.')) return;
+        runAction(id, 'Approving replacement…', 'Replacement approved; the new device must activate again.', () => {
+          pending = pending.filter(x => x.licenseId !== id);
+          const x = findLicense(id); if (x) { x.installationId = req.requestedInstallationId; x.activatedAt = null; x.credentialCount = 0; }
+        }, () => api('client-device-replacements/approve', 'POST', { licenseId: id, newInstallationId: req.requestedInstallationId, newFingerprint: req.requestedFingerprint }));
+        return;
+      }
+      const lic = findLicense(id);
+      if (!lic) { say('License not found. Refresh the list.', true); return; }
+      switch (b.dataset.action) {
+        case 'edit': openEdit(lic); break;
+        case 'renew': openRenew(lic); break;
+        case 'revoke':
+          if (!confirm('Revoke this license and its credentials?')) return;
+          runAction(id, 'Revoking…', 'License revoked.', () => { lic.revokedAt = Date.now(); lic.credentialCount = 0; }, () => api('client-activations/revoke', 'POST', { licenseId: id }));
+          break;
+        case 'delete':
+          if (!confirm('Permanently delete this revoked license from the list? This cannot be undone.')) return;
+          runAction(id, 'Deleting…', 'License deleted.', () => { licenses = licenses.filter(x => x.licenseId !== id); pending = pending.filter(x => x.licenseId !== id); }, () => api('client-activations/delete', 'POST', { licenseId: id }));
+          break;
+        case 'reissue': {
+          const install = lic.installationId;
+          if (!install) { say('This license has no registered installation yet.', true); return; }
+          if (!confirm('Reissue a credential for this same registered device and revoke the old credential?')) return;
+          runAction(id, 'Reissuing credential…', 'Credential reissued. Deliver securely to the customer.', null, async () => {
+            const d = await api('client-credentials/reissue', 'POST', { licenseId: id, installationId: install });
+            $('issued').classList.remove('hidden');
+            $('issued').textContent = `New client credential (shown once):\n${d.credential}\nInstallation: ${d.installationId}\nExpires: ${fmt(d.expiresAt)}`;
+            return d;
+          });
+          break;
+        }
+      }
+    } catch (err) { say(err.message, true); }
+  });
 })();
 </script></body></html>

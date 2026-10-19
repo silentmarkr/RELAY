@@ -8512,14 +8512,33 @@ async function loadClientSecurityState() {
     clientSecurityCache = { at: Date.now(), state };
     return state;
 }
+const CLIENT_SECURITY_KVS = [['activations', CLIENT_ACTIVATIONS_KV, 'client-activations.json'], ['credentials', CLIENT_CREDENTIALS_KV, 'client-credentials.json'], ['replacements', DEVICE_REPLACEMENT_KV, 'device-replacements.json']];
+// SPEED: isang query lang (imbes na 3 magkakahiwalay) para basahin ang tatlong KV. Kapag may key na wala pa sa Postgres
+// (o pumalya ang mabilis na query), bumabalik ito sa dating getPersistentJSON(strict) path — kaya pareho pa rin ang safety
+// (hindi kailanman magpapanggap na blangko ang store kapag pumalya ang pagbasa).
 async function loadClientSecurityStateUncached() {
     const localRead = (name) => { try { return JSON.parse(fs.readFileSync(path.join(__dirname, 'data', name), 'utf8')); } catch (_) { return {}; } };
-    const [activations, credentials, replacements] = await Promise.all([
-        getPersistentJSON(CLIENT_ACTIVATIONS_KV, localRead('client-activations.json'), { strict: true }),
-        getPersistentJSON(CLIENT_CREDENTIALS_KV, localRead('client-credentials.json'), { strict: true }),
-        getPersistentJSON(DEVICE_REPLACEMENT_KV, localRead('device-replacements.json'), { strict: true })
-    ]);
-    return { activations: activations || {}, credentials: credentials || {}, replacements: replacements || {} };
+    const pool = pgPoolDevices || pgPool;
+    let fast = null;
+    if (pool) {
+        try {
+            const r = await queryWithRetry(pool, 'SELECT key, value FROM relay_kv_store WHERE key = ANY($1::text[])', [CLIENT_SECURITY_KVS.map(([, kv]) => REDIS_KEY_PREFIX + kv)]);
+            fast = new Map(r.rows.map(row => [row.key, row.value]));
+        } catch (err) {
+            console.error('⚠️  Fast client-security read failed; using the strict per-key read:', err.message);
+            fast = null;
+        }
+    }
+    const out = {}, orig = {};
+    await Promise.all(CLIENT_SECURITY_KVS.map(async ([field, kv, localFile]) => {
+        const hit = fast ? fast.get(REDIS_KEY_PREFIX + kv) : undefined;
+        if (hit !== undefined && hit !== null) { out[field] = hit; orig[field] = JSON.stringify(hit); return; }
+        out[field] = (await getPersistentJSON(kv, localRead(localFile), { strict: true })) || {};
+        orig[field] = null;   // wala pa sa Postgres: isulat ito sa susunod na save kahit hindi nagbago
+    }));
+    const state = { activations: out.activations, credentials: out.credentials, replacements: out.replacements };
+    Object.defineProperty(state, '__orig', { value: orig, enumerable: false, writable: true, configurable: true });
+    return state;
 }
 async function saveClientSecurityState(state, allowInstallationId = null) {
     try {
@@ -8532,36 +8551,49 @@ async function saveClientSecurityState(state, allowInstallationId = null) {
 }
 async function saveClientSecurityStateInner(state, allowInstallationId = null) {
     // Critical license state must not silently succeed if durable storage is unavailable.
+    // SPEED: isinusulat lang ang mga KV na TALAGANG nagbago (karaniwan 1-2 sa 3), sa iisang SQL statement.
+    const orig = state.__orig || {};
+    const changed = [];
+    for (const [field, kv] of CLIENT_SECURITY_KVS) {
+        const json = JSON.stringify(state[field] || {});
+        if (orig[field] !== json) changed.push([field, REDIS_KEY_PREFIX + kv, json]);
+    }
     const pool = pgPoolDevices || pgPool;
     if (pool) {
-        const client = await pool.connect();
-        try {
-            await client.query('BEGIN');
-            for (const [key, value] of [[CLIENT_ACTIVATIONS_KV, state.activations], [CLIENT_CREDENTIALS_KV, state.credentials], [DEVICE_REPLACEMENT_KV, state.replacements]]) {
-                await client.query('INSERT INTO relay_kv_store (key, value, updated_at) VALUES ($1, $2::jsonb, now()) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()', [REDIS_KEY_PREFIX + key, JSON.stringify(value)]);
-            }
-            if (allowInstallationId) {
-                await client.query(`INSERT INTO relay_devices (installation_id, allowed, updated_at) VALUES ($1, true, now()) ON CONFLICT (installation_id) DO UPDATE SET allowed=true, updated_at=now()`, [allowInstallationId]);
-            }
-            await client.query('COMMIT');
-            return;
-        } catch (err) {
-            await client.query('ROLLBACK').catch(() => {});
-            throw err;
-        } finally { client.release(); }
+        const upsertSql = 'INSERT INTO relay_kv_store (key, value, updated_at) SELECT t.k, t.v::jsonb, now() FROM unnest($1::text[], $2::text[]) AS t(k, v) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()';
+        const upsertParams = [changed.map(c => c[1]), changed.map(c => c[2])];
+        const deviceSql = `INSERT INTO relay_devices (installation_id, allowed, updated_at) VALUES ($1, true, now()) ON CONFLICT (installation_id) DO UPDATE SET allowed=true, updated_at=now()`;
+        if (!allowInstallationId) {
+            if (changed.length) await pool.query(upsertSql, upsertParams);
+        } else {
+            const client = await pool.connect();
+            try {
+                await client.query('BEGIN');
+                if (changed.length) await client.query(upsertSql, upsertParams);
+                await client.query(deviceSql, [allowInstallationId]);
+                await client.query('COMMIT');
+            } catch (err) {
+                await client.query('ROLLBACK').catch(() => {});
+                throw err;
+            } finally { client.release(); }
+        }
+    } else {
+        // Local development fallback only; production should configure the device/license Postgres.
+        const base = path.join(__dirname, 'data');
+        fs.mkdirSync(base, { recursive: true });
+        for (const [field, , localFile] of CLIENT_SECURITY_KVS) {
+            const target = path.join(base, localFile), temp = target + '.tmp';
+            fs.writeFileSync(temp, JSON.stringify(state[field] || {}, null, 2), { mode: 0o600 });
+            fs.renameSync(temp, target);
+        }
+        if (allowInstallationId) {
+            allowedDevices.add(allowInstallationId);
+            await Promise.resolve(saveAllowedDevices(allowedDevices));
+        }
     }
-    // Local development fallback only; production should configure the device/license Postgres.
-    const base = path.join(__dirname, 'data');
-    fs.mkdirSync(base, { recursive: true });
-    for (const [name, value] of [['client-activations.json', state.activations], ['client-credentials.json', state.credentials], ['device-replacements.json', state.replacements]]) {
-        const target = path.join(base, name), temp = target + '.tmp';
-        fs.writeFileSync(temp, JSON.stringify(value, null, 2), { mode: 0o600 });
-        fs.renameSync(temp, target);
-    }
-    if (allowInstallationId) {
-        allowedDevices.add(allowInstallationId);
-        await Promise.resolve(saveAllowedDevices(allowedDevices));
-    }
+    const nextOrig = {};
+    for (const [field] of CLIENT_SECURITY_KVS) nextOrig[field] = JSON.stringify(state[field] || {});
+    Object.defineProperty(state, '__orig', { value: nextOrig, enumerable: false, writable: true, configurable: true });
 }
 function requireApiKey(req, res, next) {
     const provided = String(req.headers['x-relay-key'] || '');
@@ -8595,23 +8627,36 @@ function requireApiKey(req, res, next) {
 
 // Distributed lock: PostgreSQL advisory lock serializes activation read-modify-write operations across
 // multiple Render instances. A process-local queue is used only for local development without Postgres.
+// FIX: transaction-scoped (pg_advisory_xact_lock) na ang lock imbes na session-scoped (pg_try_advisory_lock). Ang session lock ay
+// puwedeng MA-LEAK kapag ang connection ay dumaan sa pooler (hal. Neon pgbouncer) — ang unlock ay napupunta sa ibang backend
+// kaya nananatili ang lock at ang lahat ng susunod na admin action ay nagti-timeout ("License storage unavailable ...").
+// Ang xact lock ay awtomatikong nabibitawan sa COMMIT/ROLLBACK o kapag namatay ang connection, kaya imposibleng ma-stuck.
 let clientSecurityLockTail = Promise.resolve();
 async function acquireClientSecurityLock() {
     const pool = pgPoolDevices || pgPool;
     if (pool) {
         const client = await pool.connect();
         try {
-            // Hindi walang hanggang maghihintay kung may ibang instance na nag-hold ng lock: 10 segundo max.
-            let got = false;
-            for (let i = 0; i < 40 && !got; i++) {
-                const r = await client.query('SELECT pg_try_advisory_lock($1::bigint) AS ok', ['73412958024681']);
-                got = !!(r.rows[0] && r.rows[0].ok);
-                if (!got) await new Promise(resolve => setTimeout(resolve, 250));
+            // Isang round trip: BEGIN + lock_timeout + blocking lock (gigising agad paglaya ng lock, walang polling delay).
+            await client.query("BEGIN; SET LOCAL lock_timeout = '10s'; SELECT pg_advisory_xact_lock(73412958024681)");
+        } catch (err) {
+            let broken = false;
+            await client.query('ROLLBACK').catch(() => { broken = true; });
+            client.release(broken ? true : undefined);
+            if (err && err.code === '55P03') {
+                const timeout = new Error('Timed out waiting for the client security lock.');
+                timeout.code = 'CLIENT_SECURITY_LOCK_TIMEOUT';
+                throw timeout;
             }
-            if (!got) throw new Error('Timed out waiting for the client security lock.');
-        } catch (err) { client.release(); throw err; }
+            throw err;
+        }
         let released = false;
-        return async () => { if (released) return; released = true; try { await client.query('SELECT pg_advisory_unlock($1::bigint)', ['73412958024681']); } finally { client.release(); } };
+        return async () => {
+            if (released) return;
+            released = true;
+            try { await client.query('COMMIT'); client.release(); }
+            catch (err) { client.release(true); throw err; }
+        };
     }
     let unlock;
     const previous = clientSecurityLockTail;
@@ -8750,18 +8795,38 @@ app.post('/relay/client/credential-check', requireApiKey, (req, res) => {
     const rec = Object.values((clientSecurityCache.state && clientSecurityCache.state.credentials) || {}).find(c => c && c.credentialId === req.relayClient.credentialId);
     return res.json({ success: true, installationId: req.relayClient.installationId, expiresAt: (rec && rec.expiresAt) || null });
 });
+// ===== ADMIN SNAPSHOT (speed): ibinabalik ng bawat admin action ang bagong listahan para hindi na kailangang mag-refetch ang page =====
+function buildLicenseList(state) {
+    const activeCredentialCounts = {};
+    for (const c of Object.values(state.credentials)) {
+        if (c && !c.revokedAt) activeCredentialCounts[c.licenseId] = (activeCredentialCounts[c.licenseId] || 0) + 1;
+    }
+    return Object.values(state.activations).filter(Boolean).map(item => ({
+        licenseId: item.licenseId, customerId: effectiveCustomerId(item), label: item.label || '', customerName: item.customerName || '', createdAt: item.createdAt || null,
+        expiresAt: item.expiresAt || null, revokedAt: item.revokedAt || null,
+        installationId: item.activatedInstallationId || null, activatedAt: item.activatedAt || null,
+        status: item.revokedAt ? 'revoked' : (item.expiresAt && item.expiresAt <= Date.now() ? 'expired' : (item.activatedInstallationId ? 'activated' : 'unused')),
+        credentialCount: activeCredentialCounts[item.licenseId] || 0
+    })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+}
+function buildPendingList(state) {
+    return Object.values(state.replacements).filter(x => x && x.status === 'pending');
+}
+function buildClientAdminSnapshot(state) {
+    return { licenses: buildLicenseList(state), pending: buildPendingList(state) };
+}
+function licenseStoreFailure(res, err, logLabel, message) {
+    console.error(logLabel, err && err.message);
+    if (err && (err.code === 'CLIENT_SECURITY_LOCK_TIMEOUT' || err.code === '55P03')) {
+        return res.status(503).json({ success: false, code: 'LICENSE_LOCK_BUSY', message: 'Another license operation is still in progress. Please try again in a few seconds.' });
+    }
+    return res.status(503).json({ success: false, message });
+}
 app.get('/relay/admin/api/client-activations', requireAdminKey, async (req, res) => {
     try {
         const state = await loadClientSecurityState();
-        const licenses = Object.values(state.activations).map(item => ({
-            licenseId: item.licenseId, customerId: effectiveCustomerId(item), label: item.label || '', customerName: item.customerName || '', createdAt: item.createdAt || null,
-            expiresAt: item.expiresAt || null, revokedAt: item.revokedAt || null,
-            installationId: item.activatedInstallationId || null, activatedAt: item.activatedAt || null,
-            status: item.revokedAt ? 'revoked' : (item.expiresAt && item.expiresAt <= Date.now() ? 'expired' : (item.activatedInstallationId ? 'activated' : 'unused')),
-            credentialCount: Object.values(state.credentials).filter(c => c.licenseId === item.licenseId && !c.revokedAt).length
-        }));
-        return res.json({ success: true, licenses: licenses.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)) });
-    } catch (err) { console.error('List client activations failed:', err.message); return res.status(503).json({ success: false, message: 'License storage unavailable.' }); }
+        return res.json({ success: true, ...buildClientAdminSnapshot(state) });
+    } catch (err) { return licenseStoreFailure(res, err, 'List client activations failed:', 'License storage unavailable.'); }
 });
 app.post('/relay/admin/api/client-activations', requireAdminKey, async (req, res) => {
     let releaseSecurityLock = null;
@@ -8783,8 +8848,8 @@ app.post('/relay/admin/api/client-activations', requireAdminKey, async (req, res
             issued.push({ licenseId, activationKey: key, customerId, label: label || null, customerName: customerName || null, expiresAt });
         }
         await saveClientSecurityState(state);
-        return res.status(201).json({ success: true, issued, warning: 'Activation keys are shown once. Save them securely; only their hashes are stored.' });
-    } catch (err) { console.error('Issue client activation failed:', err.message); return res.status(503).json({ success: false, message: 'License storage unavailable; no key issued.' }); }
+        return res.status(201).json({ success: true, issued, warning: 'Activation keys are shown once. Save them securely; only their hashes are stored.', ...buildClientAdminSnapshot(state) });
+    } catch (err) { return licenseStoreFailure(res, err, 'Issue client activation failed:', 'License storage unavailable; no key issued.'); }
     finally { if (releaseSecurityLock) await releaseSecurityLock().catch(err => console.error('Issue lock release failed:', err.message)); }
 });
 app.post('/relay/admin/api/client-activations/update', requireAdminKey, async (req, res) => {
@@ -8803,8 +8868,8 @@ app.post('/relay/admin/api/client-activations/update', requireAdminKey, async (r
             item.customerId = req.body.customerId ? String(req.body.customerId).trim().slice(0, 80) : resolveCustomerId({ activations: Object.fromEntries(Object.entries(state.activations).filter(([, l]) => l !== item)) }, name);
         }
         await saveClientSecurityState(state);
-        return res.json({ success: true, licenseId, customerId: effectiveCustomerId(item), customerName: item.customerName || '', label: item.label || '' });
-    } catch (err) { console.error('Update client license failed:', err.message); return res.status(503).json({ success: false, message: 'License storage unavailable; update not confirmed.' }); }
+        return res.json({ success: true, licenseId, customerId: effectiveCustomerId(item), customerName: item.customerName || '', label: item.label || '', ...buildClientAdminSnapshot(state) });
+    } catch (err) { return licenseStoreFailure(res, err, 'Update client license failed:', 'License storage unavailable; update not confirmed.'); }
     finally { if (releaseSecurityLock) await releaseSecurityLock().catch(err => console.error('Update lock release failed:', err.message)); }
 });
 app.post('/relay/admin/api/client-activations/revoke', requireAdminKey, async (req, res) => {
@@ -8818,8 +8883,8 @@ app.post('/relay/admin/api/client-activations/revoke', requireAdminKey, async (r
         item.revokedAt = Date.now();
         for (const credential of Object.values(state.credentials)) if (credential.licenseId === licenseId) credential.revokedAt = Date.now();
         await saveClientSecurityState(state);
-        return res.json({ success: true, revoked: true, licenseId });
-    } catch (err) { console.error('Revoke client activation failed:', err.message); return res.status(503).json({ success: false, message: 'License storage unavailable; revocation not confirmed.' }); }
+        return res.json({ success: true, revoked: true, licenseId, ...buildClientAdminSnapshot(state) });
+    } catch (err) { return licenseStoreFailure(res, err, 'Revoke client activation failed:', 'License storage unavailable; revocation not confirmed.'); }
     finally { if (releaseSecurityLock) await releaseSecurityLock().catch(err => console.error('Revoke lock release failed:', err.message)); }
 });
 // Permanently remove a REVOKED license (and its credentials / pending replacement) from the list.
@@ -8838,8 +8903,8 @@ app.post('/relay/admin/api/client-activations/delete', requireAdminKey, async (r
         for (const [key, credential] of Object.entries(state.credentials)) if (credential && credential.licenseId === licenseId) delete state.credentials[key];
         delete state.replacements[licenseId];
         await saveClientSecurityState(state);
-        return res.json({ success: true, deleted: true, licenseId });
-    } catch (err) { console.error('Delete client license failed:', err.message); return res.status(503).json({ success: false, message: 'License storage unavailable; deletion not confirmed.' }); }
+        return res.json({ success: true, deleted: true, licenseId, ...buildClientAdminSnapshot(state) });
+    } catch (err) { return licenseStoreFailure(res, err, 'Delete client license failed:', 'License storage unavailable; deletion not confirmed.'); }
     finally { if (releaseSecurityLock) await releaseSecurityLock().catch(err => console.error('Delete lock release failed:', err.message)); }
 });
 app.post('/relay/admin/api/client-activations/renew', requireAdminKey, async (req, res) => {
@@ -8856,8 +8921,8 @@ app.post('/relay/admin/api/client-activations/renew', requireAdminKey, async (re
         license.expiresAt = expiresAt;
         for (const credential of Object.values(state.credentials)) if (credential.licenseId === licenseId && !credential.revokedAt) credential.expiresAt = expiresAt;
         await saveClientSecurityState(state);
-        return res.json({ success: true, renewed: true, licenseId, expiresAt, credentialsUpdated: true });
-    } catch (err) { console.error('Renew client activation failed:', err.message); return res.status(503).json({ success: false, message: 'License storage unavailable; renewal not confirmed.' }); }
+        return res.json({ success: true, renewed: true, licenseId, expiresAt, credentialsUpdated: true, ...buildClientAdminSnapshot(state) });
+    } catch (err) { return licenseStoreFailure(res, err, 'Renew client activation failed:', 'License storage unavailable; renewal not confirmed.'); }
     finally { if (releaseSecurityLock) await releaseSecurityLock().catch(err => console.error('Renew lock release failed:', err.message)); }
 });
 app.post('/relay/admin/api/client-credentials/reissue', requireAdminKey, async (req, res) => {
@@ -8881,14 +8946,14 @@ app.post('/relay/admin/api/client-credentials/reissue', requireAdminKey, async (
         state.credentials[credentialHash] = { credentialId, licenseId, installationId, fingerprint: license.deviceFingerprint, createdAt: now, expiresAt: license.expiresAt || null, revokedAt: null };
         license.lastCredentialReissuedAt = now;
         await saveClientSecurityState(state, installationId);
-        return res.json({ success: true, credential, credentialId, installationId, expiresAt: license.expiresAt || null, message: 'Credential reissued once; the previous credentials were revoked.' });
-    } catch (err) { console.error('Reissue client credential failed:', err.message); return res.status(503).json({ success: false, message: 'License storage unavailable; credential reissue not confirmed.' }); }
+        return res.json({ success: true, credential, credentialId, installationId, expiresAt: license.expiresAt || null, message: 'Credential reissued once; the previous credentials were revoked.', ...buildClientAdminSnapshot(state) });
+    } catch (err) { return licenseStoreFailure(res, err, 'Reissue client credential failed:', 'License storage unavailable; credential reissue not confirmed.'); }
     finally { if (releaseSecurityLock) await releaseSecurityLock().catch(err => console.error('Reissue lock release failed:', err.message)); }
 });
 app.get('/relay/admin/api/client-device-replacements/pending', requireAdminKey, async (req, res) => {
     try {
         const state = await loadClientSecurityState();
-        return res.json({ success: true, pending: Object.values(state.replacements).filter(x => x.status === 'pending') });
+        return res.json({ success: true, pending: buildPendingList(state) });
     } catch (err) { console.error('List device replacement requests failed:', err.message); return res.status(503).json({ success: false, message: 'License storage unavailable.' }); }
 });
 app.post('/relay/admin/api/client-device-replacements/approve', requireAdminKey, async (req, res) => {
@@ -8912,8 +8977,8 @@ app.post('/relay/admin/api/client-device-replacements/approve', requireAdminKey,
         state.replacements[licenseId] = { ...(state.replacements[licenseId] || {}), licenseId, status: 'approved', approvedAt: Date.now(), requestedInstallationId: newInstallationId };
         await saveClientSecurityState(state, newInstallationId);
         allowedDevices.add(newInstallationId);
-        return res.json({ success: true, approved: true, licenseId, installationId: newInstallationId, message: 'Device replacement approved. The new device must activate again to receive a new credential.' });
-    } catch (err) { console.error('Approve device replacement failed:', err.message); return res.status(503).json({ success: false, message: 'License storage unavailable; approval not confirmed.' }); }
+        return res.json({ success: true, approved: true, licenseId, installationId: newInstallationId, message: 'Device replacement approved. The new device must activate again to receive a new credential.', ...buildClientAdminSnapshot(state) });
+    } catch (err) { return licenseStoreFailure(res, err, 'Approve device replacement failed:', 'License storage unavailable; approval not confirmed.'); }
     finally { if (releaseSecurityLock) await releaseSecurityLock().catch(err => console.error('Replacement lock release failed:', err.message)); }
 });
 

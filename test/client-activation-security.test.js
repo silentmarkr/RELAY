@@ -37,7 +37,7 @@ test('server keeps master-key compatibility while supporting scoped client crede
   assert.match(server, /x-relay-installation-id/);
   assert.match(server, /x-relay-device-fingerprint/);
   assert.match(server, /validateInstallationScope/);
-  assert.match(server, /pg_try_advisory_lock/);
+  assert.match(server, /pg_advisory_xact_lock/);
   assert.match(server, /client-activations\/renew/);
   assert.match(server, /client-credentials\/reissue/);
   assert.match(server, /app.get\('\/relay\/admin\/api\/client-activations'/);
