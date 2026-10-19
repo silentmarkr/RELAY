@@ -8822,6 +8822,26 @@ app.post('/relay/admin/api/client-activations/revoke', requireAdminKey, async (r
     } catch (err) { console.error('Revoke client activation failed:', err.message); return res.status(503).json({ success: false, message: 'License storage unavailable; revocation not confirmed.' }); }
     finally { if (releaseSecurityLock) await releaseSecurityLock().catch(err => console.error('Revoke lock release failed:', err.message)); }
 });
+// Permanently remove a REVOKED license (and its credentials / pending replacement) from the list.
+// Only revoked licenses can be deleted, so an active or unused key can never be removed by accident.
+app.post('/relay/admin/api/client-activations/delete', requireAdminKey, async (req, res) => {
+    let releaseSecurityLock = null;
+    try {
+        releaseSecurityLock = await acquireClientSecurityLock();
+        const licenseId = String(req.body?.licenseId || '').trim();
+        if (!licenseId) return res.status(400).json({ success: false, message: 'licenseId is required.' });
+        const state = await loadClientSecurityState();
+        const entry = Object.entries(state.activations).find(([, x]) => x && x.licenseId === licenseId);
+        if (!entry) return res.status(404).json({ success: false, message: 'License not found.' });
+        if (!entry[1].revokedAt) return res.status(409).json({ success: false, message: 'Only revoked licenses can be deleted. Revoke it first.' });
+        delete state.activations[entry[0]];
+        for (const [key, credential] of Object.entries(state.credentials)) if (credential && credential.licenseId === licenseId) delete state.credentials[key];
+        delete state.replacements[licenseId];
+        await saveClientSecurityState(state);
+        return res.json({ success: true, deleted: true, licenseId });
+    } catch (err) { console.error('Delete client license failed:', err.message); return res.status(503).json({ success: false, message: 'License storage unavailable; deletion not confirmed.' }); }
+    finally { if (releaseSecurityLock) await releaseSecurityLock().catch(err => console.error('Delete lock release failed:', err.message)); }
+});
 app.post('/relay/admin/api/client-activations/renew', requireAdminKey, async (req, res) => {
     let releaseSecurityLock = null;
     try {
