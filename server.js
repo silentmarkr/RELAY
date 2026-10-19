@@ -8469,6 +8469,22 @@ function issueDevicePermit(installationId, fingerprint) {
     const signature = crypto.sign(null, Buffer.from(payloadString), privateKey).toString('base64');
     return { payload, signature };
 }
+// MIGRATION: tinatanggap ang lumang fingerprint ng device na na-verify na dati (bago ang pagbabago ng formula) at tahimik na
+// ina-update ang naka-store. Ligtas dahil dumaan na sa requireApiKey (credential/master key) at kailangang EKSAKTONG tumugma
+// sa dating naka-store na fingerprint — ang clone na may ibang hardware ay hindi tutugma.
+function fingerprintMatchesOrMigrate(record, hardwareFingerprint, legacyFingerprint) {
+    if (!record) return false;
+    if (record.fingerprint === hardwareFingerprint) return true;
+    if (typeof legacyFingerprint === 'string' && /^[a-f0-9]{64}$/i.test(legacyFingerprint) && record.fingerprint === legacyFingerprint
+        && typeof hardwareFingerprint === 'string' && /^[a-f0-9]{64}$/i.test(hardwareFingerprint)) {
+        record.legacyFingerprint = record.fingerprint;
+        record.fingerprint = hardwareFingerprint;
+        record.fingerprintMigratedAt = Date.now();
+        saveDeviceFingerprints(deviceFingerprints);
+        return true;
+    }
+    return false;
+}
 const pendingOtps = new Map(); 
 // AYOS/SECURITY FIX: dati, kapag WALANG naka-configure na RELAY_API_KEY
 // (halimbawa, di-sinasadyang nakalimutang i-set ito sa production .env),
@@ -8479,17 +8495,408 @@ const pendingOtps = new Map();
 // magkamali ang deployment config. Ang requireAdminKey ay tama namang
 // fail-CLOSED (tinatanggihan kung walang ADMIN_KEY) — ginawa na rin
 // itong ganoon dito, tulad ng dapat.
-function requireApiKey(req, res, next) {
-    if (!RELAY_API_KEY) {
-        console.error('⚠️  RELAY_API_KEY ay hindi naka-configure sa server na ito — tinatanggihan (fail-closed) ang request sa halip na tanggapin ito nang walang verification.');
-        return res.status(503).json({ success: false, message: 'RELAY_API_KEY is not configured on this server yet. Please set it before using the relay.' });
-    }
-    const provided = req.headers['x-relay-key'];
-    if (!safeCompare(String(provided || ''), RELAY_API_KEY)) {
-        return res.status(403).json({ success: false, message: 'Invalid or missing API key.' });
-    }
-    next();
+const CLIENT_ACTIVATIONS_KV = 'per-client-activations-v1';
+const CLIENT_CREDENTIALS_KV = 'per-client-credentials-v1';
+const DEVICE_REPLACEMENT_KV = 'per-client-device-replacements-v1';
+const { hashClientSecret, secureRandomSecret, validateActivation, validateCredential, validateInstallationScope } = require('./client-activation-security');
+// Maikling cache para hindi 3 Postgres read ang bawat authenticated request ng bawat client.
+// Ang mga admin/activation write ay laging bumabasa ng sariwa (fresh) sa loob ng lock at ina-update/ina-invalidate ang cache.
+let clientSecurityCache = { at: 0, state: null };
+const CLIENT_SECURITY_CACHE_MS = 5000;
+async function loadClientSecurityStateCached() {
+    if (clientSecurityCache.state && Date.now() - clientSecurityCache.at < CLIENT_SECURITY_CACHE_MS) return clientSecurityCache.state;
+    return loadClientSecurityState();
 }
+async function loadClientSecurityState() {
+    const state = await loadClientSecurityStateUncached();
+    clientSecurityCache = { at: Date.now(), state };
+    return state;
+}
+async function loadClientSecurityStateUncached() {
+    const localRead = (name) => { try { return JSON.parse(fs.readFileSync(path.join(__dirname, 'data', name), 'utf8')); } catch (_) { return {}; } };
+    const [activations, credentials, replacements] = await Promise.all([
+        getPersistentJSON(CLIENT_ACTIVATIONS_KV, localRead('client-activations.json'), { strict: true }),
+        getPersistentJSON(CLIENT_CREDENTIALS_KV, localRead('client-credentials.json'), { strict: true }),
+        getPersistentJSON(DEVICE_REPLACEMENT_KV, localRead('device-replacements.json'), { strict: true })
+    ]);
+    return { activations: activations || {}, credentials: credentials || {}, replacements: replacements || {} };
+}
+async function saveClientSecurityState(state, allowInstallationId = null) {
+    try {
+        await saveClientSecurityStateInner(state, allowInstallationId);
+        clientSecurityCache = { at: Date.now(), state };
+    } catch (err) {
+        clientSecurityCache = { at: 0, state: null };   // may bahagyang na-mutate na state sa memory: huwag gamitin
+        throw err;
+    }
+}
+async function saveClientSecurityStateInner(state, allowInstallationId = null) {
+    // Critical license state must not silently succeed if durable storage is unavailable.
+    const pool = pgPoolDevices || pgPool;
+    if (pool) {
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+            for (const [key, value] of [[CLIENT_ACTIVATIONS_KV, state.activations], [CLIENT_CREDENTIALS_KV, state.credentials], [DEVICE_REPLACEMENT_KV, state.replacements]]) {
+                await client.query('INSERT INTO relay_kv_store (key, value, updated_at) VALUES ($1, $2::jsonb, now()) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()', [REDIS_KEY_PREFIX + key, JSON.stringify(value)]);
+            }
+            if (allowInstallationId) {
+                await client.query(`INSERT INTO relay_devices (installation_id, allowed, updated_at) VALUES ($1, true, now()) ON CONFLICT (installation_id) DO UPDATE SET allowed=true, updated_at=now()`, [allowInstallationId]);
+            }
+            await client.query('COMMIT');
+            return;
+        } catch (err) {
+            await client.query('ROLLBACK').catch(() => {});
+            throw err;
+        } finally { client.release(); }
+    }
+    // Local development fallback only; production should configure the device/license Postgres.
+    const base = path.join(__dirname, 'data');
+    fs.mkdirSync(base, { recursive: true });
+    for (const [name, value] of [['client-activations.json', state.activations], ['client-credentials.json', state.credentials], ['device-replacements.json', state.replacements]]) {
+        const target = path.join(base, name), temp = target + '.tmp';
+        fs.writeFileSync(temp, JSON.stringify(value, null, 2), { mode: 0o600 });
+        fs.renameSync(temp, target);
+    }
+    if (allowInstallationId) {
+        allowedDevices.add(allowInstallationId);
+        await Promise.resolve(saveAllowedDevices(allowedDevices));
+    }
+}
+function requireApiKey(req, res, next) {
+    const provided = String(req.headers['x-relay-key'] || '');
+    // The master key is reserved for trusted server/admin integrations. Customer packages must never contain it.
+    if (RELAY_API_KEY && safeCompare(provided, RELAY_API_KEY)) { req.relayMasterAuthenticated = true; return next(); }
+    if (!provided) return res.status(RELAY_API_KEY ? 403 : 503).json({ success: false, message: 'Missing client credential or invalid master credential.' });
+    (async () => {
+        const state = await loadClientSecurityStateCached();
+        const record = state.credentials[hashClientSecret(provided)];
+        const suppliedInstallationId = String(req.headers['x-relay-installation-id'] || (req.body && req.body.installationId) || (req.query && req.query.installationId) || '');
+        const suppliedFingerprint = String(req.headers['x-relay-device-fingerprint'] || '');
+        const verdict = validateCredential(record, suppliedInstallationId, suppliedFingerprint);
+        if (!verdict.ok) return res.status(403).json({ success: false, code: verdict.code, message: verdict.code === 'CLIENT_DEVICE_MISMATCH' ? 'Credential is bound to a different registered installation.' : 'Client credential is invalid, revoked, or expired.' });
+        // Every customer-scoped request is bound to the credential's installation. A client cannot
+        // authenticate as A and then put B in a query/body/route parameter to reach B's data.
+        const scopeVerdict = validateInstallationScope(record.installationId, [req.body?.installationId, req.query?.installationId, req.params?.installationId]);
+        if (!scopeVerdict.ok) return res.status(403).json({ success: false, code: scopeVerdict.code, message: 'This credential can only access its own registered installation.' });
+        // Check the current license state as well as the credential snapshot so admin renewals/revocations
+        // take effect without requiring a client-side credential refresh.
+        const license = Object.values(state.activations).find(item => item && item.licenseId === record.licenseId);
+        if (!license || license.revokedAt || (license.expiresAt && license.expiresAt <= Date.now())) {
+            return res.status(403).json({ success: false, code: 'CLIENT_LICENSE_EXPIRED_OR_REVOKED', message: 'Client license is expired or revoked.' });
+        }
+        req.relayClient = { installationId: record.installationId, credentialId: record.credentialId, licenseId: record.licenseId };
+        return next();
+    })().catch(err => {
+        console.error('Client credential verification failed closed:', err.message);
+        if (!res.headersSent) res.status(503).json({ success: false, message: 'Client credential store is unavailable; request denied.' });
+    });
+}
+
+// Distributed lock: PostgreSQL advisory lock serializes activation read-modify-write operations across
+// multiple Render instances. A process-local queue is used only for local development without Postgres.
+let clientSecurityLockTail = Promise.resolve();
+async function acquireClientSecurityLock() {
+    const pool = pgPoolDevices || pgPool;
+    if (pool) {
+        const client = await pool.connect();
+        try {
+            // Hindi walang hanggang maghihintay kung may ibang instance na nag-hold ng lock: 10 segundo max.
+            let got = false;
+            for (let i = 0; i < 40 && !got; i++) {
+                const r = await client.query('SELECT pg_try_advisory_lock($1::bigint) AS ok', ['73412958024681']);
+                got = !!(r.rows[0] && r.rows[0].ok);
+                if (!got) await new Promise(resolve => setTimeout(resolve, 250));
+            }
+            if (!got) throw new Error('Timed out waiting for the client security lock.');
+        } catch (err) { client.release(); throw err; }
+        let released = false;
+        return async () => { if (released) return; released = true; try { await client.query('SELECT pg_advisory_unlock($1::bigint)', ['73412958024681']); } finally { client.release(); } };
+    }
+    let unlock;
+    const previous = clientSecurityLockTail;
+    clientSecurityLockTail = new Promise(resolve => { unlock = resolve; });
+    await previous;
+    let released = false;
+    return async () => { if (!released) { released = true; unlock(); } };
+}
+// ANTI-CLONE SPLIT: kapag nag-reassign ang RELAY ng bagong installationId, ang credential (nakatali sa lumang ID) ay dapat ilipat din
+// sa bagong ID — kung hindi, ang client na nag-adopt ng bagong ID ay 403 (CLIENT_DEVICE_MISMATCH) sa lahat ng sumunod na call.
+async function rebindClientInstallation(oldId, newId) {
+    if (!oldId || !newId || oldId === newId) return false;
+    const release = await acquireClientSecurityLock();
+    try {
+        const state = await loadClientSecurityState();
+        const licenseIds = new Set();
+        for (const rec of Object.values(state.credentials)) {
+            if (rec && !rec.revokedAt && rec.installationId === oldId) { rec.installationId = newId; licenseIds.add(rec.licenseId); }
+        }
+        if (licenseIds.size === 0) return false;
+        for (const lic of Object.values(state.activations)) {
+            if (lic && licenseIds.has(lic.licenseId) && lic.activatedInstallationId === oldId) lic.activatedInstallationId = newId;
+        }
+        // Walang allowInstallationId: hindi ginagalaw ang allowed-device status (ang admin split-clone ang nagpapasya niyan).
+        await saveClientSecurityState(state);
+        return true;
+    } finally { await release().catch(err => console.error('Rebind lock release failed:', err.message)); }
+}
+// ===== CUSTOMER GROUPING NG MGA LICENSE (multi-branch) =====
+// Ang bawat license ay may customerId (at optional na label, hal. pangalan ng branch). Lahat ng branch ng IISANG customer ay dapat
+// pareho ang customerId. Ginagamit ito para hindi makasali ang ibang customer sa branch group (kahit alam nila ang group code).
+function normalizeCustomerName(n) { return String(n || '').trim().toLowerCase().replace(/\s+/g, ' '); }
+function effectiveCustomerId(license) {
+    if (!license) return null;
+    if (license.customerId) return String(license.customerId);
+    const n = normalizeCustomerName(license.customerName);
+    return n ? `name:${n}` : `license:${license.licenseId}`;
+}
+function resolveCustomerId(state, customerName) {
+    const n = normalizeCustomerName(customerName);
+    if (!n) return crypto.randomUUID();
+    for (const l of Object.values(state.activations)) {
+        if (l && normalizeCustomerName(l.customerName) === n) return effectiveCustomerId(l);
+    }
+    return crypto.randomUUID();
+}
+// Hinaharang ang device ng ibang customer sa isang branch group na mayroon nang mga miyembro mula sa ibang customer.
+// Naglalaktaw: master key (developer-owned) at mga group na wala pang miyembro.
+function requireBranchGroupCustomer(req, res, next) {
+    try {
+        if (!req.relayClient) return next();
+        const hash = String((req.body && req.body.branchGroupKeyHash) || (req.query && req.query.groupKeyHash) || '');
+        if (!hash) return next();   // ang mismong handler ang nagva-validate ng format
+        const group = branchSummaries[hash];
+        const state = clientSecurityCache.state;
+        if (!group || !state) return next();
+        const licenses = Object.values(state.activations).filter(Boolean);
+        const mineLicense = licenses.find(l => l.licenseId === req.relayClient.licenseId);
+        const mine = effectiveCustomerId(mineLicense);
+        const byInstallation = new Map();
+        for (const l of licenses) if (l.activatedInstallationId) byInstallation.set(l.activatedInstallationId, l);
+        const others = new Set();
+        for (const id of Object.keys(group)) {
+            if (id === req.relayClient.installationId) continue;
+            const l = byInstallation.get(id);
+            if (l) others.add(effectiveCustomerId(l));   // walang license (lumang/napalitang device) = hindi binibilang
+        }
+        if (others.size > 0 && !others.has(mine)) {
+            return res.status(403).json({ success: false, code: 'BRANCH_GROUP_CUSTOMER_MISMATCH', message: 'This branch group belongs to a different customer.' });
+        }
+        return next();
+    } catch (err) {
+        console.error('Branch group customer check failed closed:', err.message);
+        return res.status(503).json({ success: false, message: 'Branch group verification is unavailable; request denied.' });
+    }
+}
+// Per-customer activation bootstrap: master RELAY_API_KEY is never needed by the customer package.
+app.post('/relay/client/activate', rateLimit('client-activate', 10, 60 * 60 * 1000), async (req, res) => {
+    let releaseSecurityLock = null;
+    try {
+        releaseSecurityLock = await acquireClientSecurityLock();
+        const activationKey = String(req.body?.activationKey || '').trim();
+        const installationId = String(req.body?.installationId || '').trim();
+        const fingerprint = String(req.body?.fingerprint || '').trim();
+        if (!/^.{16,256}$/.test(activationKey) || !/^[a-zA-Z0-9._:-]{8,200}$/.test(installationId) || !/^[a-fA-F0-9]{32,128}$/.test(fingerprint)) {
+            return res.status(400).json({ success: false, code: 'INVALID_ACTIVATION_INPUT', message: 'Activation key, installation ID, or device fingerprint is invalid.' });
+        }
+        const state = await loadClientSecurityState();
+        const keyHash = hashClientSecret(activationKey);
+        const license = state.activations[keyHash];
+        const verdict = validateActivation(license, installationId, fingerprint);
+        if (!verdict.ok && verdict.code === 'ACTIVATION_KEY_INVALID') {
+            return res.status(403).json({ success: false, code: verdict.code, message: 'Activation key is invalid, revoked, or expired.' });
+        }
+        // Idempotent retry: kung nawala ang response (offline/putol na koneksyon) pagkatapos mag-save ang RELAY,
+        // puwedeng ulitin ng PAREHONG device (parehong installationId + fingerprint) sa loob ng 15 minuto.
+        // Magbibigay ng bagong credential at irerebok ang nauna; hindi ito gagana para sa ibang device.
+        const RETRY_WINDOW_MS = 15 * 60 * 1000;
+        const sameDevice = license.activatedInstallationId === installationId && (!license.deviceFingerprint || license.deviceFingerprint === fingerprint);
+        const withinRetryWindow = sameDevice && license.lastActivatedAt && (Date.now() - license.lastActivatedAt) < RETRY_WINDOW_MS;
+        if (license.activatedAt && sameDevice && !withinRetryWindow) {
+            return res.status(409).json({ success: false, code: 'ACTIVATION_KEY_ALREADY_USED', message: 'This activation key has already been used. Ask the administrator to reissue the credential.' });
+        }
+        // Ang parehong installationId pero nagbago ang fingerprint ay DAPAT dumaan sa device-replacement approval
+        // (dati ay nagiging ALREADY_USED kaya walang pending request na maa-approve ang admin).
+        if (license.activatedInstallationId && license.activatedInstallationId !== installationId) {
+            state.replacements[license.licenseId] = { licenseId: license.licenseId, currentInstallationId: license.activatedInstallationId, requestedInstallationId: installationId, requestedFingerprint: fingerprint, requestedAt: Date.now(), status: 'pending' };
+            await saveClientSecurityState(state);
+            return res.status(409).json({ success: false, code: 'DEVICE_REPLACEMENT_REQUIRES_APPROVAL', message: 'This activation is already bound to another device. Admin approval is required.' });
+        }
+        if (license.deviceFingerprint && license.deviceFingerprint !== fingerprint) {
+            state.replacements[license.licenseId] = { licenseId: license.licenseId, currentInstallationId: license.activatedInstallationId, requestedInstallationId: installationId, requestedFingerprint: fingerprint, requestedAt: Date.now(), status: 'pending' };
+            await saveClientSecurityState(state);
+            return res.status(409).json({ success: false, code: 'DEVICE_REPLACEMENT_REQUIRES_APPROVAL', message: 'Device identity changed. Admin approval is required.' });
+        }
+        const credential = secureRandomSecret('omniclient');
+        const credentialHash = hashClientSecret(credential);
+        const credentialId = crypto.randomUUID();
+        for (const item of Object.values(state.credentials)) if (item.licenseId === license.licenseId && !item.revokedAt) item.revokedAt = Date.now();
+        license.activatedInstallationId = installationId;
+        license.deviceFingerprint = fingerprint;
+        license.activatedAt = license.activatedAt || Date.now();
+        license.lastActivatedAt = Date.now();
+        state.credentials[credentialHash] = { credentialId, licenseId: license.licenseId, installationId, fingerprint, createdAt: Date.now(), expiresAt: license.expiresAt || null, revokedAt: null };
+        await saveClientSecurityState(state, installationId);
+        allowedDevices.add(installationId);
+        return res.json({ success: true, credential, credentialId, installationId, expiresAt: license.expiresAt || null, message: 'Activation successful. Store the credential securely; it will not be shown again.' });
+    } catch (err) {
+        console.error('Client activation failed:', err.message);
+        return res.status(503).json({ success: false, code: 'ACTIVATION_STORE_UNAVAILABLE', message: 'Activation could not be completed safely. Please retry later.' });
+    } finally { if (releaseSecurityLock) await releaseSecurityLock().catch(err => console.error('Activation lock release failed:', err.message)); }
+});
+// Ginagamit ng client para i-verify ang isang reissued credential bago ito i-save (requireApiKey ang gumagawa ng binding check).
+app.post('/relay/client/credential-check', requireApiKey, (req, res) => {
+    if (!req.relayClient) return res.status(403).json({ success: false, code: 'CLIENT_CREDENTIAL_REQUIRED', message: 'A per-client credential is required.' });
+    const rec = Object.values((clientSecurityCache.state && clientSecurityCache.state.credentials) || {}).find(c => c && c.credentialId === req.relayClient.credentialId);
+    return res.json({ success: true, installationId: req.relayClient.installationId, expiresAt: (rec && rec.expiresAt) || null });
+});
+app.get('/relay/admin/api/client-activations', requireAdminKey, async (req, res) => {
+    try {
+        const state = await loadClientSecurityState();
+        const licenses = Object.values(state.activations).map(item => ({
+            licenseId: item.licenseId, customerId: effectiveCustomerId(item), label: item.label || '', customerName: item.customerName || '', createdAt: item.createdAt || null,
+            expiresAt: item.expiresAt || null, revokedAt: item.revokedAt || null,
+            installationId: item.activatedInstallationId || null, activatedAt: item.activatedAt || null,
+            status: item.revokedAt ? 'revoked' : (item.expiresAt && item.expiresAt <= Date.now() ? 'expired' : (item.activatedInstallationId ? 'activated' : 'unused')),
+            credentialCount: Object.values(state.credentials).filter(c => c.licenseId === item.licenseId && !c.revokedAt).length
+        }));
+        return res.json({ success: true, licenses: licenses.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)) });
+    } catch (err) { console.error('List client activations failed:', err.message); return res.status(503).json({ success: false, message: 'License storage unavailable.' }); }
+});
+app.post('/relay/admin/api/client-activations', requireAdminKey, async (req, res) => {
+    let releaseSecurityLock = null;
+    try {
+        releaseSecurityLock = await acquireClientSecurityLock();
+        const count = Math.max(1, Math.min(100, Number(req.body?.count) || 1));
+        const customerName = String(req.body?.customerName || '').trim().slice(0, 160);
+        const expiresAt = req.body?.expiresAt ? new Date(req.body.expiresAt).getTime() : null;
+        if (expiresAt !== null && (!Number.isFinite(expiresAt) || expiresAt <= Date.now())) return res.status(400).json({ success: false, message: 'expiresAt must be a future date.' });
+        const state = await loadClientSecurityState();
+        const label = String(req.body?.label || '').trim().slice(0, 120);
+        // Lahat ng key sa isang batch (at sa mga susunod na batch na may parehong customerName) ay iisang customerId.
+        const customerId = req.body?.customerId ? String(req.body.customerId).trim().slice(0, 80) : resolveCustomerId(state, customerName);
+        const issued = [];
+        for (let i = 0; i < count; i++) {
+            const key = secureRandomSecret('OMNI-ACT');
+            const licenseId = crypto.randomUUID();
+            state.activations[hashClientSecret(key)] = { licenseId, customerId, label: label || null, customerName: customerName || null, createdAt: Date.now(), expiresAt, revokedAt: null, activatedInstallationId: null, deviceFingerprint: null };
+            issued.push({ licenseId, activationKey: key, customerId, label: label || null, customerName: customerName || null, expiresAt });
+        }
+        await saveClientSecurityState(state);
+        return res.status(201).json({ success: true, issued, warning: 'Activation keys are shown once. Save them securely; only their hashes are stored.' });
+    } catch (err) { console.error('Issue client activation failed:', err.message); return res.status(503).json({ success: false, message: 'License storage unavailable; no key issued.' }); }
+    finally { if (releaseSecurityLock) await releaseSecurityLock().catch(err => console.error('Issue lock release failed:', err.message)); }
+});
+app.post('/relay/admin/api/client-activations/update', requireAdminKey, async (req, res) => {
+    let releaseSecurityLock = null;
+    try {
+        releaseSecurityLock = await acquireClientSecurityLock();
+        const licenseId = String(req.body?.licenseId || '').trim();
+        const state = await loadClientSecurityState();
+        const item = Object.values(state.activations).find(x => x && x.licenseId === licenseId);
+        if (!item) return res.status(404).json({ success: false, message: 'License not found.' });
+        if (typeof req.body?.label === 'string') item.label = req.body.label.trim().slice(0, 120) || null;
+        if (typeof req.body?.customerName === 'string') {
+            const name = req.body.customerName.trim().slice(0, 160);
+            item.customerName = name || null;
+            // Ilipat sa customer na may ganitong pangalan (o gumawa ng bago): ito ang nag-uugnay sa mga branch ng iisang customer.
+            item.customerId = req.body.customerId ? String(req.body.customerId).trim().slice(0, 80) : resolveCustomerId({ activations: Object.fromEntries(Object.entries(state.activations).filter(([, l]) => l !== item)) }, name);
+        }
+        await saveClientSecurityState(state);
+        return res.json({ success: true, licenseId, customerId: effectiveCustomerId(item), customerName: item.customerName || '', label: item.label || '' });
+    } catch (err) { console.error('Update client license failed:', err.message); return res.status(503).json({ success: false, message: 'License storage unavailable; update not confirmed.' }); }
+    finally { if (releaseSecurityLock) await releaseSecurityLock().catch(err => console.error('Update lock release failed:', err.message)); }
+});
+app.post('/relay/admin/api/client-activations/revoke', requireAdminKey, async (req, res) => {
+    let releaseSecurityLock = null;
+    try {
+        releaseSecurityLock = await acquireClientSecurityLock();
+        const licenseId = String(req.body?.licenseId || '');
+        const state = await loadClientSecurityState();
+        const item = Object.values(state.activations).find(x => x.licenseId === licenseId);
+        if (!item) return res.status(404).json({ success: false, message: 'License not found.' });
+        item.revokedAt = Date.now();
+        for (const credential of Object.values(state.credentials)) if (credential.licenseId === licenseId) credential.revokedAt = Date.now();
+        await saveClientSecurityState(state);
+        return res.json({ success: true, revoked: true, licenseId });
+    } catch (err) { console.error('Revoke client activation failed:', err.message); return res.status(503).json({ success: false, message: 'License storage unavailable; revocation not confirmed.' }); }
+    finally { if (releaseSecurityLock) await releaseSecurityLock().catch(err => console.error('Revoke lock release failed:', err.message)); }
+});
+app.post('/relay/admin/api/client-activations/renew', requireAdminKey, async (req, res) => {
+    let releaseSecurityLock = null;
+    try {
+        releaseSecurityLock = await acquireClientSecurityLock();
+        const licenseId = String(req.body?.licenseId || '').trim();
+        const expiresAt = req.body?.expiresAt ? new Date(req.body.expiresAt).getTime() : null;
+        if (!licenseId || expiresAt === null || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) return res.status(400).json({ success: false, message: 'licenseId and a future expiresAt date are required.' });
+        const state = await loadClientSecurityState();
+        const license = Object.values(state.activations).find(item => item && item.licenseId === licenseId);
+        if (!license) return res.status(404).json({ success: false, message: 'License not found.' });
+        if (license.revokedAt) return res.status(409).json({ success: false, message: 'Revoked licenses cannot be renewed; issue a new activation key.' });
+        license.expiresAt = expiresAt;
+        for (const credential of Object.values(state.credentials)) if (credential.licenseId === licenseId && !credential.revokedAt) credential.expiresAt = expiresAt;
+        await saveClientSecurityState(state);
+        return res.json({ success: true, renewed: true, licenseId, expiresAt, credentialsUpdated: true });
+    } catch (err) { console.error('Renew client activation failed:', err.message); return res.status(503).json({ success: false, message: 'License storage unavailable; renewal not confirmed.' }); }
+    finally { if (releaseSecurityLock) await releaseSecurityLock().catch(err => console.error('Renew lock release failed:', err.message)); }
+});
+app.post('/relay/admin/api/client-credentials/reissue', requireAdminKey, async (req, res) => {
+    let releaseSecurityLock = null;
+    try {
+        releaseSecurityLock = await acquireClientSecurityLock();
+        const licenseId = String(req.body?.licenseId || '').trim();
+        const installationId = String(req.body?.installationId || '').trim();
+        if (!licenseId || !installationId) return res.status(400).json({ success: false, message: 'licenseId and installationId are required.' });
+        const state = await loadClientSecurityState();
+        const entry = Object.entries(state.activations).find(([, item]) => item && item.licenseId === licenseId);
+        if (!entry) return res.status(404).json({ success: false, message: 'License not found.' });
+        const [keyHash, license] = entry;
+        if (license.revokedAt || (license.expiresAt && license.expiresAt <= Date.now())) return res.status(409).json({ success: false, message: 'License is revoked or expired.' });
+        if (license.activatedInstallationId !== installationId || !license.deviceFingerprint) return res.status(409).json({ success: false, message: 'Installation does not match the license-bound device. Use the approved device-replacement flow.' });
+        const credential = secureRandomSecret('omniclient');
+        const credentialHash = hashClientSecret(credential);
+        const credentialId = crypto.randomUUID();
+        const now = Date.now();
+        for (const [hash, item] of Object.entries(state.credentials)) if (item.licenseId === licenseId && !item.revokedAt) state.credentials[hash].revokedAt = now;
+        state.credentials[credentialHash] = { credentialId, licenseId, installationId, fingerprint: license.deviceFingerprint, createdAt: now, expiresAt: license.expiresAt || null, revokedAt: null };
+        license.lastCredentialReissuedAt = now;
+        await saveClientSecurityState(state, installationId);
+        return res.json({ success: true, credential, credentialId, installationId, expiresAt: license.expiresAt || null, message: 'Credential reissued once; the previous credentials were revoked.' });
+    } catch (err) { console.error('Reissue client credential failed:', err.message); return res.status(503).json({ success: false, message: 'License storage unavailable; credential reissue not confirmed.' }); }
+    finally { if (releaseSecurityLock) await releaseSecurityLock().catch(err => console.error('Reissue lock release failed:', err.message)); }
+});
+app.get('/relay/admin/api/client-device-replacements/pending', requireAdminKey, async (req, res) => {
+    try {
+        const state = await loadClientSecurityState();
+        return res.json({ success: true, pending: Object.values(state.replacements).filter(x => x.status === 'pending') });
+    } catch (err) { console.error('List device replacement requests failed:', err.message); return res.status(503).json({ success: false, message: 'License storage unavailable.' }); }
+});
+app.post('/relay/admin/api/client-device-replacements/approve', requireAdminKey, async (req, res) => {
+    let releaseSecurityLock = null;
+    try {
+        releaseSecurityLock = await acquireClientSecurityLock();
+        const licenseId = String(req.body?.licenseId || '');
+        const newInstallationId = String(req.body?.newInstallationId || '');
+        const newFingerprint = String(req.body?.newFingerprint || '');
+        if (!licenseId || !newInstallationId || !/^[a-fA-F0-9]{32,128}$/.test(newFingerprint)) return res.status(400).json({ success: false, message: 'licenseId, newInstallationId and valid newFingerprint are required.' });
+        const state = await loadClientSecurityState();
+        const entry = Object.entries(state.activations).find(([, x]) => x.licenseId === licenseId);
+        if (!entry) return res.status(404).json({ success: false, message: 'License not found.' });
+        const pending = state.replacements[licenseId];
+        if (!pending || pending.status !== 'pending' || pending.requestedInstallationId !== newInstallationId || pending.requestedFingerprint !== newFingerprint) {
+            return res.status(409).json({ success: false, message: 'No matching pending device replacement request exists. Approval denied.' });
+        }
+        const [keyHash, license] = entry;
+        for (const credential of Object.values(state.credentials)) if (credential.licenseId === licenseId && !credential.revokedAt) credential.revokedAt = Date.now();
+        license.activatedInstallationId = newInstallationId; license.deviceFingerprint = newFingerprint; license.activatedAt = null; license.deviceReplacementApprovedAt = Date.now();
+        state.replacements[licenseId] = { ...(state.replacements[licenseId] || {}), licenseId, status: 'approved', approvedAt: Date.now(), requestedInstallationId: newInstallationId };
+        await saveClientSecurityState(state, newInstallationId);
+        allowedDevices.add(newInstallationId);
+        return res.json({ success: true, approved: true, licenseId, installationId: newInstallationId, message: 'Device replacement approved. The new device must activate again to receive a new credential.' });
+    } catch (err) { console.error('Approve device replacement failed:', err.message); return res.status(503).json({ success: false, message: 'License storage unavailable; approval not confirmed.' }); }
+    finally { if (releaseSecurityLock) await releaseSecurityLock().catch(err => console.error('Replacement lock release failed:', err.message)); }
+});
+
 const rateBuckets = new Map();
 const RATE_BUCKET_CLEANUP_INTERVAL_MS = 30 * 60 * 1000;
 const RATE_BUCKET_MAX_AGE_MS = 60 * 60 * 1000; 
@@ -13918,7 +14325,7 @@ app.post('/relay/integrity-checkin', requireApiKey, requireAllowedDevice, rateLi
         addedCount: added.length
     });
 });
-app.post('/relay/branch-checkin', requireApiKey, requireAllowedDevice, rateLimit('branch-checkin', 40, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
+app.post('/relay/branch-checkin', requireApiKey, requireAllowedDevice, requireBranchGroupCustomer, rateLimit('branch-checkin', 40, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
     const { installationId, branchGroupKeyHash, branchName, summary, encryptedSummary } = req.body || {};
     if (!installationId) {
         return res.status(400).json({ success: false, message: 'Missing installationId.' });
@@ -14015,7 +14422,7 @@ app.post('/relay/branch-checkin', requireApiKey, requireAllowedDevice, rateLimit
 // Without this, the device's old entry sat in branchSummaries forever and kept
 // inflating the multi-terminal discount count. Removes only this installation's
 // own entry + trend history; shared transfer history is intentionally left alone.
-app.post('/relay/branch-leave', requireApiKey, requireAllowedDevice, rateLimit('branch-leave', 10, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
+app.post('/relay/branch-leave', requireApiKey, requireAllowedDevice, requireBranchGroupCustomer, rateLimit('branch-leave', 10, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
     const { installationId } = req.body || {};
     if (!installationId) {
         return res.status(400).json({ success: false, message: 'Missing installationId.' });
@@ -14042,7 +14449,7 @@ app.post('/relay/branch-leave', requireApiKey, requireAllowedDevice, rateLimit('
     logActivity(installationId, 'branch_leave', { removedFromGroups });
     res.json({ success: true, removedFromGroups });
 });
-app.post('/relay/remote-operations/checkin', requireApiKey, requireAllowedDevice, rateLimit('remote-operations-checkin', 60, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
+app.post('/relay/remote-operations/checkin', requireApiKey, requireAllowedDevice, requireBranchGroupCustomer, rateLimit('remote-operations-checkin', 60, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
     const { installationId, branchGroupKeyHash, branchName, encryptedRemoteOperations, remoteOperations } = req.body || {};
     if (!installationId) {
         return res.status(400).json({ success: false, message: 'Missing installationId.' });
@@ -14114,7 +14521,7 @@ app.post('/relay/remote-operations/checkin', requireApiKey, requireAllowedDevice
     });
     res.json({ success: true, message: 'Remote operations check-in recorded.', updatedAt });
 });
-app.get('/relay/remote-operations/summary', requireApiKey, requireAllowedDevice, rateLimit('remote-operations-summary', 120, 60 * 60 * 1000, (req) => req.query?.installationId), (req, res) => {
+app.get('/relay/remote-operations/summary', requireApiKey, requireAllowedDevice, requireBranchGroupCustomer, rateLimit('remote-operations-summary', 120, 60 * 60 * 1000, (req) => req.query?.installationId), (req, res) => {
     const installationId = String(req.query.installationId || '');
     const groupKeyHash = String(req.query.groupKeyHash || '');
     if (!installationId || !BRANCH_GROUP_HASH_RE.test(groupKeyHash)) {
@@ -14151,7 +14558,7 @@ app.get('/relay/remote-operations/summary', requireApiKey, requireAllowedDevice,
         .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
     res.json({ success: true, branchCount: branches.length, branches, combined: null });
 });
-app.get('/relay/branch-summary', requireApiKey, requireAllowedDevice, rateLimit('branch-summary', 120, 60 * 60 * 1000, (req) => req.query?.installationId), (req, res) => {
+app.get('/relay/branch-summary', requireApiKey, requireAllowedDevice, requireBranchGroupCustomer, rateLimit('branch-summary', 120, 60 * 60 * 1000, (req) => req.query?.installationId), (req, res) => {
     const groupKeyHash = String(req.query.groupKeyHash || '');
     if (!BRANCH_GROUP_HASH_RE.test(groupKeyHash)) {
         return res.status(400).json({ success: false, message: 'Missing or invalid groupKeyHash query param format.' });
@@ -14173,7 +14580,7 @@ app.get('/relay/branch-summary', requireApiKey, requireAllowedDevice, rateLimit(
     })).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
     res.json({ success: true, branchCount: branches.length, branches, combined: null });
 });
-app.get('/relay/branch-trend', requireApiKey, requireAllowedDevice, rateLimit('branch-trend', 120, 60 * 60 * 1000, (req) => req.query?.installationId), (req, res) => {
+app.get('/relay/branch-trend', requireApiKey, requireAllowedDevice, requireBranchGroupCustomer, rateLimit('branch-trend', 120, 60 * 60 * 1000, (req) => req.query?.installationId), (req, res) => {
     const groupKeyHash = String(req.query.groupKeyHash || '');
     if (!BRANCH_GROUP_HASH_RE.test(groupKeyHash)) {
         return res.status(400).json({ success: false, message: 'Missing or invalid groupKeyHash query param format.' });
@@ -14193,7 +14600,7 @@ app.get('/relay/branch-trend', requireApiKey, requireAllowedDevice, rateLimit('b
     }));
     res.json({ success: true, branches, combinedHistory: null });
 });
-app.post('/relay/branch-transfer-request', requireApiKey, requireAllowedDevice, rateLimit('branch-transfer-request', 60, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
+app.post('/relay/branch-transfer-request', requireApiKey, requireAllowedDevice, requireBranchGroupCustomer, rateLimit('branch-transfer-request', 60, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
     const { installationId, branchGroupKeyHash, fromBranchName, toInstallationId, toBranchName, itemName, sku, qty, note } = req.body || {};
     if (!installationId || !toInstallationId) {
         return res.status(400).json({ success: false, message: 'Missing installationId or toInstallationId.' });
@@ -14236,7 +14643,7 @@ app.post('/relay/branch-transfer-request', requireApiKey, requireAllowedDevice, 
     saveBranchTransfers(branchTransfers);
     res.json({ success: true, transfer });
 });
-app.get('/relay/branch-transfers', requireApiKey, requireAllowedDevice, rateLimit('branch-transfers', 120, 60 * 60 * 1000, (req) => req.query?.installationId), (req, res) => {
+app.get('/relay/branch-transfers', requireApiKey, requireAllowedDevice, requireBranchGroupCustomer, rateLimit('branch-transfers', 120, 60 * 60 * 1000, (req) => req.query?.installationId), (req, res) => {
     const groupKeyHash = String(req.query.groupKeyHash || '');
     if (!BRANCH_GROUP_HASH_RE.test(groupKeyHash)) {
         return res.status(400).json({ success: false, message: 'Missing or invalid groupKeyHash query param format.' });
@@ -14275,7 +14682,7 @@ const BRANCH_TRANSFER_RULES = {
     send: { requiredStatus: 'accepted', actorField: 'fromInstallationId', errorMessage: 'Only the source branch can mark this transfer as sent.' },
     receive: { requiredStatus: 'in_transit', actorField: 'toInstallationId', errorMessage: 'Only the destination branch can confirm receipt of this transfer.' }
 };
-app.post('/relay/branch-transfer-respond', requireApiKey, requireAllowedDevice, rateLimit('branch-transfer-respond', 60, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
+app.post('/relay/branch-transfer-respond', requireApiKey, requireAllowedDevice, requireBranchGroupCustomer, rateLimit('branch-transfer-respond', 60, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
     const { installationId, branchGroupKeyHash, transferId, action } = req.body || {};
     if (!installationId || !transferId || !BRANCH_TRANSFER_ACTIONS.includes(action)) {
         return res.status(400).json({ success: false, message: 'Missing or invalid request.' });
@@ -14312,7 +14719,7 @@ app.post('/relay/branch-transfer-respond', requireApiKey, requireAllowedDevice, 
 // Since branchTransfers[groupKeyHash] is one shared list for the whole
 // group (not per-installation), clearing here clears it for every branch
 // in the group, not just the caller's own device.
-app.post('/relay/branch-transfers/clear-finished', requireApiKey, requireAllowedDevice, rateLimit('branch-transfers-clear', 10, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
+app.post('/relay/branch-transfers/clear-finished', requireApiKey, requireAllowedDevice, requireBranchGroupCustomer, rateLimit('branch-transfers-clear', 10, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
     const { installationId, branchGroupKeyHash } = req.body || {};
     if (!installationId) {
         return res.status(400).json({ success: false, message: 'Missing installationId.' });
@@ -18500,7 +18907,7 @@ app.post('/relay/cloud-backup/restore', requireApiKey, requireAllowedDevice, rat
             message: 'Naka-flag ang device na ito bilang posibleng clone/duplicate. Kontakin ang developer/store owner para i-review at i-reset bago payagan ang restore.'
         });
     }
-    if (fpRecord.fingerprint !== hardwareFingerprint) {
+    if (!fingerprintMatchesOrMigrate(fpRecord, hardwareFingerprint, req.body && req.body.legacyFingerprint)) {
         logActivity(installationId, 'cloud_backup_restore_blocked', { reason: 'fingerprint_mismatch' });
         return res.status(403).json({
             success: false,
@@ -18645,14 +19052,22 @@ app.post('/relay/verify-login', requireApiKey, rateLimit('verify-login', 30, 10 
         }
         recordDeviceSeen(newId, { storeName, username });
         logActivity(newId, 'device_reverified_after_split', { splitFromInstallationId: installationId });
-        return res.json({
+        const splitPayload = {
             success: true,
             allowed: allowedDevices.has(newId),
             firstTime: false,
             reassignedInstallationId: newId,
             permit: issueDevicePermit(newId, hardwareFingerprint),
             message: 'Na-verify — ang device na ito ay hiwalay na (na-split mula sa isang naunang na-flag na clone). Ida-adopt ng client ang bagong installationId mula ngayon.'
-        });
+        };
+        if (!req.relayClient) return res.json(splitPayload);   // master key: walang credential na ililipat
+        // Ilipat muna ang credential sa bagong ID BAGO sagutin ang client; kung pumalya, huwag ipa-adopt ang bagong ID.
+        return rebindClientInstallation(installationId, newId)
+            .then(() => res.json(splitPayload))
+            .catch(err => {
+                console.error('Credential rebind after clone split failed:', err.message);
+                if (!res.headersSent) res.status(503).json({ success: false, message: 'Hindi makumpleto ang device split nang ligtas. Subukan ulit.' });
+            });
     }
     if (existing.flagged) {
         return res.status(403).json({
@@ -18661,7 +19076,7 @@ app.post('/relay/verify-login', requireApiKey, rateLimit('verify-login', 30, 10 
             message: 'Naka-flag ang device na ito bilang posibleng clone/duplicate. Kontakin ang developer/store owner para i-review at i-reset.'
         });
     }
-    if (existing.fingerprint !== hardwareFingerprint) {
+    if (!fingerprintMatchesOrMigrate(existing, hardwareFingerprint, req.body && req.body.legacyFingerprint)) {
         existing.flagged = true;
         existing.flaggedFingerprint = hardwareFingerprint;
         existing.flaggedAt = Date.now();
@@ -21025,11 +21440,10 @@ async function performBuildReleaseInner(reqBody, req, publishOverride) {
         const relayUrl = (reqBody && reqBody.relayUrl)
             || process.env.RELAY_PUBLIC_URL
             || `${req.protocol}://${req.get('host')}`;
-        const relayApiKey = (reqBody && reqBody.relayApiKey) || process.env.RELAY_API_KEY;
+        // SECURITY: never put the RELAY master key in customer ZIPs or encrypted .env files.
+        // The customer receives a one-time activation key out-of-band and obtains a revocable
+        // installation-bound credential from /relay/client/activate on first launch.
         const clientPort = (reqBody && reqBody.port) || 3000;
-        if (!relayApiKey) {
-            throw new Error('Walang RELAY_API_KEY na naka-set (ni sa request body ni sa RELAY .env) — hindi makakagawa ng client .env.');
-        }
         const imageSearchProvider = (reqBody && reqBody.imageSearchProvider) || process.env.IMAGE_SEARCH_PROVIDER || '';
         const imageSearchApiKey = (reqBody && reqBody.imageSearchApiKey) || process.env.IMAGE_SEARCH_API_KEY || '';
         const imageSearchCx = (reqBody && reqBody.imageSearchCx) || process.env.IMAGE_SEARCH_CX || '';
@@ -21061,7 +21475,6 @@ async function performBuildReleaseInner(reqBody, req, publishOverride) {
             || 300000;
         const clientEnvContent = [
             `RELAY_URL=${relayUrl}`,
-            `RELAY_API_KEY=${relayApiKey}`,
             `PORT=${clientPort}`,
             `IMAGE_SEARCH_PROVIDER=${imageSearchProvider}`,
             `IMAGE_SEARCH_API_KEY=${imageSearchApiKey}`,
@@ -21070,7 +21483,7 @@ async function performBuildReleaseInner(reqBody, req, publishOverride) {
             `RELAY_FEATURE_SYNC_INTERVAL_MS=${featureSyncIntervalMs}`,
             ''
         ].join('\n');
-        setBuildProgress({ stage: 'env', percent: BUILD_STEP_END_PERCENT.filter, message: 'Ini-encrypt ang client .env...' });
+        setBuildProgress({ stage: 'env', percent: BUILD_STEP_END_PERCENT.filter, message: 'Ini-encrypt ang client .env (walang RELAY master key)...' });
         const envResult = await encryptClientEnvAndPatchLoader(tmpDir, clientEnvContent);
         setBuildProgress({ stage: 'obfuscate', percent: BUILD_STEP_END_PERCENT.env, message: shouldObfuscate ? 'Ino-obfuscate ang mga file...' : 'Inihahanda ang mga file (obfuscation OFF)...' });
         const obfuscateStart = BUILD_STEP_END_PERCENT.env;
@@ -21369,15 +21782,18 @@ app.get('/relay/download/:code', async (req, res) => {
     if (meta.usesRemaining <= 0) {
         return res.status(410).send('Naubos na ang bilang ng pwedeng gamitin sa code na ito. Kontakin ang developer para sa bagong link.');
     }
-    await ensureReleasePackageFreshOnDisk();
+    // Ireserba agad (synchronous) ang isang gamit BAGO ang anumang await, para hindi makapasok ang dalawang sabay na request sa iisang code.
+    meta.usesRemaining -= 1;
+    try { await ensureReleasePackageFreshOnDisk(); } catch (_e) { /* ang existsSync sa ibaba ang magpapasya */ }
     if (!fs.existsSync(RELEASE_PACKAGE_PATH)) {
+        meta.usesRemaining += 1;   // ibalik ang nireserbang gamit
         return res.status(503).send('Walang naka-publish na release package sa server pa. Kontakin ang developer.');
     }
-    meta.usesRemaining -= 1;
     meta.lastUsedAt = Date.now();
     meta.downloadCount = (meta.downloadCount || 0) + 1;
     saveDownloadCodes(downloadCodes);
     logActivity(null, 'client_package_downloaded', { code, label: meta.label || null, ip: req.ip });
+    res.set('Cache-Control', 'no-store');
     res.download(RELEASE_PACKAGE_PATH, 'omnipos-client.zip');
 });
 // OmniPOS.apk bootstrap: latest version + download links (see relay-bootstrap-patch.js for notes)

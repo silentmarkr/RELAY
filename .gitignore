@@ -36,3 +36,6 @@ relay-private-key.pem
 *.json.bak
 *.json.tmp
 *.json.corrupt-*
+
+# Local fallback store for hashed customer activation/license records.
+data/
