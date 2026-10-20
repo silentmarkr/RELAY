@@ -1765,6 +1765,7 @@ const FEATURE_CATALOG_BASE = {
     promo_codes: { name: 'Promo Codes Module', price: 499, category: 'module' },
     advanced_reports: { name: 'Sales Analytics & Advanced Reports', price: 799, category: 'module' },
     shift_management: { name: 'Multi-Cashier Shift Oversight & Z-Reading Reports', price: 699, category: 'module' },
+    bir_compliance: { name: 'BIR Compliance (AGT, BIR Z-Reading & e-Journal / Sales Book / EIS Exports)', price: 1999, category: 'module' },
     rbac_management: { name: 'Roles & Permissions (RBAC) Management', price: null, category: 'module', isSubscription: true },
     multi_branch: { name: 'Multi-Branch Dashboard', price: null, category: 'module', isSubscription: true },
     ai_assistant: { name: 'OmniPOS AI Assistant', price: null, category: 'module', isSubscription: true },
@@ -3744,6 +3745,17 @@ function isModuleSubscriptionFeature(featureId) {
 function isSubscriptionOnlyFeature(featureId) {
     return featureId === 'cloud_backup' || isModuleSubscriptionFeature(featureId);
 }
+// One-time modules that are sold ONLY on their own: they are never part of an Upgrade bundle (Basic/Standard/Pro).
+// BIR Compliance is kept out of the bundles so that, while it is switched off in Feature Availability (no PTU yet),
+// it cannot make the whole Pro bundle purchase fail, and so the fixed bundle prices do not silently change.
+const STANDALONE_ONLY_FEATURE_IDS = ['bir_compliance'];
+function isStandaloneOnlyFeature(featureId) {
+    return STANDALONE_ONLY_FEATURE_IDS.includes(featureId);
+}
+// Features that can be placed inside an Upgrade bundle: one-time (not subscription) and not standalone-only.
+function isBundleableFeature(featureId) {
+    return !isSubscriptionOnlyFeature(featureId) && !isStandaloneOnlyFeature(featureId);
+}
 const MODULE_SUBSCRIPTION_PLANS_BASE = {
     rbac_management: {
         id: 'rbac_management',
@@ -5153,16 +5165,16 @@ const UPGRADE_TIER_FEATURE_IDS_BASE = {
 let UPGRADE_TIERS = [
     { id: 'basic', name: 'Basic Upgrade', featureIds: [...UPGRADE_TIER_FEATURE_IDS_BASE.basic], bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.basic },
     { id: 'standard', name: 'Standard Upgrade', featureIds: [...UPGRADE_TIER_FEATURE_IDS_BASE.standard], bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.standard },
-    { id: 'pro', name: 'Pro Upgrade', featureIds: Object.keys(FEATURE_CATALOG).filter(id => !isSubscriptionOnlyFeature(id)), bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.pro }
+    { id: 'pro', name: 'Pro Upgrade', featureIds: Object.keys(FEATURE_CATALOG).filter(id => isBundleableFeature(id)), bundlePrice: UPGRADE_TIER_BUNDLE_PRICE_BASE.pro }
 ];
 function recomputeProTierFeatureIds() {
     const proTier = UPGRADE_TIERS.find(t => t.id === 'pro');
     if (!proTier) return;
     const override = upgradeTierPricingOverrides && upgradeTierPricingOverrides.pro;
     if (override && Array.isArray(override.featureIds) && override.featureIds.length) {
-        proTier.featureIds = override.featureIds.filter(id => FEATURE_CATALOG[id] && !isSubscriptionOnlyFeature(id));
+        proTier.featureIds = override.featureIds.filter(id => FEATURE_CATALOG[id] && isBundleableFeature(id));
     } else {
-        proTier.featureIds = Object.keys(FEATURE_CATALOG).filter(id => !isSubscriptionOnlyFeature(id));
+        proTier.featureIds = Object.keys(FEATURE_CATALOG).filter(id => isBundleableFeature(id));
     }
 }
 function recomputeUpgradeTierPricing() {
@@ -5175,7 +5187,7 @@ function recomputeUpgradeTierPricing() {
         }
         if (tier.id === 'pro') continue;
         if (override && Array.isArray(override.featureIds) && override.featureIds.length) {
-            tier.featureIds = override.featureIds.filter(id => FEATURE_CATALOG[id] && !isSubscriptionOnlyFeature(id));
+            tier.featureIds = override.featureIds.filter(id => FEATURE_CATALOG[id] && isBundleableFeature(id));
         } else {
             tier.featureIds = [...(UPGRADE_TIER_FEATURE_IDS_BASE[tier.id] || [])];
         }
@@ -5830,7 +5842,9 @@ app.get('/relay/admin/api/devices', requireAdminKey, async (req, res) => {
             label: deviceLabels.get(installationId) || null,
             allowed: allowedDevices.has(installationId),
             unlockedCount: unlockedIds.length,
-            totalCatalogCount: Object.keys(FEATURE_CATALOG).length,
+            // Features that are switched off in Feature Availability (e.g. BIR Compliance, until the PTU) cannot be bought, so they do not
+            // count toward the total — otherwise no client could ever show a fully-unlocked X / X while they are off.
+            totalCatalogCount: Object.keys(FEATURE_CATALOG).filter(id => unlockedIds.includes(id) || !getFeatureUnavailability(id)).length,
             demoActive: getActiveUnlockedFeatureIds(installationId).includes(DEMO_FEATURE_ID),
             lastActivationAt,
             lastBackupAt: backupCheckin ? backupCheckin.lastBackupAt : null,
@@ -6563,7 +6577,7 @@ app.get('/relay/admin/api/pricing/tiers', requireAdminKey, (req, res) => {
             featureIds: UPGRADE_TIER_FEATURE_IDS_BASE[tierId] || undefined
         };
     }
-    const selectableFeatureIds = Object.keys(FEATURE_CATALOG).filter(id => !isSubscriptionOnlyFeature(id));
+    const selectableFeatureIds = Object.keys(FEATURE_CATALOG).filter(id => isBundleableFeature(id));
     res.json({
         success: true,
         upgradeTiers: effective,
@@ -6588,9 +6602,9 @@ app.post('/relay/admin/api/pricing/tiers', requireAdminKey, (req, res) => {
         if (!Array.isArray(featureIds) || featureIds.length === 0) {
             return res.status(400).json({ success: false, message: 'featureIds must be a non-empty array of feature IDs.' });
         }
-        const invalid = featureIds.filter(id => !FEATURE_CATALOG[id] || isSubscriptionOnlyFeature(id));
+        const invalid = featureIds.filter(id => !FEATURE_CATALOG[id] || !isBundleableFeature(id));
         if (invalid.length) {
-            return res.status(400).json({ success: false, message: `These feature IDs cannot be placed in a bundle (unknown, or a subscription-only feature that is always purchased separately): ${invalid.join(', ')}` });
+            return res.status(400).json({ success: false, message: `These feature IDs cannot be placed in a bundle (unknown, or a subscription-only / standalone-only feature that is always purchased separately): ${invalid.join(', ')}` });
         }
     }
     const existing = upgradeTierPricingOverrides[tierId] || {};
@@ -6683,6 +6697,10 @@ function saveActivationFlags(value) {
 // ===================================================================
 const FEATURE_AVAILABILITY_DEFAULT_MESSAGE = 'This feature is not available yet. We are still finishing its setup and will let you know as soon as it is ready. Thank you for your patience!';
 const FEATURE_AVAILABILITY_DEFAULTS = {
+    bir_compliance: {
+        available: false,
+        message: 'BIR Compliance (AGT, BIR Z-Reading, e-Journal / Sales Book / EIS exports, BIR invoice numbering and BIR receipt details) is not available yet. It will be released once OmniPOS has its BIR Permit to Use (PTU). We will let you know as soon as it is ready. Thank you for your patience!'
+    },
     marketplace_hub: {
         available: false,
         message: 'Marketplace Hub (Shopee, Lazada & TikTok Shop) is not available yet. We are still waiting for the marketplaces to approve our integration. We will let you know as soon as it is ready. Thank you for your patience!'
@@ -19374,6 +19392,8 @@ app.post('/relay/confirm-unlock', requireApiKey, requireAllowedDevice, rateLimit
     if (!installationId || !featureId || !otp) {
         return res.status(400).json({ success: false, message: 'Kulang ang installationId, featureId, o otp.' });
     }
+    // Hindi na rin makukumpleto ang OTP na hiniling bago i-off ang feature sa Feature Availability.
+    if (rejectIfFeatureUnavailable(res, installationId, [featureId])) return;
     const key = `${installationId}:${featureId}`;
     const pending = pendingOtps.get(key);
     if (!pending) {
@@ -19690,6 +19710,8 @@ app.post('/relay/confirm-unlock-bulk', requireApiKey, requireAllowedDevice, rate
     if (!installationId || !Array.isArray(featureIds) || featureIds.length === 0 || !otp) {
         return res.status(400).json({ success: false, message: 'Kulang ang installationId, featureIds, o otp.' });
     }
+    // Hindi na rin makukumpleto ang bundle OTP na hiniling bago i-off ang feature sa Feature Availability.
+    if (rejectIfFeatureUnavailable(res, installationId, featureIds)) return;
     const key = `${installationId}:__bulk__:${featureIds.slice().sort().join(',')}`;
     const pending = pendingOtps.get(key);
     if (!pending) {
@@ -20913,6 +20935,8 @@ const RELEASE_CLIENT_TARGETS = new Set([
     // Printer Device Settings (Bluetooth brand presets + WiFi/LAN network
     // printing) — proprietary code, must ship/obfuscate alongside bt-printer.js.
     path.join('public', 'printer-manager.js'),
+    // USB printing (WebUSB / Web Serial / server bridge client) — proprietary code, must ship/obfuscate with the other printer files.
+    path.join('public', 'usb-printer.js'),
     path.join('public', 'faq-engine.js'),
     path.join('public', 'faq-knowledge.js'),
     path.join('public', 'faq-knowledge.en.js'),
