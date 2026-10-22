@@ -9048,8 +9048,17 @@ const resetRequestInbox = createResetRequestInbox();
 // (the installation comes from the credential, never from the body).
 app.post('/relay/client/reset-inbox', rateLimit('client-reset-inbox', 120, 60 * 1000), requireApiKey, async (req, res) => {
     try {
-        if (!req.relayClient) return res.status(403).json({ success: false, code: 'CLIENT_CREDENTIAL_REQUIRED', message: 'A per-client credential is required.' });
-        const r = resetRequestInbox.poll({ installationId: req.relayClient.installationId, requestCode: req.body && req.body.requestCode, ip: req.ip || null });
+        // A device activated with a per-client credential: the installation comes from that credential, never from the body.
+        // A developer/test device that still runs on the RELAY master key (activation migrated from .env) has no per-client
+        // credential. The master key is already fully trusted, so for it the installation is the one named inside the request
+        // code. The developer still reviews the request and must enter the developer passkey before any pass key is signed.
+        let inboxInstallationId = req.relayClient ? req.relayClient.installationId : null;
+        if (!inboxInstallationId && req.relayMasterAuthenticated) {
+            const probe = birPassKey.decodeRequestCode(req.body && req.body.requestCode);
+            inboxInstallationId = probe.ok ? probe.request.installationId : 'master-unresolved';   // poll() then answers INVALID_INPUT
+        }
+        if (!inboxInstallationId) return res.status(403).json({ success: false, code: 'CLIENT_CREDENTIAL_REQUIRED', message: 'A per-client credential is required.' });
+        const r = resetRequestInbox.poll({ installationId: inboxInstallationId, requestCode: req.body && req.body.requestCode, ip: req.ip || null });
         if (!r.ok) {
             const map = {
                 INVALID_INPUT: [400, 'RESET_REQUEST_INVALID', r.message || 'The request code is invalid. Close the dialog and start the reset again.'],
