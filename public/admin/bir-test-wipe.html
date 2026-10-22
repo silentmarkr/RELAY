@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#05070d"><title>BIR Test Wipe — RELAY Admin</title>
+<style>
+:root{color-scheme:dark;--bg:#05070d;--card:#101625;--line:#26334f;--text:#eafcff;--muted:#9aabc9;--accent:#22e5ff;--green:#3ddc84;--red:#ff5c72;--amber:#ffc857}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{max-width:860px;margin:0 auto;padding:18px 14px 60px}
+a{color:var(--accent)}
+h1{font-size:1.4rem;margin:.4rem 0}
+h2{font-size:1.05rem;margin:0 0 10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:14px 0}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
+.field{display:flex;flex-direction:column;gap:4px;font-size:.85rem;color:var(--muted);flex:1;min-width:200px}
+input{background:#0a0f1c;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px;font:inherit;width:100%}
+button{background:#16213a;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px 14px;font:inherit;cursor:pointer}
+button.danger{background:var(--red);color:#1a0509;border-color:var(--red);font-weight:700}
+button:disabled{opacity:.5;cursor:not-allowed}
+.small{font-size:.8rem;color:var(--muted)}
+.notice{margin:10px 0;padding:9px 12px;border-radius:8px;background:#0a1a14;border:1px solid #1f5a3d;color:var(--green);display:none}
+.notice.error{background:#2a0e14;border-color:#7a2230;color:var(--red)}
+.notice.show{display:block}
+.warn{background:#2a2108;border:1px solid #6b5514;color:var(--amber);padding:9px 12px;border-radius:8px;margin:10px 0}
+table{width:100%;border-collapse:collapse;font-size:.82rem}
+th,td{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertical-align:top;word-break:break-all}
+.hidden{display:none}
+.check{display:flex;gap:8px;align-items:flex-start;margin:8px 0;font-size:.9rem}
+.check input{width:auto;margin-top:4px}
+</style></head><body><main>
+<p><a href="bir-passkeys.html">← BIR Reset Pass Keys</a> · <a href="index.html">RELAY Admin</a></p>
+<h1>BIR Test Wipe (remote)</h1>
+<div class="warn">For test installations only. This sends a signed command to ONE installation. The client only has to confirm it, and then it deletes ALL its BIR data: AGT, invoice numbering, Z-Readings, voids, reset history, sales with a BIR invoice number and the sealed retention vault. It cannot be undone. The client ignores the command unless the file <strong>ALLOW_BIR_TEST_WIPE</strong> exists in its database folder.</div>
+
+<section class="card"><h2>Admin authentication</h2>
+<label class="field">RELAY admin key<input id="adminKey" type="password" autocomplete="current-password" placeholder="Enter ADMIN_KEY"></label>
+<p class="small">The admin key stays in this page's memory only; it is never saved in the browser.</p></section>
+
+<div id="notice" class="notice" role="status"></div>
+
+<section class="card"><h2>Send wipe command</h2>
+<div class="row">
+<label class="field">Installation ID of the test client<input id="installationId" maxlength="200" autocomplete="off" placeholder="e.g. 3d7647c1-c0af-48bc-aff7-bcfb038864a8"></label>
+<label class="field" style="max-width:220px">Valid for (minutes)<input id="ttl" type="number" min="2" max="60" value="15"></label></div>
+<div class="row" style="margin-top:8px">
+<label class="field">Reference (shown on the client's confirmation)<input id="reference" maxlength="160" placeholder="e.g. test run 12"></label></div>
+<label class="field" style="margin-top:8px">Developer passkey (RELAY_BIR_RESET_PASSKEY)<input id="developerPasskey" type="password" autocomplete="off" placeholder="Enter the developer passkey"></label>
+<label class="check hidden" id="unknownWrap"><input type="checkbox" id="unknownAck"><span>This installation is not in this RELAY's allowed-devices list, and I confirm it is my test client.</span></label>
+<label class="check"><input type="checkbox" id="confirmChk"><span>I understand this wipes ALL BIR data of that installation, including the retention vault, and cannot be undone.</span></label>
+<div class="row"><button id="sendBtn" class="danger">Send wipe command</button></div></section>
+
+<section class="card"><h2>Commands (most recent first)</h2>
+<p class="small">Pending = waiting for the client. Delivered = the client has seen it and is waiting for someone to confirm. A command expires by itself.</p>
+<div style="overflow-x:auto"><table><thead><tr><th>Sent</th><th>Installation</th><th>Reference</th><th>Status</th><th>Expires</th><th></th></tr></thead><tbody id="list"><tr><td colspan="6" class="small">Enter the admin key to load.</td></tr></tbody></table></div></section>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  let timer = null;
+  function say(msg, bad) { const n = $('notice'); n.textContent = msg; n.className = 'notice show' + (bad ? ' error' : ''); }
+  async function api(pathName, method, body) {
+    const r = await fetch('/relay/admin/api/' + pathName, { method, headers: { 'x-relay-admin-key': $('adminKey').value, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+    const j = await r.json().catch(() => ({}));
+    return { ok: r.ok && j.success !== false, status: r.status, json: j };
+  }
+  function fmt(ms) { return ms ? new Date(ms).toLocaleString() : '—'; }
+  function cell(tr, text) { const td = document.createElement('td'); td.textContent = text; tr.appendChild(td); return td; }
+  function render(commands) {
+    const body = $('list'); body.textContent = '';
+    if (!commands.length) { const tr = document.createElement('tr'); const td = cell(tr, 'No commands yet.'); td.colSpan = 6; td.className = 'small'; body.appendChild(tr); return; }
+    for (const c of commands) {
+      const tr = document.createElement('tr');
+      cell(tr, fmt(c.issuedAt)); cell(tr, c.installationId); cell(tr, c.reference); cell(tr, c.status); cell(tr, fmt(c.expiresAt));
+      const td = document.createElement('td');
+      if (c.status === 'pending' || c.status === 'delivered') {
+        const b = document.createElement('button'); b.textContent = 'Cancel';
+        b.addEventListener('click', async () => { const r = await api('bir-test-wipe/cancel', 'POST', { installationId: c.installationId }); say(r.ok ? 'Cancelled.' : (r.json.message || 'Could not cancel.'), !r.ok); load(); });
+        td.appendChild(b);
+      }
+      tr.appendChild(td); body.appendChild(tr);
+    }
+  }
+  async function load() {
+    if (!$('adminKey').value) return;
+    const r = await api('bir-test-wipe/commands', 'GET');
+    if (r.ok) {
+      try { sessionStorage.setItem('relayAdminKey', $('adminKey').value); } catch (_s) {}
+      render(r.json.commands || []);
+    } else {
+      if (r.status === 401 || r.status === 403) { try { sessionStorage.removeItem('relayAdminKey'); } catch (_s) {} }
+      say(r.json.message || 'Could not load the commands (wrong admin key?).', true);
+    }
+  }
+  function connect() { load(); if (!timer) timer = setInterval(() => { if ($('adminKey').value && !document.hidden) load(); }, 5000); }
+  $('adminKey').addEventListener('change', connect);
+  // Kusang login: gamitin ang admin key na naka-save na sa tab na ito (sessionStorage, parehong gamit ng ibang admin page; nabubura kapag isinara ang tab).
+  (function autoLogin() { let saved = ''; try { saved = sessionStorage.getItem('relayAdminKey') || ''; } catch (_s) {} if (saved) { $('adminKey').value = saved; connect(); } })();
+  $('sendBtn').addEventListener('click', async () => {
+    if (!$('adminKey').value) { say('Enter the RELAY admin key first.', true); return; }
+    $('sendBtn').disabled = true;
+    try {
+      const r = await api('bir-test-wipe/send', 'POST', {
+        installationId: $('installationId').value.trim(), reference: $('reference').value.trim(), ttlMinutes: Number($('ttl').value) || 15,
+        developerPasskey: $('developerPasskey').value, confirm: $('confirmChk').checked, acknowledgeUnknownDevice: $('unknownAck').checked
+      });
+      if (r.json && r.json.code === 'UNKNOWN_DEVICE') $('unknownWrap').classList.remove('hidden');
+      say(r.json.message || (r.ok ? 'Sent.' : 'Failed.'), !r.ok);
+      if (r.ok) { $('developerPasskey').value = ''; $('confirmChk').checked = false; }
+      load();
+    } catch (e) { say('Could not reach RELAY.', true); }
+    finally { $('sendBtn').disabled = false; }
+  });
+})();
+</script>
+</main></body></html>

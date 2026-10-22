@@ -9133,6 +9133,107 @@ app.post('/relay/admin/api/bir-reset-inbox/send', requireAdminKey, rateLimit('bi
         if (!res.headersSent) return res.status(500).json({ success: false, code: 'ISSUE_FAILED', message: 'Could not send the pass key.' });
     }
 });
+// ===== REMOTE BIR TEST WIPE =====
+// The developer presses "Send wipe command" for ONE installation (admin page bir-test-wipe.html). RELAY signs a short-lived,
+// one-time command and the OmniPOS client only has to confirm it. Same two secrets as BIR pass keys: RELAY_ADMIN_KEY + the
+// developer passkey (RELAY_BIR_RESET_PASSKEY, with the same wrong-guess lockout). The client also needs its local opt-in file
+// (database/ALLOW_BIR_TEST_WIPE), so a stolen admin key alone cannot wipe a real store. See bir-test-wipe.js.
+const birTestWipe = require('./bir-test-wipe');
+const birTestWipeStore = birTestWipe.createCommandStore();
+function checkBirDeveloperGate(req, body) {
+    if (!birPassKey.isSecureAdminRequest(req)) {
+        return { status: 400, json: { success: false, code: 'HTTPS_REQUIRED', message: 'This action requires HTTPS (localhost is allowed for local development). If RELAY runs behind a TLS-terminating proxy, set TRUST_PROXY_HOPS (e.g. 1).' } };
+    }
+    const configured = process.env.RELAY_BIR_RESET_PASSKEY || '';
+    if (!birPassKey.isStrongDeveloperPasskey(configured)) {
+        return { status: 503, json: { success: false, code: 'BIR_RESET_PASSKEY_NOT_CONFIGURED', message: 'Disabled. Set RELAY_BIR_RESET_PASSKEY on the RELAY host: at least 8 characters, mixing at least 3 of lowercase, UPPERCASE, digits and symbols.' } };
+    }
+    const lockNow = Date.now();
+    if (birPasskeyLockedUntil > lockNow) {
+        return { status: 429, json: { success: false, code: 'PASSKEY_LOCKED', message: `Too many wrong developer passkeys. Locked for ${Math.ceil((birPasskeyLockedUntil - lockNow) / 60000)} more minute(s).` } };
+    }
+    if (!birPassKey.verifyDeveloperPasskey(body && body.developerPasskey, configured)) {
+        birPasskeyFailures = birPasskeyFailures.filter((t) => lockNow - t < BIR_PASSKEY_LOCK_MS);
+        birPasskeyFailures.push(lockNow);
+        if (birPasskeyFailures.length >= BIR_PASSKEY_MAX_FAILURES) birPasskeyLockedUntil = lockNow + BIR_PASSKEY_LOCK_MS;
+        logActivity('unknown', 'bir_test_wipe_denied', { reason: 'invalid developer passkey', ip: req.ip || null });
+        notifyUnlockRequest({ subject: 'BIR test wipe: wrong developer passkey attempt', text: `Someone with the RELAY admin key tried to send a BIR test wipe command with a wrong developer passkey.\nIP: ${req.ip || 'unknown'}\nTime: ${new Date().toISOString()}` }).catch((e) => console.error('BIR test wipe denial alert failed:', e.message));
+        return { status: 403, json: { success: false, code: 'INVALID_DEVELOPER_PASSKEY', message: 'Developer passkey is invalid.' } };
+    }
+    birPasskeyFailures = [];
+    return null;
+}
+app.post('/relay/admin/api/bir-test-wipe/send', requireAdminKey, rateLimit('bir-test-wipe-send', 10, 60 * 60 * 1000), (req, res) => {
+    try {
+        const body = req.body || {};
+        const gate = checkBirDeveloperGate(req, body);
+        if (gate) return res.status(gate.status).json(gate.json);
+        const installationId = String(body.installationId || '').trim();
+        if (!installationId || installationId.length > 200) {
+            return res.status(400).json({ success: false, code: 'INSTALLATION_REQUIRED', message: 'Enter the installation ID of the client to wipe.' });
+        }
+        if (body.confirm !== true) {
+            return res.status(400).json({ success: false, code: 'CONFIRMATION_REQUIRED', message: 'Tick the confirmation box: this wipes ALL BIR data of that installation, including its sealed retention vault, and cannot be undone.' });
+        }
+        if (!allowedDevices.has(installationId) && body.acknowledgeUnknownDevice !== true) {
+            return res.status(409).json({ success: false, code: 'UNKNOWN_DEVICE', message: 'This installation is not in the allowed-devices list of this RELAY. Confirm it really is your test client.' });
+        }
+        let issued;
+        try {
+            issued = birTestWipe.issueCommand({ installationId, privateKey, reference: body.reference, ttlMinutes: body.ttlMinutes });
+        } catch (e) {
+            if (e && (e.code === 'REFERENCE_REQUIRED' || e.code === 'BAD_INPUT')) return res.status(400).json({ success: false, code: e.code, message: e.message });
+            throw e;
+        }
+        const put = birTestWipeStore.put(issued);
+        if (!put.ok) return res.status(503).json({ success: false, code: 'WIPE_STORE_FULL', message: 'Too many pending wipe commands. Cancel some and try again.' });
+        logActivity(installationId, 'bir_test_wipe_command_sent', { commandId: issued.payload.commandId, reference: issued.payload.reference, expiresAt: issued.payload.expiresAt, ip: req.ip || null });
+        notifyUnlockRequest({
+            subject: `BIR test wipe command sent — ${installationId}`,
+            text: `A BIR test wipe command was sent.\n\nInstallation ID: ${installationId}\nReference: ${issued.payload.reference}\nCommand: ${issued.payload.commandId}\nExpires: ${new Date(issued.payload.expiresAt).toISOString()}\nSent from IP: ${req.ip || 'unknown'}\n\nIf you did not send this, rotate RELAY_ADMIN_KEY and RELAY_BIR_RESET_PASSKEY now.`
+        }).catch((e) => console.error('BIR test wipe alert failed:', e.message));
+        return res.json({ success: true, commandId: issued.payload.commandId, expiresAt: issued.payload.expiresAt, message: 'Sent. The client asks for confirmation on its next check (within about 20 seconds, while an admin is logged in and the app is open).' });
+    } catch (err) {
+        console.error('Send BIR test wipe command failed:', err);
+        if (!res.headersSent) return res.status(500).json({ success: false, code: 'SEND_FAILED', message: 'Could not send the wipe command.' });
+    }
+});
+app.get('/relay/admin/api/bir-test-wipe/commands', requireAdminKey, (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    return res.json({ success: true, commands: birTestWipeStore.list(), defaultValidityMinutes: birTestWipe.DEFAULT_TTL_MINUTES, maxValidityMinutes: birTestWipe.MAX_TTL_MINUTES });
+});
+app.post('/relay/admin/api/bir-test-wipe/cancel', requireAdminKey, (req, res) => {
+    const installationId = String((req.body || {}).installationId || '').trim();
+    if (!installationId) return res.status(400).json({ success: false, message: 'Installation ID is required.' });
+    const cancelled = birTestWipeStore.cancel(installationId);
+    if (cancelled) logActivity(installationId, 'bir_test_wipe_command_cancelled', { ip: req.ip || null });
+    return res.json({ success: true, cancelled });
+});
+// Client side: the installation comes from the client's own credential, never from the body
+// (only a master-key developer device with no per-client credential names its installation in the body).
+app.post('/relay/client/bir-test-wipe/poll', rateLimit('client-bir-test-wipe', 120, 60 * 1000), requireApiKey, (req, res) => {
+    let installationId = req.relayClient ? req.relayClient.installationId : null;
+    if (!installationId && req.relayMasterAuthenticated) {
+        const fromBody = String((req.body || {}).installationId || '').trim();
+        installationId = fromBody && fromBody.length <= 200 ? fromBody : null;
+    }
+    if (!installationId) return res.status(403).json({ success: false, code: 'CLIENT_CREDENTIAL_REQUIRED', message: 'A per-client credential is required.' });
+    res.set('Cache-Control', 'no-store');
+    return res.json({ success: true, command: birTestWipeStore.deliver(installationId) });
+});
+app.post('/relay/client/bir-test-wipe/ack', rateLimit('client-bir-test-wipe', 120, 60 * 1000), requireApiKey, (req, res) => {
+    let installationId = req.relayClient ? req.relayClient.installationId : null;
+    if (!installationId && req.relayMasterAuthenticated) {
+        const fromBody = String((req.body || {}).installationId || '').trim();
+        installationId = fromBody && fromBody.length <= 200 ? fromBody : null;
+    }
+    if (!installationId) return res.status(403).json({ success: false, code: 'CLIENT_CREDENTIAL_REQUIRED', message: 'A per-client credential is required.' });
+    const commandId = String((req.body || {}).commandId || '');
+    const result = (req.body || {}).result === 'done' ? 'done' : 'declined';
+    const ok = birTestWipeStore.finish(installationId, commandId, result);
+    if (ok) logActivity(installationId, result === 'done' ? 'bir_test_wipe_done' : 'bir_test_wipe_declined', { commandId, ip: req.ip || null });
+    return res.json({ success: true, recorded: ok });
+});
 app.get('/relay/admin/api/bir-passkeys/history', requireAdminKey, (req, res) => {
     const rows = (Array.isArray(activityLog) ? activityLog : [])
         .filter((e) => e && e.type === 'bir_reset_passkey_issued')

@@ -248,10 +248,12 @@
     const key = $('adminKey').value.trim();
     if (!key) { say('Enter the RELAY admin key.', true); return; }
     adminKey = key;
-    try { await withButton($('connect'), 'Connecting…', load); say('Connected.'); loadWaiting().catch(() => {}); startWaitingLoop(); }
-    catch (e) { adminKey = ''; loaded = false; clearInterval(waitingTimer); say(e.message, true); }
+    try { await withButton($('connect'), 'Connecting…', load); try { sessionStorage.setItem('relayAdminKey', key); } catch (_s) {} say('Connected.'); loadWaiting().catch(() => {}); startWaitingLoop(); }
+    catch (e) { adminKey = ''; loaded = false; clearInterval(waitingTimer); try { sessionStorage.removeItem('relayAdminKey'); } catch (_s) {} say(e.message, true); }
   };
   $('adminKey').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('connect').click(); } });
+  // Kusang login: gamitin ang admin key na naka-save na sa tab na ito (sessionStorage, parehong gamit ng ibang admin page; nabubura kapag isinara ang tab).
+  (function autoLogin() { let saved = ''; try { saved = sessionStorage.getItem('relayAdminKey') || ''; } catch (_s) {} if (saved) { $('adminKey').value = saved; $('connect').click(); } })();
 
   $('refresh').onclick = async () => {
     try { requireKey(); await withButton($('refresh'), 'Refreshing…', load); say('License list refreshed.'); }

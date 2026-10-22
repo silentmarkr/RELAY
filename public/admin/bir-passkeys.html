@@ -32,6 +32,7 @@ th,td{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertic
 </style></head><body><main>
 <p><a href="index.html">← RELAY Admin</a></p>
 <h1>BIR Reset Pass Keys</h1>
+<p class="small"><a href="bir-test-wipe.html">Remote BIR test wipe (testing only) →</a></p>
 <p class="small">A client cannot reset its BIR records (System Hard Reset while BIR records exist, or the AGT reset) without a one-time pass key signed here. The client's reset dialog shows a <strong>pairing code</strong> and appears in <em>Waiting reset requests</em> below by itself: review the details, press <strong>Send pass key</strong>, and the client's final reset button unlocks automatically. The key is bound to that installation, device, action and request, expires, and works once. A client that cannot reach RELAY can still use the manual request-code flow at the bottom.</p>
 
 <section class="card"><h2>Admin authentication</h2>
@@ -258,12 +259,14 @@ th,td{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertic
   };
   $('historyBtn').onclick = async () => {
     if (!$('adminKey').value) { say('Enter the RELAY admin key first.', true); return; }
-    await loadHistory();
-    try { await loadWaiting(); startWaitingLoop(); say('Connected. Waiting reset requests refresh automatically.'); } catch (e) { say(e.message, true); }
+    try { await loadHistory(); await loadWaiting(); startWaitingLoop(); try { sessionStorage.setItem('relayAdminKey', $('adminKey').value); } catch (_s) {} say('Connected. Waiting reset requests refresh automatically.'); }
+    catch (e) { try { sessionStorage.removeItem('relayAdminKey'); } catch (_s) {} say(e.message, true); }
   };
   $('waitingRefresh').onclick = () => {
     if (!$('adminKey').value) { say('Enter the RELAY admin key first.', true); return; }
     loadWaiting().catch(e => say(e.message, true));
   };
+  // Kusang login: gamitin ang admin key na naka-save na sa tab na ito (sessionStorage, parehong gamit ng ibang admin page; nabubura kapag isinara ang tab).
+  (function autoLogin() { let saved = ''; try { saved = sessionStorage.getItem('relayAdminKey') || ''; } catch (_s) {} if (saved) { $('adminKey').value = saved; $('historyBtn').click(); } })();
 })();
 </script></body></html>
