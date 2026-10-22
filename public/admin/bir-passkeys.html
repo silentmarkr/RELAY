@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#05070d"><title>BIR Reset Pass Keys — RELAY Admin</title>
+<style>
+:root{color-scheme:dark;--bg:#05070d;--card:#101625;--line:#26334f;--text:#eafcff;--muted:#9aabc9;--accent:#22e5ff;--green:#3ddc84;--red:#ff5c72;--amber:#ffc857}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{max-width:980px;margin:0 auto;padding:18px 14px 60px}
+a{color:var(--accent)}
+h1{font-size:1.4rem;margin:.4rem 0}
+h2{font-size:1.05rem;margin:0 0 10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:14px 0}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
+.field{display:flex;flex-direction:column;gap:4px;font-size:.85rem;color:var(--muted);flex:1;min-width:200px}
+input,textarea{background:#0a0f1c;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px;font:inherit;width:100%}
+textarea{min-height:96px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.8rem;word-break:break-all}
+button{background:#16213a;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px 14px;font:inherit;cursor:pointer}
+button.primary{background:var(--accent);color:#04121a;border-color:var(--accent);font-weight:700}
+button:disabled{opacity:.5;cursor:not-allowed}
+.small{font-size:.8rem;color:var(--muted)}
+.notice{margin:10px 0;padding:9px 12px;border-radius:8px;background:#0a1a14;border:1px solid #1f5a3d;color:var(--green);display:none}
+.notice.error{background:#2a0e14;border-color:#7a2230;color:var(--red)}
+.notice.show{display:block}
+.warn{background:#2a2108;border:1px solid #6b5514;color:var(--amber);padding:9px 12px;border-radius:8px;margin:10px 0}
+dl{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;margin:8px 0}
+dt{color:var(--muted)}
+dd{margin:0;word-break:break-all}
+table{width:100%;border-collapse:collapse;font-size:.82rem}
+th,td{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertical-align:top;word-break:break-all}
+.hidden{display:none}
+.check{display:flex;gap:8px;align-items:flex-start;margin:8px 0;font-size:.9rem}
+.check input{width:auto;margin-top:4px}
+</style></head><body><main>
+<p><a href="index.html">← RELAY Admin</a></p>
+<h1>BIR Reset Pass Keys</h1>
+<p class="small">A client cannot reset its BIR records (System Hard Reset while BIR records exist, or the AGT reset) without a one-time pass key signed here. The client app shows a <strong>request code</strong>; you inspect it, enter a reference, and issue a key bound to that installation, device, action and request. The key expires, works once, and works offline on the client.</p>
+
+<section class="card"><h2>Admin authentication</h2>
+<div class="row"><label class="field">RELAY admin key<input id="adminKey" type="password" autocomplete="current-password" placeholder="Enter ADMIN_KEY"></label>
+<button id="historyBtn">Load issued-key history</button></div>
+<p class="small">The admin key stays in this page's memory only; it is never saved in the browser.</p></section>
+
+<div id="notice" class="notice" role="status"></div>
+
+<section class="card"><h2>1. Paste the client's request code</h2>
+<label class="field">Request code (starts with BIRRQ1.)<textarea id="requestCode" spellcheck="false" placeholder="BIRRQ1.…"></textarea></label>
+<div class="row" style="margin-top:10px"><button id="inspectBtn" class="primary">Inspect request</button></div></section>
+
+<section id="detailCard" class="card hidden"><h2>2. Check the request</h2>
+<dl id="details"></dl>
+<div id="detailWarnings"></div>
+<div class="row">
+<label class="field">Reference (required) — support ticket / invoice / reason<input id="reference" maxlength="160" placeholder="e.g. TICKET-1042 — store closure, accountant approved"></label>
+<label class="field" style="max-width:220px">Valid for (minutes)<input id="ttl" type="number" min="5" max="240" value="30"></label></div>
+<label class="field" style="margin-top:8px">Developer passkey (RELAY_BIR_RESET_PASSKEY — second secret, required to issue)<input id="developerPasskey" type="password" autocomplete="off" placeholder="Enter the developer passkey"></label>
+<label class="check hidden" id="unknownWrap"><input type="checkbox" id="unknownAck"><span>This installation is not in this RELAY's allowed-devices list, and I confirm it is still my client.</span></label>
+<label class="check"><input type="checkbox" id="confirmChk"><span>I verified the client's identity and explained that BIR records must be kept for the legal retention period. (OmniPOS stores a sealed, read-only retention copy on the device before anything is deleted.)</span></label>
+<div class="row"><button id="issueBtn" class="primary">Issue pass key</button></div></section>
+
+<section id="resultCard" class="card hidden"><h2>3. Send this pass key to the client</h2>
+<label class="field">Pass key (single use)<textarea id="passKey" readonly spellcheck="false"></textarea></label>
+<div class="row" style="margin-top:10px"><button id="copyBtn">Copy pass key</button></div>
+<p id="resultInfo" class="small"></p></section>
+
+<section class="card"><h2>Issued keys (most recent first)</h2>
+<p class="small">Shown from the RELAY activity log, which keeps a limited number of recent entries — keep your own record of every reference you enter. The client device also keeps a permanent, tamper-evident ledger.</p>
+<div style="overflow-x:auto"><table><thead><tr><th>When</th><th>Store / installation</th><th>Action</th><th>Reference</th><th>Ticket</th><th>Expires</th></tr></thead><tbody id="history"><tr><td colspan="6" class="small">Not loaded.</td></tr></tbody></table></div></section>
+</main>
+<script>
+(() => {
+  'use strict';
+  // The admin key lives only in memory (never written to any browser storage).
+  const $ = id => document.getElementById(id);
+  const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const fmt = v => v ? new Date(v).toLocaleString() : '—';
+  let inspected = null;
+
+  function say(msg, bad) {
+    const n = $('notice');
+    n.textContent = msg;
+    n.className = 'notice show' + (bad ? ' error' : '');
+  }
+
+  async function api(pathName, method, body) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 30000);
+    try {
+      const r = await fetch('/relay/admin/api/' + pathName, {
+        method: method || 'GET',
+        headers: { 'x-relay-admin-key': $('adminKey').value, 'Content-Type': 'application/json' },
+        signal: ctrl.signal,
+        ...(body ? { body: JSON.stringify(body) } : {})
+      });
+      const d = await r.json().catch(() => ({ success: false, message: 'Invalid server response' }));
+      if (!r.ok || d.success === false) { const e = new Error(d.message || ('HTTP ' + r.status)); e.code = d.code; throw e; }
+      return d;
+    } catch (e) {
+      if (e && e.name === 'AbortError') throw new Error('The request timed out. Try again.');
+      throw e;
+    } finally { clearTimeout(timer); }
+  }
+
+  const purposeLabel = p => p === 'bir-hard-reset' ? 'System Hard Reset' : (p === 'bir-agt-reset' ? 'AGT reset' : p);
+
+  function renderDetails(d) {
+    const r = d.request, s = r.summary || {};
+    const rows = [
+      ['Store name', r.storeName || '—'],
+      ['Installation ID', r.installationId],
+      ['Device tag', r.deviceTag],
+      ['Action', purposeLabel(r.purpose)],
+      ['BIR counters wiped?', r.purpose === 'bir-hard-reset' ? (r.includeBirData ? 'YES — AGT, Z-Reading history, void log, reset history are wiped (invoice numbering continues)' : 'No — counters are kept') : 'n/a'],
+      ['Request created', fmt(r.createdAt)],
+      ['Request expires', fmt(r.expiresAt)],
+      ['Next invoice number', s.nextInvoiceNumber],
+      ['Z-Readings done', s.zCounter],
+      ['Reset counter', s.resetCounter],
+      ['AGT', s.agt],
+      ['BIR-numbered sales', s.birTransactionCount],
+      ['Voids logged', s.voidCount],
+      ['Earlier vault archives', s.vaultArchives],
+      ['Known device in this RELAY', d.deviceKnown ? 'Yes' : 'NO']
+    ];
+    $('details').innerHTML = rows.map(x => '<dt>' + esc(x[0]) + '</dt><dd>' + esc(x[1]) + '</dd>').join('');
+    const warns = [];
+    if (d.requestExpired) warns.push('This request code has already expired. The client must generate a new one.');
+    if (!d.deviceKnown) warns.push('This installation is NOT in your allowed-devices list.');
+    if (r.purpose === 'bir-hard-reset' && r.includeBirData) warns.push('This wipes the client\'s BIR counters and history from the live database. A sealed copy is kept on the device, but confirm the client\'s accountant knows about it.');
+    $('detailWarnings').innerHTML = warns.map(w => '<div class="warn">' + esc(w) + '</div>').join('');
+    $('unknownWrap').classList.toggle('hidden', !!d.deviceKnown);
+    $('unknownAck').checked = false;
+    $('ttl').max = d.maxValidityMinutes; $('ttl').value = d.defaultValidityMinutes;
+    $('issueBtn').disabled = !!d.requestExpired;
+  }
+
+  $('inspectBtn').onclick = async () => {
+    $('resultCard').classList.add('hidden');
+    try {
+      const d = await api('bir-passkeys/inspect', 'POST', { requestCode: $('requestCode').value });
+      inspected = d;
+      renderDetails(d);
+      $('detailCard').classList.remove('hidden');
+      say('Request decoded. Review the details before issuing a key.');
+    } catch (e) { inspected = null; $('detailCard').classList.add('hidden'); say(e.message, true); }
+  };
+
+  $('issueBtn').onclick = async () => {
+    if (!inspected) { say('Inspect a request first.', true); return; }
+    const btn = $('issueBtn');
+    btn.disabled = true;
+    try {
+      const d = await api('bir-passkeys/issue', 'POST', {
+        requestCode: $('requestCode').value,
+        reference: $('reference').value,
+        ttlMinutes: Number($('ttl').value),
+        confirm: $('confirmChk').checked,
+        developerPasskey: $('developerPasskey').value,
+        acknowledgeUnknownDevice: $('unknownAck').checked
+      });
+      $('passKey').value = d.passKey;
+      $('resultInfo').textContent = 'Ticket ' + d.ticketId + ' · ' + purposeLabel(d.purpose) + (d.includeBirData ? ' (BIR counters included)' : '') + ' · expires ' + fmt(d.expiresAt) + '. It works once, on that device only.';
+      $('resultCard').classList.remove('hidden');
+      $('developerPasskey').value = '';
+      say('Pass key issued. Send it to the client now.');
+      loadHistory();
+    } catch (e) { say(e.message, true); }
+    finally { btn.disabled = !!(inspected && inspected.requestExpired); }
+  };
+
+  $('copyBtn').onclick = async () => {
+    try { await navigator.clipboard.writeText($('passKey').value); say('Pass key copied.'); }
+    catch (_e) { $('passKey').select(); say('Press Ctrl+C / long-press to copy the selected key.'); }
+  };
+
+  async function loadHistory() {
+    try {
+      const d = await api('bir-passkeys/history');
+      $('history').innerHTML = d.issued.length ? d.issued.map(x =>
+        '<tr><td>' + esc(fmt(x.at)) + '</td><td>' + esc(x.storeName || '—') + '<div class="small">' + esc(x.installationId || '') + '</div></td><td>' + esc(purposeLabel(x.purpose)) + (x.includeBirData ? ' (+counters)' : '') + '</td><td>' + esc(x.reference || '') + '</td><td>' + esc(x.ticketId || '') + '</td><td>' + esc(fmt(x.expiresAt)) + '</td></tr>'
+      ).join('') : '<tr><td colspan="6" class="small">No pass keys issued yet.</td></tr>';
+    } catch (e) { say(e.message, true); }
+  }
+  $('historyBtn').onclick = loadHistory;
+})();
+</script></body></html>

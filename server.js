@@ -8516,7 +8516,10 @@ const pendingOtps = new Map();
 const CLIENT_ACTIVATIONS_KV = 'per-client-activations-v1';
 const CLIENT_CREDENTIALS_KV = 'per-client-credentials-v1';
 const DEVICE_REPLACEMENT_KV = 'per-client-device-replacements-v1';
-const { hashClientSecret, secureRandomSecret, validateActivation, validateCredential, validateInstallationScope } = require('./client-activation-security');
+const { hashClientSecret, secureRandomSecret, generateSecureOtp, generateShortActivationKey, normalizeShortActivationKey, diagnoseShortKeyInput, hashShortActivationKey, validateActivation, validateCredential, validateInstallationScope } = require('./client-activation-security')
+const { createActivationInbox } = require('./client-activation-inbox')
+// Waiting (not yet activated) clients and the keys the admin sends to them. Memory only; see client-activation-inbox.js.
+const activationInbox = createActivationInbox();
 // Maikling cache para hindi 3 Postgres read ang bawat authenticated request ng bawat client.
 // Ang mga admin/activation write ay laging bumabasa ng sariwa (fresh) sa loob ng lock at ina-update/ina-invalidate ang cache.
 let clientSecurityCache = { at: 0, state: null };
@@ -8751,6 +8754,25 @@ function requireBranchGroupCustomer(req, res, next) {
         return res.status(503).json({ success: false, message: 'Branch group verification is unavailable; request denied.' });
     }
 }
+// Activation-key hashing. Short keys (XXXX-XXXX-XXXX) use a keyed hash; the pepper is RELAY_ACTIVATION_PEPPER if set, otherwise it is
+// derived from the RELAY private key. NOTE: if that private key is ever replaced and no RELAY_ACTIVATION_PEPPER was set, short
+// activation keys that were issued earlier and not yet used stop matching and must be re-issued. Long legacy keys (OMNI-ACT_...)
+// keep the old plain hash and are unaffected.
+let activationPepperCache = null;
+function getActivationPepper() {
+    if (!activationPepperCache) {
+        if (!process.env.RELAY_ACTIVATION_PEPPER) {
+            console.warn('⚠️  RELAY_ACTIVATION_PEPPER is not set: the short-activation-key pepper is derived from the RELAY private key. Set RELAY_ACTIVATION_PEPPER (a long random value) so replacing the private key can never invalidate unused activation keys.');
+        }
+        activationPepperCache = process.env.RELAY_ACTIVATION_PEPPER
+            || crypto.createHash('sha256').update(`omnipos-activation-pepper-v1:${privateKeyPem}`).digest('hex');
+    }
+    return activationPepperCache;
+}
+function activationKeyHash(input) {
+    const normalized = normalizeShortActivationKey(input);
+    return normalized ? hashShortActivationKey(normalized, getActivationPepper()) : hashClientSecret(input);
+}
 // Per-customer activation bootstrap: master RELAY_API_KEY is never needed by the customer package.
 app.post('/relay/client/activate', rateLimit('client-activate', 10, 60 * 60 * 1000), async (req, res) => {
     let releaseSecurityLock = null;
@@ -8759,13 +8781,19 @@ app.post('/relay/client/activate', rateLimit('client-activate', 10, 60 * 60 * 10
         const activationKey = String(req.body?.activationKey || '').trim();
         const installationId = String(req.body?.installationId || '').trim();
         const fingerprint = String(req.body?.fingerprint || '').trim();
-        if (!/^.{16,256}$/.test(activationKey) || !/^[a-zA-Z0-9._:-]{8,200}$/.test(installationId) || !/^[a-fA-F0-9]{32,128}$/.test(fingerprint)) {
+        if (!/^.{8,256}$/.test(activationKey) || !/^[a-zA-Z0-9._:-]{8,200}$/.test(installationId) || !/^[a-fA-F0-9]{32,128}$/.test(fingerprint)) {
             return res.status(400).json({ success: false, code: 'INVALID_ACTIVATION_INPUT', message: 'Activation key, installation ID, or device fingerprint is invalid.' });
         }
         const state = await loadClientSecurityState();
-        const keyHash = hashClientSecret(activationKey);
+        const keyHash = activationKeyHash(activationKey);
         const license = state.activations[keyHash];
         const verdict = validateActivation(license, installationId, fingerprint);
+        if (!license) {
+            // Looks like a short key that was mistyped (wrong length, or contains 0/1/I/O which a key never has): say so, instead of "revoked".
+            const hint = diagnoseShortKeyInput(activationKey);
+            if (hint === 'ACTIVATION_KEY_AMBIGUOUS_CHARACTERS') return res.status(400).json({ success: false, code: hint, message: 'That key is not valid. Activation keys never contain the characters 0, 1, I or O — check for a letter O typed as zero, or the number 1 typed as the letter I.' });
+            if (hint === 'ACTIVATION_KEY_WRONG_LENGTH') return res.status(400).json({ success: false, code: hint, message: 'That key has the wrong number of characters. An activation key looks like XXXX-XXXX-XXXX (12 characters).' });
+        }
         if (!verdict.ok && verdict.code === 'ACTIVATION_KEY_INVALID') {
             return res.status(403).json({ success: false, code: verdict.code, message: 'Activation key is invalid, revoked, or expired.' });
         }
@@ -8801,11 +8829,30 @@ app.post('/relay/client/activate', rateLimit('client-activate', 10, 60 * 60 * 10
         state.credentials[credentialHash] = { credentialId, licenseId: license.licenseId, installationId, fingerprint, createdAt: Date.now(), expiresAt: license.expiresAt || null, revokedAt: null };
         await saveClientSecurityState(state, installationId);
         allowedDevices.add(installationId);
+        activationInbox.clearDevice(installationId, fingerprint);   // the sent key (if any) is no longer needed: wipe it from memory
         return res.json({ success: true, credential, credentialId, installationId, expiresAt: license.expiresAt || null, message: 'Activation successful. Store the credential securely; it will not be shown again.' });
     } catch (err) {
         console.error('Client activation failed:', err.message);
         return res.status(503).json({ success: false, code: 'ACTIVATION_STORE_UNAVAILABLE', message: 'Activation could not be completed safely. Please retry later.' });
     } finally { if (releaseSecurityLock) await releaseSecurityLock().catch(err => console.error('Activation lock release failed:', err.message)); }
+});
+// WAITING ROOM: the activation screen of a not-yet-activated client polls here. RELAY answers with a pairing code (shown to the
+// customer so the developer can pick the right device) and, once the admin has sent one, the activation key / credential.
+// Public like /relay/client/activate (the client has no credential yet), so it is rate-limited and returns nothing unless the admin
+// sent something to THIS installationId + fingerprint. It activates nothing by itself.
+app.post('/relay/client/activation-inbox', rateLimit('client-activation-inbox', 40, 60 * 1000), (req, res) => {
+    try {
+        const r = activationInbox.poll({ installationId: String(req.body?.installationId || '').trim(), fingerprint: String(req.body?.fingerprint || '').trim(), ip: req.ip || null });
+        if (!r.ok) {
+            const status = r.code === 'INVALID_INPUT' ? 400 : 503;
+            return res.status(status).json({ success: false, code: r.code === 'INVALID_INPUT' ? 'INVALID_ACTIVATION_INPUT' : 'ACTIVATION_INBOX_BUSY', message: status === 400 ? 'Installation ID or device fingerprint is invalid.' : 'The activation waiting room is busy. Please try again shortly.' });
+        }
+        res.set('Cache-Control', 'no-store');
+        return res.json({ success: true, pairingCode: r.pairingCode, delivery: r.delivery });
+    } catch (err) {
+        console.error('Activation inbox poll failed:', err.message);
+        return res.status(503).json({ success: false, code: 'ACTIVATION_INBOX_BUSY', message: 'The activation waiting room is unavailable. Please try again shortly.' });
+    }
 });
 // Ginagamit ng client para i-verify ang isang reissued credential bago ito i-save (requireApiKey ang gumagawa ng binding check).
 app.post('/relay/client/credential-check', requireApiKey, (req, res) => {
@@ -8840,6 +8887,145 @@ function licenseStoreFailure(res, err, logLabel, message) {
     }
     return res.status(503).json({ success: false, message });
 }
+// ===================================================================
+// BIR RESET PASS KEYS (developer-controlled).
+// A client cannot reset its BIR records (System Hard Reset with BIR records on the device, or the AGT reset) without a
+// one-time pass key signed here. The client shows a request code; the developer inspects it, enters a reference, and
+// signs a key that is bound to that installation/device/action/nonce and expires. Works offline for the client.
+// Every issued key is written to the activity log. See bir-passkey.js and OMNIPOS/bir-retention.js.
+// ===================================================================
+const birPassKey = require('./bir-passkey');
+app.post('/relay/admin/api/bir-passkeys/inspect', requireAdminKey, (req, res) => {
+    const decoded = birPassKey.decodeRequestCode(req.body && req.body.requestCode);
+    if (!decoded.ok) return res.status(400).json({ success: false, code: decoded.code, message: decoded.message });
+    const request = decoded.request;
+    return res.json({
+        success: true,
+        request,
+        requestExpired: request.expiresAt <= Date.now(),
+        deviceKnown: allowedDevices.has(request.installationId),
+        defaultValidityMinutes: birPassKey.DEFAULT_VALIDITY_MINUTES,
+        maxValidityMinutes: birPassKey.MAX_VALIDITY_MINUTES
+    });
+});
+// Requests that already received a key: the same request code can never be signed twice. The nonces are persisted
+// (Postgres KV store) so a RELAY restart/redeploy cannot reopen an old request; each entry is dropped once its request
+// code has expired. The client app also accepts each key only once.
+const BIR_PASSKEY_MAX_FAILURES = 5;
+const BIR_PASSKEY_LOCK_MS = 30 * 60 * 1000;
+let birPasskeyFailures = [];
+let birPasskeyLockedUntil = 0;
+const BIR_ISSUED_NONCES_KEY = 'bir-passkey-issued-nonces';
+const issuedBirRequestNonces = new Map();
+let birIssuedNoncesLoading = null;
+function loadIssuedBirNonces() {
+    if (!birIssuedNoncesLoading) {
+        birIssuedNoncesLoading = (async () => {
+            // strict: if the store cannot be read, fail closed (the caller returns 503) instead of pretending no key was ever issued.
+            const stored = await getPersistentJSON(BIR_ISSUED_NONCES_KEY, {}, { strict: true });
+            if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
+                for (const [nonce, expiresAt] of Object.entries(stored)) {
+                    if (/^[0-9a-f]{32}$/.test(nonce) && Number.isFinite(expiresAt)) issuedBirRequestNonces.set(nonce, expiresAt);
+                }
+            }
+        })().catch((err) => { birIssuedNoncesLoading = null; throw err; });
+    }
+    return birIssuedNoncesLoading;
+}
+function persistIssuedBirNonces() {
+    const now = Date.now();
+    const snapshot = {};
+    for (const [nonce, expiresAt] of issuedBirRequestNonces) {
+        if (expiresAt > now) snapshot[nonce] = expiresAt;
+    }
+    setPersistentJSON(BIR_ISSUED_NONCES_KEY, snapshot);
+}
+app.post('/relay/admin/api/bir-passkeys/issue', requireAdminKey, rateLimit('bir-passkey-issue', 10, 60 * 60 * 1000), async (req, res) => {
+    const body = req.body || {};
+    if (!birPassKey.isSecureAdminRequest(req)) {
+        return res.status(400).json({ success: false, code: 'HTTPS_REQUIRED', message: 'Issuing a pass key requires HTTPS (localhost is allowed for local development). If RELAY runs behind a TLS-terminating proxy, set TRUST_PROXY_HOPS (e.g. 1) so RELAY can see the original HTTPS connection.' });
+    }
+    const configuredDeveloperPasskey = process.env.RELAY_BIR_RESET_PASSKEY || '';
+    if (!birPassKey.isStrongDeveloperPasskey(configuredDeveloperPasskey)) {
+        return res.status(503).json({ success: false, code: 'BIR_RESET_PASSKEY_NOT_CONFIGURED', message: 'Pass-key issuing is disabled. Set RELAY_BIR_RESET_PASSKEY on the RELAY host: at least 8 characters, mixing at least 3 of lowercase, UPPERCASE, digits and symbols.' });
+    }
+    // Short-passkey protection: a GLOBAL lockout (not per IP, so rotating IPs does not help). After 5 wrong passkeys in 30 minutes,
+    // issuing is blocked for 30 minutes even if the right passkey is entered. The wrong-attempt e-mail alert below still fires.
+    const lockNow = Date.now();
+    if (birPasskeyLockedUntil > lockNow) {
+        return res.status(429).json({ success: false, code: 'PASSKEY_LOCKED', message: `Too many wrong developer passkeys. Pass-key issuing is locked for ${Math.ceil((birPasskeyLockedUntil - lockNow) / 60000)} more minute(s).` });
+    }
+    if (!birPassKey.verifyDeveloperPasskey(body.developerPasskey, configuredDeveloperPasskey)) {
+        birPasskeyFailures = birPasskeyFailures.filter((t) => lockNow - t < BIR_PASSKEY_LOCK_MS);
+        birPasskeyFailures.push(lockNow);
+        if (birPasskeyFailures.length >= BIR_PASSKEY_MAX_FAILURES) birPasskeyLockedUntil = lockNow + BIR_PASSKEY_LOCK_MS;
+        logActivity('unknown', 'bir_reset_passkey_denied', { reason: 'invalid developer passkey', ip: req.ip || null });
+        notifyUnlockRequest({ subject: 'BIR pass-key issuing: wrong developer passkey attempt', text: `Someone with the RELAY admin key tried to issue a BIR reset pass key with a wrong developer passkey.\nIP: ${req.ip || 'unknown'}\nTime: ${new Date().toISOString()}` }).catch((e) => console.error('BIR pass-key denial alert failed:', e.message));
+        return res.status(403).json({ success: false, code: 'INVALID_DEVELOPER_PASSKEY', message: 'Developer passkey is invalid.' });
+    }
+    const decoded = birPassKey.decodeRequestCode(body.requestCode);
+    if (!decoded.ok) return res.status(400).json({ success: false, code: decoded.code, message: decoded.message });
+    const request = decoded.request;
+    if (body.confirm !== true) {
+        return res.status(400).json({ success: false, code: 'CONFIRMATION_REQUIRED', message: 'Tick the confirmation box: you must have verified the client and explained the BIR record-retention rules before issuing a key.' });
+    }
+    const deviceKnown = allowedDevices.has(request.installationId);
+    if (!deviceKnown && body.acknowledgeUnknownDevice !== true) {
+        return res.status(409).json({ success: false, code: 'UNKNOWN_DEVICE', message: 'This installation is not in the allowed-devices list of this RELAY. Confirm it really is your client before issuing a key.' });
+    }
+    birPasskeyFailures = [];
+    try {
+        await loadIssuedBirNonces();
+    } catch (loadErr) {
+        console.error('BIR pass-key: could not load the issued-request list:', loadErr.message);
+        return res.status(503).json({ success: false, code: 'ISSUED_LIST_UNAVAILABLE', message: 'RELAY could not read its list of already-issued requests, so no pass key was issued. Try again in a moment.' });
+    }
+    const nonceNow = Date.now();
+    for (const [nonce, expiresAt] of issuedBirRequestNonces) { if (expiresAt <= nonceNow) issuedBirRequestNonces.delete(nonce); }
+    if (issuedBirRequestNonces.has(request.nonce)) {
+        return res.status(409).json({ success: false, code: 'ALREADY_ISSUED', message: 'A pass key was already issued for this request code. Ask the client to generate a new request code.' });
+    }
+    try {
+        const issued = birPassKey.issuePassKey({ request, privateKey, reference: body.reference, ttlMinutes: body.ttlMinutes });
+        issuedBirRequestNonces.set(request.nonce, request.expiresAt);
+        persistIssuedBirNonces();
+        notifyUnlockRequest({
+            subject: `BIR reset pass key issued — ${request.storeName || request.installationId}`,
+            text: `A BIR reset pass key was issued.\n\nStore: ${request.storeName || 'Unspecified'}\nInstallation ID: ${request.installationId}\nAction: ${issued.payload.purpose}${issued.payload.includeBirData ? ' (BIR counters + sales history wiped)' : ''}\nReference: ${issued.payload.reference}\nTicket: ${issued.payload.ticketId}\nExpires: ${new Date(issued.payload.expiresAt).toISOString()}\nIssued from IP: ${req.ip || 'unknown'}\n\nIf you did not issue this, rotate RELAY_ADMIN_KEY and RELAY_BIR_RESET_PASSKEY now.`
+        }).catch((e) => console.error('BIR pass-key issue alert failed:', e.message));
+        logActivity(request.installationId, 'bir_reset_passkey_issued', {
+            ticketId: issued.payload.ticketId,
+            reference: issued.payload.reference,
+            purpose: issued.payload.purpose,
+            includeBirData: issued.payload.includeBirData,
+            deviceTag: issued.payload.deviceTag,
+            storeName: request.storeName || null,
+            issuedAt: issued.payload.issuedAt,
+            expiresAt: issued.payload.expiresAt,
+            deviceKnown
+        });
+        return res.json({
+            success: true,
+            passKey: issued.passKey,
+            ticketId: issued.payload.ticketId,
+            purpose: issued.payload.purpose,
+            includeBirData: issued.payload.includeBirData,
+            issuedAt: issued.payload.issuedAt,
+            expiresAt: issued.payload.expiresAt
+        });
+    } catch (err) {
+        const expected = err && ['REFERENCE_REQUIRED', 'REQUEST_EXPIRED', 'BAD_INPUT'].includes(err.code);
+        if (!expected) console.error('BIR pass key issue failed:', err);
+        return res.status(expected ? 400 : 500).json({ success: false, code: err.code || 'ISSUE_FAILED', message: expected ? err.message : 'Could not issue the pass key.' });
+    }
+});
+app.get('/relay/admin/api/bir-passkeys/history', requireAdminKey, (req, res) => {
+    const rows = (Array.isArray(activityLog) ? activityLog : [])
+        .filter((e) => e && e.type === 'bir_reset_passkey_issued')
+        .slice(0, 100)
+        .map((e) => ({ installationId: e.installationId, at: e.at, ...(e.details || {}) }));
+    return res.json({ success: true, issued: rows });
+});
 app.get('/relay/admin/api/client-activations', requireAdminKey, async (req, res) => {
     try {
         const state = await loadClientSecurityState();
@@ -8860,9 +9046,20 @@ app.post('/relay/admin/api/client-activations', requireAdminKey, async (req, res
         const customerId = req.body?.customerId ? String(req.body.customerId).trim().slice(0, 80) : resolveCustomerId(state, customerName);
         const issued = [];
         for (let i = 0; i < count; i++) {
-            const key = secureRandomSecret('OMNI-ACT');
+            // Default: short, easy-to-type key (XXXX-XXXX-XXXX). Send keyFormat: 'long' in the request body to get the old long key.
+            let key;
+            let keyHash;
+            if (req.body?.keyFormat === 'long') {
+                key = secureRandomSecret('OMNI-ACT');
+                keyHash = hashClientSecret(key);
+            } else {
+                do {
+                    key = generateShortActivationKey();
+                    keyHash = activationKeyHash(key);
+                } while (state.activations[keyHash]); // vanishingly rare collision: draw again
+            }
             const licenseId = crypto.randomUUID();
-            state.activations[hashClientSecret(key)] = { licenseId, customerId, label: label || null, customerName: customerName || null, createdAt: Date.now(), expiresAt, revokedAt: null, activatedInstallationId: null, deviceFingerprint: null };
+            state.activations[keyHash] = { licenseId, customerId, label: label || null, customerName: customerName || null, createdAt: Date.now(), expiresAt, revokedAt: null, activatedInstallationId: null, deviceFingerprint: null };
             issued.push({ licenseId, activationKey: key, customerId, label: label || null, customerName: customerName || null, expiresAt });
         }
         await saveClientSecurityState(state);
@@ -8998,6 +9195,56 @@ app.post('/relay/admin/api/client-device-replacements/approve', requireAdminKey,
         return res.json({ success: true, approved: true, licenseId, installationId: newInstallationId, message: 'Device replacement approved. The new device must activate again to receive a new credential.', ...buildClientAdminSnapshot(state) });
     } catch (err) { return licenseStoreFailure(res, err, 'Approve device replacement failed:', 'License storage unavailable; approval not confirmed.'); }
     finally { if (releaseSecurityLock) await releaseSecurityLock().catch(err => console.error('Replacement lock release failed:', err.message)); }
+});
+
+// Admin: which clients are waiting right now (no secrets are ever listed).
+app.get('/relay/admin/api/client-activation-inbox', requireAdminKey, (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    return res.json({ success: true, waiting: activationInbox.list() });
+});
+// Admin: send an activation key (or a reissued credential) to the waiting client that is showing this pairing code.
+// RELAY re-validates everything here: the secret must exist, be usable, and be valid for exactly that waiting device.
+app.post('/relay/admin/api/client-activations/send', requireAdminKey, async (req, res) => {
+    try {
+        const pairingCode = String(req.body?.pairingCode || '').trim();
+        const secret = String(req.body?.activationKey || '').trim();
+        if (!pairingCode || !secret || secret.length > 256) return res.status(400).json({ success: false, message: 'A pairing code and the activation key are required.' });
+        const state = await loadClientSecurityState();   // the only await: everything below runs synchronously
+        const found = activationInbox.lookup(pairingCode);
+        if (!found.ok) {
+            const map = {
+                PAIRING_CODE_INVALID: [400, 'That pairing code is not valid. It looks like XXXX-XXXX.'],
+                PAIRING_CODE_NOT_FOUND: [404, 'No waiting client shows that pairing code. Ask the customer to read the code on the activation screen again.'],
+                CLIENT_NOT_WAITING: [409, 'That client is no longer waiting (its activation screen is closed or offline). Ask the customer to reopen it.']
+            };
+            const [status, message] = map[found.code] || [400, 'Pairing code rejected.'];
+            return res.status(status).json({ success: false, code: found.code, message });
+        }
+        const device = found.device;
+        const lower = v => (v == null ? v : String(v).toLowerCase());
+        let licenseId = null;
+        if (/^omniclient_[A-Za-z0-9_-]{20,200}$/.test(secret)) {
+            const record = state.credentials[hashClientSecret(secret)];
+            const verdict = validateCredential(record && { ...record, fingerprint: lower(record.fingerprint) }, device.installationId, device.fingerprint);
+            if (!verdict.ok) return res.status(409).json({ success: false, code: verdict.code, message: 'That credential is invalid, revoked, expired, or belongs to a different device than the one waiting.' });
+            licenseId = record.licenseId;
+        } else {
+            const license = state.activations[activationKeyHash(secret)];
+            const verdict = validateActivation(license && { ...license, deviceFingerprint: lower(license.deviceFingerprint) }, device.installationId, device.fingerprint);
+            if (!verdict.ok) {
+                return res.status(409).json({ success: false, code: verdict.code, message: verdict.code === 'DEVICE_REPLACEMENT_REQUIRES_APPROVAL' ? 'That key is already bound to another device. Approve a device replacement first.' : 'That activation key is invalid, revoked, or expired.' });
+            }
+            if (license.activatedAt) return res.status(409).json({ success: false, code: 'ACTIVATION_KEY_ALREADY_USED', message: 'That activation key has already been used. Reissue the credential instead.' });
+            licenseId = license.licenseId;
+        }
+        const sent = activationInbox.send(pairingCode, secret, licenseId);
+        if (!sent.ok) return res.status(409).json({ success: false, code: sent.code, message: 'The client stopped waiting before the key could be sent. Try again.' });
+        logActivity(device.installationId, 'client_activation_key_sent', { licenseId, ip: req.ip || null });
+        return res.json({ success: true, sent: true, installationId: sent.installationId, deliveryId: sent.deliveryId, expiresAt: sent.expiresAt, message: 'Sent. The client activation screen will fill in the key automatically.' });
+    } catch (err) {
+        console.error('Send activation key failed:', err.message);
+        return res.status(503).json({ success: false, message: 'License storage unavailable; nothing was sent.' });
+    }
 });
 
 const rateBuckets = new Map();
@@ -19328,7 +19575,7 @@ app.post('/relay/request-unlock', requireApiKey, requireAllowedDevice, rateLimit
         }
     }
     const aiPlanTier = aiPlanChoice && aiPlanChoice.tier ? aiPlanChoice.tier : null; // null = Base
-    const otpCode = String(Math.floor(100000 + Math.random() * 900000));
+    const otpCode = generateSecureOtp();
     const key = `${installationId}:${featureId}`;
     pendingOtps.set(key, {
         code: otpCode,
@@ -19497,7 +19744,7 @@ app.post('/relay/request-demo', requireApiKey, requireAllowedDevice, rateLimit('
     if (!installationId) {
         return res.status(400).json({ success: false, message: 'Missing installationId.' });
     }
-    const otpCode = String(Math.floor(100000 + Math.random() * 900000));
+    const otpCode = generateSecureOtp();
     const key = `${installationId}:${DEMO_FEATURE_ID}`;
     pendingOtps.set(key, {
         code: otpCode,
@@ -19665,7 +19912,7 @@ app.post('/relay/request-unlock-bulk', requireApiKey, requireAllowedDevice, rate
     if (subscriptionIdsInBulk.length) {
         return res.status(400).json({ success: false, message: `These are subscription features and cannot be bundled into a one-time bulk unlock: ${subscriptionIdsInBulk.join(', ')}. Please use the subscribe/renew flow for each of them instead.` });
     }
-    const otpCode = String(Math.floor(100000 + Math.random() * 900000));
+    const otpCode = generateSecureOtp();
     const key = `${installationId}:__bulk__:${featureIds.slice().sort().join(',')}`;
     pendingOtps.set(key, {
         code: otpCode,
@@ -19785,7 +20032,7 @@ const ADMIN_RESET_TICKET_TTL_MS = 5 * 60 * 1000;
 const MAX_FAILED_OTP_ATTEMPTS = 5; 
 const pendingAdminResets = new Map();
 function generateAdminResetOtp() {
-    return String(Math.floor(100000 + Math.random() * 900000));
+    return generateSecureOtp();
 }
 setInterval(() => {
     const now = Date.now();
@@ -19922,7 +20169,7 @@ const RECEIPT_RESET_OTP_TTL_MS = 10 * 60 * 1000;
 const RECEIPT_RESET_TICKET_TTL_MS = 5 * 60 * 1000; 
 const pendingReceiptResets = new Map();
 function generateReceiptResetOtp() {
-    return String(Math.floor(100000 + Math.random() * 900000));
+    return generateSecureOtp();
 }
 setInterval(() => {
     const now = Date.now();
@@ -20097,7 +20344,7 @@ function calculateReceiptCreditQuote(quantity) {
 
 const pendingReceiptCreditPurchases = new Map();
 function generateReceiptCreditOtp() {
-    return String(Math.floor(100000 + Math.random() * 900000));
+    return generateSecureOtp();
 }
 setInterval(() => {
     const now = Date.now();
@@ -20906,6 +21153,7 @@ function removeExcludedRecursive(dir) {
     }
 }
 const RELEASE_SERVER_TARGETS = new Set([
+    'bir-retention.js', // OMNIPOS BIR record-retention + developer pass key verification (require()-d by server.js)
     'server.js',
     'db.js',
     'migrate-to-sqlite.js',

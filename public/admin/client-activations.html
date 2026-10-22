@@ -2,10 +2,12 @@
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#05070d"><title>Client Activation — RELAY Admin</title>
 <style>
 :root{color-scheme:dark;--bg:#05070d;--card:#101625;--line:#26334f;--text:#eafcff;--muted:#9aabc9;--accent:#22e5ff;--green:#3ddc84;--red:#ff5c72}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px system-ui,sans-serif}main{max-width:1200px;margin:auto;padding:20px}h1{margin:0 0 6px;font-size:26px}p,.muted{color:var(--muted)}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin:16px 0}.row{display:flex;gap:10px;flex-wrap:wrap;align-items:end}.field{display:flex;flex-direction:column;gap:6px;flex:1;min-width:180px}input,button{font:inherit;border-radius:8px;padding:10px;border:1px solid var(--line);background:#080d18;color:var(--text)}button{cursor:pointer;background:#12313a;border-color:#1b7785}button.danger{background:#35141d;border-color:#79313d}button.ghost{background:#080d18;border-color:var(--line)}button:disabled{opacity:.5;cursor:wait}table{border-collapse:collapse;width:100%;min-width:800px}th,td{text-align:left;padding:10px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-size:12px;text-transform:uppercase}.table-wrap{overflow:auto}.status{font-weight:700}.status.revoked,.status.expired{color:var(--red)}.status.activated{color:var(--green)}.output{white-space:pre-wrap;overflow-wrap:anywhere;background:#070b12;border:1px dashed #3a5675;padding:12px;border-radius:8px;margin-top:12px}.small{font-size:12px}.actions{display:flex;gap:6px;flex-wrap:wrap}.hidden{display:none}.error{color:var(--red)}a{color:var(--accent)}tr.busy td{opacity:.6}.presets{display:flex;gap:6px;flex-wrap:wrap}.modal-back{position:fixed;inset:0;background:rgba(2,4,9,.78);display:flex;align-items:center;justify-content:center;padding:16px;z-index:50}.modal{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;width:100%;max-width:440px;display:flex;flex-direction:column;gap:12px}.modal h3{margin:0}.modal .btns{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}.modal-err{min-height:18px;font-size:13px}
+.chip{padding:6px 10px;font-size:13px;letter-spacing:.06em}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:#6b7a99}.dot.on{background:var(--green)}.sendline{margin-top:10px}
 </style></head><body><main>
 <p><a href="index.html">← RELAY Admin</a></p><h1>Client Activation & Device Licensing</h1><p>Issue one-time activation keys, inspect license status, renew or revoke licenses, reissue a lost credential for the same registered device, and approve device replacement requests.</p>
 <section class="card"><h2>Admin authentication</h2><div class="row"><label class="field">RELAY admin key<input id="adminKey" type="password" autocomplete="current-password" placeholder="Enter ADMIN_KEY"></label><button id="connect">Connect & load licenses</button></div><p class="small">The key is held only in this page's memory and is not saved in local storage.</p><div id="notice" role="status" aria-live="polite"></div></section>
-<section class="card"><h2>Issue activation key</h2><div class="row"><label class="field">Customer name<input id="customerName" maxlength="160" placeholder="Customer / business name"></label><label class="field">Branch / terminal label (optional)<input id="label" maxlength="120" placeholder="e.g. Main branch"></label><label class="field">Count<input id="count" type="number" min="1" max="100" value="1"></label><label class="field">Expiration date & time (optional)<input id="expiresAt" type="datetime-local"></label><button id="issue">Generate key(s)</button></div><div id="issued" class="output hidden"></div></section>
+<section class="card"><h2>Issue activation key</h2><div class="row"><label class="field">Customer name<input id="customerName" maxlength="160" placeholder="Customer / business name"></label><label class="field">Branch / terminal label (optional)<input id="label" maxlength="120" placeholder="e.g. Main branch"></label><label class="field">Count<input id="count" type="number" min="1" max="100" value="1"></label><label class="field">Expiration date & time (optional)<input id="expiresAt" type="datetime-local"></label><button id="issue">Generate key(s)</button></div><div id="issued" class="output hidden"><div id="issuedText"></div><div id="issuedButtons" class="actions sendline"></div></div></section>
+<section class="card"><div class="row"><div style="flex:1"><h2>Waiting clients</h2><p class="small">Clients showing the activation screen appear here with a pairing code. After issuing a key, press <strong>Send to client</strong> and enter the code the customer reads to you; the key then fills in on their screen automatically. This list refreshes by itself.</p></div><button id="waitingRefresh">Refresh</button></div><div class="table-wrap"><table style="min-width:640px"><thead><tr><th>Pairing code</th><th>Device</th><th>Last seen</th><th>Delivery</th></tr></thead><tbody id="waiting"><tr><td colspan="4" class="muted">Connect to see waiting clients.</td></tr></tbody></table></div></section>
 <section class="card"><div class="row"><div style="flex:1"><h2>Licenses</h2><p class="small">Activation keys are never listed again after issuance. Reissue only works for the license-bound installation.</p></div><button id="refresh">Refresh</button></div><div class="table-wrap"><table><thead><tr><th>Customer / License</th><th>Status</th><th>Installation</th><th>Expiry</th><th>Credentials</th><th>Actions</th></tr></thead><tbody id="licenses"><tr><td colspan="6" class="muted">Connect to load licenses.</td></tr></tbody></table></div></section>
 <section class="card"><div class="row"><div style="flex:1"><h2>Pending device replacements</h2><p class="small">Approve only after confirming the customer's device replacement.</p></div><button id="pendingRefresh">Refresh pending</button></div><div class="table-wrap"><table><thead><tr><th>License</th><th>Current installation</th><th>Requested installation</th><th>Requested</th><th>Action</th></tr></thead><tbody id="pending"><tr><td colspan="5" class="muted">Connect to load requests.</td></tr></tbody></table></div></section>
 </main>
@@ -17,6 +19,9 @@
   let adminKey = '';
   let licenses = [];
   let pending = [];
+  let waiting = [];
+  let waitingTimer = null;
+  let issuedItems = [];           // secrets from the latest issue / reissue, kept in memory only so they can be sent to a waiting client
   let loaded = false;
   const busy = new Set();          // licenseIds that currently have an action in flight
   let queue = Promise.resolve();   // actions are sent one at a time, in click order (the server serializes them anyway)
@@ -74,6 +79,61 @@
     render();
   }
 
+  // ---------- waiting clients ----------
+  function renderWaiting() {
+    $('waiting').innerHTML = waiting.length ? waiting.map(w => {
+      const delivery = w.delivery ? (w.delivery.pickedUpAt ? 'Received by client' : 'Sent — waiting for the client to pick it up') : '—';
+      return `<tr><td><strong>${esc(w.pairingCode)}</strong></td><td><span class="dot ${w.online ? 'on' : ''}"></span>${w.online ? 'Waiting now' : 'Not polling'}<div class="small muted">${esc(String(w.installationId || '').slice(0, 14))}… ${w.ip ? '· ' + esc(w.ip) : ''}</div></td><td>${esc(fmt(w.lastSeenAt))}</td><td>${esc(delivery)}</td></tr>`;
+    }).join('') : '<tr><td colspan="4">No client is waiting for a key right now.</td></tr>';
+  }
+  async function loadWaiting() {
+    if (!adminKey) return;
+    const d = await api('client-activation-inbox');
+    waiting = Array.isArray(d.waiting) ? d.waiting : [];
+    renderWaiting();
+  }
+  function startWaitingLoop() {
+    clearInterval(waitingTimer);
+    waitingTimer = setInterval(() => { if (adminKey && !document.hidden) loadWaiting().catch(() => {}); }, 5000);
+  }
+
+  // ---------- freshly issued secrets (shown once) + "Send to client" ----------
+  function showIssued(text, items) {
+    issuedItems = items || [];
+    $('issued').classList.remove('hidden');
+    $('issuedText').textContent = text;
+    const box = $('issuedButtons');
+    box.innerHTML = '';
+    issuedItems.forEach((it, i) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = issuedItems.length > 1 ? `Send to client: ${it.label}` : 'Send to client';
+      b.onclick = () => openSend(i);
+      box.appendChild(b);
+    });
+  }
+  function openSend(index) {
+    const it = issuedItems[index];
+    if (!it) { say('That key is no longer available to send. Issue or reissue it again.', true); return; }
+    const online = waiting.filter(w => w.online);
+    const chips = online.length ? online.map(w => `<button type="button" class="ghost chip" data-code="${esc(w.pairingCode)}">${esc(w.pairingCode)}</button>`).join(' ') : '<span class="small muted">No client is waiting right now. Ask the customer to open the activation screen.</span>';
+    openModal({
+      title: 'Send to client',
+      bodyHtml: `<p class="small">Sending <strong>${esc(it.label)}</strong>. Type the pairing code the customer reads from their activation screen. The key will fill in on that device only.</p><label class="field">Pairing code<input id="sCode" maxlength="20" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX"></label><div class="small muted" style="margin-top:8px">Waiting now:</div><div class="actions" id="sChips" style="margin-top:6px">${chips}</div>`,
+      submitText: 'Send',
+      onOpen: () => { document.querySelectorAll('#sChips button[data-code]').forEach(b => { b.onclick = () => { $('sCode').value = b.dataset.code; $('sCode').focus(); }; }); },
+      onSubmit: async () => {
+        const code = $('sCode').value.trim();
+        if (!code) throw new Error('Enter the pairing code shown on the customer\u2019s screen.');
+        requireKey();
+        const d = await api('client-activations/send', 'POST', { pairingCode: code, activationKey: it.secret });
+        say(`Sent to the waiting client (${String(d.installationId || '').slice(0, 14)}…). It fills in on their screen within a few seconds.`);
+        loadWaiting().catch(() => {});
+        return true;
+      }
+    });
+  }
+
   // ---------- loading (one request returns both lists) ----------
   async function load() { applySnapshot(await api('client-activations')); }
   async function withButton(btn, workingLabel, fn) {
@@ -112,9 +172,14 @@
     const previouslyFocused = document.activeElement;
     root.innerHTML = `<div class="modal-back" id="mBack"><div class="modal" role="dialog" aria-modal="true" aria-label="${esc(title)}"><h3>${esc(title)}</h3>${bodyHtml}<div id="mErr" class="modal-err error" role="alert"></div><div class="btns"><button type="button" class="ghost" id="mCancel">Cancel</button><button type="button" id="mOk">${esc(submitText)}</button></div></div></div>`;
     const close = () => { root.innerHTML = ''; document.removeEventListener('keydown', onKey, true); if (previouslyFocused && previouslyFocused.focus) try { previouslyFocused.focus(); } catch (_) {} };
-    const submit = () => {
+    let submitting = false;
+    const submit = async () => {
+      if (submitting) return;
+      submitting = true;
       $('mErr').textContent = '';
-      try { const keep = onSubmit(); if (keep === false) return; close(); } catch (e) { $('mErr').textContent = e.message; }
+      $('mOk').disabled = true;
+      try { const keep = await onSubmit(); if (keep === false) { submitting = false; $('mOk').disabled = false; return; } close(); }
+      catch (e) { submitting = false; if ($('mErr')) $('mErr').textContent = e.message; if ($('mOk')) $('mOk').disabled = false; }
     };
     function onKey(e) {
       if (e.key === 'Escape') { e.preventDefault(); close(); }
@@ -183,14 +248,17 @@
     const key = $('adminKey').value.trim();
     if (!key) { say('Enter the RELAY admin key.', true); return; }
     adminKey = key;
-    try { await withButton($('connect'), 'Connecting…', load); say('Connected.'); }
-    catch (e) { adminKey = ''; loaded = false; say(e.message, true); }
+    try { await withButton($('connect'), 'Connecting…', load); say('Connected.'); loadWaiting().catch(() => {}); startWaitingLoop(); }
+    catch (e) { adminKey = ''; loaded = false; clearInterval(waitingTimer); say(e.message, true); }
   };
   $('adminKey').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('connect').click(); } });
 
   $('refresh').onclick = async () => {
     try { requireKey(); await withButton($('refresh'), 'Refreshing…', load); say('License list refreshed.'); }
     catch (e) { say(e.message, true); }
+  };
+  $('waitingRefresh').onclick = async () => {
+    try { requireKey(); await withButton($('waitingRefresh'), 'Refreshing…', loadWaiting); } catch (e) { say(e.message, true); }
   };
   $('pendingRefresh').onclick = async () => {
     try { requireKey(); await withButton($('pendingRefresh'), 'Refreshing…', load); say('Pending requests refreshed.'); }
@@ -208,8 +276,8 @@
       }
       await withButton($('issue'), 'Generating…', async () => {
         const d = await api('client-activations', 'POST', body);
-        $('issued').classList.remove('hidden');
-        $('issued').textContent = 'Save these activation key(s) now — they are shown only once:\n\n' + d.issued.map(x => `${x.customerName || 'Customer'} | ${x.licenseId}\n${x.activationKey}\nExpires: ${fmt(x.expiresAt)}`).join('\n\n');
+        showIssued('Save these activation key(s) now — they are shown only once:\n\n' + d.issued.map(x => `${x.customerName || 'Customer'} | ${x.licenseId}\n${x.activationKey}\nExpires: ${fmt(x.expiresAt)}`).join('\n\n'),
+          d.issued.map(x => ({ label: `${x.customerName || 'Customer'} (${x.activationKey})`, secret: x.activationKey })));
         applySnapshot(d);
       });
       say('Activation key(s) issued. Copy and deliver securely.');
@@ -251,8 +319,7 @@
           if (!confirm('Reissue a credential for this same registered device and revoke the old credential?')) return;
           runAction(id, 'Reissuing credential…', 'Credential reissued. Deliver securely to the customer.', null, async () => {
             const d = await api('client-credentials/reissue', 'POST', { licenseId: id, installationId: install });
-            $('issued').classList.remove('hidden');
-            $('issued').textContent = `New client credential (shown once):\n${d.credential}\nInstallation: ${d.installationId}\nExpires: ${fmt(d.expiresAt)}`;
+            showIssued(`New client credential (shown once):\n${d.credential}\nInstallation: ${d.installationId}\nExpires: ${fmt(d.expiresAt)}`, [{ label: 'reissued credential', secret: d.credential }]);
             return d;
           });
           break;
