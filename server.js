@@ -8940,20 +8940,24 @@ function persistIssuedBirNonces() {
     }
     setPersistentJSON(BIR_ISSUED_NONCES_KEY, snapshot);
 }
-app.post('/relay/admin/api/bir-passkeys/issue', requireAdminKey, rateLimit('bir-passkey-issue', 10, 60 * 60 * 1000), async (req, res) => {
-    const body = req.body || {};
+// Shared by the manual endpoint below (the developer pastes a request code) and the fast endpoint further down (the developer
+// presses "Send pass key" for a client that is waiting with a pairing code). Every check lives here, once: HTTPS, developer
+// passkey + lockout, request validity, confirmation, unknown device, already-issued request, signing and the audit trail.
+// Returns { status, json } and, on success, also { issued, request, deviceKnown } so the fast endpoint can deliver the key.
+async function issueBirPassKeyForRequest(req, body) {
+    body = body || {};
     if (!birPassKey.isSecureAdminRequest(req)) {
-        return res.status(400).json({ success: false, code: 'HTTPS_REQUIRED', message: 'Issuing a pass key requires HTTPS (localhost is allowed for local development). If RELAY runs behind a TLS-terminating proxy, set TRUST_PROXY_HOPS (e.g. 1) so RELAY can see the original HTTPS connection.' });
+        return { status: 400, json: { success: false, code: 'HTTPS_REQUIRED', message: 'Issuing a pass key requires HTTPS (localhost is allowed for local development). If RELAY runs behind a TLS-terminating proxy, set TRUST_PROXY_HOPS (e.g. 1) so RELAY can see the original HTTPS connection.' } };
     }
     const configuredDeveloperPasskey = process.env.RELAY_BIR_RESET_PASSKEY || '';
     if (!birPassKey.isStrongDeveloperPasskey(configuredDeveloperPasskey)) {
-        return res.status(503).json({ success: false, code: 'BIR_RESET_PASSKEY_NOT_CONFIGURED', message: 'Pass-key issuing is disabled. Set RELAY_BIR_RESET_PASSKEY on the RELAY host: at least 8 characters, mixing at least 3 of lowercase, UPPERCASE, digits and symbols.' });
+        return { status: 503, json: { success: false, code: 'BIR_RESET_PASSKEY_NOT_CONFIGURED', message: 'Pass-key issuing is disabled. Set RELAY_BIR_RESET_PASSKEY on the RELAY host: at least 8 characters, mixing at least 3 of lowercase, UPPERCASE, digits and symbols.' } };
     }
     // Short-passkey protection: a GLOBAL lockout (not per IP, so rotating IPs does not help). After 5 wrong passkeys in 30 minutes,
     // issuing is blocked for 30 minutes even if the right passkey is entered. The wrong-attempt e-mail alert below still fires.
     const lockNow = Date.now();
     if (birPasskeyLockedUntil > lockNow) {
-        return res.status(429).json({ success: false, code: 'PASSKEY_LOCKED', message: `Too many wrong developer passkeys. Pass-key issuing is locked for ${Math.ceil((birPasskeyLockedUntil - lockNow) / 60000)} more minute(s).` });
+        return { status: 429, json: { success: false, code: 'PASSKEY_LOCKED', message: `Too many wrong developer passkeys. Pass-key issuing is locked for ${Math.ceil((birPasskeyLockedUntil - lockNow) / 60000)} more minute(s).` } };
     }
     if (!birPassKey.verifyDeveloperPasskey(body.developerPasskey, configuredDeveloperPasskey)) {
         birPasskeyFailures = birPasskeyFailures.filter((t) => lockNow - t < BIR_PASSKEY_LOCK_MS);
@@ -8961,29 +8965,29 @@ app.post('/relay/admin/api/bir-passkeys/issue', requireAdminKey, rateLimit('bir-
         if (birPasskeyFailures.length >= BIR_PASSKEY_MAX_FAILURES) birPasskeyLockedUntil = lockNow + BIR_PASSKEY_LOCK_MS;
         logActivity('unknown', 'bir_reset_passkey_denied', { reason: 'invalid developer passkey', ip: req.ip || null });
         notifyUnlockRequest({ subject: 'BIR pass-key issuing: wrong developer passkey attempt', text: `Someone with the RELAY admin key tried to issue a BIR reset pass key with a wrong developer passkey.\nIP: ${req.ip || 'unknown'}\nTime: ${new Date().toISOString()}` }).catch((e) => console.error('BIR pass-key denial alert failed:', e.message));
-        return res.status(403).json({ success: false, code: 'INVALID_DEVELOPER_PASSKEY', message: 'Developer passkey is invalid.' });
+        return { status: 403, json: { success: false, code: 'INVALID_DEVELOPER_PASSKEY', message: 'Developer passkey is invalid.' } };
     }
     const decoded = birPassKey.decodeRequestCode(body.requestCode);
-    if (!decoded.ok) return res.status(400).json({ success: false, code: decoded.code, message: decoded.message });
+    if (!decoded.ok) return { status: 400, json: { success: false, code: decoded.code, message: decoded.message } };
     const request = decoded.request;
     if (body.confirm !== true) {
-        return res.status(400).json({ success: false, code: 'CONFIRMATION_REQUIRED', message: 'Tick the confirmation box: you must have verified the client and explained the BIR record-retention rules before issuing a key.' });
+        return { status: 400, json: { success: false, code: 'CONFIRMATION_REQUIRED', message: 'Tick the confirmation box: you must have verified the client and explained the BIR record-retention rules before issuing a key.' } };
     }
     const deviceKnown = allowedDevices.has(request.installationId);
     if (!deviceKnown && body.acknowledgeUnknownDevice !== true) {
-        return res.status(409).json({ success: false, code: 'UNKNOWN_DEVICE', message: 'This installation is not in the allowed-devices list of this RELAY. Confirm it really is your client before issuing a key.' });
+        return { status: 409, json: { success: false, code: 'UNKNOWN_DEVICE', message: 'This installation is not in the allowed-devices list of this RELAY. Confirm it really is your client before issuing a key.' } };
     }
     birPasskeyFailures = [];
     try {
         await loadIssuedBirNonces();
     } catch (loadErr) {
         console.error('BIR pass-key: could not load the issued-request list:', loadErr.message);
-        return res.status(503).json({ success: false, code: 'ISSUED_LIST_UNAVAILABLE', message: 'RELAY could not read its list of already-issued requests, so no pass key was issued. Try again in a moment.' });
+        return { status: 503, json: { success: false, code: 'ISSUED_LIST_UNAVAILABLE', message: 'RELAY could not read its list of already-issued requests, so no pass key was issued. Try again in a moment.' } };
     }
     const nonceNow = Date.now();
     for (const [nonce, expiresAt] of issuedBirRequestNonces) { if (expiresAt <= nonceNow) issuedBirRequestNonces.delete(nonce); }
     if (issuedBirRequestNonces.has(request.nonce)) {
-        return res.status(409).json({ success: false, code: 'ALREADY_ISSUED', message: 'A pass key was already issued for this request code. Ask the client to generate a new request code.' });
+        return { status: 409, json: { success: false, code: 'ALREADY_ISSUED', message: 'A pass key was already issued for this request code. Ask the client to generate a new request code.' } };
     }
     try {
         const issued = birPassKey.issuePassKey({ request, privateKey, reference: body.reference, ttlMinutes: body.ttlMinutes });
@@ -9004,19 +9008,120 @@ app.post('/relay/admin/api/bir-passkeys/issue', requireAdminKey, rateLimit('bir-
             expiresAt: issued.payload.expiresAt,
             deviceKnown
         });
-        return res.json({
-            success: true,
-            passKey: issued.passKey,
-            ticketId: issued.payload.ticketId,
-            purpose: issued.payload.purpose,
-            includeBirData: issued.payload.includeBirData,
-            issuedAt: issued.payload.issuedAt,
-            expiresAt: issued.payload.expiresAt
-        });
+        return {
+            status: 200,
+            json: {
+                success: true,
+                passKey: issued.passKey,
+                ticketId: issued.payload.ticketId,
+                purpose: issued.payload.purpose,
+                includeBirData: issued.payload.includeBirData,
+                issuedAt: issued.payload.issuedAt,
+                expiresAt: issued.payload.expiresAt
+            },
+            issued,
+            request,
+            deviceKnown
+        };
     } catch (err) {
         const expected = err && ['REFERENCE_REQUIRED', 'REQUEST_EXPIRED', 'BAD_INPUT'].includes(err.code);
         if (!expected) console.error('BIR pass key issue failed:', err);
-        return res.status(expected ? 400 : 500).json({ success: false, code: err.code || 'ISSUE_FAILED', message: expected ? err.message : 'Could not issue the pass key.' });
+        return { status: expected ? 400 : 500, json: { success: false, code: err.code || 'ISSUE_FAILED', message: expected ? err.message : 'Could not issue the pass key.' } };
+    }
+}
+app.post('/relay/admin/api/bir-passkeys/issue', requireAdminKey, rateLimit('bir-passkey-issue', 10, 60 * 60 * 1000), async (req, res) => {
+    try {
+        const out = await issueBirPassKeyForRequest(req, req.body);
+        return res.status(out.status).json(out.json);
+    } catch (err) {
+        console.error('BIR pass key issue failed unexpectedly:', err);
+        if (!res.headersSent) return res.status(500).json({ success: false, code: 'ISSUE_FAILED', message: 'Could not issue the pass key.' });
+    }
+});
+// FAST FLOW (mirrors the activation waiting room). The reset dialog of an activated client registers its request here and shows a
+// pairing code. The developer sees the waiting request in the admin page (all details decoded, nothing to copy or paste), reviews
+// it, and presses "Send pass key": RELAY signs the key with exactly the same checks as the manual endpoint and puts it in the
+// client's inbox, which enables the client's final reset button on its next poll. The manual endpoints above stay available.
+const { createResetRequestInbox } = require('./reset-request-inbox');
+const resetRequestInbox = createResetRequestInbox();
+// Client side: only a client with its own credential may poll, and only for a request of its OWN installation
+// (the installation comes from the credential, never from the body).
+app.post('/relay/client/reset-inbox', rateLimit('client-reset-inbox', 120, 60 * 1000), requireApiKey, async (req, res) => {
+    try {
+        if (!req.relayClient) return res.status(403).json({ success: false, code: 'CLIENT_CREDENTIAL_REQUIRED', message: 'A per-client credential is required.' });
+        const r = resetRequestInbox.poll({ installationId: req.relayClient.installationId, requestCode: req.body && req.body.requestCode, ip: req.ip || null });
+        if (!r.ok) {
+            const map = {
+                INVALID_INPUT: [400, 'RESET_REQUEST_INVALID', r.message || 'The request code is invalid. Close the dialog and start the reset again.'],
+                INSTALLATION_MISMATCH: [403, 'RESET_REQUEST_INSTALLATION_MISMATCH', 'This request code belongs to a different installation.'],
+                REQUEST_EXPIRED: [410, 'RESET_REQUEST_EXPIRED', 'This request has expired. Get a new pairing code.'],
+                REQUEST_MISMATCH: [409, 'RESET_REQUEST_MISMATCH', 'This request does not match the one already registered. Get a new pairing code.'],
+                INBOX_FULL: [503, 'RESET_INBOX_BUSY', 'The reset waiting room is busy. Please try again shortly.']
+            };
+            const [status, code, message] = map[r.code] || [400, 'RESET_REQUEST_INVALID', 'Request rejected.'];
+            return res.status(status).json({ success: false, code, message });
+        }
+        if (!r.delivery) {
+            // RELAY signs each request only once. If a key was already issued for this request but nothing is waiting for the client
+            // (RELAY restarted, or the key expired unused), say so, so the client can ask for a new pairing code instead of waiting forever.
+            let alreadyIssued = false;
+            try {
+                const decoded = birPassKey.decodeRequestCode(req.body && req.body.requestCode);
+                if (decoded.ok) { await loadIssuedBirNonces(); alreadyIssued = issuedBirRequestNonces.has(decoded.request.nonce); }
+            } catch (_hintErr) { alreadyIssued = false; }
+            if (alreadyIssued) {
+                return res.status(409).json({ success: false, code: 'RESET_REQUEST_ALREADY_ISSUED', message: 'A pass key was already issued for this request but it did not arrive here. If the developer gave you the key another way, paste it in manual mode. Otherwise tap "Get a new pairing code".' });
+            }
+        }
+        res.set('Cache-Control', 'no-store');
+        return res.json({ success: true, pairingCode: r.pairingCode, requestExpiresAt: r.requestExpiresAt, delivery: r.delivery });
+    } catch (err) {
+        console.error('Reset inbox poll failed:', err.message);
+        return res.status(503).json({ success: false, code: 'RESET_INBOX_BUSY', message: 'The reset waiting room is unavailable. Please try again shortly.' });
+    }
+});
+// Admin: the reset requests that are waiting (or already answered). The pass key itself is never listed.
+app.get('/relay/admin/api/bir-reset-inbox', requireAdminKey, (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const waiting = resetRequestInbox.list().map(w => ({ ...w, deviceKnown: allowedDevices.has(w.installationId) }));
+    return res.json({ success: true, waiting, defaultValidityMinutes: birPassKey.DEFAULT_VALIDITY_MINUTES, maxValidityMinutes: birPassKey.MAX_VALIDITY_MINUTES });
+});
+// Admin: sign a pass key for the waiting request behind this pairing code and put it in that client's inbox.
+app.post('/relay/admin/api/bir-reset-inbox/send', requireAdminKey, rateLimit('bir-passkey-issue', 10, 60 * 60 * 1000), async (req, res) => {
+    try {
+        const body = req.body || {};
+        const pairingCode = String(body.pairingCode || '').trim();
+        if (!pairingCode) return res.status(400).json({ success: false, code: 'PAIRING_CODE_INVALID', message: 'A pairing code is required.' });
+        const found = resetRequestInbox.lookup(pairingCode);
+        if (!found.ok) {
+            const map = {
+                PAIRING_CODE_INVALID: [400, 'That pairing code is not valid. It looks like XXXX-XXXX.'],
+                PAIRING_CODE_NOT_FOUND: [404, 'No waiting reset request shows that pairing code. Ask the customer to read the code on the reset dialog again.'],
+                CLIENT_NOT_WAITING: [409, 'That client is no longer waiting (its reset dialog is closed or offline). Ask the customer to reopen it.']
+            };
+            const [status, message] = map[found.code] || [400, 'Pairing code rejected.'];
+            return res.status(status).json({ success: false, code: found.code, message });
+        }
+        const out = await issueBirPassKeyForRequest(req, { ...body, requestCode: found.entry.requestCode });
+        if (out.status !== 200) {
+            if (out.json && out.json.code === 'ALREADY_ISSUED') {
+                return res.status(409).json({ success: false, code: 'ALREADY_ISSUED', message: 'A pass key was already issued for this request (it may have been lost when RELAY restarted or expired unused). Ask the client to tap "Get a new pairing code" in its reset dialog, then send again.' });
+            }
+            return res.status(out.status).json(out.json);
+        }
+        const issued = out.issued;
+        const sent = resetRequestInbox.send(pairingCode, { passKey: issued.passKey, ticketId: issued.payload.ticketId, reference: issued.payload.reference, expiresAt: issued.payload.expiresAt });
+        if (!sent.ok) {
+            // The client stopped waiting between the check and the delivery. The key is already signed (and its request burnt), so hand it
+            // to the developer to send by hand instead of losing it.
+            return res.json({ ...out.json, delivered: false, message: 'The client stopped waiting before the key could be delivered automatically. Send the pass key below to the client by hand.' });
+        }
+        logActivity(out.request.installationId, 'bir_reset_passkey_sent_to_client', { ticketId: issued.payload.ticketId, purpose: issued.payload.purpose, deliveryId: sent.deliveryId, ip: req.ip || null });
+        const { passKey: _withheld, ...safe } = out.json;
+        return res.json({ ...safe, delivered: true, installationId: sent.installationId, deliveryId: sent.deliveryId, message: 'Sent. The final reset button on the client unlocks within a few seconds.' });
+    } catch (err) {
+        console.error('Send BIR reset pass key failed:', err);
+        if (!res.headersSent) return res.status(500).json({ success: false, code: 'ISSUE_FAILED', message: 'Could not send the pass key.' });
     }
 });
 app.get('/relay/admin/api/bir-passkeys/history', requireAdminKey, (req, res) => {

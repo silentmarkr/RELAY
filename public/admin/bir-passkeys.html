@@ -32,20 +32,23 @@ th,td{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertic
 </style></head><body><main>
 <p><a href="index.html">← RELAY Admin</a></p>
 <h1>BIR Reset Pass Keys</h1>
-<p class="small">A client cannot reset its BIR records (System Hard Reset while BIR records exist, or the AGT reset) without a one-time pass key signed here. The client app shows a <strong>request code</strong>; you inspect it, enter a reference, and issue a key bound to that installation, device, action and request. The key expires, works once, and works offline on the client.</p>
+<p class="small">A client cannot reset its BIR records (System Hard Reset while BIR records exist, or the AGT reset) without a one-time pass key signed here. The client's reset dialog shows a <strong>pairing code</strong> and appears in <em>Waiting reset requests</em> below by itself: review the details, press <strong>Send pass key</strong>, and the client's final reset button unlocks automatically. The key is bound to that installation, device, action and request, expires, and works once. A client that cannot reach RELAY can still use the manual request-code flow at the bottom.</p>
 
 <section class="card"><h2>Admin authentication</h2>
 <div class="row"><label class="field">RELAY admin key<input id="adminKey" type="password" autocomplete="current-password" placeholder="Enter ADMIN_KEY"></label>
-<button id="historyBtn">Load issued-key history</button></div>
+<button id="historyBtn" class="primary">Connect</button></div>
 <p class="small">The admin key stays in this page's memory only; it is never saved in the browser.</p></section>
 
 <div id="notice" class="notice" role="status"></div>
 
-<section class="card"><h2>1. Paste the client's request code</h2>
+<section class="card"><div class="row"><div style="flex:1"><h2>Waiting reset requests</h2><p class="small">A client that starts a System Hard Reset or an AGT reset shows a pairing code and appears here by itself. Press <strong>Review</strong>, check the details, then <strong>Send pass key</strong>. This list refreshes every few seconds after you press <strong>Connect</strong>.</p></div><button id="waitingRefresh">Refresh</button></div>
+<div style="overflow-x:auto"><table><thead><tr><th>Pairing code</th><th>Store / installation</th><th>Action</th><th>Status</th><th></th></tr></thead><tbody id="waiting"><tr><td colspan="5" class="small">Press Connect to see waiting requests.</td></tr></tbody></table></div></section>
+
+<section class="card"><h2>Manual (offline client): paste the client's request code</h2>
 <label class="field">Request code (starts with BIRRQ1.)<textarea id="requestCode" spellcheck="false" placeholder="BIRRQ1.…"></textarea></label>
 <div class="row" style="margin-top:10px"><button id="inspectBtn" class="primary">Inspect request</button></div></section>
 
-<section id="detailCard" class="card hidden"><h2>2. Check the request</h2>
+<section id="detailCard" class="card hidden"><h2>Review the request</h2>
 <dl id="details"></dl>
 <div id="detailWarnings"></div>
 <div class="row">
@@ -56,7 +59,7 @@ th,td{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertic
 <label class="check"><input type="checkbox" id="confirmChk"><span>I verified the client's identity and explained that BIR records must be kept for the legal retention period. (OmniPOS stores a sealed, read-only retention copy on the device before anything is deleted.)</span></label>
 <div class="row"><button id="issueBtn" class="primary">Issue pass key</button></div></section>
 
-<section id="resultCard" class="card hidden"><h2>3. Send this pass key to the client</h2>
+<section id="resultCard" class="card hidden"><h2>Send this pass key to the client by hand</h2>
 <label class="field">Pass key (single use)<textarea id="passKey" readonly spellcheck="false"></textarea></label>
 <div class="row" style="margin-top:10px"><button id="copyBtn">Copy pass key</button></div>
 <p id="resultInfo" class="small"></p></section>
@@ -73,6 +76,10 @@ th,td{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertic
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const fmt = v => v ? new Date(v).toLocaleString() : '—';
   let inspected = null;
+  let waitingList = [];
+  let waitingDefaults = { def: 30, max: 240 };
+  let selectedPairing = null;   // set while a WAITING client's request is under review (fast flow); null in the manual flow
+  let waitingTimer = null;
 
   function say(msg, bad) {
     const n = $('notice');
@@ -104,6 +111,7 @@ th,td{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertic
   function renderDetails(d) {
     const r = d.request, s = r.summary || {};
     const rows = [
+      ...(selectedPairing ? [['Pairing code', selectedPairing]] : []),
       ['Store name', r.storeName || '—'],
       ['Installation ID', r.installationId],
       ['Device tag', r.deviceTag],
@@ -130,10 +138,12 @@ th,td{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertic
     $('unknownAck').checked = false;
     $('ttl').max = d.maxValidityMinutes; $('ttl').value = d.defaultValidityMinutes;
     $('issueBtn').disabled = !!d.requestExpired;
+    $('issueBtn').textContent = selectedPairing ? 'Send pass key to client' : 'Issue pass key';
   }
 
   $('inspectBtn').onclick = async () => {
     $('resultCard').classList.add('hidden');
+    selectedPairing = null;
     try {
       const d = await api('bir-passkeys/inspect', 'POST', { requestCode: $('requestCode').value });
       inspected = d;
@@ -144,24 +154,37 @@ th,td{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertic
   };
 
   $('issueBtn').onclick = async () => {
-    if (!inspected) { say('Inspect a request first.', true); return; }
+    if (!inspected) { say('Review a request first.', true); return; }
     const btn = $('issueBtn');
     btn.disabled = true;
+    const fast = !!selectedPairing;
     try {
-      const d = await api('bir-passkeys/issue', 'POST', {
-        requestCode: $('requestCode').value,
+      const common = {
         reference: $('reference').value,
         ttlMinutes: Number($('ttl').value),
         confirm: $('confirmChk').checked,
         developerPasskey: $('developerPasskey').value,
         acknowledgeUnknownDevice: $('unknownAck').checked
-      });
-      $('passKey').value = d.passKey;
-      $('resultInfo').textContent = 'Ticket ' + d.ticketId + ' · ' + purposeLabel(d.purpose) + (d.includeBirData ? ' (BIR counters included)' : '') + ' · expires ' + fmt(d.expiresAt) + '. It works once, on that device only.';
-      $('resultCard').classList.remove('hidden');
+      };
+      const d = fast
+        ? await api('bir-reset-inbox/send', 'POST', { ...common, pairingCode: selectedPairing })
+        : await api('bir-passkeys/issue', 'POST', { ...common, requestCode: $('requestCode').value });
       $('developerPasskey').value = '';
-      say('Pass key issued. Send it to the client now.');
+      if (fast && d.delivered) {
+        const sentTo = selectedPairing;
+        $('resultCard').classList.add('hidden');
+        $('passKey').value = '';
+        selectedPairing = null; inspected = null;
+        $('detailCard').classList.add('hidden');
+        say('Pass key sent to ' + sentTo + ' (ticket ' + d.ticketId + '). The final reset button on the client unlocks within a few seconds.');
+      } else {
+        $('passKey').value = d.passKey;
+        $('resultInfo').textContent = 'Ticket ' + d.ticketId + ' · ' + purposeLabel(d.purpose) + (d.includeBirData ? ' (BIR counters included)' : '') + ' · expires ' + fmt(d.expiresAt) + '. It works once, on that device only.';
+        $('resultCard').classList.remove('hidden');
+        say(fast ? (d.message || 'Pass key issued, but it could not be delivered. Send it by hand.') : 'Pass key issued. Send it to the client now.');
+      }
       loadHistory();
+      if ($('adminKey').value) loadWaiting().catch(() => {});
     } catch (e) { say(e.message, true); }
     finally { btn.disabled = !!(inspected && inspected.requestExpired); }
   };
@@ -179,6 +202,68 @@ th,td{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertic
       ).join('') : '<tr><td colspan="6" class="small">No pass keys issued yet.</td></tr>';
     } catch (e) { say(e.message, true); }
   }
-  $('historyBtn').onclick = loadHistory;
+
+  const statusText = w => {
+    if (w.delivery) return w.delivery.pickedUpAt ? 'Pass key received by the client' : 'Pass key sent — waiting for the client to pick it up';
+    return w.online ? 'Waiting now' : 'Client not polling';
+  };
+  function renderWaiting() {
+    $('waiting').innerHTML = waitingList.length ? waitingList.map(w =>
+      '<tr><td><strong>' + esc(w.pairingCode) + '</strong></td>' +
+      '<td>' + esc(w.request.storeName || '—') + '<div class="small">' + esc(String(w.installationId || '').slice(0, 14)) + '…' + (w.ip ? ' · ' + esc(w.ip) : '') + '</div></td>' +
+      '<td>' + esc(purposeLabel(w.request.purpose)) + (w.request.includeBirData ? ' (+counters)' : '') + '</td>' +
+      '<td>' + esc(statusText(w)) + '<div class="small">' + esc(fmt(w.lastSeenAt)) + '</div></td>' +
+      '<td><button type="button" class="reviewBtn" data-code="' + esc(w.pairingCode) + '"' + (w.online ? '' : ' disabled') + '>Review</button></td></tr>'
+    ).join('') : '<tr><td colspan="5">No client is waiting for a pass key right now.</td></tr>';
+  }
+  async function loadWaiting() {
+    const d = await api('bir-reset-inbox');
+    waitingList = Array.isArray(d.waiting) ? d.waiting : [];
+    waitingDefaults = { def: d.defaultValidityMinutes || 30, max: d.maxValidityMinutes || 240 };
+    renderWaiting();
+    const pending = waitingList.filter(w => w.online && !w.delivery).length;
+    document.title = (pending ? '(' + pending + ') ' : '') + 'BIR Reset Pass Keys — RELAY Admin';
+  }
+  function startWaitingLoop() {
+    clearInterval(waitingTimer);
+    waitingTimer = setInterval(() => { if ($('adminKey').value && !document.hidden) loadWaiting().catch(() => {}); }, 5000);
+  }
+  function review(w) {
+    selectedPairing = w.pairingCode;
+    const d = {
+      request: { ...w.request, installationId: w.installationId },
+      requestExpired: w.request.expiresAt <= Date.now(),
+      deviceKnown: !!w.deviceKnown,
+      defaultValidityMinutes: waitingDefaults.def,
+      maxValidityMinutes: waitingDefaults.max
+    };
+    inspected = d;
+    $('resultCard').classList.add('hidden');
+    $('confirmChk').checked = false;
+    $('reference').value = '';
+    renderDetails(d);
+    if (w.delivery) {
+      $('detailWarnings').innerHTML += '<div class="warn">A pass key was already sent for this request, so it cannot be signed again. If the client lost it, ask the client to tap “Get a new pairing code”.</div>';
+      $('issueBtn').disabled = true;
+    }
+    $('detailCard').classList.remove('hidden');
+    $('detailCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    say('Review the details for ' + w.pairingCode + ', enter a reference, then send the pass key.');
+  }
+  $('waiting').onclick = e => {
+    const b = e.target.closest('button[data-code]');
+    if (!b || b.disabled) return;
+    const w = waitingList.find(x => x.pairingCode === b.dataset.code);
+    if (w) review(w); else say('That request is no longer waiting.', true);
+  };
+  $('historyBtn').onclick = async () => {
+    if (!$('adminKey').value) { say('Enter the RELAY admin key first.', true); return; }
+    await loadHistory();
+    try { await loadWaiting(); startWaitingLoop(); say('Connected. Waiting reset requests refresh automatically.'); } catch (e) { say(e.message, true); }
+  };
+  $('waitingRefresh').onclick = () => {
+    if (!$('adminKey').value) { say('Enter the RELAY admin key first.', true); return; }
+    loadWaiting().catch(e => say(e.message, true));
+  };
 })();
 </script></body></html>
