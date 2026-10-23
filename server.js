@@ -8616,6 +8616,22 @@ async function saveClientSecurityStateInner(state, allowInstallationId = null) {
     for (const [field] of CLIENT_SECURITY_KVS) nextOrig[field] = JSON.stringify(state[field] || {});
     Object.defineProperty(state, '__orig', { value: nextOrig, enumerable: false, writable: true, configurable: true });
 }
+// Ang Customer name ng license ang nagiging label ng installation ID sa allowed devices (Devices page).
+// Tinatawag kapag nag-activate ang client, kapag inaprubahan ang device replacement, at kapag binago ang customer name.
+function syncDeviceLabelFromLicense(installationId, license) {
+    try {
+        const name = String((license && license.customerName) || '').trim().slice(0, 120);
+        if (!installationId || !name) return false;
+        if (deviceLabels.get(installationId) === name) return false;
+        deviceLabels.set(installationId, name);
+        saveDeviceLabels(deviceLabels);
+        logActivity(installationId, 'device_labeled', { label: name, source: 'customer_name' });
+        return true;
+    } catch (err) {
+        console.error('Could not set the device label from the customer name:', err.message);
+        return false;
+    }
+}
 function requireApiKey(req, res, next) {
     const provided = String(req.headers['x-relay-key'] || '');
     // The master key is reserved for trusted server/admin integrations. Customer packages must never contain it.
@@ -8829,6 +8845,7 @@ app.post('/relay/client/activate', rateLimit('client-activate', 10, 60 * 60 * 10
         state.credentials[credentialHash] = { credentialId, licenseId: license.licenseId, installationId, fingerprint, createdAt: Date.now(), expiresAt: license.expiresAt || null, revokedAt: null };
         await saveClientSecurityState(state, installationId);
         allowedDevices.add(installationId);
+        syncDeviceLabelFromLicense(installationId, license);
         activationInbox.clearDevice(installationId, fingerprint);   // the sent key (if any) is no longer needed: wipe it from memory
         return res.json({ success: true, credential, credentialId, installationId, expiresAt: license.expiresAt || null, message: 'Activation successful. Store the credential securely; it will not be shown again.' });
     } catch (err) {
@@ -9298,6 +9315,7 @@ app.post('/relay/admin/api/client-activations/update', requireAdminKey, async (r
             item.customerId = req.body.customerId ? String(req.body.customerId).trim().slice(0, 80) : resolveCustomerId({ activations: Object.fromEntries(Object.entries(state.activations).filter(([, l]) => l !== item)) }, name);
         }
         await saveClientSecurityState(state);
+        if (typeof req.body?.customerName === 'string' && item.activatedInstallationId) syncDeviceLabelFromLicense(item.activatedInstallationId, item);
         return res.json({ success: true, licenseId, customerId: effectiveCustomerId(item), customerName: item.customerName || '', label: item.label || '', ...buildClientAdminSnapshot(state) });
     } catch (err) { return licenseStoreFailure(res, err, 'Update client license failed:', 'License storage unavailable; update not confirmed.'); }
     finally { if (releaseSecurityLock) await releaseSecurityLock().catch(err => console.error('Update lock release failed:', err.message)); }
@@ -9407,6 +9425,7 @@ app.post('/relay/admin/api/client-device-replacements/approve', requireAdminKey,
         state.replacements[licenseId] = { ...(state.replacements[licenseId] || {}), licenseId, status: 'approved', approvedAt: Date.now(), requestedInstallationId: newInstallationId };
         await saveClientSecurityState(state, newInstallationId);
         allowedDevices.add(newInstallationId);
+        syncDeviceLabelFromLicense(newInstallationId, license);
         return res.json({ success: true, approved: true, licenseId, installationId: newInstallationId, message: 'Device replacement approved. The new device must activate again to receive a new credential.', ...buildClientAdminSnapshot(state) });
     } catch (err) { return licenseStoreFailure(res, err, 'Approve device replacement failed:', 'License storage unavailable; approval not confirmed.'); }
     finally { if (releaseSecurityLock) await releaseSecurityLock().catch(err => console.error('Replacement lock release failed:', err.message)); }
