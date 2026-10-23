@@ -16308,6 +16308,7 @@ app.post('/relay/cloud-backup/v2/finish', requireApiKey, requireAllowedDevice, r
         recordCloudBackupSyncTiming(projectedSizeMB, writeDurationSeconds);
         recordClientHourlyUsage(installationId, { syncs: 1, bytes: totalSizeBytes, computeSeconds: writeDurationSeconds });
         const percentUsed = quotaMB > 0 ? Math.round(Math.min(100, (projectedSizeMB / quotaMB) * 100) * 10) / 10 : 0;
+        console.log(`☁️ CLOUD_BACKUP v2 finish: installation=${String(installationId).slice(0, 8)}… segments=${session.segments.size} reused=${session.reusedSegments || 0} (${((session.reusedBytes || 0) / 1048576).toFixed(2)} MB) uploaded=${session.segments.size - (session.reusedSegments || 0)} total=${projectedSizeMB} MB write=${writeDurationSeconds.toFixed(2)}s`);
         res.json({
             success: true, message: 'Cloud backup successfully saved to Postgres.', segmented: true,
             moduleNames: moduleNamesOut, sizeBytes: totalSizeBytes, sizeMB: projectedSizeMB, tier, quotaMB, percentUsed, nearQuota: percentUsed >= 90,
