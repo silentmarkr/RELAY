@@ -40,6 +40,7 @@ if (!process.env.UV_THREADPOOL_SIZE) process.env.UV_THREADPOOL_SIZE = '8';
 })();
 const express = require('express');
 const crypto = require('crypto');
+const cloudBackupV2Store = require('./cloud-backup-v2-store');
 const zlib = require('zlib');
 const { promisify } = require('util');
 const { execSync, execFileSync, execFile, spawn } = require('child_process');
@@ -355,6 +356,27 @@ async function ensureCloudBackupSchema() {
             sync_count        INTEGER NOT NULL DEFAULT 0
         );
     `);
+    // SEGMENTED CLOUD BACKUP (GB-scale): hinihiwa ang bawat module sa maliliit na gzip segment (BYTEA) sa halip na isang malaking JSONB
+    // value (may hard limit ang JSONB at hindi kasya sa RAM ng RELAY). Ang `generation` ay staging: ang bagong upload ay hindi
+    // nakikita hangga't hindi nag-finish at hindi nagpapalit ng cloud_backup_meta.v2_generation (atomic swap).
+    await pgPool.query(`
+        CREATE TABLE IF NOT EXISTS cloud_backup_segments (
+            installation_id TEXT NOT NULL,
+            generation      TEXT NOT NULL,
+            module          TEXT NOT NULL,
+            part            INTEGER NOT NULL,
+            kind            TEXT NOT NULL DEFAULT 'array',
+            record_count    INTEGER NOT NULL DEFAULT 0,
+            raw_bytes       BIGINT NOT NULL DEFAULT 0,
+            data            BYTEA NOT NULL,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (installation_id, generation, module, part)
+        );
+    `);
+    await pgPool.query(`ALTER TABLE cloud_backup_meta ADD COLUMN IF NOT EXISTS v2_generation TEXT;`);
+    await pgPool.query(`ALTER TABLE cloud_backup_segments ADD COLUMN IF NOT EXISTS sha256 TEXT;`);
+    // INCREMENTAL (zero-copy): blobs table, client_sha256/blob_id columns, FK, indexes at GC trigger — tingnan ang cloud-backup-v2-store.js
+    await cloudBackupV2Store.ensureSchema((t, params) => pgPool.query(t, params));
     await pgPool.query(`ALTER TABLE cloud_backup_modules ADD COLUMN IF NOT EXISTS size_bytes BIGINT NOT NULL DEFAULT 0;`);
     await pgPool.query(`ALTER TABLE cloud_backup_meta ADD COLUMN IF NOT EXISTS size_bytes BIGINT NOT NULL DEFAULT 0;`);
     // AYOS/BAGO: tracking-only columns (walang kinalaman sa charging) — para
@@ -1023,9 +1045,15 @@ const AI_ASSISTANT_PROXY_PATH = '/relay/ai-assistant/complete';
 const defaultJsonParser = express.json({ limit: '2mb' });
 const aiAssistantJsonParser = express.json({ limit: '32mb' }); // BAGO: maraming larawan kada tanong (hanggang 4)
 const cloudBackupChunkRawParser = express.raw({ type: '*/*', limit: '6mb' });
+// SEGMENTED (streaming) cloud backup: bawat segment ay gzip ng ~4 MB JSON lang, kaya maliit ang hawak ng RELAY sa memorya kada request.
+const CLOUD_BACKUP_V2_SEGMENT_PATH = '/relay/cloud-backup/v2/segment';
+const cloudBackupV2SegmentRawParser = express.raw({ type: '*/*', limit: '24mb' });
 app.use((req, res, next) => {
     if (req.path === CLOUD_BACKUP_UPLOAD_CHUNK_PATH) {
         return cloudBackupChunkRawParser(req, res, next);
+    }
+    if (req.path === CLOUD_BACKUP_V2_SEGMENT_PATH) {
+        return cloudBackupV2SegmentRawParser(req, res, next);
     }
     if (req.path === AI_ASSISTANT_PROXY_PATH) {
         return aiAssistantJsonParser(req, res, next);
@@ -1040,7 +1068,7 @@ app.use((err, req, res, next) => {
         return res.status(413).json({
             success: false,
             payloadTooLarge: true,
-            message: req.path === CLOUD_BACKUP_UPLOAD_CHUNK_PATH
+            message: (req.path === CLOUD_BACKUP_UPLOAD_CHUNK_PATH || req.path === CLOUD_BACKUP_V2_SEGMENT_PATH)
                 ? 'A cloud backup chunk was larger than expected — this should not normally happen. Please try syncing again.'
                 : 'Masyadong malaki ang request (lumagpas sa 2mb limit).'
         });
@@ -4634,6 +4662,7 @@ async function runCloudBackupDebtPurgeSweep() {
                     const wr = w.rows[0];
                     if (!wr || !(Number(wr.balance_tokens) < 0) || !wr.debt_since) return false;
                     await client.query('DELETE FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
+                    await client.query('DELETE FROM cloud_backup_segments WHERE installation_id = $1', [installationId]);
                     await client.query('DELETE FROM cloud_backup_usage_hourly WHERE installation_id = $1', [installationId]);
                     await client.query('DELETE FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
                     return true;
@@ -6169,6 +6198,7 @@ async function purgeDeviceHandler(req, res) {
             try {
                 await runPgWriteTx(pgPool, async (client) => {
                     const modulesResult = await client.query('DELETE FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
+                    await client.query('DELETE FROM cloud_backup_segments WHERE installation_id = $1', [installationId]);
                     await client.query('DELETE FROM cloud_backup_usage_hourly WHERE installation_id = $1', [installationId]);
                     const metaResult = await client.query('DELETE FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
                     summary.deletedCloudBackupModuleRows = modulesResult.rowCount;
@@ -7621,7 +7651,7 @@ async function collectAllKnownInstallationIds() {
             warnings.push(`${table}: ${err.message}`);
         }
     };
-    for (const t of ['cloud_backup_meta', 'cloud_backup_modules', 'cloud_backup_usage_hourly', 'cloud_token_wallets', 'cloud_token_purchases', 'cloud_token_ledger', 'cloud_sync_activity']) {
+    for (const t of ['cloud_backup_meta', 'cloud_backup_modules', 'cloud_backup_segments', 'cloud_backup_usage_hourly', 'cloud_token_wallets', 'cloud_token_purchases', 'cloud_token_ledger', 'cloud_sync_activity']) {
         await scan(pgPool, t);
     }
     for (const t of ['relay_devices', 'relay_device_fingerprints', 'relay_clone_splits', 'relay_ai_credit_usage', 'relay_ai_credit_requests', 'relay_ai_credit_settings', 'relay_ai_tier_purchases', 'relay_ai_extra_purchases', 'relay_ai_day_boosts', 'relay_ai_daily_usage', 'relay_ai_cost_ledger']) {
@@ -7916,6 +7946,22 @@ app.get('/relay/admin/api/installations', requireAdminKey, async (req, res) => {
 // charge dito (admin-initiated na export/manual backup, hindi client
 // restore), at hindi ito naka-rate-limit tulad ng client-facing restore
 // dahil ang tumatawag dito ay ang developer/admin lang (requireAdminKey).
+// SEGMENTED (v2) backup: wala ang laman nito sa cloud_backup_modules (nasa cloud_backup_segments bilang gzip BYTEA), kaya ang mga admin
+// tool na nagbabasa ng cloud_backup_modules ay hindi ito nakikita. Ang helper na ito ay nagbibigay ng buod (module, records, laki).
+const CLOUD_BACKUP_V2_NO_EXPORT_MESSAGE = 'This installation uses the new large (segmented) cloud backup format, which is too big to export as one JSON file through this tool. Restore it from the client device instead (Cloud Backup > Restore).';
+async function getCloudBackupV2ModuleRows(installationId) {
+    if (!pgPool) return [];
+    const m = await queryWithRetry(pgPool, 'SELECT v2_generation FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
+    const generation = m.rows[0] && m.rows[0].v2_generation;
+    if (!generation) return [];
+    const r = await queryWithRetry(
+        pgPool,
+        `SELECT module, COALESCE(SUM(record_count), 0)::bigint AS record_count, COALESCE(SUM(raw_bytes), 0)::bigint AS size_bytes, MAX(created_at) AS updated_at
+           FROM cloud_backup_segments WHERE installation_id = $1 AND generation = $2 GROUP BY module ORDER BY module`,
+        [installationId, generation]
+    );
+    return r.rows;
+}
 app.get('/relay/admin/api/installations/:installationId/export', requireAdminKey, async (req, res) => {
     const { installationId } = req.params;
     if (!installationId) {
@@ -7928,6 +7974,9 @@ app.get('/relay/admin/api/installations/:installationId/export', requireAdminKey
         const metaResult = await queryWithRetry(pgPool, 'SELECT * FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
         if (!metaResult.rows[0]) {
             return res.status(404).json({ success: false, message: 'Walang Cloud Backup data na nakita para sa installation na ito sa Neon.' });
+        }
+        if (metaResult.rows[0].v2_generation) {
+            return res.status(409).json({ success: false, segmented: true, message: CLOUD_BACKUP_V2_NO_EXPORT_MESSAGE });
         }
         const modulesResult = await queryWithRetry(pgPool, 'SELECT module, data, record_count, size_bytes, updated_at FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
         const modules = {};
@@ -7981,6 +8030,7 @@ app.post('/relay/admin/api/installations/bulk-export', requireAdminKey, async (r
         for (const installationId of installationIds) {
             const metaResult = await queryWithRetry(pgPool, 'SELECT * FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
             if (!metaResult.rows[0]) { skipped.push(installationId); continue; }
+            if (metaResult.rows[0].v2_generation) { skipped.push(installationId); continue; }   // segmented backup: hindi kasya sa isang JSON export
             const modulesResult = await queryWithRetry(pgPool, 'SELECT module, data FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
             const modules = {};
             modulesResult.rows.forEach((r) => { modules[r.module] = r.data; });
@@ -15459,6 +15509,11 @@ function cleanupCloudBackupUploadSession(uploadId) {
         CLOUD_BACKUP_UPLOAD_LOCKS.delete(session.installationId);
     }
     if (session.idleTimer) clearTimeout(session.idleTimer);
+    // Hindi natapos/pumalyang segmented upload: burahin ang staged na segments nito (hindi pa ito ang aktibong backup).
+    if (session.v2 && !session.finalized && pgPool) {
+        pgPool.query('DELETE FROM cloud_backup_segments WHERE installation_id = $1 AND generation = $2', [session.installationId, session.generation])
+            .catch((err) => console.warn('⚠️ CLOUD_BACKUP: hindi nabura ang staged segments ng abandonadong upload:', err.message));
+    }
 }
 function armCloudBackupSessionIdleTimer(uploadId) {
     const session = CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS.get(uploadId);
@@ -15841,9 +15896,12 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
                     module_count = excluded.module_count,
                     size_bytes = excluded.size_bytes,
                     last_sync_at = now(),
-                    sync_count = cloud_backup_meta.sync_count + 1`,
+                    sync_count = cloud_backup_meta.sync_count + 1,
+                    v2_generation = NULL`,
                 [installationId, storeName || null, typeof totalRecords === 'number' ? totalRecords : null, moduleCount, totalSizeBytes]
             );
+            // Bagong (legacy) full sync ang pinakabago na ngayon: tanggalin ang lumang segmented copy para hindi ito ma-restore nang mali.
+            await client.query('DELETE FROM cloud_backup_segments WHERE installation_id = $1', [installationId]);
         });
         logActivity(installationId, 'cloud_backup_sync', { moduleCount: Object.keys(modules).length, totalRecords: totalRecords || null, storeName: storeName || null, sizeBytes: totalSizeBytes });
         CLOUD_BACKUP_RUNTIME_STATS.syncOk++;
@@ -15890,6 +15948,412 @@ app.post('/relay/cloud-backup/upload/finish', requireApiKey, requireAllowedDevic
         res.status(500).json({ success: false, message: friendlyMessage });
     } finally {
         cleanupCloudBackupUploadSession(String(uploadId));
+    }
+});
+// ===================================================================
+// SEGMENTED (STREAMING) CLOUD BACKUP — v2
+// ===================================================================
+// Bakit: ang v1 ay iniipon ang LAHAT ng chunk sa RAM, ginagunzip, at JSON.parse ang buo bago isulat sa Postgres (isang JSONB value
+// kada module). Sa GB-scale na backup, mauubusan ng memory ang RELAY (para sa LAHAT ng tindahan) at lalampas sa limit ng JSONB.
+// Dito: ang client ay nagpapadala ng maliliit na SEGMENT (gzip ng ~4 MB JSON, isang module-part bawat request). Ang bawat segment ay
+// agad na vine-validate at isinusulat bilang BYTEA sa staging `generation`, tapos kalimutan na sa memorya. Sa /finish lang
+// "nagiging aktibo" ang bagong generation (atomic swap sa cloud_backup_meta.v2_generation) kaya kung mag-fail sa gitna,
+// buo pa rin ang dating backup. Pareho pa rin ang Omni Token gate, quota, at refund logic ng v1.
+const CLOUD_BACKUP_V2_MAX_SEGMENT_RAW_BYTES = 40 * 1024 * 1024; // proteksyon laban sa gzip bomb kada segment
+const CLOUD_BACKUP_V2_MODULE_NAME_RE = /^[A-Za-z0-9_.:-]{1,80}$/;
+const CLOUD_BACKUP_V2_RESTORE_GRANTS = new Map();
+const CLOUD_BACKUP_V2_RESTORE_GRANT_TTL_MS = 3 * 60 * 60 * 1000;
+function pruneCloudBackupV2RestoreGrants() {
+    const now = Date.now();
+    for (const [id, g] of CLOUD_BACKUP_V2_RESTORE_GRANTS.entries()) {
+        if (g.expiresAt < now) CLOUD_BACKUP_V2_RESTORE_GRANTS.delete(id);
+    }
+}
+app.post('/relay/cloud-backup/v2/start', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-v2-start', 30, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    const { installationId, uncompressedSizeBytes } = req.body || {};
+    if (!installationId || typeof uncompressedSizeBytes !== 'number' || uncompressedSizeBytes < 0) {
+        return res.status(400).json({ success: false, message: 'Missing or invalid installationId/uncompressedSizeBytes.' });
+    }
+    const sizeBytesForPrecheck = Math.max(1, uncompressedSizeBytes);
+    if (!isFeatureCurrentlyUnlocked(installationId, 'cloud_backup')) {
+        logActivity(installationId, 'cloud_backup_blocked', { reason: 'feature_not_unlocked' });
+        return res.status(402).json({
+            success: false, featureLocked: true, featureId: 'cloud_backup', featureName: FEATURE_CATALOG.cloud_backup.name, isSubscription: true, plans: CLOUD_BACKUP_PLANS,
+            message: 'There is no active/it has expired for the Cloud Backup subscription for this installation. You must subscribe (or renew) first before using Cloud Backup.'
+        });
+    }
+    if (!pgPool) {
+        return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured yet on RELAY. Tell the developer to set it.' });
+    }
+    const unlockForTier = (issuedUnlocks[installationId] || {})['cloud_backup'];
+    const tier = (unlockForTier && unlockForTier.tier && CLOUD_BACKUP_PLANS[unlockForTier.tier]) ? unlockForTier.tier : 'basic';
+    try {
+        const walletRow = await getOrCreateCloudTokenWallet(installationId);
+        const minCostForPrecheck = await getCloudTokenCostPerSyncExact(sizeBytesForPrecheck, tier);
+        const precheckDebtLock = evaluateCloudTokenDebtLock(walletRow.balance_tokens, walletRow.debt_since);
+        if (precheckDebtLock.locked) {
+            logActivity(installationId, 'cloud_backup_blocked', { reason: 'in_debt', balanceTokens: Number(walletRow.balance_tokens) });
+            return res.status(402).json({
+                success: false, insufficientTokens: true, inDebt: true, tokensToResume: precheckDebtLock.tokensToResume,
+                balanceTokens: Number(walletRow.balance_tokens), message: buildCloudTokenDebtMessage(precheckDebtLock, 'sync')
+            });
+        }
+        if (Number(walletRow.balance_tokens) < minCostForPrecheck) {
+            logActivity(installationId, 'cloud_backup_blocked', { reason: 'insufficient_tokens', balanceTokens: Number(walletRow.balance_tokens) });
+            return res.status(402).json({
+                success: false, insufficientTokens: true, balanceTokens: Number(walletRow.balance_tokens),
+                message: 'Insufficient Cloud Backup (Omni Tokens) balance. Please buy more tokens to keep syncing.'
+            });
+        }
+    } catch (walletErr) {
+        console.error('⚠️ CLOUD_BACKUP v2: hindi ma-verify ang Omni Token balance bago mag-start:', walletErr.message);
+        return res.status(503).json({ success: false, message: 'Could not verify the Omni Tokens balance right now — please try syncing again in a moment.' });
+    }
+    const existingUploadId = CLOUD_BACKUP_UPLOAD_LOCKS.get(installationId);
+    if (existingUploadId && CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS.has(existingUploadId)) {
+        return res.status(409).json({ success: false, uploadInProgress: true, message: 'A cloud backup upload for this installation is already in progress. Please wait for it to finish before starting another.' });
+    }
+    const quotaMB = CLOUD_BACKUP_PLANS[tier].storageQuotaMB;
+    const totalMB = Math.round((sizeBytesForPrecheck / (1024 * 1024)) * 100) / 100;
+    if (totalMB > quotaMB * 1.2 + 5) {
+        logActivity(installationId, 'cloud_backup_blocked', { reason: 'storage_quota_exceeded', tier, quotaMB, sizeMB: totalMB });
+        return res.status(413).json({
+            success: false, storageQuotaExceeded: true, tier, quotaMB, sizeMB: totalMB, overageMB: Math.round((totalMB - quotaMB) * 100) / 100,
+            message: `Cloud backup exceeds your ${CLOUD_BACKUP_PLANS[tier].name} storage allowance (about ${totalMB} MB to upload, ${quotaMB} MB limit). Upgrade your Cloud Backup plan or free up space (e.g., trim old transaction/userlog history) before syncing.`
+        });
+    }
+    // Nag-iisang session lang kada installation (lock sa itaas), kaya ligtas burahin ang mga naiwang staged generation (hal. nag-restart ang RELAY).
+    try {
+        await pgPool.query(
+            `DELETE FROM cloud_backup_segments WHERE installation_id = $1
+               AND generation <> COALESCE((SELECT v2_generation FROM cloud_backup_meta WHERE installation_id = $1), '')`,
+            [installationId]
+        );
+    } catch (sweepErr) {
+        console.warn('⚠️ CLOUD_BACKUP v2: hindi nalinis ang naiwang staged segments:', sweepErr.message);
+    }
+    const uploadId = crypto.randomUUID();
+    const generation = crypto.randomUUID();
+    // INCREMENTAL: aling segment (module + SHA-256) ang nasa aktibong generation na — pwede itong gamitin ulit nang hindi ina-upload.
+    let baselineGeneration = null;
+    let baseline = [];
+    try {
+        const baseInfo = await loadCloudBackupV2Baseline(installationId);
+        baselineGeneration = baseInfo.generation;
+        baseline = baseInfo.items;
+    } catch (baseErr) {
+        console.warn('⚠️ CLOUD_BACKUP v2: hindi nabasa ang baseline para sa incremental (full upload na lang):', baseErr.message);
+    }
+    CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS.set(uploadId, {
+        v2: true, finalized: false, generation, installationId, totalBytes: 0, compressed: true, receivedBytes: 0, chunks: [],
+        segments: new Map(), rawBytes: 0, tier, quotaMB, createdAt: Date.now(), idleTimer: null, baselineGeneration, reusedSegments: 0, reusedBytes: 0
+    });
+    CLOUD_BACKUP_UPLOAD_LOCKS.set(installationId, uploadId);
+    armCloudBackupSessionIdleTimer(uploadId);
+    res.json({ success: true, uploadId, v2: true, maxSegmentRawBytes: CLOUD_BACKUP_V2_MAX_SEGMENT_RAW_BYTES, incremental: true, baseline });
+});
+app.post('/relay/cloud-backup/v2/segment', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-v2-segment', 30000, 60 * 60 * 1000, (req) => req.query?.installationId), async (req, res) => {
+    const uploadId = String(req.query.uploadId || '');
+    const installationId = String(req.query.installationId || '');
+    const moduleName = String(req.query.module || '');
+    const part = Number.parseInt(String(req.query.part), 10);
+    const session = uploadId && CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS.get(uploadId);
+    if (!session || !session.v2 || session.installationId !== installationId) {
+        recordCloudBackupFailure('session', installationId, 'Unknown or expired v2 upload session.');
+        return res.status(404).json({ success: false, message: 'Unknown or expired upload session. Start a new cloud backup upload.' });
+    }
+    if (!CLOUD_BACKUP_V2_MODULE_NAME_RE.test(moduleName) || !Number.isInteger(part) || part < 0 || part > 200000) {
+        return res.status(400).json({ success: false, message: 'Invalid module name or part number.' });
+    }
+    const body = req.body;
+    if (!Buffer.isBuffer(body) || body.length === 0) {
+        return res.status(400).json({ success: false, message: 'Empty or invalid segment.' });
+    }
+    let rawBuf;
+    try {
+        rawBuf = await gunzipAsync(body, { maxOutputLength: CLOUD_BACKUP_V2_MAX_SEGMENT_RAW_BYTES });
+    } catch (err) {
+        if (err && err.code === 'ERR_BUFFER_TOO_LARGE') {
+            return res.status(413).json({ success: false, message: 'A backup segment decompressed to more data than allowed.' });
+        }
+        return res.status(400).json({ success: false, retryable: true, message: 'Could not decompress the backup segment (corrupted in transit?). Please retry.' });
+    }
+    // INTEGRITY: SHA-256 ng hilaw na JSON ng segment na ipinadala ng client. Kapag hindi tugma, nasira sa biyahe: ulitin ang segment.
+    const receivedSha = crypto.createHash('sha256').update(rawBuf).digest('hex');
+    const claimedSha = String(req.query.sha256 || '').toLowerCase();
+    if (claimedSha && /^[0-9a-f]{64}$/.test(claimedSha) && claimedSha !== receivedSha) {
+        return res.status(400).json({ success: false, retryable: true, message: 'Backup segment checksum mismatch (corrupted in transit). Please retry.' });
+    }
+    let parsed;
+    try {
+        parsed = JSON.parse(rawBuf.toString('utf8'));
+    } catch (_err) {
+        return res.status(400).json({ success: false, retryable: true, message: 'Could not parse the backup segment as JSON (corrupted in transit?). Please retry.' });
+    }
+    const kind = Array.isArray(parsed) ? 'array' : ((parsed && typeof parsed === 'object') ? 'object' : null);
+    if (!kind || (kind === 'object' && part !== 0)) {
+        return res.status(400).json({ success: false, message: 'Invalid segment content.' });
+    }
+    let storedGz = body;
+    let rawBytes = rawBuf.length;
+    let storedSha = receivedSha;   // SHA-256 ng AKTWAL na iniimbak (pagkatapos ng redaction, kung meron) — ito ang ibe-verify ng client sa restore
+    if (kind === 'array' && CLOUD_BACKUP_REDACTED_FIELDS_BY_MODULE[moduleName]) {
+        const cleanJson = Buffer.from(JSON.stringify(stripCloudBackupRedactedFields(moduleName, parsed)), 'utf8');
+        rawBytes = cleanJson.length;
+        storedGz = await gzipAsync(cleanJson);
+        storedSha = crypto.createHash('sha256').update(cleanJson).digest('hex');
+    }
+    const recordCount = kind === 'array' ? parsed.length : 0;
+    const segKey = `${moduleName}\u0000${part}`;
+    const previous = session.segments.get(segKey);
+    const newTotal = session.rawBytes - (previous ? previous.rawBytes : 0) + rawBytes;
+    const hardCapBytes = Math.ceil((Number(session.quotaMB) + 5) * 1.2 * 1024 * 1024);
+    if (newTotal > hardCapBytes) {
+        const tierName = CLOUD_BACKUP_PLANS[session.tier] ? CLOUD_BACKUP_PLANS[session.tier].name : session.tier;
+        const quotaMBHit = session.quotaMB;
+        const tierHit = session.tier;
+        cleanupCloudBackupUploadSession(uploadId);
+        logActivity(installationId, 'cloud_backup_blocked', { reason: 'storage_quota_exceeded', tier: tierHit, quotaMB: quotaMBHit });
+        return res.status(413).json({
+            success: false, storageQuotaExceeded: true, tier: tierHit, quotaMB: quotaMBHit,
+            message: `The backup is larger than your ${tierName} storage allowance (${quotaMBHit} MB limit). Upgrade your Cloud Backup plan or free up space before syncing.`
+        });
+    }
+    try {
+        await runPgWriteTx(pgPool, (client) => cloudBackupV2Store.saveSegment((t, params) => client.query(t, params), {
+            installationId, generation: session.generation, moduleName, part, kind, recordCount, rawBytes,
+            storedGz, storedSha, clientSha: receivedSha
+        }));
+    } catch (err) {
+        console.error('⚠️ CLOUD_BACKUP v2: hindi na-save ang segment:', err.message);
+        return res.status(503).json({ success: false, message: 'The database could not save this segment right now. Please retry.', transient: isTransientPgConnectionError(err) });
+    }
+    session.segments.set(segKey, { moduleName, part, kind, records: recordCount, rawBytes, clientSha: receivedSha });
+    session.rawBytes = newTotal;
+    armCloudBackupSessionIdleTimer(uploadId);
+    res.json({ success: true, receivedSegments: session.segments.size, rawBytes: session.rawBytes });
+});
+// INCREMENTAL: listahan ng {module, sha256} ng AKTIBONG generation na pwedeng gamitin ulit (tingnan ang cloud-backup-v2-store.js).
+function loadCloudBackupV2Baseline(installationId) {
+    return cloudBackupV2Store.loadBaseline((t, params) => queryWithRetry(pgPool, t, params), installationId);
+}
+// INCREMENTAL (ZERO-COPY): gagawa lang ng segment row sa bagong staging generation na tumuturo sa parehong blob ng hindi nagbagong segment ng
+// aktibong generation — walang kopya ng data, walang dagdag na storage.
+app.post('/relay/cloud-backup/v2/reuse', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-v2-reuse', 30000, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    const { uploadId, installationId, module: moduleName } = req.body || {};
+    const part = Number.parseInt(String(req.body && req.body.part), 10);
+    const sha = String((req.body && req.body.sha256) || '').toLowerCase();
+    const session = uploadId && CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS.get(String(uploadId));
+    if (!session || !session.v2 || session.finalized || session.installationId !== installationId) {
+        return res.status(404).json({ success: false, message: 'Unknown or expired upload session. Start a new cloud backup upload.' });
+    }
+    if (!CLOUD_BACKUP_V2_MODULE_NAME_RE.test(String(moduleName || '')) || !Number.isInteger(part) || part < 0 || part > 200000 || !/^[0-9a-f]{64}$/.test(sha)) {
+        return res.status(400).json({ success: false, message: 'Invalid module, part or sha256.' });
+    }
+    if (!pgPool || !session.baselineGeneration) return res.json({ success: true, reused: false });
+    try {
+        const reusedRow = await runPgWriteTx(pgPool, (client) => cloudBackupV2Store.reuseSegment((t, params) => client.query(t, params), {
+            installationId, generation: session.generation, baselineGeneration: session.baselineGeneration, moduleName, part, clientSha: sha
+        }), { maxAttempts: 2 });
+        if (!reusedRow) return res.json({ success: true, reused: false });
+        const row = { kind: reusedRow.kind, record_count: reusedRow.recordCount, raw_bytes: reusedRow.rawBytes };
+        const rawBytes = Number(row.raw_bytes) || 0;
+        const segKey = `${moduleName}\u0000${part}`;
+        const previous = session.segments.get(segKey);
+        session.segments.set(segKey, { moduleName, part, kind: row.kind, records: Number(row.record_count) || 0, rawBytes, clientSha: sha });
+        session.rawBytes = session.rawBytes - (previous ? previous.rawBytes : 0) + rawBytes;
+        session.reusedSegments = (session.reusedSegments || 0) + 1;
+        session.reusedBytes = (session.reusedBytes || 0) + rawBytes;
+        armCloudBackupSessionIdleTimer(String(uploadId));
+        return res.json({ success: true, reused: true, records: Number(row.record_count) || 0, rawBytes, receivedSegments: session.segments.size });
+    } catch (err) {
+        console.error('⚠️ CLOUD_BACKUP v2: hindi nagamit ulit ang segment:', err.message);
+        return res.json({ success: true, reused: false });   // babalik ang client sa normal na upload ng segment
+    }
+});
+// RESUME: sinasabi sa client kung aling segment (module, part, sha256 ng ipinadala nila) ang nasa staging na ng session na ito, para
+// hindi na nila ulitin ang pag-upload ng mga iyon kung pumutol ang koneksyon. Buhay lang ang session habang hindi lumalampas ang idle timeout.
+app.post('/relay/cloud-backup/v2/status', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-v2-status', 120, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    const { uploadId, installationId } = req.body || {};
+    const session = uploadId && CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS.get(String(uploadId));
+    if (!session || !session.v2 || session.finalized || session.installationId !== installationId) {
+        return res.status(404).json({ success: false, message: 'Unknown or expired upload session.' });
+    }
+    armCloudBackupSessionIdleTimer(String(uploadId));
+    const segments = [];
+    for (const seg of session.segments.values()) segments.push({ module: seg.moduleName, part: seg.part, sha256: seg.clientSha || null });
+    let baseline = [];
+    if (session.baselineGeneration && pgPool) {
+        try { baseline = (await loadCloudBackupV2Baseline(installationId)).items; } catch (_e) { baseline = []; }
+    }
+    return res.json({ success: true, segments, rawBytes: session.rawBytes, incremental: true, baseline });
+});
+app.post('/relay/cloud-backup/v2/finish', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-v2-finish', 30, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    const { uploadId, installationId, storeName, totalRecords, expectSegments } = req.body || {};
+    const trigger = (req.body && req.body.trigger === 'automatic') ? 'automatic' : 'manual';
+    const session = uploadId && CLOUD_BACKUP_CHUNK_UPLOAD_SESSIONS.get(String(uploadId));
+    if (!session || !session.v2 || session.installationId !== installationId) {
+        recordCloudBackupFailure('session', installationId, 'Unknown or expired v2 upload session at finish.');
+        return res.status(404).json({ success: false, message: 'Unknown or expired upload session. Start a new cloud backup upload.' });
+    }
+    const failEarly = (status, payload, kindForStats, statsMessage) => {
+        cleanupCloudBackupUploadSession(String(uploadId));
+        if (kindForStats) recordCloudBackupFailure(kindForStats, installationId, statsMessage || payload.message);
+        return res.status(status).json({ success: false, ...payload });
+    };
+    // RESUME: kung ipinadala ng client ang pinal na plano (moduleParts), alisin ang naiwang staged segment na wala na roon
+    // (hal. mas kaunti na ang part ng module kaysa sa nakaraang subok).
+    const moduleParts = req.body && req.body.moduleParts;
+    if (moduleParts && typeof moduleParts === 'object' && !Array.isArray(moduleParts)) {
+        const stale = [];
+        for (const [segKey, seg] of session.segments.entries()) {
+            const n = Number(moduleParts[seg.moduleName]);
+            if (!Number.isInteger(n) || n < 1 || seg.part >= n) stale.push([segKey, seg]);
+        }
+        for (const [segKey, seg] of stale) {
+            session.segments.delete(segKey);
+            session.rawBytes -= seg.rawBytes;
+            try {
+                await pgPool.query('DELETE FROM cloud_backup_segments WHERE installation_id = $1 AND generation = $2 AND module = $3 AND part = $4', [installationId, session.generation, seg.moduleName, seg.part]);
+            } catch (pruneErr) { return failEarly(503, { message: 'Could not clean up the staged backup right now. Please try syncing again.' }); }
+        }
+    }
+    // Kumpleto ba? Bawat module: parts 0..n-1 walang butas, iisang uri.
+    const byModule = new Map();
+    for (const seg of session.segments.values()) {
+        if (!byModule.has(seg.moduleName)) byModule.set(seg.moduleName, { kind: seg.kind, parts: [], records: 0 });
+        const m = byModule.get(seg.moduleName);
+        if (m.kind !== seg.kind) return failEarly(400, { message: `Inconsistent segment types for module "${seg.moduleName}". Please start a new sync.` }, 'session');
+        m.parts.push(seg.part);
+        m.records += seg.records;
+    }
+    if (!byModule.size) return failEarly(400, { message: 'No backup segments were received.' }, 'session');
+    if (Number.isInteger(expectSegments) && expectSegments !== session.segments.size) {
+        return failEarly(400, { message: `Incomplete upload — received ${session.segments.size} of ${expectSegments} segments. No partial backup was saved; please start a new sync.` }, 'session');
+    }
+    for (const [name, m] of byModule.entries()) {
+        m.parts.sort((a, b) => a - b);
+        const contiguous = m.parts.every((v, i) => v === i);
+        if (!contiguous || (m.kind === 'object' && m.parts.length !== 1)) {
+            return failEarly(400, { message: `Missing segment(s) for module "${name}". No partial backup was saved; please start a new sync.` }, 'session');
+        }
+    }
+    if (!isFeatureCurrentlyUnlocked(installationId, 'cloud_backup')) {
+        cleanupCloudBackupUploadSession(String(uploadId));
+        logActivity(installationId, 'cloud_backup_blocked', { reason: 'feature_not_unlocked' });
+        return res.status(402).json({
+            success: false, featureLocked: true, featureId: 'cloud_backup', featureName: FEATURE_CATALOG.cloud_backup.name, isSubscription: true, plans: CLOUD_BACKUP_PLANS,
+            message: 'There is no active/it has expired for the Cloud Backup subscription for this installation. You must subscribe (or renew) first before using Cloud Backup.'
+        });
+    }
+    if (!pgPool) return failEarly(503, { message: 'Postgres (DATABASE_URL) is not configured yet on RELAY. Tell the developer to set it.' });
+    const { tier, quotaMB, generation } = session;
+    const totalSizeBytes = session.rawBytes; // sinukat ng RELAY mismo (hindi client-declared)
+    const projectedSizeMB = Math.round((totalSizeBytes / (1024 * 1024)) * 100) / 100;
+    if (projectedSizeMB > quotaMB) {
+        logActivity(installationId, 'cloud_backup_blocked', { reason: 'storage_quota_exceeded', tier, quotaMB, sizeMB: projectedSizeMB });
+        return failEarly(413, {
+            storageQuotaExceeded: true, tier, quotaMB, sizeMB: projectedSizeMB, overageMB: Math.round((projectedSizeMB - quotaMB) * 100) / 100,
+            message: `Cloud backup exceeds your ${CLOUD_BACKUP_PLANS[tier].name} storage allowance (${projectedSizeMB} MB used, ${quotaMB} MB limit). Upgrade your Cloud Backup plan or free up space (e.g., trim old transaction/userlog history) before syncing.`
+        });
+    }
+    let tokenConsumeResult;
+    try {
+        tokenConsumeResult = await consumeCloudTokensForSyncExact(installationId, totalSizeBytes, tier, 'Cloud backup sync', trigger);
+        invalidateWalletCache(installationId);
+    } catch (consumeErr) {
+        console.error('⚠️ CLOUD_BACKUP v2: hindi ma-verify/ma-charge ang Omni Token balance sa finish:', consumeErr.message);
+        return failEarly(503, { message: 'Could not verify the Omni Tokens balance right now — no data was written. Please try syncing again in a moment.' });
+    }
+    if (!tokenConsumeResult.ok) {
+        logActivity(installationId, 'cloud_backup_blocked', { reason: tokenConsumeResult.inDebt ? 'in_debt' : 'insufficient_tokens', balanceTokens: tokenConsumeResult.balanceTokens });
+        cleanupCloudBackupUploadSession(String(uploadId));
+        return res.status(402).json({
+            success: false, insufficientTokens: true,
+            ...(tokenConsumeResult.inDebt ? { inDebt: true, tokensToResume: tokenConsumeResult.tokensToResume } : {}),
+            balanceTokens: tokenConsumeResult.balanceTokens,
+            message: tokenConsumeResult.inDebt
+                ? buildCloudTokenDebtMessage({ tokensToResume: tokenConsumeResult.tokensToResume }, 'sync')
+                : 'Insufficient Cloud Backup (Omni Tokens) balance. Nothing was written to the cloud — please buy more tokens to keep syncing.'
+        });
+    }
+    const writeStartedAtMs = Date.now();
+    try {
+        let recordsTotal = 0;
+        byModule.forEach((m) => { recordsTotal += m.records; });
+        const moduleNamesOut = Array.from(byModule.keys());
+        await runPgWriteTx(pgPool, async (client) => {
+            await client.query(
+                `INSERT INTO cloud_backup_meta (installation_id, store_name, total_records, module_count, size_bytes, last_sync_at, sync_count, first_sync_at, v2_generation)
+                 VALUES ($1, $2, $3, $4, $5, now(), 1, now(), $6)
+                 ON CONFLICT (installation_id) DO UPDATE SET
+                    first_sync_at = COALESCE(cloud_backup_meta.first_sync_at, now()),
+                    store_name = excluded.store_name,
+                    total_records = excluded.total_records,
+                    module_count = excluded.module_count,
+                    size_bytes = excluded.size_bytes,
+                    last_sync_at = now(),
+                    sync_count = cloud_backup_meta.sync_count + 1,
+                    v2_generation = excluded.v2_generation`,
+                [installationId, storeName || null, typeof totalRecords === 'number' ? totalRecords : recordsTotal, byModule.size, totalSizeBytes, generation]
+            );
+            // Atomic swap: ang bagong generation na ang aktibo; tanggalin ang luma at ang legacy per-module copy.
+            await client.query('DELETE FROM cloud_backup_segments WHERE installation_id = $1 AND generation <> $2', [installationId, generation]);
+            await client.query('DELETE FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
+        });
+        session.finalized = true;
+        logActivity(installationId, 'cloud_backup_sync', { moduleCount: byModule.size, totalRecords: recordsTotal, storeName: storeName || null, sizeBytes: totalSizeBytes, segmented: true, segments: session.segments.size });
+        CLOUD_BACKUP_RUNTIME_STATS.syncOk++;
+        const writeDurationSeconds = Math.max(0, (Date.now() - writeStartedAtMs) / 1000);
+        recordCloudBackupSyncTiming(projectedSizeMB, writeDurationSeconds);
+        recordClientHourlyUsage(installationId, { syncs: 1, bytes: totalSizeBytes, computeSeconds: writeDurationSeconds });
+        const percentUsed = quotaMB > 0 ? Math.round(Math.min(100, (projectedSizeMB / quotaMB) * 100) * 10) / 10 : 0;
+        res.json({
+            success: true, message: 'Cloud backup successfully saved to Postgres.', segmented: true,
+            moduleNames: moduleNamesOut, sizeBytes: totalSizeBytes, sizeMB: projectedSizeMB, tier, quotaMB, percentUsed, nearQuota: percentUsed >= 90,
+            reusedSegments: session.reusedSegments || 0, reusedBytes: session.reusedBytes || 0,
+            tokensCharged: tokenConsumeResult.tokensCharged, balanceTokens: tokenConsumeResult.balanceTokens
+        });
+    } catch (err) {
+        console.error('⚠️ CLOUD_BACKUP v2: hindi na-finalize sa Postgres:', err.message);
+        if (tokenConsumeResult.tokensCharged > 0) {
+            await creditCloudTokens(installationId, tokenConsumeResult.tokensCharged, `Refund — failed sync (${err.message})`, 'REFUND').catch((refundErr) => {
+                console.error('⚠️ CLOUD_TOKENS: failed to refund after a failed v2 sync:', refundErr.message);
+            });
+        }
+        recordCloudBackupFailure('sync', installationId, err.message, { refunded: tokenConsumeResult.tokensCharged > 0, transient: isTransientPgConnectionError(err) });
+        res.status(500).json({
+            success: false,
+            message: isTransientPgConnectionError(err)
+                ? 'Lost connection to the database while finalizing the cloud backup. Your previous backup is untouched — please try syncing again.'
+                : ('An error occurred while saving to Postgres: ' + err.message)
+        });
+    } finally {
+        cleanupCloudBackupUploadSession(String(uploadId));
+    }
+});
+app.post('/relay/cloud-backup/v2/restore-segment', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-v2-restore-segment', 30000, 60 * 60 * 1000, (req) => req.body?.installationId), async (req, res) => {
+    const { installationId, generation, module: moduleName, part } = req.body || {};
+    pruneCloudBackupV2RestoreGrants();
+    const grant = installationId ? CLOUD_BACKUP_V2_RESTORE_GRANTS.get(String(installationId)) : null;
+    if (!grant || grant.generation !== String(generation) || grant.expiresAt < Date.now()) {
+        return res.status(403).json({ success: false, restoreGrantRequired: true, message: 'No active restore session. Start the restore again.' });
+    }
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Hindi pa naka-configure ang Postgres (DATABASE_URL).' });
+    if (!CLOUD_BACKUP_V2_MODULE_NAME_RE.test(String(moduleName || '')) || !Number.isInteger(part) || part < 0) {
+        return res.status(400).json({ success: false, message: 'Invalid module/part.' });
+    }
+    try {
+        const seg = await cloudBackupV2Store.readSegment((t, params) => queryWithRetry(pgPool, t, params), {
+            installationId: String(installationId), generation: String(generation), moduleName: String(moduleName), part
+        });
+        if (!seg) return res.status(404).json({ success: false, message: 'Segment not found (the backup may have been replaced or deleted).' });
+        res.set('Content-Type', 'application/octet-stream');
+        if (seg.sha256) res.set('X-Segment-Sha256', seg.sha256);
+        res.send(seg.data);
+    } catch (err) {
+        console.error('⚠️ CLOUD_BACKUP v2: hindi nakuha ang segment para sa restore:', err.message);
+        res.status(500).json({ success: false, message: 'Could not read the backup segment: ' + err.message });
     }
 });
 app.get('/relay/cloud-backup/usage', requireApiKey, requireAllowedDevice, rateLimit('cloud-backup-usage', 60, 60 * 60 * 1000, (req) => req.query?.installationId), async (req, res) => {
@@ -17933,6 +18397,7 @@ async function purgeCloudBackupDataForInstallation(installationId) {
     }
     await runPgWriteTx(pgPool, async (client) => {
         await client.query('DELETE FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
+        await client.query('DELETE FROM cloud_backup_segments WHERE installation_id = $1', [installationId]);
         await client.query('DELETE FROM cloud_backup_usage_hourly WHERE installation_id = $1', [installationId]);
         await client.query('DELETE FROM cloud_backup_meta WHERE installation_id = $1', [installationId]);
     });
@@ -18734,7 +19199,7 @@ async function buildCloudBackupControlCenter(th) {
         safe('table-sizes', q(
             `SELECT relname AS table_name, pg_total_relation_size(relid)::float8 AS bytes
              FROM pg_catalog.pg_statio_user_tables
-             WHERE relname IN ('cloud_backup_modules','cloud_backup_meta','cloud_backup_usage_hourly','cloud_token_wallets','cloud_token_ledger','cloud_token_purchases','cloud_sync_activity')
+             WHERE relname IN ('cloud_backup_modules','cloud_backup_segments','cloud_backup_blobs','cloud_backup_meta','cloud_backup_usage_hourly','cloud_token_wallets','cloud_token_ledger','cloud_token_purchases','cloud_sync_activity')
              ORDER BY 2 DESC`), { rows: [] }),
         safe('db-size', getPgDatabaseSizeBytes(pgPool), null),
         safe('top-tables', getTopTableSizes(pgPool, 8), []),
@@ -19330,6 +19795,7 @@ app.get('/relay/admin/api/cloud-backup/control-center/client/:installationId', r
             q('SELECT id, type, tokens, balance_after, note, category, trigger_type, created_at FROM cloud_token_ledger WHERE installation_id = $1 ORDER BY id DESC LIMIT 25', [installationId]),
             q('SELECT id, trigger_type, cost_tokens, accrued_after, size_bytes, created_at FROM cloud_sync_activity WHERE installation_id = $1 ORDER BY id DESC LIMIT 15', [installationId])
         ]);
+        if (!modules.rows.length) modules.rows = await getCloudBackupV2ModuleRows(installationId);
         const log = Array.isArray(activityLog) ? activityLog : [];
         const events = log.filter((e) => e && e.installationId === installationId && typeof e.type === 'string' && e.type.startsWith('cloud_')).slice(0, 30)
             .map((e) => ({ at: e.at, type: e.type, count: e.count || 1, details: e.details || {} }));
@@ -19426,7 +19892,8 @@ app.get('/relay/admin/api/cloud-backup/:installationId', requireAdminKey, async 
             quota_mb: quotaMBForAdmin,
             percent_used: quotaMBForAdmin > 0 ? Math.round(Math.min(100, (sizeMBForMeta / quotaMBForAdmin) * 100) * 10) / 10 : 0
         };
-        const modules = modulesResult.rows.map((m) => ({
+        const moduleRowsForAdmin = modulesResult.rows.length ? modulesResult.rows : await getCloudBackupV2ModuleRows(installationId);
+        const modules = moduleRowsForAdmin.map((m) => ({
             ...m,
             size_mb: Math.round((Number(m.size_bytes || 0) / (1024 * 1024)) * 100) / 100
         }));
@@ -19441,6 +19908,9 @@ app.get('/relay/admin/api/cloud-backup/:installationId/download', requireAdminKe
         const { installationId } = req.params;
         const modulesResult = await queryWithRetry(pgPool, 'SELECT module, data FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
         if (modulesResult.rows.length === 0) {
+            if ((await getCloudBackupV2ModuleRows(installationId)).length) {
+                return res.status(409).json({ success: false, segmented: true, message: CLOUD_BACKUP_V2_NO_EXPORT_MESSAGE });
+            }
             return res.status(404).json({ success: false, message: 'Walang cloud backup na nakita para sa installationId na ito.' });
         }
         const payload = {};
@@ -19507,6 +19977,14 @@ app.post('/relay/cloud-backup/restore', requireApiKey, requireAllowedDevice, rat
         if (!metaResult.rows[0]) {
             return res.status(404).json({ success: false, message: 'Walang cloud backup na nakita para sa installation na ito.' });
         }
+        // Segmented (v2) backup: kailangang marunong ng client ang segmented restore, kung hindi ay hindi sila dapat masingil para sa wala.
+        const v2GenerationForRestore = metaResult.rows[0].v2_generation || null;
+        if (v2GenerationForRestore && !(req.body && req.body.acceptsSegmentedRestore === true)) {
+            return res.status(409).json({
+                success: false, updateRequired: true,
+                message: 'This cloud backup was saved in the new large-backup format. Please update OMNIPOS on this device to restore it. Nothing was charged.'
+            });
+        }
         // AYOS/BAGO: proportional-to-size token charge for the restore
         // itself (same PHP-from-real-Neon-cost model as sync — see
         // computeRealCloudBackupRestoreCostPHP() above). This gives the
@@ -19530,7 +20008,22 @@ app.post('/relay/cloud-backup/restore', requireApiKey, requireAllowedDevice, rat
             });
         }
         restoreTokensChargedForRefund = Number(chargeResult.tokensCharged) || 0;
-        const modulesResult = await queryWithRetry(pgPool, 'SELECT module, data, record_count FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
+        let modulesResult = { rows: [] };
+        let v2Manifest = null;
+        if (v2GenerationForRestore) {
+            const manifestResult = await queryWithRetry(
+                pgPool,
+                `SELECT module, MIN(kind) AS kind, COUNT(*)::int AS parts, COALESCE(SUM(record_count), 0)::bigint AS records, COALESCE(SUM(raw_bytes), 0)::bigint AS raw_bytes
+                   FROM cloud_backup_segments WHERE installation_id = $1 AND generation = $2 GROUP BY module ORDER BY module`,
+                [installationId, v2GenerationForRestore]
+            );
+            v2Manifest = manifestResult.rows.map((r) => ({ module: r.module, kind: r.kind, parts: Number(r.parts), records: Number(r.records), rawBytes: Number(r.raw_bytes) }));
+            if (!v2Manifest.length) throw new Error('Segmented backup has no segments (it may have been deleted).');
+            pruneCloudBackupV2RestoreGrants();
+            CLOUD_BACKUP_V2_RESTORE_GRANTS.set(String(installationId), { generation: v2GenerationForRestore, expiresAt: Date.now() + CLOUD_BACKUP_V2_RESTORE_GRANT_TTL_MS });
+        } else {
+            modulesResult = await queryWithRetry(pgPool, 'SELECT module, data, record_count FROM cloud_backup_modules WHERE installation_id = $1', [installationId]);
+        }
         const modules = {};
         modulesResult.rows.forEach((r) => { modules[r.module] = r.data; });
         // AYOS/BAGO: tracking-only (walang kinalaman sa charging sa itaas) —
@@ -19548,7 +20041,8 @@ app.post('/relay/cloud-backup/restore', requireApiKey, requireAllowedDevice, rat
             recordClientHourlyUsage(installationId, { restores: 1, computeSeconds: cc.assumedBaseSeconds + cc.assumedSecondsPerMB * rsMB });
         }
         logActivity(installationId, 'cloud_backup_restored', {
-            moduleCount: modulesResult.rows.length,
+            moduleCount: v2Manifest ? v2Manifest.length : modulesResult.rows.length,
+            segmented: !!v2Manifest,
             lastSyncAt: metaResult.rows[0].last_sync_at,
             tokensCharged: chargeResult.tokensCharged,
             balanceAfter: chargeResult.balanceTokens
@@ -19563,7 +20057,7 @@ app.post('/relay/cloud-backup/restore', requireApiKey, requireAllowedDevice, rat
                 moduleCount: metaResult.rows[0].module_count,
                 lastSyncAt: metaResult.rows[0].last_sync_at
             },
-            modules,
+            ...(v2Manifest ? { v2: true, generation: v2GenerationForRestore, manifest: v2Manifest } : { modules }),
             redactedFieldsByModule: CLOUD_BACKUP_REDACTED_FIELDS_BY_MODULE,
             tokensCharged: chargeResult.tokensCharged,
             balanceTokens: chargeResult.balanceTokens
