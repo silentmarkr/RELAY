@@ -979,19 +979,87 @@ async function getPersistentJSON(key, fallback, { strict = false } = {}) {
     // hawak-hawak na ito ng bawat load*() function sa ibaba).
     return fallback;
 }
-function setPersistentJSON(key, value) {
-    const pool = pgPoolDevices || pgPool;
-    if (pool) {
-        pool.query(
-            `INSERT INTO relay_kv_store (key, value, updated_at) VALUES ($1, $2::jsonb, now())
-             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
-            [REDIS_KEY_PREFIX + key, JSON.stringify(value)]
-        ).catch((err) => {
-            console.error(`⚠️  Hindi ma-save sa Postgres KV store ang key "${key}":`, err.message);
-        });
+// CRITICAL FIX (data loss): dati, ang bawat setPersistentJSON ay hiwalay na fire-and-forget na pool.query. Kapag magkasunod ang dalawang
+// save ng PAREHONG key (hal. bawat feature ng isang bundle purchase ay tumatawag ng recordIssuedUnlock -> saveIssuedUnlocks), puwedeng sa
+// magkaibang connection mapunta ang mga query at matapos nang BALIKTAD: ang LUMANG snapshot ang nagiging huling nasa Postgres, kaya ang
+// binayarang unlock/subscription ay nawawala pagka-restart ng RELAY. Tahimik din itong pumapalya sa pansamantalang Neon connection error
+// (walang retry), at nawawala ang nakabinbing write kapag nag-SIGTERM ang host (deploy/restart sa Render).
+// Ngayon: (1) iisang write lang ang sabay-sabay kada key, (2) laging ang PINAKABAGONG value ang isinusulat (ang mga nasa gitna ay
+// pinagsasama), (3) may retry sa pansamantalang error, (4) may flushPersistentWrites() na hinihintay bago mag-exit ang RELAY.
+const PERSISTENT_WRITE_STATE = new Map();     // fullKey -> { running, dirty, payload }
+const PERSISTENT_WRITE_PENDING = new Set();   // mga tumatakbong write job (para sa flush)
+const PERSISTENT_WRITE_MAX_FAILED_ROUNDS = 3;
+const PERSISTENT_WRITE_RETRY_PAUSE_MS = 3000;
+function enqueuePersistentPgWrite(pool, fullKey, payload) {
+    let st = PERSISTENT_WRITE_STATE.get(fullKey);
+    if (!st) {
+        st = { running: false, dirty: false, payload: null };
+        PERSISTENT_WRITE_STATE.set(fullKey, st);
     }
+    st.payload = payload;   // laging ang pinakabago ang mananalo
+    st.dirty = true;
+    if (st.running) return; // may tumatakbong write na: kukunin nito ang pinakabagong payload pagkatapos
+    st.running = true;
+    const job = (async () => {
+        let failedRounds = 0;
+        try {
+            while (st.dirty) {
+                st.dirty = false;
+                const body = st.payload;
+                try {
+                    await queryWithRetry(
+                        pool,
+                        `INSERT INTO relay_kv_store (key, value, updated_at) VALUES ($1, $2::jsonb, now())
+                         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+                        [fullKey, body],
+                        { maxAttempts: 3 }
+                    );
+                    failedRounds = 0;
+                } catch (err) {
+                    failedRounds++;
+                    console.error(`⚠️  Hindi ma-save sa Postgres KV store ang key "${fullKey}" (subok ${failedRounds}/${PERSISTENT_WRITE_MAX_FAILED_ROUNDS}):`, err.message);
+                    if (failedRounds < PERSISTENT_WRITE_MAX_FAILED_ROUNDS) {
+                        st.dirty = true; // ulitin ang PINAKABAGONG payload (ang st.payload)
+                        await new Promise((r) => setTimeout(r, PERSISTENT_WRITE_RETRY_PAUSE_MS));
+                    } else {
+                        failedRounds = 0;
+                        console.error(`🔴 Sumuko na ang pag-save ng key "${fullKey}" sa Postgres — ang susunod na save ng key na ito ang magtatangkang mag-sulat ulit.`);
+                    }
+                }
+            }
+        } finally {
+            st.running = false;
+            if (!st.dirty) PERSISTENT_WRITE_STATE.delete(fullKey);
+        }
+    })();
+    PERSISTENT_WRITE_PENDING.add(job);
+    job.finally(() => PERSISTENT_WRITE_PENDING.delete(job));
+}
+// Hintayin ang lahat ng nakabinbing Postgres write (ginagamit bago mag-exit). Nagbabalik ng true kung natapos lahat bago mag-timeout.
+async function flushPersistentWrites(timeoutMs = 8000) {
+    if (!PERSISTENT_WRITE_PENDING.size) return true;
+    let timer = null;
+    const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve('timeout'), timeoutMs); });
+    const done = (async () => {
+        while (PERSISTENT_WRITE_PENDING.size) await Promise.allSettled(Array.from(PERSISTENT_WRITE_PENDING));
+        return 'done';
+    })();
+    const outcome = await Promise.race([done, timeout]);
+    if (timer) clearTimeout(timer);
+    return outcome === 'done';
+}
+function setPersistentJSON(key, value) {
+    let serialized;
+    try {
+        serialized = JSON.stringify(value);
+    } catch (err) {
+        console.error(`⚠️  Hindi ma-serialize ang key "${key}" para i-save:`, err.message);
+        return;
+    }
+    const pool = pgPoolDevices || pgPool;
+    if (pool) enqueuePersistentPgWrite(pool, REDIS_KEY_PREFIX + key, serialized);
     if (redisClient) {
-        redisClient.set(REDIS_KEY_PREFIX + key, JSON.stringify(value)).catch((err) => {
+        redisClient.set(REDIS_KEY_PREFIX + key, serialized).catch((err) => {
             console.error(`⚠️  Hindi ma-save sa Redis ang key "${key}":`, err.message);
         });
     }
@@ -23096,6 +23164,30 @@ bootstrapStores()
             console.log(`OmniPOS Unlock Relay running sa port ${PORT}`);
         });
         server.requestTimeout = 60 * 60 * 1000;
+        // CRITICAL FIX: walang SIGTERM handler dati, kaya kapag nag-deploy/nag-restart ang host (Render) ay agad namamatay ang RELAY at
+        // nawawala ang mga write na kakapasok lang (hal. unlock na kababayad lang). Ngayon: huminto sa pagtanggap ng bagong connection,
+        // hintayin sandali ang mga tumatakbong request, i-flush ang nakabinbing Postgres writes, saka mag-exit.
+        let relayShutdownStarted = false;
+        const shutdownRelay = async (signal) => {
+            if (relayShutdownStarted) return;
+            relayShutdownStarted = true;
+            console.log(`ℹ️  ${signal} received — flushing pending saves before exit...`);
+            const hardExit = setTimeout(() => process.exit(0), 15000);
+            if (hardExit.unref) hardExit.unref();
+            try {
+                await Promise.race([
+                    new Promise((resolve) => { try { server.close(() => resolve()); } catch (_) { resolve(); } }),
+                    new Promise((resolve) => setTimeout(resolve, 3000))
+                ]);
+                const flushed = await flushPersistentWrites(8000);
+                if (!flushed) console.error('⚠️  Hindi natapos ang lahat ng nakabinbing save bago mag-exit (timeout).');
+            } catch (err) {
+                console.error('⚠️  Error habang nagfi-flush bago mag-exit:', err.message);
+            }
+            process.exit(0);
+        };
+        process.on('SIGTERM', () => { shutdownRelay('SIGTERM'); });
+        process.on('SIGINT', () => { shutdownRelay('SIGINT'); });
     })
     .catch((err) => {
         console.error('❌ Hindi ma-bootstrap ang persistent storage — hindi tumakbo ang server:', err);

@@ -1195,107 +1195,107 @@ a:focus-visible,
 
 /* =========================================================
    Relay Home tab — compress vertical rhythm (same treatment as
-   OmniPOS Overview / OmniAI). Scoped to #tabPanel-home only, so
+   OmniPOS Overview / OmniAI). Scoped to .tab-panel.tp-compact only, so
    the shared .card / .stat-card / .home-chip classes used by the
    Devices, Downloads and Subscriptions tabs are not affected.
    ========================================================= */
-#tabPanel-home .status-line {
+.tab-panel.tp-compact .status-line {
   padding: 7px 11px;
   font-size: 11.5px;
   margin-bottom: 8px;
 }
-#tabPanel-home .home-nav {
+.tab-panel.tp-compact .home-nav {
   gap: 5px;
   padding: 0 0 8px;
 }
-#tabPanel-home .home-chip {
+.tab-panel.tp-compact .home-chip {
   padding: 4px 10px;
   font-size: .72rem;
   border-width: 1px;
 }
-#tabPanel-home .stat-strip {
+.tab-panel.tp-compact .stat-strip {
   gap: 6px;
   margin-bottom: 10px;
 }
-#tabPanel-home .stat-strip .stat-card {
+.tab-panel.tp-compact .stat-strip .stat-card {
   padding: 8px 9px;
   border-width: 1px;
   border-radius: 10px;
 }
-#tabPanel-home .stat-strip .stat-card::before { left: 10px; right: 10px; }
-#tabPanel-home .stat-strip .stat-card.has-ico { padding-right: 28px; }
-#tabPanel-home .stat-strip .stat-num { font-size: 17px; line-height: 1.15; }
-#tabPanel-home .stat-strip .stat-label {
+.tab-panel.tp-compact .stat-strip .stat-card::before { left: 10px; right: 10px; }
+.tab-panel.tp-compact .stat-strip .stat-card.has-ico { padding-right: 28px; }
+.tab-panel.tp-compact .stat-strip .stat-num { font-size: 17px; line-height: 1.15; }
+.tab-panel.tp-compact .stat-strip .stat-label {
   font-size: 9px;
   line-height: 1.25;
   margin-top: 2px;
   letter-spacing: .04em;
 }
-#tabPanel-home .stat-strip .stat-ico {
+.tab-panel.tp-compact .stat-strip .stat-ico {
   right: 6px;
   bottom: 6px;
   font-size: 15px;
 }
-#tabPanel-home .card {
+.tab-panel.tp-compact .card {
   padding: 12px 14px;
   margin-bottom: 8px;
 }
-#tabPanel-home .card h2 {
+.tab-panel.tp-compact .card h2 {
   font-size: 13px;
   margin: 0 0 8px;
   gap: 6px;
 }
-#tabPanel-home .card.collapsible h2 { margin-bottom: 0; }
-#tabPanel-home .card h2 .count-pill {
+.tab-panel.tp-compact .card.collapsible h2 { margin-bottom: 0; }
+.tab-panel.tp-compact .card h2 .count-pill {
   font-size: 10px;
   padding: 0 7px;
 }
-#tabPanel-home .card.collapsible .collapse-body { margin-top: 10px; }
-#tabPanel-home .backup-note {
+.tab-panel.tp-compact .card.collapsible .collapse-body { margin-top: 10px; }
+.tab-panel.tp-compact .backup-note {
   font-size: 11.5px;
   line-height: 1.45;
   margin-top: 4px;
 }
-#tabPanel-home .auto-backup-toggle {
+.tab-panel.tp-compact .auto-backup-toggle {
   font-size: 12.5px;
   margin-top: 8px !important;
 }
 @media (max-width: 480px) {
-  #tabPanel-home .stat-strip { gap: 5px; margin-bottom: 8px; }
-  #tabPanel-home .stat-strip .stat-card { padding: 7px 8px; }
-  #tabPanel-home .stat-strip .stat-card.has-ico { padding-right: 24px; }
-  #tabPanel-home .stat-strip .stat-num { font-size: 15px; }
-  #tabPanel-home .stat-strip .stat-label { font-size: 8.5px; }
-  #tabPanel-home .stat-strip .stat-ico { font-size: 13px; right: 5px; bottom: 5px; }
-  #tabPanel-home .card { padding: 10px 12px; margin-bottom: 6px; }
-  #tabPanel-home .card h2 { font-size: 12.5px; }
+  .tab-panel.tp-compact .stat-strip { gap: 5px; margin-bottom: 8px; }
+  .tab-panel.tp-compact .stat-strip .stat-card { padding: 7px 8px; }
+  .tab-panel.tp-compact .stat-strip .stat-card.has-ico { padding-right: 24px; }
+  .tab-panel.tp-compact .stat-strip .stat-num { font-size: 15px; }
+  .tab-panel.tp-compact .stat-strip .stat-label { font-size: 8.5px; }
+  .tab-panel.tp-compact .stat-strip .stat-ico { font-size: 13px; right: 5px; bottom: 5px; }
+  .tab-panel.tp-compact .card { padding: 10px 12px; margin-bottom: 6px; }
+  .tab-panel.tp-compact .card h2 { font-size: 12.5px; }
 }
 
 /* =========================================================
    Devices tab — compact rows, prominent label, icon-only action
    buttons with a hover/focus tooltip showing the button name.
-   Scoped to #tabPanel-devices only.
+   Scoped to #tabPanel-clients only.
    ========================================================= */
-#tabPanel-devices .empty:has(> .row) {
+#tabPanel-clients .empty:has(> .row) {
   padding: 0;
   border: 0;
   background: none;
   text-align: left;
   overflow: visible;
 }
-#tabPanel-devices .empty:has(> .row)::after { display: none; }
-#tabPanel-devices .row {
+#tabPanel-clients .empty:has(> .row)::after { display: none; }
+#tabPanel-clients .row {
   padding: 8px 10px;
   gap: 8px;
   margin-bottom: 6px;
   flex-wrap: nowrap;
   align-items: center;
 }
-#tabPanel-devices .row-info { flex: 1 1 0; min-width: 0; }
-#tabPanel-devices .id { font-size: 11px; line-height: 1.35; }
-#tabPanel-devices .meta { font-size: 11px; line-height: 1.35; margin-top: 1px; }
-#tabPanel-devices .row .badge { font-size: 9.5px; padding: 1px 6px; margin-left: 4px; }
-#tabPanel-devices .dev-label {
+#tabPanel-clients .row-info { flex: 1 1 0; min-width: 0; }
+#tabPanel-clients .id { font-size: 11px; line-height: 1.35; }
+#tabPanel-clients .meta { font-size: 11px; line-height: 1.35; margin-top: 1px; }
+#tabPanel-clients .row .badge { font-size: 9.5px; padding: 1px 6px; margin-left: 4px; }
+#tabPanel-clients .dev-label {
   display: inline-block;
   max-width: 100%;
   font-family: var(--font-ui);
@@ -1311,14 +1311,14 @@ a:focus-visible,
   overflow-wrap: anywhere;
   box-shadow: 0 0 10px rgba(34,229,255,.25);
 }
-#tabPanel-devices .row-actions {
+#tabPanel-clients .row-actions {
   flex-direction: row;
   flex-wrap: nowrap;
   gap: 5px;
   width: auto;
   flex: 0 0 auto;
 }
-#tabPanel-devices .row-actions button.act-ico {
+#tabPanel-clients .row-actions button.act-ico {
   flex: 0 0 auto;
   min-width: 0;
   width: 32px;
@@ -1333,8 +1333,8 @@ a:focus-visible,
   position: relative;
   overflow: visible !important;
 }
-#tabPanel-devices .row-actions button.act-ico::before { display: none; }
-#tabPanel-devices .row-actions button.act-ico::after {
+#tabPanel-clients .row-actions button.act-ico::before { display: none; }
+#tabPanel-clients .row-actions button.act-ico::after {
   content: attr(data-tip);
   position: absolute;
   bottom: calc(100% + 6px);
@@ -1356,17 +1356,17 @@ a:focus-visible,
   transition: opacity .12s ease;
   z-index: 20;
 }
-#tabPanel-devices .row-actions button.act-ico:first-child::after { left: 0; transform: none; }
-#tabPanel-devices .row-actions button.act-ico:last-child::after { left: auto; right: 0; transform: none; }
-#tabPanel-devices .row-actions button.act-ico:only-child::after { left: 50%; right: auto; transform: translateX(-50%); }
-#tabPanel-devices .row-actions button.act-ico:hover::after,
-#tabPanel-devices .row-actions button.act-ico:focus-visible::after { opacity: 1; }
+#tabPanel-clients .row-actions button.act-ico:first-child::after { left: 0; transform: none; }
+#tabPanel-clients .row-actions button.act-ico:last-child::after { left: auto; right: 0; transform: none; }
+#tabPanel-clients .row-actions button.act-ico:only-child::after { left: 50%; right: auto; transform: translateX(-50%); }
+#tabPanel-clients .row-actions button.act-ico:hover::after,
+#tabPanel-clients .row-actions button.act-ico:focus-visible::after { opacity: 1; }
 /* Seen list can have up to 8 actions: keep them on their own compact line under the info */
-#tabPanel-devices .row-seen { flex-wrap: wrap; }
-#tabPanel-devices .row-seen .row-info { flex: 1 1 100%; }
-#tabPanel-devices .row-seen .row-actions { flex-wrap: wrap; width: 100%; }
-#tabPanel-devices #bulkResetBar { gap: 8px !important; margin-bottom: 8px !important; }
-#tabPanel-devices #bulkResetBar button { padding: 6px 10px; font-size: 11.5px; }
+#tabPanel-clients .row-seen { flex-wrap: wrap; }
+#tabPanel-clients .row-seen .row-info { flex: 1 1 100%; }
+#tabPanel-clients .row-seen .row-actions { flex-wrap: wrap; width: 100%; }
+#tabPanel-clients #bulkResetBar { gap: 8px !important; margin-bottom: 8px !important; }
+#tabPanel-clients #bulkResetBar button { padding: 6px 10px; font-size: 11.5px; }
 
 /* Sponsor Donations card (Home tab) */
 .sponsor-totals { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
@@ -1375,6 +1375,59 @@ a:focus-visible,
 .sponsor-amt { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; font-family: var(--font-mono); font-size: 15px; font-weight: 700; color: var(--green); flex: 0 0 auto; }
 .sponsor-amt .badge { margin-left: 0; font-size: 9.5px; padding: 1px 6px; }
 #cardSponsorDonations .row { flex-wrap: nowrap; padding: 8px 10px; margin-bottom: 6px; }
+
+/* =========================================================
+   Admin reorganisation — 6 client-centric tabs
+   (Home / Clients / Revenue / Plans / Releases / System)
+   ========================================================= */
+.tab-nav .tab-btn { min-width: 56px; padding: 8px 2px 7px; }
+.tab-nav .tab-badge { right: 6px; }
+.attention-banner {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 9px 12px; margin-bottom: 10px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--green-line); background: var(--green-bg); color: var(--green);
+  font-size: 13px; font-weight: 600; line-height: 1.35;
+}
+.attention-banner.warn { border-color: var(--amber-line); background: var(--amber-bg); color: var(--amber); }
+.attention-banner .attn-text { flex: 1 1 200px; min-width: 0; }
+.attention-banner .attn-link {
+  background: transparent; border: 1px solid currentColor; color: inherit; border-radius: 999px;
+  padding: 2px 9px; font: inherit; font-size: 11.5px; cursor: pointer; margin: 2px 4px 2px 0;
+}
+.link-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; margin-top: 10px; }
+.link-tile {
+  position: relative; display: flex; align-items: center; gap: 10px; text-decoration: none; color: var(--text);
+  padding: 10px 12px; border-radius: var(--radius-lg);
+  border: 1px solid var(--border); background: rgba(255,255,255,.02);
+  transition: border-color .2s var(--ease), background .2s var(--ease), transform .15s var(--ease);
+}
+.link-tile:hover, .link-tile:focus-visible { border-color: var(--border-soft); background: var(--accent-soft); transform: translateY(-1px); outline: none; }
+.link-tile .lt-ico { font-size: 20px; line-height: 1; flex: 0 0 auto; }
+.link-tile .lt-body { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
+.link-tile .lt-title { font-weight: 700; font-size: 13px; }
+.link-tile .lt-sub { font-size: 11px; color: var(--muted); line-height: 1.3; }
+.link-tile .lt-badge {
+  flex: 0 0 auto; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px;
+  background: var(--red); color: #2b0605; font-family: var(--font-mono); font-size: 11px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+}
+.danger-zone { border: 1px solid var(--red-line) !important; }
+.danger-zone h2 { color: var(--red); }
+.danger-row {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: space-between;
+  padding: 10px 0; border-top: 1px solid var(--line);
+}
+.danger-row:first-of-type { margin-top: 8px; }
+.danger-row .danger-text { flex: 1 1 240px; min-width: 0; display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.danger-row .danger-text small { color: var(--muted); font-size: 11px; line-height: 1.35; }
+.client-subnav { display: flex; gap: 6px; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; padding: 2px 0 12px; }
+.client-subnav::-webkit-scrollbar { display: none; }
+
+#cardHistory .timeline-item { padding: 6px 8px; margin-bottom: 4px; }
+#cardHistory .timeline-item .feature-meta { font-size: 10.5px; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+#cardHistory .timeline-item .timeline-time { font-size: 10px; }
+.show-more-btn { width: 100%; margin-top: 6px; padding: 8px; border-radius: 8px; border: 1px dashed var(--border-color, #475569); background: transparent; color: var(--muted); font-size: 12px; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -1414,13 +1467,6 @@ a:focus-visible,
     <div class="topbar-actions">
       <span id="idleCountdownPill" class="idle-countdown"></span>
       <button id="installBtn" class="icon-btn" style="display:none;" onclick="installApp()">⬇️ Install</button>
-      <button id="pricingBtn" class="icon-btn" onclick="window.location.href='pricing.html'" title="Cloud Backup pricing" aria-label="Cloud Backup pricing">💳 Pricing</button>
-      <button id="featurePricingBtn" class="icon-btn" onclick="window.location.href='feature-pricing.html'" title="Theme/Module pricing" aria-label="Theme/Module pricing">🎨 Feature Pricing</button>
-      <button id="clientCostAllocationBtn" class="icon-btn" onclick="window.location.href='client-cost-allocation.html'" title="Per-client Neon cost allocation" aria-label="Per-client Neon cost allocation">📊 Client Cost Allocation</button>
-      <button id="installationsBtn" class="icon-btn" onclick="window.location.href='installations.html'" title="Per-installation stored data — view, backup, or delete" aria-label="Installation Data">🗄️ Installation Data</button>
-      <button id="clientActivationsBtn" class="icon-btn" onclick="window.location.href='client-activations.html'" title="Issue and manage customer activation keys and device bindings" aria-label="Client Activation">🔐 Client Activation</button>
-      <button id="birPassKeysBtn" class="icon-btn" onclick="window.location.href='bir-passkeys.html'" title="Issue one-time pass keys that let a client reset BIR records" aria-label="BIR Reset Pass Keys">🧾 BIR Pass Keys</button>
-      <button id="ticketsBtn" class="icon-btn" onclick="window.location.href='tickets.html'" title="Support tickets sent from OmniPOS installations" aria-label="Support Tickets">🎫 Support Tickets</button>
       <button id="logoutBtn" class="icon-btn icon-btn-logout" onclick="logout()" title="Log out" aria-label="Log out">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 2v10"/>
@@ -1429,69 +1475,46 @@ a:focus-visible,
       </button>
     </div>
   </div>
-  <div class="tab-nav">
-    <button class="tab-btn active" data-tab="home" onclick="switchTab('home')">
+  <div class="tab-nav" role="tablist">
+    <button class="tab-btn active" data-tab="home" onclick="switchTab('home')" role="tab">
       <span class="tab-icon">🏠</span><span>Home</span>
       <span class="tab-badge" id="tabBadgeHome" style="display:none;">0</span>
     </button>
-    <button class="tab-btn" data-tab="devices" onclick="switchTab('devices')">
-      <span class="tab-icon">📟</span><span>Devices</span>
-      <span class="tab-badge" id="tabBadgeDevices" style="display:none;">0</span>
+    <button class="tab-btn" data-tab="clients" onclick="switchTab('clients')" role="tab">
+      <span class="tab-icon">👥</span><span>Clients</span>
+      <span class="tab-badge" id="tabBadgeClients" style="display:none;">0</span>
     </button>
-    <button class="tab-btn" data-tab="downloads" onclick="switchTab('downloads')">
-      <span class="tab-icon">📦</span><span>Downloads</span>
-      <span class="tab-dot" id="tabDotDownloads" style="display:none;"></span>
+    <button class="tab-btn" data-tab="revenue" onclick="switchTab('revenue')" role="tab">
+      <span class="tab-icon">💰</span><span>Revenue</span>
+      <span class="tab-badge" id="tabBadgeRevenue" style="display:none;">0</span>
     </button>
-    <button class="tab-btn" data-tab="subscriptions" onclick="switchTab('subscriptions')">
-      <span class="tab-icon">📅</span><span>Subscriptions</span>
-      <span class="tab-badge" id="tabBadgeSubscriptions" style="display:none;">0</span>
+    <button class="tab-btn" data-tab="plans" onclick="switchTab('plans')" role="tab" title="Plans &amp; Pricing">
+      <span class="tab-icon">🏷️</span><span>Plans</span>
     </button>
-    <button class="tab-btn" data-tab="analytics" onclick="openAnalytics()">
-      <span class="tab-icon">📊</span><span>Analytics</span>
+    <button class="tab-btn" data-tab="releases" onclick="switchTab('releases')" role="tab">
+      <span class="tab-icon">🚀</span><span>Releases</span>
+    </button>
+    <button class="tab-btn" data-tab="system" onclick="switchTab('system')" role="tab">
+      <span class="tab-icon">🛠️</span><span>System</span>
+      <span class="tab-dot" id="tabDotSystem" style="display:none;"></span>
     </button>
   </div>
   <div class="wrap">
-    <div class="tab-panel" id="tabPanel-home">
+    <div class="tab-panel tp-compact" id="tabPanel-home">
       <div id="restrictionStatus" class="status-line"></div>
+      <div id="homeAttentionBanner" class="attention-banner ok" role="status">
+        <span class="attn-icon" aria-hidden="true">✅</span>
+        <span class="attn-text" id="homeAttentionText">Walang naghihintay na aksyon.</span>
+      </div>
       <div class="home-nav" id="homeNav">
-        <button type="button" class="home-chip" onclick="homeNavGo('cardActivationFlags')">⚙️ Controls</button>
-        <button type="button" class="home-chip" onclick="homeNavGo('cardFeatureAvailability')">🚧 Availability</button>
         <button type="button" class="home-chip" onclick="homeNavGo('cardPendingOtps')">🔑 OTPs</button>
         <button type="button" class="home-chip" onclick="homeNavGo('cardAdminResets')">🔐 Admin resets</button>
         <button type="button" class="home-chip" onclick="homeNavGo('cardReceiptResets')">🧾 Receipt resets</button>
         <button type="button" class="home-chip" onclick="homeNavGo('cardReceiptCredits')">💰 Credits</button>
-        <button type="button" class="home-chip" onclick="homeNavGo('cardManualAdd')">➕ Add device</button>
-        <button type="button" class="home-chip" onclick="homeNavGo('cardSponsorDonations')">💝 Sponsors</button>
+        <button type="button" class="home-chip" onclick="homeNavGo('cardHomeExpiring')">⏳ Expiring</button>
         <span class="home-nav-spacer"></span>
         <button type="button" class="home-chip ghost" onclick="homeToggleAll(true)">Expand all</button>
         <button type="button" class="home-chip ghost" onclick="homeToggleAll(false)">Collapse all</button>
-      </div>
-      <div class="card collapsible collapsed" id="cardActivationFlags" data-card-id="homeActivationFlags" style="border: 1px solid var(--red-line);">
-        <h2 onclick="toggleCardCollapse('cardActivationFlags')">⚙️ System Controls — Unlock/Activation Switches <span class="count-pill warn" id="activationFlagsOffPill" style="display:none;"></span><span class="collapse-chevron">▾</span></h2>
-        <div class="collapse-body">
-        <div class="backup-note">
-          Emergency kill-switches. I-disable ang "Send Request" kung hindi ka available para mag-manual approve ng mga unlock OTP (mananatiling bukas ang Omni Tokens kung gusto mong doon lang muna sila). I-disable naman ang "Activate via Omni Tokens" kung may problema/maintenance sa token wallet system. Pareho itong agad na sinusunod ng lahat ng device — hindi na kailangan mag-restart o mag-redeploy.
-        </div>
-        <label class="auto-backup-toggle" style="margin-top:10px;">
-          <input type="checkbox" id="otpRequestsEnabledToggle" onchange="onActivationFlagToggleChange('otpRequestsEnabled', this.checked)">
-          🔑 Allow "Send Request" (manual OTP approval by developer)
-        </label>
-        <label class="auto-backup-toggle" style="margin-top:6px;">
-          <input type="checkbox" id="omniTokenActivationEnabledToggle" onchange="onActivationFlagToggleChange('omniTokenActivationEnabled', this.checked)">
-          💎 Allow "Activate via Omni Tokens" (self-service token activation)
-        </label>
-        <div id="activationFlagsSavedNote" class="feature-avail-saved" style="display:none;">Saved ✓</div>
-        </div>
-      </div>
-      <div class="card collapsible collapsed" id="cardFeatureAvailability" data-card-id="homeFeatureAvailability">
-        <h2 onclick="toggleCardCollapse('cardFeatureAvailability')">🚧 Feature Availability — "Not available yet" <span class="count-pill warn" id="featureAvailabilityOffPill" style="display:none;"></span><span class="collapse-chevron">▾</span></h2>
-        <div class="collapse-body">
-        <div class="backup-note">
-          I-OFF ang "Available to customers" para sabihan ang client na hindi pa available ang feature kapag sinubukan niyang i-unlock o i-subscribe ito (Send Request o Omni Tokens). Ang mga client na dati nang may feature ay pwede pa ring mag-renew. Ang mensahe sa baba ang ipapakita sa client.
-        </div>
-        <div id="featureAvailabilityList" style="margin-top:10px;"></div>
-        <div id="featureAvailabilitySavedNote" class="feature-avail-saved" style="display:none;">Saved ✓</div>
-        </div>
       </div>
       <div class="stat-strip">
         <div class="stat-card has-ico">
@@ -1509,17 +1532,17 @@ a:focus-visible,
           <div class="stat-label">Seen devices</div>
           <span class="stat-ico" aria-hidden="true">📱</span>
         </div>
-        <div class="stat-card has-ico" style="cursor:pointer;" onclick="switchTab('devices'); document.getElementById('seenFilterStatus').value='flagged'; renderSeenList(); document.getElementById('seenList').scrollIntoView({behavior:'smooth'});">
+        <div class="stat-card has-ico" style="cursor:pointer;" onclick="switchTab('clients'); document.getElementById('seenFilterStatus').value='flagged'; renderSeenList(); document.getElementById('seenList').scrollIntoView({behavior:'smooth'});">
           <div class="stat-num stat-num-danger" id="statCloneFlagged">—</div>
           <div class="stat-label">🚩 Clone flagged</div>
           <span class="stat-ico" aria-hidden="true">🧬</span>
         </div>
-        <div class="stat-card has-ico" style="cursor:pointer;" onclick="switchTab('devices'); document.getElementById('seenFilterStatus').value='integrity'; renderSeenList(); document.getElementById('seenList').scrollIntoView({behavior:'smooth'});">
+        <div class="stat-card has-ico" style="cursor:pointer;" onclick="switchTab('clients'); document.getElementById('seenFilterStatus').value='integrity'; renderSeenList(); document.getElementById('seenList').scrollIntoView({behavior:'smooth'});">
           <div class="stat-num stat-num-danger" id="statIntegrityFlagged">—</div>
           <div class="stat-label">🛠️ Modified/missing files</div>
           <span class="stat-ico" aria-hidden="true">🗂️</span>
         </div>
-        <div class="stat-card has-ico" style="cursor:pointer;" onclick="switchTab('devices'); document.getElementById('seenFilterStatus').value='noBaseline'; renderSeenList(); document.getElementById('seenList').scrollIntoView({behavior:'smooth'});">
+        <div class="stat-card has-ico" style="cursor:pointer;" onclick="switchTab('clients'); document.getElementById('seenFilterStatus').value='noBaseline'; renderSeenList(); document.getElementById('seenList').scrollIntoView({behavior:'smooth'});">
           <div class="stat-num" style="color:var(--amber);" id="statIntegrityNoBaseline">—</div>
           <div class="stat-label">⚠️ Not actually checked (no baseline)</div>
           <span class="stat-ico" aria-hidden="true">🔍</span>
@@ -1549,6 +1572,43 @@ a:focus-visible,
           <div id="receiptCreditList" class="empty">Loading...</div>
         </div>
       </div>
+      <div class="card collapsible collapsed" id="cardHomeExpiring" data-card-id="homeExpiring">
+        <h2 onclick="toggleCardCollapse('cardHomeExpiring')">⏳ Expiring Soon <span style="font-size:11px; color:var(--muted); font-weight:normal;">(within 7 days, incl. grace period)</span> <span class="count-pill" id="homeExpiringCountPill">0</span><span class="collapse-chevron">▾</span></h2>
+        <div class="collapse-body">
+          <div class="backup-note">Mga subscription na malapit nang mag-expire — i-follow up ang customer bago siya ma-lock out. Ang buong listahan ay nasa Revenue tab.</div>
+          <div id="homeExpiringList" class="empty" style="margin-top:10px;">Loading...</div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>🧭 Mga pila na hiwalay ang pahina</h2>
+        <div class="link-grid">
+          <a class="link-tile" href="tickets.html">
+            <span class="lt-ico">🎫</span>
+            <span class="lt-body"><span class="lt-title">Support Tickets</span><span class="lt-sub" id="homeTicketsSub">Mga ticket mula sa OmniPOS installations</span></span>
+            <span class="lt-badge" id="homeTicketsBadge" style="display:none;">0</span>
+          </a>
+          <a class="link-tile" href="bir-passkeys.html">
+            <span class="lt-ico">🧾</span>
+            <span class="lt-body"><span class="lt-title">BIR Reset Pass Keys</span><span class="lt-sub" id="homeBirSub">Hinihintay na reset request ng clients</span></span>
+            <span class="lt-badge" id="homeBirBadge" style="display:none;">0</span>
+          </a>
+        </div>
+      </div>
+    </div>
+    <div class="tab-panel tp-compact" id="tabPanel-clients" style="display:none;">
+      <div class="card">
+        <h2>🔗 Client tools</h2>
+        <div class="link-grid">
+          <a class="link-tile" href="client-activations.html">
+            <span class="lt-ico">🔐</span>
+            <span class="lt-body"><span class="lt-title">Client Activation</span><span class="lt-sub">Activation keys, device bindings, renew/revoke</span></span>
+          </a>
+          <a class="link-tile" href="installations.html">
+            <span class="lt-ico">🗄️</span>
+            <span class="lt-body"><span class="lt-title">Installation Data</span><span class="lt-sub">Per-installation stored data — view, backup, delete</span></span>
+          </a>
+        </div>
+      </div>
       <div class="card collapsible collapsed" id="cardManualAdd" data-card-id="homeManualAdd">
         <h2 onclick="toggleCardCollapse('cardManualAdd')">Manually add a device<span class="collapse-chevron">▾</span></h2>
         <div class="collapse-body">
@@ -1556,16 +1616,6 @@ a:focus-visible,
           <button class="btn-primary" onclick="manualAllow()">+ Allow</button>
         </div>
       </div>
-      <div class="card collapsible collapsed" id="cardSponsorDonations" data-card-id="homeSponsorDonations">
-        <h2 onclick="toggleCardCollapse('cardSponsorDonations'); loadSponsorDonations();">💝 Sponsor Donations <span class="count-pill" id="sponsorCountPill">0</span><span class="collapse-chevron">▾</span></h2>
-        <div class="collapse-body">
-          <div class="backup-note">Boluntaryong donasyon galing sa mga installation (Omni Tokens o online payment). Hindi ito nagdadagdag sa token balance ng customer — talaan lang. Pinakabagong 200 ang ipinapakita.</div>
-          <div id="sponsorTotals" class="sponsor-totals"></div>
-          <div id="sponsorList" class="empty">Loading...</div>
-        </div>
-      </div>
-    </div>
-    <div class="tab-panel" id="tabPanel-devices" style="display:none;">
       <div class="card collapsible collapsed" id="cardAllowedDevices" data-card-id="allowedDevices">
         <h2 onclick="toggleCardCollapse('cardAllowedDevices')">Allowed devices <span class="count-pill" id="allowedCountPill">0</span><span class="collapse-chevron">▾</span></h2>
         <div class="collapse-body">
@@ -1606,35 +1656,112 @@ a:focus-visible,
         </div>
       </div>
     </div>
-    <div class="tab-panel" id="tabPanel-downloads" style="display:none;">
-      <div id="backupSyncBanner" class="sync-banner sync-orange">
-        <div class="sync-dot-blink sync-orange" id="backupSyncDot"></div>
-        <div class="sync-banner-text">
-          <div id="backupSyncMain">Waiting for the first successful auto-backup check-in...</div>
-          <div class="sync-banner-sub" id="backupSyncSub">Database → Download/RELAY_BACKUP</div>
+    <div class="tab-panel tp-compact" id="tabPanel-revenue" style="display:none;">
+      <div class="card">
+        <h2>📊 Revenue &amp; Analytics</h2>
+        <div class="backup-note">Buong ulat: MRR, monthly sales trend, Omni AI revenue, token sales, activity, top features at cloud backup plan popularity. Ang mga mapanganib na reset (Reset Revenue, Fresh Start) ay nasa System &rarr; Danger Zone na.</div>
+        <div class="backup-row" style="margin-top:10px;">
+          <button class="btn-primary" onclick="openAnalytics()">📊 Open Analytics</button>
         </div>
       </div>
-      <div class="card collapsible collapsed" id="cardBackupRestore" data-card-id="backupRestore">
-        <h2 onclick="toggleCardCollapse('cardBackupRestore')">💾 Backup / Restore<span class="collapse-chevron">▾</span></h2>
+      <div class="stat-strip">
+        <div class="stat-card">
+          <div class="stat-num" id="subStatCloudBackup">—</div>
+          <div class="stat-label">☁️ Cloud Backup active</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-num" id="subStatRbac">—</div>
+          <div class="stat-label">🔐 RBAC active</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-num" id="subStatMultiBranch">—</div>
+          <div class="stat-label">🌿 Multi-Branch active</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-num" id="subStatAiAssistant">—</div>
+          <div class="stat-label">🤖 AI Assistant active</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-num" id="subStatRemoteOperations">—</div>
+          <div class="stat-label">📱 Remote Operations active</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-num stat-num-danger" id="subStatExpiringSoon">—</div>
+          <div class="stat-label">⏰ Expiring within 7 days</div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>💳 All Active Subscriptions <span class="count-pill" id="subCountPill">0</span></h2>
+        <div class="filter-bar">
+          <input type="text" id="subFilterInput" placeholder="Search: store or installation ID" oninput="renderSubscriptionsList()">
+          <select id="subFilterFeature" onchange="renderSubscriptionsList()">
+            <option value="all">All subscriptions</option>
+            <option value="cloud_backup">☁️ Cloud Backup only</option>
+            <option value="rbac_management">🔐 RBAC only</option>
+            <option value="multi_branch">🌿 Multi-Branch only</option>
+            <option value="ai_assistant">🤖 AI Assistant only</option>
+            <option value="remote_operations">📱 Remote Operations only</option>
+            <option value="marketplace_hub">🛒 Marketplace Hub only</option>
+          </select>
+          <select id="subSortBy" onchange="renderSubscriptionsList()">
+            <option value="expiry">Sort: Soonest to expire</option>
+            <option value="storeName">Sort: Store name</option>
+          </select>
+        </div>
+        <div id="subscriptionsList" class="empty">Loading...</div>
+      </div>
+      <div class="card collapsible collapsed" id="cardSponsorDonations" data-card-id="homeSponsorDonations">
+        <h2 onclick="toggleCardCollapse('cardSponsorDonations'); loadSponsorDonations();">💝 Sponsor Donations <span class="count-pill" id="sponsorCountPill">0</span><span class="collapse-chevron">▾</span></h2>
         <div class="collapse-body">
-          <div class="backup-note">
-            Full snapshot ito ngayon (v3) — kasama na ang lahat ng persisted data (devices, unlocks, history, fingerprints, pricing/feature overrides, download codes, build history, atbp.), hindi lang yung 4 na field dati. Bagama't naka-Postgres na ang karamihan nito (hindi na basta-basta nawawala sa redeploy), extra safety net pa rin ito kung sakaling magkaproblema ang database mismo o mag-delete ka ng service/domain. Download-in pa rin periodically (lalo na pagkatapos ng bagong unlock/customer) at itago sa ligtas na lugar.
-          </div>
-          <div class="backup-row">
-            <button class="btn-primary" onclick="downloadBackup()">⬇️ Download Backup</button>
-            <button class="btn-ghost" onclick="document.getElementById('restoreFileInput').click()">⬆️ Restore from Backup</button>
-          </div>
-          <input type="file" id="restoreFileInput" accept="application/json" style="display:none;" onchange="restoreBackupFromFile(event)">
-          <div class="backup-lastexport" id="backupLastExport"></div>
-          <label class="auto-backup-toggle">
-            <input type="checkbox" id="autoBackupOnAllowToggle" onchange="onAutoBackupToggleChange()">
-            Automatically download a timestamped backup whenever a new device is allowed
-          </label>
-          <div class="backup-note" style="margin-top:6px;">
-            The auto-download filename includes a date/time stamp (e.g. <code>relaybackup07260130.json</code> = July 26, 1:30 AM — your browser's LOCAL time), so each allow creates a new file instead of overwriting the last one. These stay in your Downloads folder as your backup history.
-          </div>
+          <div class="backup-note">Boluntaryong donasyon galing sa mga installation (Omni Tokens o online payment). Hindi ito nagdadagdag sa token balance ng customer — talaan lang. Pinakabagong 200 ang ipinapakita.</div>
+          <div id="sponsorTotals" class="sponsor-totals"></div>
+          <div id="sponsorList" class="empty">Loading...</div>
         </div>
       </div>
+    </div>
+    <div class="tab-panel tp-compact" id="tabPanel-plans" style="display:none;">
+      <div class="card">
+        <h2>🏷️ Pricing editors</h2>
+        <div class="link-grid">
+          <a class="link-tile" href="pricing.html">
+            <span class="lt-ico">💳</span>
+            <span class="lt-body"><span class="lt-title">Cloud Backup Pricing</span><span class="lt-sub">Cloud Backup tiers &amp; storage pricing</span></span>
+          </a>
+          <a class="link-tile" href="feature-pricing.html">
+            <span class="lt-ico">🎨</span>
+            <span class="lt-body"><span class="lt-title">Theme / Module Pricing</span><span class="lt-sub">Feature, module &amp; Omni AI pricing</span></span>
+          </a>
+        </div>
+      </div>
+      <div class="card collapsible collapsed" id="cardFeatureAvailability" data-card-id="homeFeatureAvailability">
+        <h2 onclick="toggleCardCollapse('cardFeatureAvailability')">🚧 Feature Availability — "Not available yet" <span class="count-pill warn" id="featureAvailabilityOffPill" style="display:none;"></span><span class="collapse-chevron">▾</span></h2>
+        <div class="collapse-body">
+        <div class="backup-note">
+          I-OFF ang "Available to customers" para sabihan ang client na hindi pa available ang feature kapag sinubukan niyang i-unlock o i-subscribe ito (Send Request o Omni Tokens). Ang mga client na dati nang may feature ay pwede pa ring mag-renew. Ang mensahe sa baba ang ipapakita sa client.
+        </div>
+        <div id="featureAvailabilityList" style="margin-top:10px;"></div>
+        <div id="featureAvailabilitySavedNote" class="feature-avail-saved" style="display:none;">Saved ✓</div>
+        </div>
+      </div>
+      <div class="card collapsible collapsed" id="cardActivationFlags" data-card-id="homeActivationFlags" style="border: 1px solid var(--red-line);">
+        <h2 onclick="toggleCardCollapse('cardActivationFlags')">⚙️ System Controls — Unlock/Activation Switches <span class="count-pill warn" id="activationFlagsOffPill" style="display:none;"></span><span class="collapse-chevron">▾</span></h2>
+        <div class="collapse-body">
+        <div class="backup-note">
+          Emergency kill-switches. I-disable ang "Send Request" kung hindi ka available para mag-manual approve ng mga unlock OTP (mananatiling bukas ang Omni Tokens kung gusto mong doon lang muna sila). I-disable naman ang "Activate via Omni Tokens" kung may problema/maintenance sa token wallet system. Pareho itong agad na sinusunod ng lahat ng device — hindi na kailangan mag-restart o mag-redeploy.
+        </div>
+        <label class="auto-backup-toggle" style="margin-top:10px;">
+          <input type="checkbox" id="otpRequestsEnabledToggle" onchange="onActivationFlagToggleChange('otpRequestsEnabled', this.checked)">
+          🔑 Allow "Send Request" (manual OTP approval by developer)
+        </label>
+        <label class="auto-backup-toggle" style="margin-top:6px;">
+          <input type="checkbox" id="omniTokenActivationEnabledToggle" onchange="onActivationFlagToggleChange('omniTokenActivationEnabled', this.checked)">
+          💎 Allow "Activate via Omni Tokens" (self-service token activation)
+        </label>
+        <div id="activationFlagsSavedNote" class="feature-avail-saved" style="display:none;">Saved ✓</div>
+        </div>
+      </div>
+    </div>
+    <div class="tab-panel tp-compact" id="tabPanel-releases" style="display:none;">
       <div class="card collapsible collapsed" id="cardPublishUpdate" data-card-id="publishUpdate">
         <h2 onclick="toggleCardCollapse('cardPublishUpdate')">🚀 Publish a New Update <span style="font-size:11px; color:var(--muted); font-weight:normal;">(build + publish in one click — no Termux/curl required)</span><span class="collapse-chevron">▾</span></h2>
         <div class="collapse-body">
@@ -1730,6 +1857,36 @@ a:focus-visible,
           <div id="buildHistoryList" class="empty" style="margin-top:12px;">Loading...</div>
         </div>
       </div>
+    </div>
+    <div class="tab-panel tp-compact" id="tabPanel-system" style="display:none;">
+      <div id="backupSyncBanner" class="sync-banner sync-orange">
+        <div class="sync-dot-blink sync-orange" id="backupSyncDot"></div>
+        <div class="sync-banner-text">
+          <div id="backupSyncMain">Waiting for the first successful auto-backup check-in...</div>
+          <div class="sync-banner-sub" id="backupSyncSub">Database → Download/RELAY_BACKUP</div>
+        </div>
+      </div>
+      <div class="card collapsible collapsed" id="cardBackupRestore" data-card-id="backupRestore">
+        <h2 onclick="toggleCardCollapse('cardBackupRestore')">💾 Backup / Restore<span class="collapse-chevron">▾</span></h2>
+        <div class="collapse-body">
+          <div class="backup-note">
+            Full snapshot ito ngayon (v3) — kasama na ang lahat ng persisted data (devices, unlocks, history, fingerprints, pricing/feature overrides, download codes, build history, atbp.), hindi lang yung 4 na field dati. Bagama't naka-Postgres na ang karamihan nito (hindi na basta-basta nawawala sa redeploy), extra safety net pa rin ito kung sakaling magkaproblema ang database mismo o mag-delete ka ng service/domain. Download-in pa rin periodically (lalo na pagkatapos ng bagong unlock/customer) at itago sa ligtas na lugar.
+          </div>
+          <div class="backup-row">
+            <button class="btn-primary" onclick="downloadBackup()">⬇️ Download Backup</button>
+            <button class="btn-ghost" onclick="document.getElementById('restoreFileInput').click()">⬆️ Restore from Backup</button>
+          </div>
+          <input type="file" id="restoreFileInput" accept="application/json" style="display:none;" onchange="restoreBackupFromFile(event)">
+          <div class="backup-lastexport" id="backupLastExport"></div>
+          <label class="auto-backup-toggle">
+            <input type="checkbox" id="autoBackupOnAllowToggle" onchange="onAutoBackupToggleChange()">
+            Automatically download a timestamped backup whenever a new device is allowed
+          </label>
+          <div class="backup-note" style="margin-top:6px;">
+            The auto-download filename includes a date/time stamp (e.g. <code>relaybackup07260130.json</code> = July 26, 1:30 AM — your browser's LOCAL time), so each allow creates a new file instead of overwriting the last one. These stay in your Downloads folder as your backup history.
+          </div>
+        </div>
+      </div>
       <div class="card collapsible collapsed" id="cardDbStatus" data-card-id="dbStatus">
         <h2 onclick="toggleCardCollapse('cardDbStatus')">🩺 Database Health <span style="font-size:11px; color:var(--muted); font-weight:normal;">(read-only SELECT 1 check, walang epekto sa datos)</span><span class="collapse-chevron">▾</span></h2>
         <div class="collapse-body">
@@ -1753,53 +1910,41 @@ a:focus-visible,
           <div class="backup-note" id="dbHealthMeta" style="margin-top:10px;"></div>
         </div>
       </div>
-    </div>
-    <div class="tab-panel" id="tabPanel-subscriptions" style="display:none;">
-      <div class="stat-strip">
-        <div class="stat-card">
-          <div class="stat-num" id="subStatCloudBackup">—</div>
-          <div class="stat-label">☁️ Cloud Backup active</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-num" id="subStatRbac">—</div>
-          <div class="stat-label">🔐 RBAC active</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-num" id="subStatMultiBranch">—</div>
-          <div class="stat-label">🌿 Multi-Branch active</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-num" id="subStatAiAssistant">—</div>
-          <div class="stat-label">🤖 AI Assistant active</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-num" id="subStatRemoteOperations">—</div>
-          <div class="stat-label">📱 Remote Operations active</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-num stat-num-danger" id="subStatExpiringSoon">—</div>
-          <div class="stat-label">⏰ Expiring within 7 days</div>
+      <div class="card">
+        <h2>🧰 Developer tools</h2>
+        <div class="link-grid">
+          <a class="link-tile" href="client-cost-allocation.html">
+            <span class="lt-ico">📊</span>
+            <span class="lt-body"><span class="lt-title">Client Cost Allocation</span><span class="lt-sub">Per-client Neon cost &amp; safety-net reconciliation</span></span>
+          </a>
+          <a class="link-tile" href="installations.html">
+            <span class="lt-ico">🗄️</span>
+            <span class="lt-body"><span class="lt-title">Installation Data</span><span class="lt-sub">Stored data per installation</span></span>
+          </a>
+          <a class="link-tile" href="bir-passkeys.html">
+            <span class="lt-ico">🧾</span>
+            <span class="lt-body"><span class="lt-title">BIR Reset Pass Keys</span><span class="lt-sub">Issue one-time pass keys</span></span>
+          </a>
+          <a class="link-tile" href="bir-test-wipe.html">
+            <span class="lt-ico">🧪</span>
+            <span class="lt-body"><span class="lt-title">BIR Test Wipe</span><span class="lt-sub">Remote wipe for testing only</span></span>
+          </a>
         </div>
       </div>
-      <div class="card">
-        <h2>💳 All Active Subscriptions <span class="count-pill" id="subCountPill">0</span></h2>
-        <div class="filter-bar">
-          <input type="text" id="subFilterInput" placeholder="Search: store or installation ID" oninput="renderSubscriptionsList()">
-          <select id="subFilterFeature" onchange="renderSubscriptionsList()">
-            <option value="all">All subscriptions</option>
-            <option value="cloud_backup">☁️ Cloud Backup only</option>
-            <option value="rbac_management">🔐 RBAC only</option>
-            <option value="multi_branch">🌿 Multi-Branch only</option>
-            <option value="ai_assistant">🤖 AI Assistant only</option>
-            <option value="remote_operations">📱 Remote Operations only</option>
-            <option value="marketplace_hub">🛒 Marketplace Hub only</option>
-          </select>
-          <select id="subSortBy" onchange="renderSubscriptionsList()">
-            <option value="expiry">Sort: Soonest to expire</option>
-            <option value="storeName">Sort: Store name</option>
-          </select>
+      <div class="card danger-zone" id="cardDangerZone">
+        <h2>⚠️ Danger Zone <span style="font-size:11px; color:var(--muted); font-weight:normal;">(hindi na mababawi — may hiwalay na confirmation ang bawat isa)</span></h2>
+        <div class="danger-row">
+          <div class="danger-text"><b>🔄 Reset Analytics</b><small>Clears the Activity/History log at mga orphan license record lang. Hindi ginagalaw ang unlocked features o customer/device database.</small></div>
+          <button class="btn-revoke" onclick="resetAnalytics()" id="resetAnalyticsBtn">🔄 Reset Analytics</button>
         </div>
-        <div id="subscriptionsList" class="empty">Loading...</div>
+        <div class="danger-row">
+          <div class="danger-text"><b>💸 Reset Revenue &amp; Tokens</b><small>Ibinabalik sa zero ang revenue at token purchase counters (kailangang i-type ang RESET REVENUE).</small></div>
+          <button class="btn-revoke" onclick="openRevenueReset()" id="resetRevenueBtn">💸 Reset Revenue &amp; Tokens</button>
+        </div>
+        <div class="danger-row">
+          <div class="danger-text"><b>🧹 Fresh Start</b><small>Buburahin ang LAHAT ng device/customer data, revenue at activity log — para sa bagong-bagong RELAY bago ang totoong clients (kailangang i-type ang FRESH START).</small></div>
+          <button class="btn-revoke" onclick="openFreshStart()" id="freshStartBtn">🧹 Fresh Start</button>
+        </div>
       </div>
     </div>
     <div class="footer-note">
@@ -1829,6 +1974,17 @@ a:focus-visible,
       <div class="meta" style="margin-top:6px;" id="detailMeta">—</div>
       <div style="margin-top:10px;" id="detailAllowedBadgeWrap"></div>
     </div>
+    <div class="client-subnav" id="clientSubnav">
+      <button type="button" class="home-chip" onclick="detailNavGo('cardDemo')">🕘 Demo</button>
+      <button type="button" class="home-chip" onclick="detailNavGo('cardTokenWallet')">💎 Wallet</button>
+      <button type="button" class="home-chip" onclick="detailNavGo('cardCloudBackup')">☁️ Cloud Backup</button>
+      <button type="button" class="home-chip" onclick="detailNavGo('cardUnlocked')">✅ Unlocked</button>
+      <button type="button" class="home-chip" onclick="detailNavGo('cardLocked')">🔒 Locked</button>
+      <button type="button" class="home-chip" onclick="detailNavGo('cardClientSubs')">📅 Subs</button>
+      <button type="button" class="home-chip" onclick="detailNavGo('cardSecurity')">🛡️ Security</button>
+      <button type="button" class="home-chip" onclick="detailNavGo('cardHistory')">🕘 History</button>
+      <button type="button" class="home-chip" onclick="detailNavGo('cardDanger')">⚠️ Danger</button>
+    </div>
     <div class="stat-strip">
       <div class="stat-card">
         <div class="stat-num" id="detailUnlockedCount">—</div>
@@ -1843,7 +1999,7 @@ a:focus-visible,
         <div class="stat-label">Demo mode</div>
       </div>
     </div>
-    <div class="card">
+    <div class="card" id="cardDemo">
       <h2>🕘 Demo Mode <span style="font-size:11px; color:var(--muted); font-weight:normal;">(activates instantly — no OTP, no waiting for a request)</span></h2>
       <div class="demo-status-line" id="demoModeStatusLine">Loading...</div>
       <div style="display:flex; gap:8px; flex-wrap:wrap;">
@@ -1896,15 +2052,54 @@ a:focus-visible,
         <div id="detailLockedList" class="empty">Loading...</div>
       </div>
     </div>
-    <div class="card">
-      <h2>🕘 History for this device</h2>
-      <button class="btn-revoke" onclick="clearDeviceHistory()" id="clearDeviceHistoryBtn" style="margin-bottom:12px;">🗑️ Clear History for this device</button>
-      <div id="detailHistoryList" class="empty">Loading...</div>
+    <div class="card collapsible collapsed" id="cardSecurity" data-card-id="clientSecurity">
+      <h2 onclick="toggleCardCollapse('cardSecurity')">🛡️ Security &amp; Integrity <span class="count-pill warn" id="securityFlagPill" style="display:none;">!</span><span class="collapse-chevron">▾</span></h2>
+      <div class="collapse-body">
+        <div class="meta" style="margin-bottom:6px;"><strong>Hardware fingerprint</strong></div>
+        <div id="securityFingerprintBox" class="meta">Loading...</div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
+          <button class="icon-btn" id="splitCloneBtn" style="display:none;" onclick="splitCloneFromDetail()">✂️ Split clone</button>
+          <button class="icon-btn" onclick="resetFingerprintFromDetail()">♻️ Reset fingerprint</button>
+        </div>
+        <div class="meta" style="margin:14px 0 6px;"><strong>File integrity</strong></div>
+        <div id="securityIntegrityBox" class="meta">Loading...</div>
+        <div id="securityIntegrityFiles" style="margin-top:6px;"></div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
+          <button class="icon-btn" onclick="checkIntegrityNowFromDetail()">🔎 Check now</button>
+          <button class="icon-btn" id="clearIntegrityBtn" style="display:none;" onclick="clearIntegrityFromDetail()">✅ Clear flag</button>
+          <button class="icon-btn" onclick="loadSecurityDetail(currentDetailId)">🔄 Refresh</button>
+        </div>
+      </div>
     </div>
-    <div class="card">
-      <h2>⚠️ Danger Zone</h2>
+    <div class="card" id="cardClientSubs">
+      <h2>📅 Subscriptions <span class="count-pill" id="clientSubsPill">0</span></h2>
+      <div id="clientSubsList" class="empty">Loading...</div>
+    </div>
+    <div class="card" id="cardClientTools">
+      <h2>🔗 Client tools</h2>
+      <div class="meta" style="margin-bottom:8px;">Kokopyahin ang Installation ID bago buksan para madaling i-search sa kabilang page.</div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="icon-btn" onclick="openClientTool('client-activations.html')">🔐 Client Activation</button>
+        <button class="icon-btn" onclick="openClientTool('installations.html')">🗄️ Installation Data</button>
+        <button class="icon-btn" onclick="openClientTool('client-cost-allocation.html')">💰 Cost Allocation</button>
+        <button class="icon-btn" id="clientExportBtn" onclick="exportClientData()">⬇️ Export data (JSON)</button>
+        <button class="icon-btn" onclick="copyClientSummary()">📋 Copy summary</button>
+      </div>
+    </div>
+    <div class="card collapsible collapsed" id="cardHistory" data-card-id="clientHistory">
+      <h2 onclick="toggleCardCollapse('cardHistory')">🕘 History <span class="count-pill" id="detailHistoryPill">0</span><span class="collapse-chevron">▾</span></h2>
+      <div class="collapse-body">
+      <select id="detailHistoryFilter" onchange="detailHistoryLimit = 15; renderDetailHistory()" style="width:100%; margin-bottom:8px; padding:8px; border-radius:8px;"><option value="">All activity</option></select>
+      <button class="btn-revoke" onclick="clearDeviceHistory()" id="clearDeviceHistoryBtn" style="margin-bottom:10px; padding:6px 10px; font-size:11.5px;">🗑️ Clear History for this device</button>
+      <div id="detailHistoryList" class="empty">Loading...</div>
+      </div>
+    </div>
+    <div class="card collapsible collapsed danger-zone" id="cardDanger" data-card-id="clientDanger">
+      <h2 onclick="toggleCardCollapse('cardDanger')">⚠️ Danger Zone<span class="collapse-chevron">▾</span></h2>
+      <div class="collapse-body">
       <div class="meta" style="margin-bottom:10px;">Permanently deletes this device everywhere — allow-list, label, fingerprint, clone-split history, issued unlocks, backup/integrity history, maintenance-fee override, and its Cloud Backup data on Neon. Use only for an old/duplicate installation ID (e.g. after uninstall+reinstall created a new one). Cannot be undone.</div>
       <button class="btn-revoke" style="background:linear-gradient(135deg,#5a0f1a,#2b0605);" onclick="purgeDevice(currentDetailId, document.getElementById('detailMeta').innerText)">🗑️ Purge This Device (permanent)</button>
+      </div>
     </div>
   </div>
 </div>
@@ -1918,9 +2113,6 @@ a:focus-visible,
       </div>
     </div>
     <div class="topbar-actions">
-      <button class="icon-btn" onclick="openFreshStart()" id="freshStartBtn" title="Buburahin ang LAHAT ng device/customer data at ibabalik sa zero ang lahat ng revenue/token counters — para sa bagong-bagong RELAY bago ang totoong clients.">🧹 Fresh Start</button>
-      <button class="icon-btn" onclick="openRevenueReset()" id="resetRevenueBtn" title="Ibinabalik sa zero ang lahat ng revenue at token purchase counters (para sa paglipat sa totoong customers).">💸 Reset Revenue &amp; Tokens</button>
-      <button class="icon-btn" onclick="resetAnalytics()" id="resetAnalyticsBtn" title="Clears the Activity/History log only — hindi ito nagagalaw sa unlocked features o sa customer/device database.">🔄 Reset Analytics</button>
       <button class="icon-btn" onclick="closeAnalytics()">← Back</button>
     </div>
   </div>
@@ -2195,7 +2387,19 @@ function resetCollapsedCardsOnLogin() {
 }
 // Home: compressed na mga card (kagaya ng Omni AI / Control Center). Naka-collapse bilang default;
 // kusang bubukas ang mga "Pending ..." card kapag may laman (maliban kung ikaw mismo ang nag-collapse/nag-expand nito).
-const HOME_CARD_IDS = ['cardActivationFlags', 'cardFeatureAvailability', 'cardPendingOtps', 'cardAdminResets', 'cardReceiptResets', 'cardReceiptCredits', 'cardManualAdd', 'cardSponsorDonations'];
+const HOME_CARD_IDS = ['cardPendingOtps', 'cardAdminResets', 'cardReceiptResets', 'cardReceiptCredits', 'cardHomeExpiring'];
+// Bawat tab at ang mga collapsible card nito (isang lugar lang kada uri ng data).
+const TAB_NAMES = ['home', 'clients', 'revenue', 'plans', 'releases', 'system'];
+const LEGACY_TAB_ALIASES = { devices: 'clients', downloads: 'releases', subscriptions: 'revenue', analytics: 'revenue' };
+const TAB_CARD_IDS = {
+  home: HOME_CARD_IDS,
+  clients: ['cardManualAdd', 'cardAllowedDevices', 'cardRecentlySeen'],
+  revenue: ['cardSponsorDonations'],
+  plans: ['cardFeatureAvailability', 'cardActivationFlags'],
+  releases: ['cardPublishUpdate', 'cardDownloadPackage', 'cardBuildHistory'],
+  system: ['cardBackupRestore', 'cardDbStatus', 'cardDbHealth']
+};
+const ALL_TAB_CARD_IDS = [].concat(...Object.values(TAB_CARD_IDS));
 function homeSetCardCollapsed(cardId, collapsed) {
   const card = document.getElementById(cardId);
   if (!card) return;
@@ -2210,6 +2414,12 @@ function homeNavGo(cardId) {
   homeSetCardCollapsed(cardId, false);
   card.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
+function detailNavGo(cardId) {
+  const card = document.getElementById(cardId);
+  if (!card) return;
+  if (card.classList.contains('collapsible')) homeSetCardCollapsed(cardId, false);
+  card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
 function homeToggleAll(expand) {
   HOME_CARD_IDS.forEach((cardId) => homeSetCardCollapsed(cardId, !expand));
 }
@@ -2218,7 +2428,8 @@ function homeToggleAll(expand) {
     otpCountPill: 'cardPendingOtps',
     adminResetCountPill: 'cardAdminResets',
     receiptResetCountPill: 'cardReceiptResets',
-    receiptCreditCountPill: 'cardReceiptCredits'
+    receiptCreditCountPill: 'cardReceiptCredits',
+    homeExpiringCountPill: 'cardHomeExpiring'
   };
   const sync = () => {
     Object.keys(pillToCard).forEach((pillId) => {
@@ -2316,39 +2527,130 @@ document.getElementById('confirmBackdrop').addEventListener('click', (e) => {
   }
 });
 function switchTab(name) {
-  ['home', 'devices', 'downloads', 'subscriptions'].forEach(t => {
-    const panel = document.getElementById('tabPanel-' + t);
-    if (panel) panel.style.display = (t === name) ? 'block' : 'none';
+  if (LEGACY_TAB_ALIASES[name]) name = LEGACY_TAB_ALIASES[name];
+  if (TAB_NAMES.indexOf(name) === -1) name = 'home';
+  TAB_NAMES.forEach(tabName => {
+    const panel = document.getElementById('tabPanel-' + tabName);
+    if (panel) panel.style.display = (tabName === name) ? 'block' : 'none';
   });
   document.querySelectorAll('.tab-btn[data-tab]').forEach(btn => {
     btn.classList.toggle('active', btn.getAttribute('data-tab') === name);
   });
-  if (name === 'downloads') {
-    applyStoredCardCollapse(['cardBackupRestore', 'cardPublishUpdate', 'cardDownloadPackage', 'cardBuildHistory']);
-  }
-  if (name === 'subscriptions') {
+  applyStoredCardCollapse(TAB_CARD_IDS[name] || []);
+  try { history.replaceState(null, '', '#' + name); } catch (err) {   }
+  if (name === 'revenue') {
     loadSubscriptions();
   }
 }
+const homeShortcutCounts = { tickets: 0, bir: 0 };
+function adminNum(id) {
+  const el = document.getElementById(id);
+  return el ? (parseInt(el.innerText, 10) || 0) : 0;
+}
+function homePendingItems() {
+  return [
+    { n: adminNum('otpCountPill'), label: 'OTP request', card: 'cardPendingOtps' },
+    { n: adminNum('adminResetCountPill'), label: 'admin password reset', card: 'cardAdminResets' },
+    { n: adminNum('receiptResetCountPill'), label: 'receipt reset', card: 'cardReceiptResets' },
+    { n: adminNum('receiptCreditCountPill'), label: 'receipt credit purchase', card: 'cardReceiptCredits' },
+    { n: homeShortcutCounts.tickets, label: 'open support ticket', href: 'tickets.html' },
+    { n: homeShortcutCounts.bir, label: 'BIR reset request', href: 'bir-passkeys.html' },
+    { n: adminNum('homeExpiringCountPill'), label: 'expiring soon', card: 'cardHomeExpiring', soft: true }
+  ];
+}
+function renderHomeAttention() {
+  const banner = document.getElementById('homeAttentionBanner');
+  const textEl = document.getElementById('homeAttentionText');
+  if (!banner || !textEl) return;
+  const items = homePendingItems().filter(i => i.n > 0);
+  const icon = banner.querySelector('.attn-icon');
+  if (items.length === 0) {
+    banner.className = 'attention-banner ok';
+    if (icon) icon.innerText = '✅';
+    textEl.innerText = 'Walang naghihintay na aksyon.';
+    return;
+  }
+  banner.className = 'attention-banner warn';
+  if (icon) icon.innerText = '⚠️';
+  textEl.innerHTML = '';
+  items.forEach(i => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'attn-link';
+    b.innerText = i.n + ' ' + i.label + (i.n > 1 && !i.soft ? 's' : '');
+    b.onclick = () => { if (i.href) window.location.href = i.href; else homeNavGo(i.card); };
+    textEl.appendChild(b);
+  });
+}
+function setTabBadge(id, n) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.innerText = n;
+  el.style.display = n > 0 ? 'flex' : 'none';
+}
+function applyHashTab() {
+  // Deep link mula sa ibang admin page (hal. index.html#plans) o pag-refresh — bumalik sa huling tab.
+  const m = /^#(?:tab=)?([a-z]+)$/.exec(location.hash || '');
+  if (!m) return;
+  const name = LEGACY_TAB_ALIASES[m[1]] || m[1];
+  if (TAB_NAMES.indexOf(name) !== -1) switchTab(name);
+}
 function updateTabBadges() {
-  const pending = parseInt(document.getElementById('otpCountPill').innerText, 10) || 0;
-  const homeBadge = document.getElementById('tabBadgeHome');
-  homeBadge.innerText = pending;
-  homeBadge.style.display = pending > 0 ? 'flex' : 'none';
-  const flagged = parseInt(document.getElementById('statCloneFlagged').innerText, 10) || 0;
-  const devicesBadge = document.getElementById('tabBadgeDevices');
-  devicesBadge.innerText = flagged;
-  devicesBadge.style.display = flagged > 0 ? 'flex' : 'none';
+  const homePending = homePendingItems().filter(i => !i.soft).reduce((sum, i) => sum + i.n, 0);
+  setTabBadge('tabBadgeHome', homePending);
+  setTabBadge('tabBadgeClients', adminNum('statCloneFlagged') + adminNum('statIntegrityFlagged'));
+  setTabBadge('tabBadgeRevenue', adminNum('subStatExpiringSoon'));
   const syncBanner = document.getElementById('backupSyncBanner');
   const needsBackupAttention = syncBanner && syncBanner.classList.contains('sync-orange');
-  document.getElementById('tabDotDownloads').style.display = needsBackupAttention ? 'block' : 'none';
-  const expiringSoon = parseInt(document.getElementById('subStatExpiringSoon').innerText, 10) || 0;
-  const subsBadge = document.getElementById('tabBadgeSubscriptions');
-  subsBadge.innerText = expiringSoon;
-  subsBadge.style.display = expiringSoon > 0 ? 'flex' : 'none';
+  const sysDot = document.getElementById('tabDotSystem');
+  if (sysDot) sysDot.style.display = needsBackupAttention ? 'block' : 'none';
+  renderHomeAttention();
+}
+async function loadHomeShortcutCounts() {
+  if (!adminKey) return;
+  try {
+    const t = await api('/relay/admin/api/support-tickets?limit=1');
+    if (t && t.success && t.counts) homeShortcutCounts.tickets = (t.counts.open || 0) + (t.counts.in_progress || 0);
+  } catch (err) {   }
+  try {
+    const b = await api('/relay/admin/api/bir-reset-inbox');
+    if (b && b.success && Array.isArray(b.waiting)) homeShortcutCounts.bir = b.waiting.length;
+  } catch (err) {   }
+  [['homeTicketsBadge', homeShortcutCounts.tickets], ['homeBirBadge', homeShortcutCounts.bir]].forEach(([id, n]) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.innerText = n;
+    el.style.display = n > 0 ? 'flex' : 'none';
+  });
+  updateTabBadges();
+}
+function renderHomeExpiring() {
+  const listEl = document.getElementById('homeExpiringList');
+  const pill = document.getElementById('homeExpiringCountPill');
+  if (!listEl || !pill) return;
+  const rows = lastLoadedSubscriptions.filter(s => s.expiringSoon);
+  pill.innerText = rows.length;
+  if (rows.length === 0) {
+    listEl.innerHTML = '<div class="empty">Walang subscription na mag-e-expire sa loob ng 7 araw.</div>';
+    return;
+  }
+  const icons = { cloud_backup: '☁️', rbac_management: '🔐', multi_branch: '🌿', ai_assistant: '🤖', remote_operations: '📱', marketplace_hub: '🛒' };
+  listEl.innerHTML = rows.slice(0, 50).map(s => {
+    let daysLabel, urgency;
+    if (s.inGracePeriod) { daysLabel = 'expired — in grace period'; urgency = 'urgent'; }
+    else if (s.daysLeft <= 0) { daysLabel = 'today'; urgency = 'urgent'; }
+    else { daysLabel = s.daysLeft + ' day(s) left'; urgency = s.daysLeft <= 2 ? 'urgent' : 'soon'; }
+    return `<div class="expiring-item">
+      <div>
+        <div class="feature-name">${icons[s.featureId] || ''} ${sponsorEsc(s.featureName)}${s.tier ? ' · ' + sponsorEsc(s.tier) : ''}</div>
+        <div class="feature-meta">${sponsorEsc(s.label || 'No label')} · <a href="#" onclick="switchTab('clients'); openDeviceDetail('${escapeAttr(s.installationId)}'); return false;">open client</a></div>
+      </div>
+      <div class="expiring-days ${urgency}">${daysLabel}</div>
+    </div>`;
+  }).join('') + (rows.length > 50 ? `<div class="meta" style="margin-top:6px;">+${rows.length - 50} pa — tingnan ang Revenue tab.</div>` : '');
 }
 (function () {
-  const SWIPE_TAB_ORDER = ['home', 'devices', 'downloads', 'subscriptions'];
+  const SWIPE_TAB_ORDER = TAB_NAMES;
   const SWIPE_MIN_DIST = 55;      
   const SWIPE_MAX_OFF_AXIS = 70;  
   const SWIPE_MAX_TIME = 600;     
@@ -2418,12 +2720,14 @@ function login() {
   renderLastExportNote();
   renderAutoBackupToggle();
   startPolling();
+  applyHashTab();
 }
 function logout(message) {
   sessionStorage.removeItem('relayAdminKey');
   adminKey = '';
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   if (dbStatusPollTimer) { clearInterval(dbStatusPollTimer); dbStatusPollTimer = null; }
+  if (typeof homeShortcutTimer !== 'undefined' && homeShortcutTimer) { clearInterval(homeShortcutTimer); homeShortcutTimer = null; }
   document.getElementById('mainScreen').style.display = 'none';
   document.getElementById('loginScreen').style.display = 'block';
   document.getElementById('loginError').innerText = '';
@@ -3701,6 +4005,7 @@ async function loadSubscriptions() {
   document.getElementById('subStatExpiringSoon').innerText = data.expiringSoonCount || 0;
   document.getElementById('subCountPill').innerText = lastLoadedSubscriptions.length;
   renderSubscriptionsList();
+  renderHomeExpiring();
 }
 function renderSubscriptionsList() {
   const listEl = document.getElementById('subscriptionsList');
@@ -3748,7 +4053,7 @@ function renderSubscriptionsList() {
     return `<div class="expiring-item">
       <div>
         <div class="feature-name">${featureIcon[s.featureId] || ''} ${s.featureName}${cycleLabel ? ' · ' + cycleLabel : ''}${s.tier ? ' · ' + s.tier : ''}</div>
-        <div class="feature-meta">${s.label || 'No label'} · <a href="#" onclick="closeAnalyticsIfOpen(); switchTab('devices'); openDeviceDetail('${s.installationId}'); return false;">open device</a></div>
+        <div class="feature-meta">${s.label || 'No label'} · <a href="#" onclick="closeAnalyticsIfOpen(); switchTab('clients'); openDeviceDetail('${s.installationId}'); return false;">open device</a></div>
       </div>
       <div class="expiring-days ${urgency}">${daysLabel}</div>
     </div>`;
@@ -3756,7 +4061,7 @@ function renderSubscriptionsList() {
 }
 function closeAnalyticsIfOpen() {
   const el = document.getElementById('analyticsScreen');
-  if (el && el.style.display !== 'none') closeAnalytics();
+  if (el && el.style.display !== 'none') closeAnalytics(true);
 }
 function renderSeenList() {
   const seenEl = document.getElementById('seenList');
@@ -4486,17 +4791,30 @@ let detailPollTimer = null;
 let currentDetailId = null;
 async function openDeviceDetail(installationId) {
   currentDetailId = installationId;
+  if (!(history.state && history.state.relayScreen)) pushOverlayHistory('detail');
+  detailHistoryLimit = 15; detailLockedLimit = 6;
   document.getElementById('mainScreen').style.display = 'none';
   document.getElementById('deviceDetailScreen').style.display = 'block';
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   await loadDeviceDetail();
   await loadCloudBackupDetail(installationId);
   await loadTokenWalletDetail(installationId);
+  loadSecurityDetail(installationId);
+  if (typeof loadSubscriptions === 'function') loadSubscriptions().then(renderClientSubs);
   if (detailPollTimer) clearInterval(detailPollTimer);
   detailPollTimer = setInterval(withScrollPreserved(loadDeviceDetail), 8000);
-  applyStoredCardCollapse(['cardTokenWallet', 'cardCloudBackup', 'cardUnlocked', 'cardLocked']);
+  applyStoredCardCollapse(['cardTokenWallet', 'cardCloudBackup', 'cardUnlocked', 'cardLocked', 'cardSecurity', 'cardHistory', 'cardDanger']);
 }
-function closeDeviceDetail() {
+let ignoreNextPop = false;
+function popOverlayHistory(skipHistory) {
+  if (skipHistory) return;
+  try { if (history.state && history.state.relayScreen) { ignoreNextPop = true; history.back(); } } catch (err) {   }
+}
+function pushOverlayHistory(name) {
+  try { history.pushState({ relayScreen: name }, '', location.pathname + (location.hash || '')); } catch (err) {   }
+}
+function closeDeviceDetail(skipHistory) {
+  popOverlayHistory(skipHistory === true);
   if (detailPollTimer) { clearInterval(detailPollTimer); detailPollTimer = null; }
   document.getElementById('deviceDetailScreen').style.display = 'none';
   document.getElementById('mainScreen').style.display = 'block';
@@ -4526,8 +4844,15 @@ async function clearDeviceHistory() {
     if (btn) { btn.disabled = false; btn.innerText = '🗑️ Clear History for this device'; }
   }
 }
+function afterDangerAction() {
+  // Ang mga danger action ay nasa System tab na — i-refresh lang ang analytics kung bukas ito.
+  const ana = document.getElementById('analyticsScreen');
+  if (ana && ana.style.display !== 'none') loadAnalytics();
+  if (adminKey) loadDevices();
+}
 let analyticsPollTimer = null;
 async function openAnalytics() {
+  if (!(history.state && history.state.relayScreen)) pushOverlayHistory('analytics');
   document.getElementById('mainScreen').style.display = 'none';
   document.getElementById('analyticsScreen').style.display = 'block';
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
@@ -4535,7 +4860,8 @@ async function openAnalytics() {
   if (analyticsPollTimer) clearInterval(analyticsPollTimer);
   analyticsPollTimer = setInterval(withScrollPreserved(loadAnalytics), 15000);
 }
-function closeAnalytics() {
+function closeAnalytics(skipHistory) {
+  popOverlayHistory(skipHistory === true);
   if (analyticsPollTimer) { clearInterval(analyticsPollTimer); analyticsPollTimer = null; }
   document.getElementById('analyticsScreen').style.display = 'none';
   document.getElementById('mainScreen').style.display = 'block';
@@ -4564,7 +4890,7 @@ async function resetAnalytics() {
     const data = await api('/relay/admin/api/analytics/reset?confirm=RESET', { method: 'POST' });
     if (data.success) {
       toast(`✅ Na-reset ang Analytics (${data.clearedActivityCount} activity entries, ${data.clearedOrphanFeatureCount} orphan license record mula sa ${data.clearedOrphanDeviceCount} device na hindi na naka-Allow).`, 'success');
-      loadAnalytics();
+      afterDangerAction();
     } else {
       toast(data.message || 'Could not reset analytics.', 'error');
     }
@@ -4617,7 +4943,7 @@ async function submitFreshStart() {
       `Natira: installations ${rrFmt(rem.installations)} · allowed ${rrFmt(rem.allowedDevices)} · license revenue ₱${rrFmt(rev.unlockRevenueTotal)} · token purchases ${rrFmt(rev.tokenPurchasesDone)} · ledger ${rrFmt(rev.ledgerRows)} · AI plan ${rrFmt(rev.aiTierPurchases)} · AI cost rows ${rrFmt(rem.aiCostLedgerRows)}` +
       ((sm.failedDevices && sm.failedDevices.length) ? `\n❌ Hindi na-purge: ${sm.failedDevices.map(f => f.installationId + ' (' + f.message + ')').join('; ')}` : '');
     toast(data.success ? '✅ Fresh Start tapos.' : (data.message || 'Hindi natapos ang Fresh Start.'), data.success ? 'success' : 'error');
-    loadAnalytics();
+    afterDangerAction();
   } catch (err) {
   } finally {
     btn.disabled = false; btn.innerText = 'Oo, burahin lahat';
@@ -4670,10 +4996,10 @@ async function submitRevenueReset() {
     if (data.success) {
       closeRevenueReset();
       toast('✅ Na-reset sa zero ang revenue at token purchase counters.', 'success');
-      loadAnalytics();
+      afterDangerAction();
     } else if (data.partial) {
       toast('⚠️ Partial lang ang reset: ' + Object.values((data.summary && data.summary.errors) || {}).join(' | '), 'error');
-      loadAnalytics();
+      afterDangerAction();
     } else {
       toast(data.message || 'Could not reset counters.', 'error');
     }
@@ -5209,7 +5535,7 @@ function renderAnalytics(a) {
         return `<div class="expiring-item">
           <div>
             <div class="feature-name">${e.featureName}</div>
-            <div class="feature-meta">${e.label || 'No label'} · <a href="#" onclick="closeAnalytics(); openDeviceDetail('${e.installationId}'); return false;">open device</a></div>
+            <div class="feature-meta">${e.label || 'No label'} · <a href="#" onclick="closeAnalytics(true); openDeviceDetail('${e.installationId}'); return false;">open device</a></div>
           </div>
           <div class="expiring-days ${urgency}">${daysLeft <= 0 ? 'today' : daysLeft + ' day(s) left'}</div>
         </div>`;
@@ -5370,7 +5696,7 @@ function renderDeviceDetail(detail) {
   const lockedEl = document.getElementById('detailLockedList');
   lockedEl.innerHTML = detail.locked.length === 0
     ? '<div class="empty">Nothing locked — everything is unlocked!</div>'
-    : detail.locked.map(f => `
+    : detail.locked.slice(0, detailLockedLimit).map(f => `
       <div class="feature-item">
         <div>
           <div class="feature-name">${f.name}</div>
@@ -5381,17 +5707,175 @@ function renderDeviceDetail(detail) {
           <button class="btn-allow" onclick="activateFeature('${detail.installationId}', '${f.featureId}', '${f.name.replace(/'/g, "\\'")}')">Activate</button>
         </div>
       </div>
-    `).join('');
+    `).join('') + (detail.locked.length > detailLockedLimit ? `<button class="show-more-btn" onclick="detailLockedLimit = 9999; loadDeviceDetail()">Show more (${detail.locked.length - detailLockedLimit} pa)</button>` : '');
+  lastDetailHistory = detail.history || [];
+  lastDetailSummary = { id: detail.installationId, label: detail.label, allowed: detail.allowed, meta: meta, unlocked: detail.unlocked.length, locked: detail.locked.length, demo: detail.demo.active };
+  renderDetailHistory();
+  renderClientSubs();
+}
+let lastDetailSummary = null;
+function renderClientSubs() {
+  const listEl = document.getElementById('clientSubsList');
+  const pill = document.getElementById('clientSubsPill');
+  if (!listEl || !currentDetailId) return;
+  const rows = (typeof lastLoadedSubscriptions !== 'undefined' ? lastLoadedSubscriptions : []).filter(s => s.installationId === currentDetailId);
+  pill.innerText = rows.length;
+  listEl.className = rows.length ? '' : 'empty';
+  listEl.innerHTML = rows.length === 0 ? 'Walang aktibong subscription.' : rows.map(s => {
+    let note = s.inGracePeriod ? 'expired — in grace period' : (s.daysLeft != null ? s.daysLeft + ' day(s) left' : '');
+    const urgent = s.inGracePeriod || (s.daysLeft != null && s.daysLeft <= 2);
+    return `<div class="feature-item"><div><div class="feature-name">${sponsorEsc(s.featureName || s.featureId)}${s.tier ? ' · ' + sponsorEsc(s.tier) : ''}</div>` +
+      `<div class="feature-meta">${s.billingCycle ? sponsorEsc(s.billingCycle) + ' · ' : ''}${s.expiresAt ? 'hanggang ' + new Date(s.expiresAt).toLocaleDateString('en-PH') : 'walang expiry'}</div></div>` +
+      `<div class="expiring-days ${urgent ? 'urgent' : 'soon'}" style="${s.expiringSoon || s.inGracePeriod ? '' : 'visibility:hidden;'}">${note}</div></div>`;
+  }).join('');
+}
+async function exportClientData() {
+  if (!currentDetailId) return;
+  const btn = document.getElementById('clientExportBtn');
+  if (btn) { btn.disabled = true; }
+  try {
+    const res = await fetch(`/relay/admin/api/installations/${encodeURIComponent(currentDetailId)}/export`, { headers: { 'x-relay-admin-key': adminKey } });
+    if (!res.ok) {
+      let msg = 'Hindi na-export.';
+      try { const j = await res.json(); msg = j.message || msg; } catch (e) {}
+      toast(msg, 'error');
+    } else {
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `relay-backup-${currentDetailId}.json`;
+      document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+      toast('Na-export ang data ng client.', 'success');
+    }
+  } catch (err) { toast('Network error habang nag-e-export.', 'error'); }
+  if (btn) btn.disabled = false;
+}
+function copyClientSummary() {
+  const s = lastDetailSummary;
+  if (!s) return;
+  const m = s.meta || {};
+  const lines = [`Client: ${s.label || m.storeName || '—'}`, `Installation ID: ${s.id}`, `Status: ${s.allowed ? 'ALLOWED' : 'BLOCKED'}`,
+    `User: ${m.username || '—'} · last seen ${m.lastSeenAt ? new Date(m.lastSeenAt).toLocaleString('en-PH') : '—'}`,
+    `Unlocked: ${s.unlocked} · Locked: ${s.locked} · Demo: ${s.demo ? 'active' : 'none'}`];
+  try { navigator.clipboard.writeText(lines.join('\n')).then(() => toast('Summary copied.', 'success'), () => toast('Hindi makopya.', 'error')); } catch (err) { toast('Hindi makopya.', 'error'); }
+}
+let lastDetailHistory = [];
+let detailHistoryLimit = 15;
+let detailLockedLimit = 6;
+function renderDetailHistory() {
   const historyEl = document.getElementById('detailHistoryList');
-  historyEl.innerHTML = detail.history.length === 0
+  const filterEl = document.getElementById('detailHistoryFilter');
+  if (!historyEl) return;
+  if (filterEl) {
+    const current = filterEl.value;
+    const types = Array.from(new Set(lastDetailHistory.map(x => x.type))).sort();
+    filterEl.innerHTML = '<option value="">All activity (' + lastDetailHistory.length + ')</option>' + types.map(t =>
+      '<option value="' + escapeAttr(t) + '">' + sponsorEsc(ACTIVITY_LABELS[t] || t) + ' (' + lastDetailHistory.filter(x => x.type === t).length + ')</option>').join('');
+    filterEl.value = types.indexOf(current) !== -1 ? current : '';
+  }
+  const want = filterEl ? filterEl.value : '';
+  const all = want ? lastDetailHistory.filter(x => x.type === want) : lastDetailHistory;
+  const rows = all.slice(0, detailHistoryLimit);
+  const pillEl = document.getElementById('detailHistoryPill');
+  if (pillEl) pillEl.innerText = lastDetailHistory.length;
+  historyEl.innerHTML = rows.length === 0
     ? '<div class="empty">Walang history pa.</div>'
-    : `<div class="timeline">` + detail.history.map(h => `
+    : `<div class="timeline">` + rows.map(h => `
         <div class="timeline-item timeline-type-${h.type}">
           <div>${ACTIVITY_LABELS[h.type] || h.type}</div>
           <div class="feature-meta">${activityDescription(h)}</div>
           <div class="timeline-time">${timeAgo(h.at)}${h.count > 1 ? ` · ${h.count}x` : ''}</div>
         </div>
-      `).join('') + `</div>`;
+      `).join('') + `</div>` + (all.length > rows.length ? `<button class="show-more-btn" onclick="detailHistoryLimit += 30; renderDetailHistory()">Show more (${all.length - rows.length} pa)</button>` : '');
+}
+function openClientTool(page) {
+  if (currentDetailId) { try { navigator.clipboard.writeText(currentDetailId).then(() => toast('Installation ID copied.', 'success'), () => {}); } catch (err) {} }
+  setTimeout(() => { window.location.href = page; }, 250);
+}
+async function loadSecurityDetail(installationId) {
+  if (!installationId) return;
+  const fpBox = document.getElementById('securityFingerprintBox');
+  const inBox = document.getElementById('securityIntegrityBox');
+  const filesBox = document.getElementById('securityIntegrityFiles');
+  const splitBtn = document.getElementById('splitCloneBtn');
+  const clearBtn = document.getElementById('clearIntegrityBtn');
+  const pill = document.getElementById('securityFlagPill');
+  if (!fpBox || !inBox) return;
+  const id = encodeURIComponent(installationId);
+  let fp = null, integ = null, flagged = false;
+  try { const r = await api(`/relay/admin/api/devices/${id}/fingerprint`); if (r && r.success) fp = r.record; } catch (err) {}
+  try { const r = await api(`/relay/admin/api/devices/${id}/integrity`); if (r && r.success) integ = r.record; } catch (err) {}
+  if (installationId !== currentDetailId) return;
+  if (!fp) {
+    fpBox.innerHTML = '⚪ Wala pang na-verify na fingerprint.';
+    splitBtn.style.display = 'none';
+  } else {
+    fpBox.innerHTML = (fp.flagged ? '🔴 <strong>CLONE FLAGGED</strong>' : '🟢 Naka-bind') +
+      `<br>First verified: ${fp.firstVerifiedAt ? new Date(fp.firstVerifiedAt).toLocaleString('en-PH') : '—'}` +
+      `<br>Last verified: ${fp.lastVerifiedAt ? timeAgo(fp.lastVerifiedAt) : '—'} · ${fp.verifyCount || 0} verification(s)` +
+      (fp.flagged && fp.flaggedAt ? `<br>Flagged ${timeAgo(fp.flaggedAt)}` : '');
+    splitBtn.style.display = (fp.flagged && fp.flaggedFingerprint) ? 'inline-flex' : 'none';
+    if (fp.flagged) flagged = true;
+  }
+  filesBox.innerHTML = '';
+  clearBtn.style.display = 'none';
+  if (!integ) {
+    inBox.innerHTML = '⚪ Wala pang integrity check-in mula sa device na ito.';
+  } else if (!integ.hasBaseline) {
+    inBox.innerHTML = `⚪ Walang baseline para sa version <strong>${sponsorEsc(integ.baselineVersion || '—')}</strong> · checked ${timeAgo(integ.checkedAt)}`;
+  } else {
+    const cleared = integ.flagged && integ.clearedAt;
+    inBox.innerHTML = (integ.flagged ? (cleared ? '🟡 <strong>May pagbabago (na-clear na)</strong>' : '🔴 <strong>MAY PAGBABAGO SA FILES</strong>') : '🟢 Tugma sa baseline') +
+      `<br>Version ${sponsorEsc(integ.baselineVersion || '—')} · checked ${timeAgo(integ.checkedAt)} · watcher ${integ.watcherActive ? 'active' : 'inactive'}` +
+      (integ.flagged ? `<br>${integ.modifiedCount} modified · ${integ.deletedCount} deleted · ${integ.addedCount} added` : '') +
+      (cleared ? `<br>Cleared ${timeAgo(integ.clearedAt)}${integ.clearedNote ? ' — ' + sponsorEsc(integ.clearedNote) : ''}` : '');
+    if (integ.flagged) {
+      const group = (label, list) => (list && list.length)
+        ? `<div class="feature-meta" style="margin-top:4px;"><strong>${label}</strong> (${list.length})<br>` +
+          list.slice(0, 20).map(f => sponsorEsc(f)).join('<br>') + (list.length > 20 ? `<br>+${list.length - 20} pa` : '') + '</div>' : '';
+      filesBox.innerHTML = group('Modified', integ.modified) + group('Deleted', integ.deleted) + group('Added', integ.added);
+      if (!cleared) { clearBtn.style.display = 'inline-flex'; flagged = true; }
+    }
+  }
+  if (pill) pill.style.display = flagged ? 'inline-block' : 'none';
+}
+async function resetFingerprintFromDetail() {
+  if (!currentDetailId) return;
+  const ok = await confirmAction({ title: 'Reset fingerprint?', message: 'Buburahin ang hardware fingerprint binding. Kailangang mag-verify online ang device sa susunod na login at ang unang makaka-verify ang magiging bagong binding.', confirmLabel: 'Oo, i-reset', danger: true });
+  if (!ok) return;
+  try {
+    const r = await api(`/relay/admin/api/devices/${encodeURIComponent(currentDetailId)}/fingerprint/reset`, { method: 'POST' });
+    toast(r.message || (r.success ? 'Fingerprint reset.' : 'Hindi na-reset.'), r.success ? 'success' : 'error');
+  } catch (err) {}
+  loadSecurityDetail(currentDetailId); loadDeviceDetail();
+}
+async function splitCloneFromDetail() {
+  if (!currentDetailId) return;
+  const ok = await confirmAction({ title: 'Split clone?', message: 'Gagawa ng hiwalay na installationId para sa naka-flag na clone device. Kailangan mong i-activate manually ang mga feature nito pagkatapos.', confirmLabel: 'Oo, i-split', danger: false });
+  if (!ok) return;
+  try {
+    const r = await api(`/relay/admin/api/devices/${encodeURIComponent(currentDetailId)}/split-clone`, { method: 'POST' });
+    toast(r.message || (r.success ? 'Split done.' : 'Hindi na-split.'), r.success ? 'success' : 'error');
+  } catch (err) {}
+  loadSecurityDetail(currentDetailId); loadDeviceDetail();
+}
+async function checkIntegrityNowFromDetail() {
+  if (!currentDetailId) return;
+  try {
+    const r = await api(`/relay/admin/api/devices/${encodeURIComponent(currentDetailId)}/integrity/check-now`, { method: 'POST' });
+    toast(r.message || (r.success ? 'Requested.' : 'Hindi na-request.'), r.success ? 'success' : 'error');
+  } catch (err) {}
+  setTimeout(() => loadSecurityDetail(currentDetailId), 15000);
+}
+async function clearIntegrityFromDetail() {
+  if (!currentDetailId) return;
+  const note = await promptForNote('I-clear ang integrity flag ng device na ito. Maglagay ng tala kung bakit (hal. na-verify na lehitimo ang update).');
+  if (note === null) return;
+  try {
+    const r = await api(`/relay/admin/api/devices/${encodeURIComponent(currentDetailId)}/integrity/clear`, { method: 'POST', body: JSON.stringify({ note }) });
+    toast(r.message || (r.success ? 'Cleared.' : 'Hindi na-clear.'), r.success ? 'success' : 'error');
+  } catch (err) {}
+  loadSecurityDetail(currentDetailId);
 }
 async function toggleAllowFromDetail(installationId, currentlyAllowed) {
   const ok = await confirmAction({
@@ -5872,10 +6356,35 @@ function promptForLabel(currentLabel) {
     cancelBtn.onclick = () => cleanup(null);
   });
 }
+// Back button / bfcache: ang Back ay nagsasara ng detail/analytics screen (hindi lumalabas sa app),
+// at ang pagbalik mula sa ibang admin page ay hindi na nag-a-auto-logout dahil sa lumang idle timer.
+window.addEventListener('popstate', () => {
+  if (ignoreNextPop) { ignoreNextPop = false; return; }
+  lastActivityAt = Date.now();
+  const detail = document.getElementById('deviceDetailScreen');
+  const ana = document.getElementById('analyticsScreen');
+  if (detail && detail.style.display !== 'none') closeDeviceDetail(true);
+  else if (ana && ana.style.display !== 'none') closeAnalytics(true);
+  else if (adminKey) applyHashTab();
+});
+window.addEventListener('hashchange', () => { lastActivityAt = Date.now(); if (adminKey) applyHashTab(); });
+window.addEventListener('pageshow', (e) => {
+  lastActivityAt = Date.now();
+  let stored = '';
+  try { stored = sessionStorage.getItem('relayAdminKey') || ''; } catch (err) {   }
+  if (!e.persisted) return;
+  if (adminKey && !stored) { logout(); return; }
+  if (!adminKey && stored) { adminKey = stored; startPolling(); applyHashTab(); return; }
+  if (adminKey) { applyHashTab(); loadHomeShortcutCounts(); loadDevices(); }
+});
 let dbStatusPollTimer = null;
+let homeShortcutTimer = null;
 function startPolling() {
-  applyStoredCardCollapse(HOME_CARD_IDS);
+  applyStoredCardCollapse(TAB_CARD_IDS.home);
   loadDevices();
+  loadHomeShortcutCounts();
+  if (homeShortcutTimer) clearInterval(homeShortcutTimer);
+  homeShortcutTimer = setInterval(() => { if (adminKey) loadHomeShortcutCounts(); }, 30000);
   loadDownloadCodes();
   loadBuildHistory();
   loadDbStatus();
@@ -5897,7 +6406,7 @@ function startPolling() {
   if (dbHealthPollTimer) clearInterval(dbHealthPollTimer);
   dbHealthPollTimer = setInterval(() => { if (adminKey) loadDbHealth(); }, 60000);
 }
-if (adminKey) { renderLastExportNote(); renderAutoBackupToggle(); startPolling(); }
+if (adminKey) { renderLastExportNote(); renderAutoBackupToggle(); startPolling(); applyHashTab(); }
 let deferredInstallPrompt = null;
 window.addEventListener('beforeinstallprompt', (e) => {
   e.preventDefault();
