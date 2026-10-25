@@ -9268,6 +9268,53 @@ app.post('/relay/admin/api/bir-reset-inbox/send', requireAdminKey, rateLimit('bi
         if (!res.headersSent) return res.status(500).json({ success: false, code: 'ISSUE_FAILED', message: 'Could not send the pass key.' });
     }
 });
+// ===================================================================
+// KIOSK DEVELOPER PIN (isa para sa lahat ng client) — tingnan ang kiosk-dev-pin.js
+// Itinatakda ng developer sa admin page (kiosk-dev-pin.html). Ang client OMNIPOS ay nagtatanong lang kung tama ang PIN.
+// ===================================================================
+const kioskDevPin = require('./kiosk-dev-pin');
+const kioskDevPinGuard = kioskDevPin.createGuard();
+const KIOSK_DEV_PIN_PATH = path.join(__dirname, 'kiosk-dev-pin.json');
+async function loadKioskDevPinRecord() {
+    const fromStore = await getPersistentJSON('kiosk-dev-pin', null, { strict: true });
+    if (fromStore !== null) return fromStore && fromStore.hash ? fromStore : null;
+    try { const j = JSON.parse(readStateFileSync(KIOSK_DEV_PIN_PATH)); return j && j.hash ? j : null; } catch (err) { return null; }
+}
+function saveKioskDevPinRecord(rec) {
+    if (pgPoolDevices || pgPool || redisClient) { setPersistentJSON('kiosk-dev-pin', rec); return; }
+    atomicWriteFileSync(KIOSK_DEV_PIN_PATH, JSON.stringify(rec));
+}
+app.get('/relay/admin/api/kiosk-dev-pin/status', requireAdminKey, async (req, res) => {
+    try {
+        const rec = await loadKioskDevPinRecord();
+        res.set('Cache-Control', 'no-store');
+        res.json({ success: true, isSet: !!rec, updatedAt: rec ? rec.updatedAt : null, minLength: kioskDevPin.MIN_LEN, maxLength: kioskDevPin.MAX_LEN });
+    } catch (err) { res.status(500).json({ success: false, message: 'Hindi mabasa ang PIN status: ' + err.message }); }
+});
+app.post('/relay/admin/api/kiosk-dev-pin/set', requireAdminKey, rateLimit('kiosk-dev-pin-set', 20, 60 * 60 * 1000), async (req, res) => {
+    const body = req.body || {};
+    if (!kioskDevPin.validatePin(body.pin)) return res.status(400).json({ success: false, message: `Dapat ${kioskDevPin.MIN_LEN}-${kioskDevPin.MAX_LEN} character, walang espasyo.` });
+    if (String(body.pin) !== String(body.confirmPin)) return res.status(400).json({ success: false, message: 'Hindi magkapareho ang PIN at ang kumpirmasyon.' });
+    try { saveKioskDevPinRecord(kioskDevPin.makeRecord(body.pin)); }
+    catch (err) { return res.status(500).json({ success: false, message: 'Hindi ma-save ang PIN: ' + err.message }); }
+    console.log('🔑 Na-update ang Kiosk Developer PIN via admin panel.');
+    res.json({ success: true });
+});
+app.post('/relay/client/kiosk-dev-pin/verify', rateLimit('client-kiosk-dev-pin', 30, 10 * 60 * 1000), requireApiKey, async (req, res) => {
+    let installationId = req.relayClient ? req.relayClient.installationId : null;
+    if (!installationId && req.relayMasterAuthenticated) {
+        const fromBody = String((req.body || {}).installationId || '').trim();
+        installationId = fromBody && fromBody.length <= 200 ? fromBody : null;
+    }
+    if (!installationId) return res.status(403).json({ success: false, code: 'CLIENT_CREDENTIAL_REQUIRED', message: 'A per-client credential is required.' });
+    res.set('Cache-Control', 'no-store');
+    try {
+        const rec = await loadKioskDevPinRecord();
+        const v = kioskDevPinGuard.check(installationId, rec, (req.body || {}).pin);
+        return res.json({ success: true, ok: v.ok, code: v.code || null, retryAfterSec: v.retryAfterSec || 0 });
+    } catch (err) { return res.status(500).json({ success: false, message: 'Hindi ma-verify ngayon.' }); }
+});
+
 // ===== REMOTE BIR TEST WIPE =====
 // The developer presses "Send wipe command" for ONE installation (admin page bir-test-wipe.html). RELAY signs a short-lived,
 // one-time command and the OmniPOS client only has to confirm it. Same two secrets as BIR pass keys: RELAY_ADMIN_KEY + the

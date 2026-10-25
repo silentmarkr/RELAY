@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#05070d"><title>Kiosk Developer PIN — RELAY Admin</title>
+<style>
+:root{color-scheme:dark;--bg:#05070d;--card:#101625;--line:#26334f;--text:#eafcff;--muted:#9aabc9;--accent:#22e5ff;--green:#3ddc84;--red:#ff5c72;--amber:#ffc857}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{max-width:640px;margin:0 auto;padding:18px 14px 60px}
+a{color:var(--accent)}h1{font-size:1.4rem;margin:.4rem 0}h2{font-size:1.05rem;margin:0 0 10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:14px 0}
+.field{display:flex;flex-direction:column;gap:4px;font-size:.85rem;color:var(--muted);margin:8px 0}
+input{background:#0a0f1c;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px;font:inherit;width:100%}
+button{background:#16213a;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px 16px;font:inherit;cursor:pointer}
+button.primary{background:var(--accent);color:#04222a;border-color:var(--accent);font-weight:700}
+button:disabled{opacity:.5;cursor:not-allowed}
+.small{font-size:.8rem;color:var(--muted)}
+.notice{margin:10px 0;padding:9px 12px;border-radius:8px;background:#0a1a14;border:1px solid #1f5a3d;color:var(--green);display:none}
+.notice.error{background:#2a0e14;border-color:#7a2230;color:var(--red)}.notice.show{display:block}
+.warn{background:#2a2108;border:1px solid #6b5514;color:var(--amber);padding:9px 12px;border-radius:8px;margin:10px 0}
+.badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:.8rem;border:1px solid var(--line)}
+</style></head><body><main>
+<p><a href="index.html#system">← RELAY Admin</a></p>
+<h1>Kiosk Developer PIN</h1>
+<div class="warn">Ang PIN na ito ay para sa <b>lahat ng client</b>. Kailangan ito ng OMNIKiosk (Counter &gt; Settings) para palitan ang <b>Uri ng negosyo</b> (restaurant, sari-sari, serbisyo, atbp.). Ikaw lang ang may alam; hindi ito ipinapadala sa mga client; naka-hash dito sa RELAY. Kapag pinalitan mo, <b>agad</b> itong magiging bago sa lahat ng client.</div>
+
+<section class="card"><h2>Admin authentication</h2>
+<label class="field">RELAY admin key<input id="adminKey" type="password" autocomplete="current-password" placeholder="Enter ADMIN_KEY"></label>
+<p class="small">Nasa memory ng page na ito lang (at sa sessionStorage ng tab, gaya ng ibang admin page).</p></section>
+
+<div id="notice" class="notice" role="status"></div>
+
+<section class="card"><h2>Kasalukuyang status <span id="state" class="badge">—</span></h2>
+<p class="small" id="when">Mag-connect muna gamit ang admin key.</p>
+<label class="field">Bagong Developer PIN (<span id="lenhint">6-12</span> character, walang espasyo)<input id="pin" type="password" autocomplete="new-password" inputmode="text" maxlength="12"></label>
+<label class="field">Ulitin ang PIN<input id="pin2" type="password" autocomplete="new-password" maxlength="12"></label>
+<div style="margin-top:10px"><button id="connectBtn">Connect</button> <button id="saveBtn" class="primary" disabled>I-save ang PIN</button></div>
+</section>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  function say(m,bad){const n=$('notice');n.textContent=m;n.className='notice show'+(bad?' error':'')}
+  async function api(p,method,body){
+    const r=await fetch('/relay/admin/api/kiosk-dev-pin/'+p,{method,headers:{'x-relay-admin-key':$('adminKey').value,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
+    let j={};try{j=await r.json()}catch(_){}
+    if(!r.ok||j.success===false){const e=new Error(j.message||('HTTP '+r.status));e.status=r.status;throw e}
+    return j;
+  }
+  async function connect(){
+    try{
+      const j=await api('status','GET');
+      try{sessionStorage.setItem('relayAdminKey',$('adminKey').value)}catch(_){}
+      $('state').textContent=j.isSet?'May PIN na':'Wala pang PIN';
+      $('state').style.color=j.isSet?'var(--green)':'var(--amber)';
+      $('when').textContent=j.isSet?('Huling binago: '+new Date(j.updatedAt).toLocaleString()):'Hindi pa makakapagpalit ng Uri ng negosyo ang kahit sinong client hangga’t wala nito.';
+      $('lenhint').textContent=j.minLength+'-'+j.maxLength;
+      $('saveBtn').disabled=false;say('Connected.');
+    }catch(e){
+      if(e.status===401||e.status===403){try{sessionStorage.removeItem('relayAdminKey')}catch(_){}}
+      say(e.message,true);
+    }
+  }
+  $('connectBtn').onclick=connect;
+  $('saveBtn').onclick=async()=>{
+    if(!confirm('Palitan ang Developer PIN ng LAHAT ng client?'))return;
+    try{await api('set','POST',{pin:$('pin').value,confirmPin:$('pin2').value});$('pin').value='';$('pin2').value='';say('Na-save ang bagong Developer PIN para sa lahat ng client.');connect()}
+    catch(e){say(e.message,true)}
+  };
+  let saved='';try{saved=sessionStorage.getItem('relayAdminKey')||''}catch(_){}
+  if(saved){$('adminKey').value=saved;connect()}
+})();
+</script></main></body></html>
