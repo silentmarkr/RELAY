@@ -1867,7 +1867,8 @@ const FEATURE_CATALOG_BASE = {
     ai_assistant: { name: 'OmniPOS AI Assistant', price: null, category: 'module', isSubscription: true },
     cloud_backup: { name: 'Cloud Backup (Postgres)', price: null, category: 'module', isSubscription: true },
     remote_operations: { name: 'Remote Operations & Attendance', price: null, category: 'module', isSubscription: true },
-    marketplace_hub: { name: 'Marketplace Hub (Shopee, Lazada & TikTok Shop)', price: null, category: 'module', isSubscription: true }
+    marketplace_hub: { name: 'Marketplace Hub (Shopee, Lazada & TikTok Shop)', price: null, category: 'module', isSubscription: true },
+    self_order_kiosk: { name: 'Self-Order Kiosk (OMNIKiosk)', price: null, category: 'module', isSubscription: true }
 };
 const CLOUD_BACKUP_PLANS_BASE = {
     // AYOS: idinagdag ang autoBackupIntervalMs bilang bahagi ng plan config
@@ -3834,7 +3835,7 @@ async function creditClaimedPurchase(purchase) {
         throw err;
     }
 }
-const MODULE_SUBSCRIPTION_FEATURE_IDS = ['rbac_management', 'multi_branch', 'ai_assistant', 'remote_operations', 'marketplace_hub'];
+const MODULE_SUBSCRIPTION_FEATURE_IDS = ['rbac_management', 'multi_branch', 'ai_assistant', 'remote_operations', 'marketplace_hub', 'self_order_kiosk'];
 function isModuleSubscriptionFeature(featureId) {
     return MODULE_SUBSCRIPTION_FEATURE_IDS.includes(featureId);
 }
@@ -3880,6 +3881,15 @@ const MODULE_SUBSCRIPTION_PLANS_BASE = {
         id: 'marketplace_hub',
         name: 'Marketplace Hub (Shopee, Lazada & TikTok Shop)',
         price: { monthly: 399, yearly: 3990 }
+    },
+    // Self-Order Kiosk (OMNIKiosk app + Counter screen). Subscription (hindi one-time) dahil: (1) may tuloy-tuloy na
+    // maintenance ang Android app at ang mga bagong business type/feature, (2) pumapalit ito sa isang taong kukuha ng
+    // order kaya may tuloy-tuloy na halaga sa negosyo, at (3) ang one-time module ay otomatikong napapasama sa Pro bundle
+    // at binabago ang takbo ng nakapirming bundle price. Editable sa admin panel (Pricing). Yearly = 10 buwan (2 buwan libre).
+    self_order_kiosk: {
+        id: 'self_order_kiosk',
+        name: 'Self-Order Kiosk (OMNIKiosk)',
+        price: { monthly: 299, yearly: 2990 }
     }
 };
 const MODULE_SUBSCRIPTION_BILLING_DAYS = { monthly: 30, yearly: 365 };
@@ -6527,7 +6537,7 @@ app.get('/relay/admin/api/pricing/module-subscriptions', requireAdminKey, (req, 
 app.post('/relay/admin/api/pricing/module-subscriptions', requireAdminKey, (req, res) => {
     const { featureId, name, monthly, yearly } = req.body || {};
     if (!featureId || !MODULE_SUBSCRIPTION_PLANS_BASE[featureId]) {
-        return res.status(400).json({ success: false, message: 'Invalid or missing featureId (rbac_management/multi_branch/ai_assistant).' });
+        return res.status(400).json({ success: false, message: 'Invalid or missing featureId (a module subscription: rbac_management/multi_branch/ai_assistant/remote_operations/marketplace_hub/self_order_kiosk).' });
     }
     if (monthly !== undefined && (typeof monthly !== 'number' || !isFinite(monthly) || monthly < 0)) {
         return res.status(400).json({ success: false, message: 'Invalid monthly price.' });
@@ -6556,7 +6566,7 @@ app.post('/relay/admin/api/pricing/module-subscriptions', requireAdminKey, (req,
 app.post('/relay/admin/api/pricing/module-subscriptions/reset', requireAdminKey, (req, res) => {
     const { featureId } = req.body || {};
     if (!featureId || !MODULE_SUBSCRIPTION_PLANS_BASE[featureId]) {
-        return res.status(400).json({ success: false, message: 'Invalid or missing featureId (rbac_management/multi_branch/ai_assistant).' });
+        return res.status(400).json({ success: false, message: 'Invalid or missing featureId (a module subscription: rbac_management/multi_branch/ai_assistant/remote_operations/marketplace_hub/self_order_kiosk).' });
     }
     delete moduleSubscriptionOverrides[featureId];
     saveModuleSubscriptionOverrides(moduleSubscriptionOverrides);
@@ -6585,7 +6595,7 @@ app.get('/relay/admin/api/pricing/features', requireAdminKey, (req, res) => {
 app.post('/relay/admin/api/pricing/features', requireAdminKey, (req, res) => {
     const { featureId, name, price } = req.body || {};
     if (!featureId || isSubscriptionOnlyFeature(featureId) || !FEATURE_CATALOG[featureId]) {
-        return res.status(400).json({ success: false, message: 'Invalid or unknown featureId (or it is a subscription feature — cloud_backup/rbac_management/multi_branch/ai_assistant — which has its own dedicated pricing editor).' });
+        return res.status(400).json({ success: false, message: 'Invalid or unknown featureId (or it is a subscription feature — cloud_backup/rbac_management/multi_branch/ai_assistant/remote_operations/marketplace_hub/self_order_kiosk — which has its own dedicated pricing editor).' });
     }
     if (price !== undefined && (typeof price !== 'number' || !isFinite(price) || price < 0)) {
         return res.status(400).json({ success: false, message: 'Invalid price.' });
@@ -7050,9 +7060,9 @@ app.get('/relay/admin/api/analytics', requireAdminKey, (req, res) => {
 //      ng Omni AI at ang cash-in galing sa pagbebenta ng Omni Tokens.
 // Buwan ay nakabatay sa Asia/Manila (UTC+8). Walang binabago sa data.
 // ===================================================================
-const ANALYTICS_SUBSCRIPTION_IDS = ['cloud_backup', 'ai_assistant', 'multi_branch', 'rbac_management', 'remote_operations', 'marketplace_hub'];
+const ANALYTICS_SUBSCRIPTION_IDS = ['cloud_backup', 'ai_assistant', 'multi_branch', 'rbac_management', 'remote_operations', 'marketplace_hub', 'self_order_kiosk'];
 const ANALYTICS_MANILA_OFFSET_MS = 8 * 60 * 60 * 1000;
-const ANALYTICS_LEDGER_BUCKET_ORDER = ['cloud_backup', 'ai_assistant', 'multi_branch', 'rbac_management', 'remote_operations', 'marketplace_hub', 'ai_plan', 'ai_extra', 'ai_boost', 'receipt_credits', 'bundle', 'addons_other'];
+const ANALYTICS_LEDGER_BUCKET_ORDER = ['cloud_backup', 'ai_assistant', 'multi_branch', 'rbac_management', 'remote_operations', 'marketplace_hub', 'self_order_kiosk', 'ai_plan', 'ai_extra', 'ai_boost', 'receipt_credits', 'bundle', 'addons_other'];
 function analyticsRound2(n) {
     const v = Number(n);
     return Number.isFinite(v) ? Math.round(v * 100) / 100 : 0;
