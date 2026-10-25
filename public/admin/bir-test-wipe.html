@@ -11,7 +11,14 @@ h2{font-size:1.05rem;margin:0 0 10px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:14px 0}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
 .field{display:flex;flex-direction:column;gap:4px;font-size:.85rem;color:var(--muted);flex:1;min-width:200px}
-input{background:#0a0f1c;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px;font:inherit;width:100%}
+input,select{background:#0a0f1c;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px;font:inherit;width:100%}
+.browse{margin-top:6px;border:1px solid var(--line);border-radius:10px;background:#0a0f1c;padding:8px}
+.devlist{max-height:280px;overflow:auto;margin-top:8px;display:flex;flex-direction:column;gap:6px}
+.dev{display:flex;gap:10px;align-items:center;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#101625;cursor:pointer;text-align:left;width:100%}
+.dev:hover,.dev.sel{border-color:var(--accent);background:#0f2230}
+.dev .dot{width:10px;height:10px;border-radius:50%;background:#55627f;flex:0 0 auto}.dev .dot.on{background:var(--green);box-shadow:0 0 6px var(--green)}
+.dev b{display:block;font-size:.95rem}.dev>span:nth-child(2){min-width:0;flex:1}.dev small{display:block;color:var(--muted);word-break:break-all;font-size:.72rem}
+.tag{margin-left:auto;font-size:.68rem;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--muted);white-space:nowrap}.tag.ok{color:var(--green);border-color:#1f5a3d}.tag.no{color:var(--amber);border-color:#6b5514}
 button{background:#16213a;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px 14px;font:inherit;cursor:pointer}
 button.danger{background:var(--red);color:#1a0509;border-color:var(--red);font-weight:700}
 button:disabled{opacity:.5;cursor:not-allowed}
@@ -25,6 +32,9 @@ th,td{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertic
 .hidden{display:none}
 .check{display:flex;gap:8px;align-items:flex-start;margin:8px 0;font-size:.9rem}
 .check input{width:auto;margin-top:4px}
+.custname{margin-top:6px;font-size:.9rem;color:var(--green);min-height:1.3em}
+.custname.none{color:var(--amber)}
+.pick{display:flex;gap:6px}.pick input{flex:1}.pick button{white-space:nowrap}
 </style></head><body><main>
 <p><a href="bir-passkeys.html">← BIR Reset Pass Keys</a> · <a href="index.html#system">RELAY Admin</a></p>
 <h1>BIR Test Wipe (remote)</h1>
@@ -38,11 +48,17 @@ th,td{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertic
 
 <section class="card"><h2>Send wipe command</h2>
 <div class="row">
-<label class="field">Installation ID of the test client<input id="installationId" maxlength="200" autocomplete="off" placeholder="e.g. 3d7647c1-c0af-48bc-aff7-bcfb038864a8"></label>
+<div class="field" style="flex:1 1 100%">Installation ID of the test client
+<div class="pick"><input id="installationId" list="deviceList" maxlength="200" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Pick from the list or type / paste the ID"><button type="button" id="clearId" title="Clear">✕</button></div>
+<datalist id="deviceList"></datalist>
+<button type="button" id="browseBtn" style="margin-top:6px;text-align:left">📋 Browse clients (<span id="devCount">0</span>)</button>
+<div id="browse" class="browse hidden"><input id="devFilter" placeholder="Search name, store or ID…" autocomplete="off"><div id="devList" class="devlist"></div></div>
+<div id="custName" class="custname"></div></div>
 <label class="field" style="max-width:220px">Valid for (minutes)<input id="ttl" type="number" min="2" max="60" value="15"></label></div>
 <div class="row" style="margin-top:8px">
 <label class="field">Reference (shown on the client's confirmation)<input id="reference" maxlength="160" placeholder="e.g. test run 12"></label></div>
-<label class="field" style="margin-top:8px">Developer passkey (RELAY_BIR_RESET_PASSKEY)<input id="developerPasskey" type="password" autocomplete="off" placeholder="Enter the developer passkey"></label>
+<label class="field" style="margin-top:8px">Developer passkey (RELAY_BIR_RESET_PASSKEY)<input id="developerPasskey" name="password" type="password" autocomplete="current-password" placeholder="Enter the developer passkey"></label>
+<label class="check"><input type="checkbox" id="rememberPk"><span>Remember the developer passkey on this device (autofill). Untick to forget it.</span></label>
 <label class="check hidden" id="unknownWrap"><input type="checkbox" id="unknownAck"><span>This installation is not in this RELAY's allowed-devices list, and I confirm it is my test client.</span></label>
 <label class="check"><input type="checkbox" id="confirmChk"><span>I understand this wipes ALL BIR data of that installation, including the retention vault, and cannot be undone.</span></label>
 <div class="row"><button id="sendBtn" class="danger">Send wipe command</button></div></section>
@@ -89,7 +105,75 @@ th,td{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertic
       say(r.json.message || 'Could not load the commands (wrong admin key?).', true);
     }
   }
-  function connect() { load(); if (!timer) timer = setInterval(() => { if ($('adminKey').value && !document.hidden) load(); }, 5000); }
+
+  // ===== Installation dropdown + customer name =====
+  let devices = []; // [{id,label,store,allowed}]
+  const PK_KEY = 'relayBirWipePasskey';
+  const REF_AUTO_FLAG = 'data-auto';
+  function nameOf(d) { return d ? (d.label || d.store || '') : ''; }
+  function findDevice(id) { return devices.find((d) => d.id === id) || null; }
+  function today() { const t = new Date(); return t.getFullYear() + '-' + String(t.getMonth() + 1).padStart(2, '0') + '-' + String(t.getDate()).padStart(2, '0'); }
+  function defaultReference(d) { return 'BIR test wipe - ' + (nameOf(d) || 'test client') + ' - ' + today(); }
+  function refreshName() {
+    const id = $('installationId').value.trim(); const box = $('custName');
+    if (!id) { box.textContent = ''; box.className = 'custname'; renderDevList(); return; }
+    const d = findDevice(id);
+    if (d) {
+      box.className = 'custname';
+      box.textContent = '👤 ' + (nameOf(d) || '(no label / store name)') + (d.allowed ? '' : ' · not allowed');
+      $('unknownWrap').classList.toggle('hidden', d.allowed);
+    } else {
+      box.className = 'custname none'; box.textContent = '⚠ Not in the list (manual ID)';
+    }
+    renderDevList();
+    const ref = $('reference');
+    if (!ref.value.trim() || ref.getAttribute(REF_AUTO_FLAG) === '1') { ref.value = defaultReference(d); ref.setAttribute(REF_AUTO_FLAG, '1'); }
+  }
+  async function loadDevices() {
+    if (!$('adminKey').value) return;
+    const r = await api('devices', 'GET');
+    if (!r.ok) return;
+    const map = new Map();
+    for (const s of (r.json.seenDevices || [])) map.set(s.installationId, { id: s.installationId, label: s.label || '', store: s.storeName || '', allowed: !!s.allowed, online: !!s.online });
+    const labels = r.json.deviceLabels || {};
+    for (const id of (r.json.allowedDevices || [])) { const e = map.get(id) || { id, label: '', store: '', allowed: true, online: false }; e.allowed = true; if (!e.label && labels[id]) e.label = labels[id]; map.set(id, e); }
+    devices = [...map.values()].sort((a, b) => (nameOf(a) || '~').localeCompare(nameOf(b) || '~'));
+    const dl = $('deviceList'); dl.textContent = '';
+    for (const d of devices) {
+      const o1 = document.createElement('option'); o1.value = d.id; o1.label = (nameOf(d) || '(no name)') + ' — ' + d.id; o1.textContent = o1.label; dl.appendChild(o1);
+    }
+    $('devCount').textContent = devices.length;
+    refreshName();
+  }
+  function renderDevList() {
+    const box = $('devList'); if (!box) return; box.textContent = '';
+    const q = $('devFilter').value.trim().toLowerCase(), cur = $('installationId').value.trim();
+    const list = devices.filter((d) => !q || (nameOf(d) + ' ' + d.id).toLowerCase().includes(q));
+    if (!list.length) { const p = document.createElement('div'); p.className = 'small'; p.textContent = devices.length ? 'No match.' : 'No clients loaded yet (enter the admin key).'; box.appendChild(p); return; }
+    for (const d of list) {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'dev' + (d.id === cur ? ' sel' : '');
+      const dot = document.createElement('span'); dot.className = 'dot' + (d.online ? ' on' : ''); dot.title = d.online ? 'Online' : 'Offline';
+      const wrap = document.createElement('span'); const n = document.createElement('b'); n.textContent = nameOf(d) || '(no name)'; const i = document.createElement('small'); i.textContent = d.id; wrap.appendChild(n); wrap.appendChild(i);
+      const tag = document.createElement('span'); tag.className = 'tag ' + (d.allowed ? 'ok' : 'no'); tag.textContent = d.allowed ? 'allowed' : 'not allowed';
+      b.appendChild(dot); b.appendChild(wrap); b.appendChild(tag);
+      b.addEventListener('click', () => { $('installationId').value = d.id; $('browse').classList.add('hidden'); refreshName(); });
+      box.appendChild(b);
+    }
+  }
+  $('browseBtn').addEventListener('click', () => { $('browse').classList.toggle('hidden'); renderDevList(); if (!$('browse').classList.contains('hidden')) $('devFilter').focus(); });
+  $('devFilter').addEventListener('input', renderDevList);
+  $('installationId').addEventListener('input', refreshName);
+  $('installationId').addEventListener('change', refreshName);
+  $('clearId').addEventListener('click', () => { $('installationId').value = ''; refreshName(); $('installationId').focus(); });
+  $('reference').addEventListener('input', () => { $('reference').removeAttribute(REF_AUTO_FLAG); });
+  if (!$('reference').value) { $('reference').value = defaultReference(null); $('reference').setAttribute(REF_AUTO_FLAG, '1'); }
+
+  // ===== Developer passkey autofill (stored only in this browser, only if the box is ticked) =====
+  (function restorePk() { try { const v = localStorage.getItem(PK_KEY); if (v) { $('developerPasskey').value = v; $('rememberPk').checked = true; } } catch (_s) {} })();
+  function savePk() { try { if ($('rememberPk').checked && $('developerPasskey').value) localStorage.setItem(PK_KEY, $('developerPasskey').value); else localStorage.removeItem(PK_KEY); } catch (_s) {} }
+  $('rememberPk').addEventListener('change', savePk);
+
+  function connect() { loadDevices(); load(); if (!timer) timer = setInterval(() => { if ($('adminKey').value && !document.hidden) load(); }, 5000); }
   $('adminKey').addEventListener('change', connect);
   // Kusang login: gamitin ang admin key na naka-save na sa tab na ito (sessionStorage, parehong gamit ng ibang admin page; nabubura kapag isinara ang tab).
   (function autoLogin() { let saved = ''; try { saved = sessionStorage.getItem('relayAdminKey') || ''; } catch (_s) {} if (saved) { $('adminKey').value = saved; connect(); } })();
@@ -103,7 +187,7 @@ th,td{border-bottom:1px solid var(--line);padding:6px 4px;text-align:left;vertic
       });
       if (r.json && r.json.code === 'UNKNOWN_DEVICE') $('unknownWrap').classList.remove('hidden');
       say(r.json.message || (r.ok ? 'Sent.' : 'Failed.'), !r.ok);
-      if (r.ok) { $('developerPasskey').value = ''; $('confirmChk').checked = false; }
+      if (r.ok) { savePk(); if (!$('rememberPk').checked) $('developerPasskey').value = ''; $('confirmChk').checked = false; }
       load();
     } catch (e) { say('Could not reach RELAY.', true); }
     finally { $('sendBtn').disabled = false; }
