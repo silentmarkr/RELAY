@@ -21990,8 +21990,11 @@ const BUILD_EXCLUDE_NAMES = new Set([
     '.start.sh.lock', '.self-update-backup', 'package-lock.json',
     'build-release.js', 'obfuscate-worker.js', 'start.sh.bak', 'vacuum-now.js',
     'cloud-backup-pricing-cache.json',
+    // SECURITY: dev/runtime leftovers na hindi dapat mapunta sa customer package.
+    'logs', 'certs', '.start.sh.lock.d', '.omnipos-device-seed', '.env.key',
+    'diagnose.py', 'fix_modals.py', 'recreate-widgets.sh',
 ]);
-const BUILD_EXCLUDE_EXTENSIONS = new Set(['.log', '.patch']);
+const BUILD_EXCLUDE_EXTENSIONS = new Set(['.log', '.patch', '.bak', '.bak-kiosk', '.relaybak']);
 function removeExcludedRecursive(dir) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         const fullPath = path.join(dir, entry.name);
@@ -22024,6 +22027,8 @@ const RELEASE_SERVER_TARGETS = new Set([
     // omnipos-client.zip na ginawa ng remote build na ito.
     'bir-compliance.js',
     'uom-pricing.js',
+    'kiosk.js', // Self-Order Kiosk server module (license gate + Developer PIN logic)
+    'daily-digest.js', // Daily Owner Summary report module
 ]);
 const RELEASE_CLIENT_TARGETS = new Set([
     path.join('public', 'app.js'),
@@ -22033,6 +22038,7 @@ const RELEASE_CLIENT_TARGETS = new Set([
     // app.js, kaya na-e-excempt sa obfuscation sa remote build path.
     path.join('public', 'app1.js'),
     path.join('public', 'marketplace-ui.js'), // OMNIPOS Marketplace Hub UI
+    path.join('public', 'daily-digest-ui.js'), // OMNIPOS Daily Summary card UI
     path.join('public', 'bt-printer.js'),
     // Printer Device Settings (Bluetooth brand presets + WiFi/LAN network
     // printing) — proprietary code, must ship/obfuscate alongside bt-printer.js.
