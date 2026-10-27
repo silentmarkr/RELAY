@@ -22,10 +22,16 @@ const fs = require('fs');
 const path = require('path');
 const { parentPort, workerData } = require('worker_threads');
 const JavaScriptObfuscator = require('javascript-obfuscator');
+const { lowerForLegacy } = require('./legacy-lower.js');
 
 try {
     const { code, srcPath, destPath, options } = workerData;
-    const source = typeof code === 'string' ? code : fs.readFileSync(srcPath, 'utf8');
+    const rawSource = typeof code === 'string' ? code : fs.readFileSync(srcPath, 'utf8');
+    // Browser (client) code is first lowered to Chrome 70-compatible syntax (optional chaining, ??, etc.)
+    // so old Android WebViews can run it. Server code (target 'node') is never touched.
+    const source = (options && options.target === 'browser')
+        ? lowerForLegacy(rawSource, srcPath ? path.basename(srcPath) : 'inline-script')
+        : rawSource;
     const result = JavaScriptObfuscator.obfuscate(source, options);
     const obfuscatedCode = result.getObfuscatedCode();
 

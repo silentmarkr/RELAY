@@ -21988,9 +21988,9 @@ app.post('/relay/admin/api/pricing/cloud-backup-sync-compute/reset', requireAdmi
 const BUILD_EXCLUDE_NAMES = new Set([
     '.git', 'node_modules', 'database', 'release', 'uploads_tmp',
     '.start.sh.lock', '.self-update-backup', 'package-lock.json',
-    'build-release.js', 'obfuscate-worker.js', 'start.sh.bak', 'vacuum-now.js',
+    'build-release.js', 'obfuscate-worker.js', 'legacy-lower.js', 'start.sh.bak', 'vacuum-now.js',
     'cloud-backup-pricing-cache.json',
-    // SECURITY: dev/runtime leftovers na hindi dapat mapunta sa customer package.
+    // SECURITY: dev/runtime leftovers that must never end up in the customer package.
     'logs', 'certs', '.start.sh.lock.d', '.omnipos-device-seed', '.env.key',
     'diagnose.py', 'fix_modals.py', 'recreate-widgets.sh',
 ]);
@@ -22278,6 +22278,7 @@ function getReleaseObfProfile(type, fullPath) {
     if (type === 'client' || type === 'html') return pickReleaseObfOptions(fullPath, true);
     return null; // 'css' has no JS obfuscation profile
 }
+const { LEGACY_LOWER_VERSION } = require('./legacy-lower.js'); // build-only helper; esbuild itself is loaded lazily inside the worker
 function releaseItemOptionsHash(type, obfProfile) {
     let profile;
     if (type === 'html') profile = { htmlStripVersion: HTML_STRIP_VERSION, obf: obfProfile };
@@ -22305,7 +22306,9 @@ function releaseItemOptionsHash(type, obfProfile) {
             cursor = parent;
         }
     } catch (_) {}
-    return sha256Buffer(Buffer.from(JSON.stringify({ schema: 1, type, profile, obfuscatorVersion, nodeMajor: process.versions.node.split('.')[0] })));
+    // Client/HTML output is lowered for Chrome 70 before obfuscation: include that version so older cached output is never reused.
+    const legacyLower = (type === 'client' || type === 'html') ? LEGACY_LOWER_VERSION : undefined;
+    return sha256Buffer(Buffer.from(JSON.stringify({ schema: 1, type, profile, obfuscatorVersion, legacyLower, nodeMajor: process.versions.node.split('.')[0] })));
 }
 async function loadObfuscationCacheManifest() {
     const fromDb = await buildKvGetJSON(OBFUSCATION_CACHE_MANIFEST_KEY, null);
