@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#05070d"><title>URL Checker — RELAY Admin</title>
+<style>
+:root{color-scheme:dark;--bg:#05070d;--card:#101625;--line:#26334f;--text:#eafcff;--muted:#9aabc9;--accent:#22e5ff;--green:#3ddc84;--red:#ff5c72;--amber:#ffc857;--blue:#7aa7ff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{max-width:760px;margin:0 auto;padding:18px 14px 70px}
+a{color:var(--accent)}h1{font-size:1.4rem;margin:.4rem 0}h2{font-size:1.05rem;margin:0 0 10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:14px 0}
+.field{display:flex;flex-direction:column;gap:4px;font-size:.85rem;color:var(--muted);margin:8px 0}
+input[type=text],input[type=password]{background:#0a0f1c;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px;font:inherit;width:100%}
+button{background:#16213a;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px 16px;font:inherit;cursor:pointer}
+button.primary{background:var(--accent);color:#04222a;border-color:var(--accent);font-weight:700}
+button.mini{padding:4px 10px;font-size:.78rem}
+button:disabled{opacity:.5;cursor:not-allowed}
+.small{font-size:.8rem;color:var(--muted)}
+.notice{margin:10px 0;padding:9px 12px;border-radius:8px;background:#0a1a14;border:1px solid #1f5a3d;color:var(--green);display:none}
+.notice.error{background:#2a0e14;border-color:#7a2230;color:var(--red)}.notice.show{display:block}
+.warnbox{background:#2a2108;border:1px solid #6b5514;color:var(--amber);padding:9px 12px;border-radius:8px;margin:10px 0}
+.pills{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
+.pill{padding:4px 12px;border-radius:999px;border:1px solid var(--line);font-size:.85rem;font-weight:600}
+.pill.ok{color:var(--green)}.pill.warn{color:var(--amber)}.pill.fail{color:var(--red)}.pill.manual{color:var(--blue)}
+.verdict{padding:12px 14px;border-radius:10px;border:1px solid var(--line);font-weight:700;margin:8px 0}
+.verdict.good{background:#0a1a14;border-color:#1f5a3d;color:var(--green)}
+.verdict.bad{background:#2a0e14;border-color:#7a2230;color:var(--red)}
+.verdict.meh{background:#2a2108;border-color:#6b5514;color:var(--amber)}
+.item{border-left:4px solid var(--line);padding:8px 10px;margin:8px 0;background:#0a0f1c;border-radius:6px}
+.item.ok{border-color:var(--green)}.item.warn{border-color:var(--amber)}.item.fail{border-color:var(--red)}.item.info{border-color:#4b5b7c}.item.manual{border-color:var(--blue)}
+.item .t{font-weight:600}.item .d{font-size:.84rem;color:var(--muted);word-break:break-word;margin-top:2px}.item .f{font-size:.84rem;color:var(--amber);margin-top:3px;word-break:break-word}
+.item label{display:flex;gap:8px;align-items:flex-start;cursor:pointer}
+.copyrow{display:flex;gap:8px;align-items:center;margin:6px 0}
+.copyrow code{flex:1;background:#0a0f1c;border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:.78rem;word-break:break-all}
+.copyrow .n{width:78px;font-size:.78rem;color:var(--muted)}
+</style></head><body><main>
+<p><a href="index.html#system">← RELAY Admin</a></p>
+<h1>Public URL Checker</h1>
+<div class="warnbox">Gamitin ito <b>pagkatapos mong magpalit ng Render (public) URL</b>. Ipinapakita nito kung alin ang nakatuturo pa sa lumang URL: webhook sa payment dashboard, RELAY_PUBLIC_URL, Render env, at mga kliyente. Walang secret na ipinapakita; “tugma / hindi tugma” lang.</div>
+
+<section class="card"><h2>Admin authentication</h2>
+<label class="field">RELAY admin key<input id="adminKey" type="password" autocomplete="current-password" placeholder="Enter ADMIN_KEY"></label>
+<label class="field">Bagong URL na i-che-check (opsyonal — iwan kung ang kasalukuyang RELAY_PUBLIC_URL ang gusto mo)<input id="expected" type="text" placeholder="https://relay.example.com" autocomplete="off" spellcheck="false"></label>
+<div style="margin-top:8px"><button id="runBtn" class="primary">I-check ngayon</button></div>
+<p class="small">Tip: buksan ang page na ito gamit mismo ang bagong public URL para awtomatikong makita ng RELAY kung saan ka nakakonekta.</p></section>
+
+<div id="notice" class="notice" role="status"></div>
+<div id="result" hidden>
+  <section class="card"><h2>Resulta</h2><div id="verdict" class="verdict"></div><div id="pills" class="pills"></div><p class="small" id="meta"></p></section>
+  <section class="card"><h2>Mga URL na dapat nakalagay</h2><p class="small">Kopyahin at ilagay sa tamang lugar.</p><div id="copy"></div></section>
+  <section class="card"><h2>Mga nakita</h2><div id="items"></div></section>
+  <section class="card"><h2>Mano-manong i-update (hindi ma-detect ng RELAY)</h2><p class="small">I-tick kapag tapos na. Naka-save lang ito sa browser na ito.</p><div id="manual"></div></section>
+</div>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const GROUPS=[['url','RELAY URL'],['payments','Payment providers (webhooks)'],['env','Render environment'],['clients','Mga kliyente']];
+  const ICON={ok:'✅',warn:'⚠️',fail:'❌',info:'ℹ️',manual:'📝'};
+  function say(m,bad){const n=$('notice');n.textContent=m;n.className='notice show'+(bad?' error':'')}
+  function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
+  async function copy(text,btn){
+    try{await navigator.clipboard.writeText(text)}catch(_){const t=document.createElement('textarea');t.value=text;document.body.appendChild(t);t.select();try{document.execCommand('copy')}catch(_e){}t.remove()}
+    const old=btn.textContent;btn.textContent='Nakopya';setTimeout(()=>{btn.textContent=old},1200);
+  }
+  function renderItem(i,checkKey){
+    const box=el('div','item '+i.status);
+    const head=el('div','t');
+    if(i.status==='manual'&&checkKey){
+      const lab=el('label');const cb=document.createElement('input');cb.type='checkbox';
+      let store={};try{store=JSON.parse(localStorage.getItem(checkKey)||'{}')}catch(_){}
+      cb.checked=!!store[i.id];
+      cb.onchange=()=>{let s={};try{s=JSON.parse(localStorage.getItem(checkKey)||'{}')}catch(_){}s[i.id]=cb.checked;try{localStorage.setItem(checkKey,JSON.stringify(s))}catch(_){}};
+      lab.appendChild(cb);const w=el('div');w.appendChild(el('div','t',i.title));if(i.detail)w.appendChild(el('div','d',i.detail));if(i.fix)w.appendChild(el('div','f',i.fix));lab.appendChild(w);box.appendChild(lab);return box;
+    }
+    head.textContent=(ICON[i.status]||'')+' '+i.title;box.appendChild(head);
+    if(i.detail)box.appendChild(el('div','d',i.detail));
+    if(i.fix)box.appendChild(el('div','f','Gawin: '+i.fix));
+    return box;
+  }
+  function render(r){
+    $('result').hidden=false;
+    const s=r.summary||{};
+    const v=$('verdict');
+    if(s.fail>0){v.className='verdict bad';v.textContent='❌ May '+s.fail+' kailangang ayusin bago maging ligtas ang pagpapalit ng URL.'}
+    else if(s.warn>0){v.className='verdict meh';v.textContent='⚠️ Walang malubhang mali, pero may '+s.warn+' babala.'}
+    else{v.className='verdict good';v.textContent='✅ Walang nakitang problema sa RELAY. Ituloy sa mano-manong checklist sa ibaba.'}
+    const pills=$('pills');pills.textContent='';
+    [['ok','✅ OK',s.ok],['warn','⚠️ Babala',s.warn],['fail','❌ Mali',s.fail],['manual','📝 Mano-mano',s.manual]].forEach(p=>pills.appendChild(el('span','pill '+p[0],p[1]+': '+(p[2]||0))));
+    const u=r.urls||{};
+    $('meta').textContent='Sinusuri: '+(u.expected||'—')+' | Nakita mong URL: '+(u.detected||'—')+' | RELAY_PUBLIC_URL: '+(u.configured||'wala')+' | Uptime: '+Math.round((r.uptimeSec||0)/60)+' min (ang activity stats ay mula pa sa huling restart)';
+    const copyBox=$('copy');copyBox.textContent='';
+    const rows=[['RELAY_URL',r.copy&&r.copy.relayUrl]];
+    const w=(r.copy&&r.copy.webhooks)||{};
+    Object.keys(w).forEach(k=>rows.push([k,w[k]]));
+    rows.forEach(row=>{if(!row[1])return;const d=el('div','copyrow');d.appendChild(el('span','n',row[0]));d.appendChild(el('code',null,row[1]));const b=el('button','mini','Kopyahin');b.onclick=()=>copy(row[1],b);d.appendChild(b);copyBox.appendChild(d)});
+    if(!copyBox.firstChild)copyBox.appendChild(el('p','small','Walang URL na mapagbabatayan.'));
+    const items=$('items');items.textContent='';
+    GROUPS.forEach(g=>{
+      const list=(r.items||[]).filter(i=>i.group===g[0]&&i.status!=='manual');
+      if(!list.length)return;
+      items.appendChild(el('h2',null,g[1]));
+      const order={fail:0,warn:1,info:2,ok:3};
+      list.sort((a,b)=>(order[a.status]??9)-(order[b.status]??9)).forEach(i=>items.appendChild(renderItem(i)));
+    });
+    const manualItems=(r.items||[]).filter(i=>i.status==='manual');
+    const manual=$('manual');manual.textContent='';
+    const key='relayUrlCheck:'+(u.expected||'none');
+    manualItems.forEach(i=>manual.appendChild(renderItem(i,key)));
+  }
+  async function run(){
+    const btn=$('runBtn');btn.disabled=true;btn.textContent='Sinusuri…';
+    try{
+      const exp=$('expected').value.trim();
+      const r=await fetch('/relay/admin/api/url-check'+(exp?('?expected='+encodeURIComponent(exp)):''),{headers:{'x-relay-admin-key':$('adminKey').value}});
+      let j={};try{j=await r.json()}catch(_){}
+      if(!r.ok||j.success===false){const e=new Error(j.message||('HTTP '+r.status));e.status=r.status;throw e}
+      try{sessionStorage.setItem('relayAdminKey',$('adminKey').value)}catch(_){}
+      render(j);say('Tapos na ang check ('+new Date(j.generatedAt).toLocaleTimeString()+').');
+    }catch(e){
+      if(e.status===401||e.status===403){try{sessionStorage.removeItem('relayAdminKey')}catch(_){}}
+      say(e.message,true);
+    }finally{btn.disabled=false;btn.textContent='I-check ngayon'}
+  }
+  $('runBtn').onclick=run;
+  let saved='';try{saved=sessionStorage.getItem('relayAdminKey')||''}catch(_){}
+  if(saved){$('adminKey').value=saved;run()}
+})();
+</script></main></body></html>

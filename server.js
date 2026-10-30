@@ -5890,6 +5890,427 @@ function requireAdminKey(req, res, next) {
     next();
 }
 app.use('/relay/admin', express.static(path.join(__dirname, 'public', 'admin')));
+
+// ===================================================================
+// RELAY PUBLIC URL CHECKER
+// Kapag nagpalit ng Render (public) URL ang RELAY, maraming lugar ang
+// nakatali sa lumang URL: ang webhook sa payment dashboard, ang RELAY_URL
+// ng bawat OMNIPOS/APK, ang naka-generate na client package, atbp.
+// Ang page na ito (admin: url-check.html) at ang API sa ibaba ay mabilisang
+// nagche-check kung alin ang HINDI pa na-update — at nagpapadala ng
+// Telegram alert pagkatapos ng bawat restart/deploy kung may nakitang mali.
+//   - HINDI kailanman ipinapakita ang value ng kahit anong secret/key;
+//     "set / hindi set" at "tugma / hindi tugma" lang.
+//   - Ang stats ay nasa memory lang (nare-reset sa bawat restart).
+//   - RELAY_URL_CHECK_BOOT_ALERT=off para i-disable ang alert sa boot.
+// ===================================================================
+const URL_CHECK_INSTANCE_ID = crypto.randomUUID();
+const URL_CHECK_BOOT_AT = Date.now();
+const URL_CHECK_MAX_TRACKED = 50;
+const urlCheckWebhookStats = new Map(); // provider -> { total, ok, rejected, errors, lastAt, lastStatus, lastOkAt }
+const urlCheckHostStats = new Map(); // host na ginamit ng mga kliyente -> { count, lastAt }
+const urlCheckBaseMismatches = new Map(); // installationId(8) -> { base, count, lastAt }
+
+// Binibilang ang bawat webhook na dumarating (anong provider, anong status ang isinagot) — walang binabago sa mismong handler.
+app.use('/relay/webhooks', (req, res, next) => {
+    const provider = String(req.path || '').replace(/^\/+/, '').split('/')[0].toLowerCase().slice(0, 30) || 'unknown';
+    res.on('finish', () => {
+        try {
+            const s = urlCheckWebhookStats.get(provider) || { total: 0, ok: 0, rejected: 0, errors: 0, lastAt: 0, lastStatus: null, lastOkAt: 0 };
+            s.total += 1;
+            s.lastAt = Date.now();
+            s.lastStatus = res.statusCode;
+            if (res.statusCode >= 200 && res.statusCode < 300) { s.ok += 1; s.lastOkAt = s.lastAt; }
+            else if (res.statusCode >= 400 && res.statusCode < 500) s.rejected += 1;
+            else s.errors += 1;
+            if (urlCheckWebhookStats.size < URL_CHECK_MAX_TRACKED || urlCheckWebhookStats.has(provider)) urlCheckWebhookStats.set(provider, s);
+        } catch (_e) { /* tracking lang ito — huwag kailanman magdulot ng error */ }
+    });
+    next();
+});
+
+// Anong host (URL) ang ginagamit ng mga kliyente sa pagtawag sa RELAY — para makita kung may gumagamit pa ng ibang host.
+app.use('/relay', (req, res, next) => {
+    try {
+        const p = req.path || '';
+        if (!p.startsWith('/admin') && !p.startsWith('/webhooks') && !p.startsWith('/url-check')) {
+            const host = String(req.get('host') || '').trim().toLowerCase().slice(0, 120);
+            if (host && (urlCheckHostStats.size < URL_CHECK_MAX_TRACKED || urlCheckHostStats.has(host))) {
+                const h = urlCheckHostStats.get(host) || { count: 0, lastAt: 0 };
+                h.count += 1;
+                h.lastAt = Date.now();
+                urlCheckHostStats.set(host, h);
+            }
+        }
+    } catch (_e) { /* tracking lang */ }
+    next();
+});
+
+// Tinatawag ng purchase/create at donate-online: itinatala kapag ang returnBaseUrl ng kliyente (ang RELAY_URL niya) ay ibang host sa inaasahan.
+function urlCheckNoteClientBase(installationId, base, req) {
+    try {
+        const baseHost = new URL(base).host.toLowerCase();
+        const ownHost = String(req.get('host') || '').trim().toLowerCase();
+        const configured = urlCheckOrigin(process.env.RELAY_PUBLIC_URL);
+        const expectedHost = configured ? new URL(configured).host.toLowerCase() : ownHost;
+        if (!baseHost || !expectedHost || baseHost === expectedHost) return;
+        const key = String(installationId || 'unknown').slice(0, 8);
+        if (!urlCheckBaseMismatches.has(key) && urlCheckBaseMismatches.size >= URL_CHECK_MAX_TRACKED) return;
+        const m = urlCheckBaseMismatches.get(key) || { base: '', count: 0, lastAt: 0 };
+        m.base = String(base).slice(0, 160);
+        m.count += 1;
+        m.lastAt = Date.now();
+        urlCheckBaseMismatches.set(key, m);
+    } catch (_e) { /* tracking lang */ }
+}
+
+// Pampubliko at walang sikreto: sinasabi lang kung ANONG instance ng RELAY ang sumasagot sa isang URL.
+app.get('/relay/url-check/ping', rateLimit('url-check-ping', 60, 60 * 1000), (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.json({ ok: true, service: 'omnipos-relay', instanceId: URL_CHECK_INSTANCE_ID, bootAt: new Date(URL_CHECK_BOOT_AT).toISOString() });
+});
+
+function urlCheckOrigin(u) {
+    if (!u) return null;
+    const s = String(u).trim().replace(/^[\s'"]+|[\s'"]+$/g, '');
+    if (!/^https?:\/\//i.test(s)) return null;
+    try { return new URL(s).origin.toLowerCase(); } catch (_e) { return null; }
+}
+function urlCheckSameUrl(a, b) {
+    const norm = (u) => { try { const p = new URL(String(u).trim()); return (p.origin + p.pathname.replace(/\/+$/, '')).toLowerCase(); } catch (_e) { return null; } };
+    const x = norm(a); const y = norm(b);
+    return !!x && x === y;
+}
+function urlCheckAgo(ts) {
+    if (!ts) return null;
+    const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+    if (s < 90) return `${s} segundo na ang nakalipas`;
+    if (s < 5400) return `${Math.round(s / 60)} minuto na ang nakalipas`;
+    if (s < 172800) return `${Math.round(s / 3600)} oras na ang nakalipas`;
+    return `${Math.round(s / 86400)} araw na ang nakalipas`;
+}
+
+async function urlCheckFetchJson(url, options) {
+    const resp = await fetch(url, Object.assign({ signal: AbortSignal.timeout(8000) }, options || {}));
+    const body = await resp.json().catch(() => null);
+    return { ok: resp.ok, status: resp.status, body };
+}
+
+// Ang listahan ng webhook sa PayMongo account — itinatapat sa inaasahang URL. HINDI ibinabalik ang secret_key; boolean lang kung tugma sa env.
+async function urlCheckPaymongoWebhooks() {
+    const r = await urlCheckFetchJson(`${PAYMONGO_API_BASE}/webhooks`, { headers: { Authorization: paymongoAuthHeader(), accept: 'application/json' } });
+    if (!r.ok || !r.body || !Array.isArray(r.body.data)) {
+        const detail = r.body && r.body.errors && r.body.errors[0] && r.body.errors[0].detail;
+        throw new Error(detail || `PayMongo HTTP ${r.status}`);
+    }
+    return r.body.data.map((w) => {
+        const a = (w && w.attributes) || {};
+        let secretMatches = null;
+        if (a.secret_key && PAYMONGO_WEBHOOK_SECRET) secretMatches = safeCompare(String(a.secret_key), PAYMONGO_WEBHOOK_SECRET);
+        return { id: w.id, url: a.url || '', status: a.status || 'unknown', events: Array.isArray(a.events) ? a.events : [], secretMatches };
+    });
+}
+async function urlCheckStripeWebhooks() {
+    const r = await urlCheckFetchJson('https://api.stripe.com/v1/webhook_endpoints?limit=100', { headers: { Authorization: `Bearer ${STRIPE_SECRET_KEY}` } });
+    if (!r.ok || !r.body || !Array.isArray(r.body.data)) {
+        const detail = r.body && r.body.error && r.body.error.message;
+        throw new Error(detail || `Stripe HTTP ${r.status}`);
+    }
+    return r.body.data.map((w) => ({ id: w.id, url: w.url || '', status: w.status || 'unknown' }));
+}
+
+async function buildUrlCheckReport({ req, expectedOverride, skipPing }) {
+    const items = [];
+    const add = (group, status, id, title, detail, fix) => items.push({ group, status, id, title, detail: detail || '', fix: fix || '' });
+
+    const detected = req ? `${req.protocol}://${req.get('host')}` : null;
+    const configuredRaw = process.env.RELAY_PUBLIC_URL || null;
+    const configured = urlCheckOrigin(configuredRaw);
+    const override = urlCheckOrigin(expectedOverride);
+    const renderExternal = urlCheckOrigin(process.env.RENDER_EXTERNAL_URL);
+    const expected = override || configured || urlCheckOrigin(detected);
+    const urls = { detected: urlCheckOrigin(detected), configured, configuredRaw: configuredRaw ? String(configuredRaw).slice(0, 200) : null, expected, renderExternal };
+
+    // ---- 1) URL ng RELAY mismo ----
+    if (!configuredRaw) {
+        add('url', 'warn', 'public-url-missing', 'Walang RELAY_PUBLIC_URL sa Render', 'Kapag wala ito, ang client package at bootstrap ay gagamit ng host ng request — puwedeng ibang URL ang makuha kapag nagpalit ka.', expected ? `Render > Environment: RELAY_PUBLIC_URL=${expected}` : 'Render > Environment: ilagay ang RELAY_PUBLIC_URL.');
+    } else if (!configured) {
+        add('url', 'fail', 'public-url-invalid', 'Hindi tamang format ang RELAY_PUBLIC_URL', `Laman: ${urls.configuredRaw}`, 'Dapat nagsisimula sa https:// at walang sobrang espasyo o quotes (hal. https://relay.example.com).');
+    } else if (urls.detected && configured !== urls.detected) {
+        add('url', 'fail', 'public-url-differs', 'Iba ang RELAY_PUBLIC_URL sa URL na ginagamit mo ngayon', `RELAY_PUBLIC_URL: ${configured} | Ginamit mong URL sa page na ito: ${urls.detected}`, 'Kung bago ang tamang URL, palitan ang RELAY_PUBLIC_URL sa Render at i-redeploy. Kung sinadya (custom domain), buksan ang page na ito gamit ang public URL para mawala ang babalang ito.');
+    } else {
+        add('url', 'ok', 'public-url-ok', 'Tugma ang RELAY_PUBLIC_URL', configured);
+    }
+    if (!expected) {
+        add('url', 'warn', 'expected-unknown', 'Walang mapagbatayang URL', 'Walang RELAY_PUBLIC_URL at walang request na mapagkukunan ng host.');
+    } else {
+        if (/^http:\/\//.test(expected) && !/localhost|127\.0\.0\.1/.test(expected)) add('url', 'warn', 'not-https', 'Hindi https ang URL', expected, 'Gumamit ng https:// — kailangan ito ng payment providers at ng mobile app.');
+        if (/localhost|127\.0\.0\.1|0\.0\.0\.0/.test(expected)) add('url', 'fail', 'local-url', 'Local address ang URL', expected, 'Hindi maaabot ng labas ang localhost. Ilagay ang public URL ng Render.');
+        if (/\.onrender\.com$/.test(new URL(expected).hostname)) add('url', 'info', 'onrender-default', 'Default na onrender.com URL ang gamit', expected, 'Gumamit ng custom domain na naka-CNAME sa Render para hindi na kailangang palitan ang lahat kapag gumawa ka ng bagong service.');
+    }
+    if (renderExternal) add('url', 'info', 'render-external', 'Default URL ng Render service na ito', `${renderExternal}${configured && configured !== renderExternal ? ' (iba ito sa RELAY_PUBLIC_URL — normal lang kung custom domain ang gamit mo)' : ''}`);
+    if (!skipPing && expected) {
+        try {
+            const r = await urlCheckFetchJson(`${expected}/relay/url-check/ping`, {});
+            if (r.ok && r.body && r.body.instanceId === URL_CHECK_INSTANCE_ID) {
+                add('url', 'ok', 'ping-same', 'Ang URL ay tumuturo sa RELAY na ito', `${expected} -> instance ${String(URL_CHECK_INSTANCE_ID).slice(0, 8)}`);
+            } else if (r.ok && r.body && r.body.service === 'omnipos-relay') {
+                add('url', 'fail', 'ping-other', 'Ibang RELAY server ang sumasagot sa URL na iyon', `${expected} ay sinasagot ng ibang instance (${String(r.body.instanceId || '?').slice(0, 8)}) — baka luma pang Render service, o may bagong deploy na kasalukuyang nagpapalit.`, 'Siguraduhing ang URL na ito ay ang bagong service. Kung kaka-deploy lang, i-check ulit pagkatapos ng ilang minuto.');
+            } else {
+                add('url', 'fail', 'ping-bad', 'Hindi RELAY ang sumasagot sa URL na iyon', `${expected} -> HTTP ${r.status}`, 'Mali ang URL, o luma at nakapatay na ang service.');
+            }
+        } catch (err) {
+            add('url', 'fail', 'ping-unreachable', 'Hindi maabot ang URL', `${expected}: ${err && err.message ? err.message : err}`, 'Tingnan kung tama ang URL, kung may DNS/CNAME na, at kung gising ang service.');
+        }
+    }
+
+    // ---- 2) Payment providers ----
+    const hooks = expected ? {
+        paymongo: `${expected}/relay/webhooks/paymongo`,
+        xendit: `${expected}/relay/webhooks/xendit`,
+        stripe: `${expected}/relay/webhooks/stripe`,
+        paypal: `${expected}/relay/webhooks/paypal`,
+        dragonpay: `${expected}/relay/webhooks/dragonpay`
+    } : {};
+    const activity = (provider, label) => {
+        const s = urlCheckWebhookStats.get(provider);
+        if (!s) {
+            add('payments', 'info', `${provider}-activity`, `${label}: wala pang webhook na natatanggap`, 'Mula nang huling restart ng RELAY. Normal ito kung wala pang bumibili.');
+        } else if (s.ok === 0 && s.rejected > 0) {
+            add('payments', 'fail', `${provider}-activity`, `${label}: may dumating na webhook pero lahat tinanggihan`, `${s.rejected} ang tinanggihan (HTTP 4xx), huli ${urlCheckAgo(s.lastAt)}. Karaniwang sanhi: mali ang webhook secret/token, o hindi tugma ang live/test mode.`, 'Ihambing ang secret sa dashboard sa Render env, tapos i-restart.');
+        } else if (s.errors > 0 && s.ok === 0) {
+            add('payments', 'fail', `${provider}-activity`, `${label}: nag-error ang RELAY sa mga webhook`, `${s.errors} ang nag-error (HTTP 5xx), huli ${urlCheckAgo(s.lastAt)}. Tingnan ang Render logs.`);
+        } else {
+            add('payments', 'ok', `${provider}-activity`, `${label}: tumatanggap ng webhook`, `${s.ok} matagumpay, ${s.rejected} tinanggihan, ${s.errors} error. Huling matagumpay: ${urlCheckAgo(s.lastOkAt) || 'wala pa'}.`);
+        }
+    };
+
+    if (PAYMONGO_SECRET_KEY) {
+        const keyPrefix = String(PAYMONGO_SECRET_KEY).slice(0, 8);
+        const wantPrefix = PAYMONGO_ENV === 'live' ? 'sk_live_' : 'sk_test_';
+        if (!keyPrefix.startsWith(wantPrefix)) add('payments', 'fail', 'paymongo-key-mode', `PayMongo: hindi tugma ang key sa PAYMONGO_ENV=${PAYMONGO_ENV}`, `Ang secret key ay hindi nagsisimula sa ${wantPrefix}.`, `Ilagay ang tamang ${PAYMONGO_ENV === 'live' ? 'PAYMONGO_LIVE_SECRET_KEY' : 'PAYMONGO_TEST_SECRET_KEY'}, o palitan ang PAYMONGO_ENV.`);
+        else add('payments', 'ok', 'paymongo-key-mode', `PayMongo: ${PAYMONGO_ENV.toUpperCase()} mode, tugma ang key`);
+        if (!PAYMONGO_WEBHOOK_SECRET) add('payments', 'fail', 'paymongo-secret-missing', `PayMongo: walang ${PAYMONGO_ENV === 'live' ? 'PAYMONGO_LIVE_WEBHOOK_SECRET' : 'PAYMONGO_TEST_WEBHOOK_SECRET'}`, 'Walang secret, kaya LAHAT ng webhook ay tatanggihan at walang ma-cre-credit na tokens.', 'Ilagay ang whsk_… ng webhook sa Render env at i-restart.');
+        else if (!String(PAYMONGO_WEBHOOK_SECRET).startsWith('whsk_')) add('payments', 'warn', 'paymongo-secret-format', 'PayMongo: kakaiba ang format ng webhook secret', 'Karaniwang nagsisimula ito sa whsk_. Baka naputol, may espasyo, o API key ang nailagay.');
+        try {
+            const list = await urlCheckPaymongoWebhooks();
+            const enabled = list.filter((w) => w.status === 'enabled');
+            const required = ['source.chargeable', 'payment.paid', 'payment.failed', 'payment_intent.succeeded'];
+            if (!expected) {
+                add('payments', 'warn', 'paymongo-hooks-nourl', 'PayMongo: walang URL na mapagbabatayan', `${enabled.length} enabled na webhook sa account.`);
+            } else {
+                const match = enabled.filter((w) => urlCheckSameUrl(w.url, hooks.paymongo));
+                const others = enabled.filter((w) => !urlCheckSameUrl(w.url, hooks.paymongo));
+                if (match.length === 0) {
+                    add('payments', 'fail', 'paymongo-hook-url', 'PayMongo: walang enabled na webhook na tumuturo sa URL na ito', `Dapat: ${hooks.paymongo}. Nakita sa account: ${enabled.length ? enabled.map((w) => w.url).join(' | ') : 'walang enabled na webhook'}.`, 'Sa PayMongo dashboard > Developers > Webhooks: palitan ang URL (o gumawa ng bago) at ilagay ang bagong whsk_… sa Render.');
+                } else {
+                    add('payments', 'ok', 'paymongo-hook-url', 'PayMongo: may enabled na webhook para sa URL na ito', hooks.paymongo);
+                    const w = match[0];
+                    const missing = required.filter((e) => !w.events.includes(e) && !w.events.includes('*'));
+                    if (missing.length) add('payments', 'warn', 'paymongo-hook-events', 'PayMongo: kulang ang events ng webhook', `Kulang: ${missing.join(', ')}`, 'I-subscribe ang mga event na ito sa webhook.');
+                    if (w.secretMatches === true) add('payments', 'ok', 'paymongo-hook-secret', 'PayMongo: tugma ang webhook secret sa Render env');
+                    else if (w.secretMatches === false) add('payments', 'fail', 'paymongo-hook-secret', 'PayMongo: HINDI tugma ang webhook secret sa Render env', 'Ang whsk_… ng webhook na ito ay iba sa nasa env, kaya tatanggihan ang bawat webhook.', 'Kopyahin ang secret ng WEBHOOK NA ITO sa dashboard at ilagay sa Render env, tapos i-restart.');
+                    else add('payments', 'info', 'paymongo-hook-secret', 'PayMongo: hindi ma-verify ang secret mula sa API', 'Hindi ibinalik ng PayMongo ang secret — ihambing mismo sa dashboard.');
+                }
+                if (others.length) add('payments', 'warn', 'paymongo-hook-others', 'PayMongo: may iba pang enabled na webhook na tumuturo sa ibang URL', others.map((w) => w.url).join(' | '), 'I-disable ang luma para hindi dumoble ang webhook o mapunta sa lumang server.');
+            }
+        } catch (err) {
+            add('payments', 'warn', 'paymongo-hooks-error', 'PayMongo: hindi nabasa ang listahan ng webhook', String(err && err.message ? err.message : err), 'Manu-manong tingnan sa PayMongo dashboard.');
+        }
+        activity('paymongo', 'PayMongo');
+    }
+
+    if (STRIPE_SECRET_KEY) {
+        if (!STRIPE_WEBHOOK_SECRET) add('payments', 'fail', 'stripe-secret-missing', 'Stripe: walang STRIPE_WEBHOOK_SECRET', 'Tatanggihan ang lahat ng Stripe webhook.', 'Ilagay ang whsec_… ng endpoint sa Render env.');
+        try {
+            const list = await urlCheckStripeWebhooks();
+            const enabled = list.filter((w) => w.status === 'enabled');
+            if (expected) {
+                const match = enabled.filter((w) => urlCheckSameUrl(w.url, hooks.stripe));
+                if (match.length) add('payments', 'ok', 'stripe-hook-url', 'Stripe: may enabled na endpoint para sa URL na ito', hooks.stripe);
+                else add('payments', 'fail', 'stripe-hook-url', 'Stripe: walang enabled na endpoint na tumuturo sa URL na ito', `Dapat: ${hooks.stripe}. Nakita: ${enabled.length ? enabled.map((w) => w.url).join(' | ') : 'wala'}.`, 'Sa Stripe dashboard > Developers > Webhooks: palitan ang endpoint URL at ang STRIPE_WEBHOOK_SECRET.');
+            }
+        } catch (err) {
+            add('payments', 'warn', 'stripe-hooks-error', 'Stripe: hindi nabasa ang listahan ng webhook', String(err && err.message ? err.message : err));
+        }
+        activity('stripe', 'Stripe');
+    }
+
+    if (XENDIT_SECRET_KEY) {
+        if (!XENDIT_WEBHOOK_TOKEN) add('payments', 'fail', 'xendit-token-missing', 'Xendit: walang XENDIT_WEBHOOK_TOKEN', 'Tatanggihan ang lahat ng Xendit callback.', 'Ilagay ang callback verification token sa Render env.');
+        add('payments', 'manual', 'xendit-url', 'Xendit: i-check nang mano-mano ang callback URL', hooks.xendit ? `Dapat: ${hooks.xendit}` : '', 'Xendit dashboard > Settings > Callbacks (Invoice paid / expired).');
+        activity('xendit', 'Xendit');
+    }
+    if (PAYPAL_CLIENT_ID) {
+        if (!PAYPAL_WEBHOOK_ID) add('payments', 'fail', 'paypal-id-missing', 'PayPal: walang PAYPAL_WEBHOOK_ID', 'Hindi ma-ve-verify ang PayPal webhook.', 'Ilagay ang Webhook ID ng bagong webhook sa Render env.');
+        add('payments', 'manual', 'paypal-url', 'PayPal: i-check nang mano-mano ang webhook URL', hooks.paypal ? `Dapat: ${hooks.paypal}` : '', 'PayPal Developer dashboard > Apps > Webhooks. Bagong webhook = bagong PAYPAL_WEBHOOK_ID.');
+        activity('paypal', 'PayPal');
+    }
+    if (DRAGONPAY_MERCHANT_ID) {
+        add('payments', 'manual', 'dragonpay-url', 'Dragonpay: i-check nang mano-mano ang Postback URL', hooks.dragonpay ? `Dapat: ${hooks.dragonpay}` : '', 'Dragonpay merchant panel > Postback / Return URL settings.');
+        activity('dragonpay', 'Dragonpay');
+    }
+    if (!PAYMONGO_SECRET_KEY && !STRIPE_SECRET_KEY && !XENDIT_SECRET_KEY && !PAYPAL_CLIENT_ID && !DRAGONPAY_MERCHANT_ID) {
+        add('payments', 'warn', 'no-provider', 'Walang naka-configure na payment provider', 'Walang tatanggap ng bayad hangga’t walang key sa Render env.');
+    }
+
+    // ---- 3) Render environment (presence lang — hindi ipinapakita ang value) ----
+    const envPresent = (name) => !!(process.env[name] && String(process.env[name]).trim());
+    if (!DATABASE_URL && !DEVICES_DATABASE_URL) add('env', 'fail', 'env-db', 'Walang DATABASE_URL', 'Walang database ang RELAY na ito — hindi mapapanatili ang wallets, purchases at devices.', 'Ilagay ang parehong DATABASE_URL ng lumang service.');
+    else add('env', 'ok', 'env-db', 'May database na naka-configure');
+    add('env', RELAY_API_KEY ? 'ok' : 'warn', 'env-api-key', RELAY_API_KEY ? 'May RELAY_API_KEY' : 'Walang RELAY_API_KEY', RELAY_API_KEY ? 'Siguraduhing tugma ito sa RELAY_API_KEY ng OMNIPOS .env ng mga kliyente.' : 'Hindi makakapag-authenticate ang mga kliyenteng gumagamit ng master key.');
+    const hasPrivateKey = envPresent('RELAY_PRIVATE_KEY_PEM') || fs.existsSync(path.join(__dirname, 'relay-private-key.pem'));
+    add('env', hasPrivateKey ? 'ok' : 'fail', 'env-private-key', hasPrivateKey ? 'May private key' : 'Walang private key', hasPrivateKey ? 'Kailangang PAREHO sa lumang service — kung nag-iba, mawawalan ng bisa ang mga naibigay na unlock token.' : 'Ilagay ang RELAY_PRIVATE_KEY_PEM (parehong key ng luma).');
+    add('env', ADMIN_KEY ? 'ok' : 'warn', 'env-admin-key', ADMIN_KEY ? 'May RELAY_ADMIN_KEY' : 'Walang RELAY_ADMIN_KEY');
+    add('env', REDIS_URL ? 'ok' : 'info', 'env-redis', REDIS_URL ? 'May REDIS_URL' : 'Walang REDIS_URL', REDIS_URL ? '' : 'Okay lang kung hindi mo ginagamit ang Redis; kung ginamit mo dati, ilagay ulit.');
+
+    // ---- 3b) Mga dagdag na env at resources na madalas makalimutan kapag nagpalit ng Render account ----
+    // (presence / host lang ang ipinapakita — hindi kailanman ang value ng secret)
+    const urlHostOf = (u) => { try { return new URL(String(u).trim()).host.toLowerCase(); } catch (_e) { return null; } };
+    const expectedHost = expected ? urlHostOf(expected) : null;
+
+    // Database: ipakita ang host/pangalan (walang user/password) para maihambing sa lumang service, at tingnan kung may laman.
+    const dbLabel = (u) => { try { const x = new URL(String(u)); return `${x.host}${x.pathname}`; } catch (_e) { return null; } };
+    const dbMain = dbLabel(DATABASE_URL);
+    if (dbMain) {
+        const parts = [`DATABASE_URL -> ${dbMain}`];
+        if (DEVICES_DATABASE_URL && DEVICES_DATABASE_URL !== DATABASE_URL) parts.push(`DEVICES -> ${dbLabel(DEVICES_DATABASE_URL) || '?'}`);
+        if (BUILD_DATABASE_URL) parts.push(`BUILD -> ${dbLabel(BUILD_DATABASE_URL) || '?'}`);
+        add('env', 'info', 'env-db-identity', 'Aling database ang gamit ng RELAY na ito', parts.join(' | '), 'Ihambing sa lumang service: dapat PAREHONG host at pangalan. Kung iba, bagong database ito at mukhang wala ang lahat ng kliyente at tokens.');
+    }
+    if (!BUILD_DATABASE_URL) add('env', 'warn', 'env-build-db', 'Walang RELAY_BUILD_DATABASE_URL', 'Ang download codes, build history at release baselines ay naka-save dapat sa build database. Kapag wala, sa local disk ng Render ito mapupunta at mawawala sa bawat redeploy.', 'Ilagay ang parehong RELAY_BUILD_DATABASE_URL ng lumang service.');
+    const dbHostRaw = DATABASE_URL ? (urlHostOf(DATABASE_URL) || '') : '';
+    const redisHostRaw = REDIS_URL ? (urlHostOf(REDIS_URL) || '') : '';
+    if (/(^|\.)render\.com(:|$)/.test(dbHostRaw) || /^dpg-/.test(dbHostRaw) || /(^|\.)render\.com(:|$)/.test(redisHostRaw) || /^red-/.test(redisHostRaw)) {
+        add('env', 'warn', 'env-render-db', 'Render Postgres/Key Value ang gamit mo', `${dbHostRaw}${redisHostRaw ? ' | ' + redisHostRaw : ''}`, 'Ang database sa loob ng Render account ay HINDI nalilipat sa ibang Render account. Kailangan ng pg_dump/restore papunta sa bagong DB (o gumamit ng external DB tulad ng Neon).');
+    }
+    if (pgPool) {
+        try {
+            const w = await queryWithRetry(pgPool, 'SELECT count(*)::int AS n FROM cloud_token_wallets', [], { maxAttempts: 1 });
+            const pu = await queryWithRetry(pgPool, 'SELECT count(*)::int AS n FROM cloud_token_purchases', [], { maxAttempts: 1 });
+            const stuck = await queryWithRetry(pgPool, "SELECT count(*)::int AS n FROM cloud_token_purchases WHERE status = 'pending' AND updated_at < now() - interval '2 hours'", [], { maxAttempts: 1 });
+            const nW = (w.rows[0] && w.rows[0].n) || 0;
+            const nP = (pu.rows[0] && pu.rows[0].n) || 0;
+            const nS = (stuck.rows[0] && stuck.rows[0].n) || 0;
+            if (nW === 0 && nP === 0) add('env', 'warn', 'env-db-empty', 'Walang laman ang database (0 wallet, 0 purchase)', 'Mukhang bago o ibang database ito — walang makikitang kliyente o tokens.', 'Kung hindi ito sinadya, ilagay ang DATABASE_URL ng lumang service.');
+            else add('env', 'ok', 'env-db-rows', 'May laman ang database', `${nW} wallet, ${nP} purchase.`);
+            if (nS > 0) add('env', 'info', 'env-stuck-purchases', `May ${nS} purchase na pending pa nang mahigit 2 oras`, 'Karaniwan itong abandoned checkout (hindi tinapos ng customer). Pero kung may kliyenteng nagsabing nagbayad na siya at walang tokens, ito ang unang tingnan: baka luma ang webhook URL o mali ang secret.', 'Ihambing sa webhook delivery log ng provider; tingnan ang Payment providers section sa itaas.');
+        } catch (err) {
+            add('env', 'warn', 'env-db-query', 'Hindi nabasa ang database', String(err && err.message ? err.message : err), 'Tingnan ang DATABASE_URL, PGSSL at kung gising ang database.');
+        }
+    }
+    add('env', 'info', 'env-pepper', envPresent('RELAY_ACTIVATION_PEPPER') ? 'May RELAY_ACTIVATION_PEPPER' : 'Walang RELAY_ACTIVATION_PEPPER', envPresent('RELAY_ACTIVATION_PEPPER') ? 'Kailangang PAREHO sa luma, kung hindi ay hindi na tatanggapin ang mga naibigay na short activation key.' : 'Hinango ang pepper sa private key, kaya OK basta PAREHO ang private key. Kung may RELAY_ACTIVATION_PEPPER sa lumang service, ilagay din dito.');
+
+    // Marketplace (Lazada / Shopee / TikTok)
+    const mpPlatforms = [];
+    if (envPresent('LAZADA_APP_KEY') && envPresent('LAZADA_APP_SECRET')) mpPlatforms.push('lazada');
+    if (envPresent('SHOPEE_PARTNER_ID') && envPresent('SHOPEE_PARTNER_KEY')) mpPlatforms.push('shopee');
+    if (envPresent('TIKTOK_APP_KEY') && envPresent('TIKTOK_APP_SECRET')) mpPlatforms.push('tiktok');
+    if (mpPlatforms.length) {
+        add('env', 'ok', 'env-marketplace', `Naka-configure ang marketplace: ${mpPlatforms.join(', ')}`);
+        if (!envPresent('MARKETPLACE_TOKEN_KEY')) add('env', 'warn', 'env-mp-token-key', 'Walang MARKETPLACE_TOKEN_KEY', 'Ang RELAY_API_KEY ang ginagamit na pang-encrypt ng mga naka-save na shop token. Mawawala ang access sa mga ito kapag nagpalit ng RELAY_API_KEY.', 'Ilagay ang parehong MARKETPLACE_TOKEN_KEY (at MARKETPLACE_TOKEN_KEY_PREVIOUS kung meron) ng lumang service.');
+        else add('env', 'ok', 'env-mp-token-key', 'May MARKETPLACE_TOKEN_KEY', 'Kailangang PAREHO sa luma, kung hindi ay hindi na mababasa ang mga naka-save na shop token.');
+        if (!envPresent('MARKETPLACE_STATE_SECRET')) add('env', 'info', 'env-mp-state', 'Walang MARKETPLACE_STATE_SECRET', 'RELAY_API_KEY ang gamit na panlagda ng OAuth state. Okay lang.');
+    } else if (envPresent('MARKETPLACE_TOKEN_KEY') || envPresent('LAZADA_APP_KEY') || envPresent('SHOPEE_PARTNER_ID') || envPresent('TIKTOK_APP_KEY')) {
+        add('env', 'warn', 'env-marketplace', 'Kulang ang marketplace credentials', 'May nakita pero kulang ang app key/secret (o partner id/key) ng isa o higit pang platform.', 'Kopyahin ang LAZADA_*, SHOPEE_*, TIKTOK_* mula sa lumang service.');
+    }
+
+    // AI (Cloudflare / Google)
+    const hasCf = !!(envPresent('CF_ACCOUNT_ID') && envPresent('CF_AI_API_TOKEN'));
+    const hasOneCf = !!(envPresent('CF_ACCOUNT_ID') || envPresent('CF_AI_API_TOKEN'));
+    if (hasCf) add('env', 'ok', 'env-cf-ai', 'May Cloudflare AI (CF_ACCOUNT_ID at CF_AI_API_TOKEN)');
+    else if (hasOneCf) add('env', 'fail', 'env-cf-ai', 'Kulang ang Cloudflare AI credentials', 'Isa lang sa CF_ACCOUNT_ID / CF_AI_API_TOKEN ang naka-set.', 'Ilagay ang pareho mula sa lumang service.');
+    else add('env', 'warn', 'env-cf-ai', 'Walang Cloudflare AI credentials', 'Hindi gagana ang Omni AI (FREE tier) at ang vision.', 'Ilagay ang CF_ACCOUNT_ID, CF_AI_API_TOKEN at CF_AI_MODEL mula sa lumang service.');
+    add('env', envPresent('GOOGLE_AI_API_KEY') ? 'ok' : 'warn', 'env-google-ai', envPresent('GOOGLE_AI_API_KEY') ? 'May GOOGLE_AI_API_KEY' : 'Walang GOOGLE_AI_API_KEY', envPresent('GOOGLE_AI_API_KEY') ? '' : 'Hindi gagana ang AI ng mga BASE/PLUS/PRO tier.');
+
+    // Email, Telegram, Neon
+    const hasMail = !!(RESEND_API_KEY || (MAIL_USER && MAIL_PASS));
+    add('env', hasMail ? 'ok' : 'warn', 'env-mail', hasMail ? 'May email provider' : 'Walang email provider', hasMail ? (envPresent('RESEND_FROM_EMAIL') || !RESEND_API_KEY ? '' : 'Walang RESEND_FROM_EMAIL — baka default sender ang gamitin.') : 'Walang RESEND_API_KEY o RELAY_MAIL_USER/RELAY_MAIL_PASS — hindi makakapagpadala ng email (activation, reset, resibo).', hasMail ? '' : 'Ilagay ang email variables mula sa lumang service.');
+    if (!envPresent('RELAY_RECIPIENT_EMAIL')) add('env', 'info', 'env-recipient', 'Walang RELAY_RECIPIENT_EMAIL', 'Kung dati kang tumatanggap ng email alert sa address na ito, ilagay ulit.');
+    const hasTg = !!(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID);
+    add('env', hasTg ? 'ok' : 'warn', 'env-telegram', hasTg ? 'May Telegram alert' : 'Walang Telegram alert (RELAY_TELEGRAM_BOT_TOKEN / RELAY_TELEGRAM_CHAT_ID)', hasTg ? '' : 'Hindi ka aabisuhan ng RELAY — kasama ang URL check pagkatapos ng restart.', hasTg ? '' : 'Ilagay ang parehong Telegram variables ng luma.');
+    if (!envPresent('NEON_API_KEY') || !envPresent('NEON_CLOUD_BACKUP_PROJECT_ID')) add('env', 'info', 'env-neon', 'Kulang ang NEON_API_KEY / NEON_CLOUD_BACKUP_PROJECT_ID', 'Para ito sa usage monitoring ng database sa admin. Hindi apektado ang mga bayad.', 'Ilagay (kasama ang NEON_DEVICES_PROJECT_ID at NEON_BUILD_PROJECT_ID) kung ginagamit mo dati.');
+    if (!process.env.RENDER && !process.env.TRUST_PROXY_HOPS) add('env', 'warn', 'env-trust-proxy', 'Walang RENDER / TRUST_PROXY_HOPS', 'Hindi malalaman ng RELAY ang tamang https/IP sa likod ng proxy, kaya puwedeng mali ang URL at rate limit.', 'Awtomatikong nilalagay ng Render ang RENDER. Kung ibang host ito, itakda ang TRUST_PROXY_HOPS.');
+
+    // Mga env na URL na puwedeng tumuturo pa sa luma
+    const urlEnvNames = ['BOOTSTRAP_CLIENT_ZIP_URL', 'OMNIPOS_REPO_URL', 'BOOTSTRAP_TERMUX_ARM64', 'BOOTSTRAP_TERMUX_ARM32', 'BOOTSTRAP_TERMUX_X86_64', 'BOOTSTRAP_TERMUX_UNIVERSAL'];
+    const staleUrlEnvs = urlEnvNames.filter((n) => {
+        const h = envPresent(n) ? urlHostOf(process.env[n]) : null;
+        return !!h && /\.onrender\.com$/.test(h.split(':')[0]) && !!expectedHost && h !== expectedHost;
+    });
+    if (staleUrlEnvs.length) add('env', 'warn', 'env-stale-url-envs', 'May URL env na tumuturo sa ibang onrender.com host', staleUrlEnvs.map((n) => `${n} -> ${urlHostOf(process.env[n])}`).join(' | '), `Palitan ng ${expectedHost} (o tanggalin kung hindi na kailangan).`);
+    else if (urlEnvNames.some((n) => envPresent(n))) add('env', 'ok', 'env-url-envs', 'Walang URL env na tumuturo sa lumang onrender.com host');
+
+    // ---- 4) Mga kliyente ----
+    const hostList = Array.from(urlCheckHostStats.entries()).map(([host, h]) => ({ host, count: h.count, lastAt: h.lastAt })).sort((a, b) => b.count - a.count);
+    if (hostList.length === 0) {
+        add('clients', 'info', 'client-hosts', 'Wala pang tawag mula sa mga kliyente', 'Mula nang huling restart ng RELAY.');
+    } else if (hostList.length > 1) {
+        add('clients', 'warn', 'client-hosts', 'May mga kliyenteng gumagamit ng IBANG host', hostList.map((h) => `${h.host} (${h.count}, huli ${urlCheckAgo(h.lastAt)})`).join(' | '), 'Kung hindi sinadya, may mga device pang may lumang RELAY_URL. Palitan sa kanila (Seksyon “Mano-manong i-update”).');
+    } else {
+        add('clients', 'ok', 'client-hosts', 'Iisang host ang ginagamit ng mga kliyente', `${hostList[0].host} (${hostList[0].count} request, huli ${urlCheckAgo(hostList[0].lastAt)})`);
+    }
+    if (urlCheckBaseMismatches.size) {
+        add('clients', 'warn', 'client-base', 'May kliyenteng ibang URL ang RELAY_URL na ginamit sa pagbili', Array.from(urlCheckBaseMismatches.entries()).map(([id, m]) => `${id}… -> ${m.base} (${m.count}x, huli ${urlCheckAgo(m.lastAt)})`).join(' | '), 'Doon sa URL na iyon babalik ang customer pagkatapos magbayad. Palitan ang RELAY_URL ng device na iyon.');
+    }
+
+    // ---- 5) Hindi ma-detect mula sa RELAY: kailangang i-update nang mano-mano ----
+    const target = expected || '<BAGONG-URL>';
+    add('manual', 'manual', 'm-omnipos-env', 'OMNIPOS .env ng bawat kliyente', `RELAY_URL=${target}`, 'I-restart ang OMNIPOS pagkatapos.');
+    add('manual', 'manual', 'm-apk-device', 'Native APK na naka-install na', target, 'Options > Edit relay link.');
+    add('manual', 'manual', 'm-apk-build', 'Native APK build (para sa bagong install)', `DEFAULT_RELAY_URL = "${target}"`, 'SetupConfig.java: palitan, i-increase ang versionCode, i-rebuild.');
+    add('manual', 'manual', 'm-packages', 'Client package at download link', `RELAY_PUBLIC_URL=${target}`, 'Mag-regenerate ng package; hindi na gagana ang mga lumang /relay/download/<code> link.');
+    mpPlatforms.forEach((pl) => add('manual', 'manual', `m-marketplace-${pl}`, `${({ lazada: 'Lazada', shopee: 'Shopee', tiktok: 'TikTok' })[pl] || pl}: Redirect/Callback URL sa developer console`, `${target}/relay/marketplace/callback/${pl}`, `I-update sa ${pl} developer console (App/Partner settings) at i-disable ang luma. Pagkatapos, mag-connect ulit ng shop para subukan.`));
+    add('manual', 'manual', 'm-custom-domain', 'Custom domain (kung gagamitin)', expectedHost ? `Domain: ${expectedHost}` : '', 'Isang service lang ang puwedeng may hawak ng domain: alisin sa luma, idagdag sa bago, tapos i-update ang DNS/CNAME. Hintayin ang SSL bago palitan ang webhooks.');
+    add('manual', 'manual', 'm-old-service', 'Luma pang Render service', '', 'Panatilihing tumatakbo hanggang walang kliyenteng gumagamit ng lumang host (tingnan ang Mga kliyente) at walang pending na purchase. Pagkatapos, i-suspend.');
+    add('manual', 'manual', 'm-private-key-backup', 'Backup ng private key at lahat ng env', '', 'Itabi sa ligtas na lugar (RELAY_PRIVATE_KEY_PEM, RELAY_ACTIVATION_PEPPER, MARKETPLACE_TOKEN_KEY, RELAY_API_KEY). Kapag nawala ang mga ito, hindi na maibabalik.');
+    add('manual', 'manual', 'm-kiosk', 'OMNIKiosk, Kitchen KIOSK, Customer Display', '', 'I-check kung may sarili silang relay link sa settings.');
+
+    const summary = { ok: 0, warn: 0, fail: 0, info: 0, manual: 0 };
+    items.forEach((i) => { summary[i.status] = (summary[i.status] || 0) + 1; });
+    return {
+        success: true,
+        generatedAt: new Date().toISOString(),
+        uptimeSec: Math.round((Date.now() - URL_CHECK_BOOT_AT) / 1000),
+        instanceId: URL_CHECK_INSTANCE_ID,
+        urls,
+        copy: { relayUrl: expected, webhooks: hooks },
+        summary,
+        items
+    };
+}
+
+app.get('/relay/admin/api/url-check', requireAdminKey, rateLimit('url-check', 30, 10 * 60 * 1000), async (req, res) => {
+    try {
+        const report = await buildUrlCheckReport({ req, expectedOverride: req.query.expected ? String(req.query.expected).slice(0, 300) : null, skipPing: false });
+        res.set('Cache-Control', 'no-store');
+        res.json(report);
+    } catch (err) {
+        console.error('⚠️  /relay/admin/api/url-check error:', err && err.message ? err.message : err);
+        res.status(500).json({ success: false, message: 'Hindi nagawa ang URL check.' });
+    }
+});
+
+// Pagkatapos ng bawat restart/deploy: mabilisang check (walang self-ping — baka hindi pa nakalipat ang traffic) at Telegram alert kung may mali.
+setTimeout(async () => {
+    if (String(process.env.RELAY_URL_CHECK_BOOT_ALERT || '').toLowerCase() === 'off') return;
+    try {
+        const rep = await buildUrlCheckReport({ req: null, expectedOverride: null, skipPing: true });
+        const fails = rep.items.filter((i) => i.status === 'fail');
+        const warns = rep.items.filter((i) => i.status === 'warn' && ['public-url-missing', 'expected-unknown', 'env-db-empty', 'env-render-db'].includes(i.id));
+        const problems = fails.concat(warns);
+        if (problems.length === 0) {
+            console.log('✅ URL CHECK: walang nakitang problema sa RELAY URL / webhook settings.');
+            return;
+        }
+        console.error(`⚠️  URL CHECK: ${problems.length} problema —\n` + problems.map((i) => `  - ${i.title}${i.detail ? `: ${i.detail}` : ''}`).join('\n'));
+        if (typeof sendTelegramNotification === 'function') {
+            sendTelegramNotification(`⚠️ RELAY URL check pagkatapos ng restart: ${problems.length} problema.\n` + problems.slice(0, 6).map((i) => `• ${i.title}`).join('\n') + '\nBuksan ang /relay/admin/url-check.html para sa detalye.').catch(() => {});
+        }
+    } catch (err) {
+        console.warn('⚠️  URL CHECK (boot) hindi natapos:', err && err.message ? err.message : err);
+    }
+}, 45000).unref();
 app.post('/relay/admin/api/pending-otps/approve', requireAdminKey, async (req, res) => {
     const { key, durationDays } = req.body;
     const pending = pendingOtps.get(key);
@@ -16923,6 +17344,7 @@ app.post('/relay/cloud-tokens/purchase/create', requireApiKey, requireAllowedDev
     const amountPHP = tokens; 
     const purchaseId = `TKN-${installationId.slice(0, 8)}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
     const base = (returnBaseUrl && /^https?:\/\//.test(returnBaseUrl)) ? returnBaseUrl.replace(/\/$/, '') : `${req.protocol}://${req.get('host')}`;
+    urlCheckNoteClientBase(installationId, base, req);
     try {
         const checkout = await createPaymentCheckout({
             method,
@@ -17093,6 +17515,7 @@ app.post('/relay/sponsor/donate-online/create', requireApiKey, requireAllowedDev
     }
     const purchaseId = `DON-${String(installationId).slice(0, 8)}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
     const base = (returnBaseUrl && /^https?:\/\//.test(returnBaseUrl)) ? String(returnBaseUrl).replace(/\/$/, '') : `${req.protocol}://${req.get('host')}`;
+    urlCheckNoteClientBase(installationId, base, req);
     try {
         const checkout = await createPaymentCheckout({
             method,
