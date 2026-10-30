@@ -5637,6 +5637,27 @@ function buildFileManifest(rootDir) {
     walk(rootDir, '');
     return manifest;
 }
+// Files of the Termux setup that the Android app does not have (and its own install marker).
+const NATIVE_RUNTIME_EXEMPT_FILES = new Set(['start.sh', 'setup-omnipos.sh', '.native-install-ok']);
+const NATIVE_BASELINE_DIR = path.join(__dirname, 'native-baselines');
+let nativeBaselineCache = { at: 0, map: new Map() };
+function loadNativeBaselines() {
+    if (Date.now() - nativeBaselineCache.at < 60 * 1000) return nativeBaselineCache.map;
+    const map = new Map();
+    let names = [];
+    try { names = fs.readdirSync(NATIVE_BASELINE_DIR); } catch (e) { names = []; }
+    for (const f of names) {
+        if (!/\.json$/i.test(f)) continue;
+        try {
+            const d = JSON.parse(fs.readFileSync(path.join(NATIVE_BASELINE_DIR, f), 'utf8'));
+            if (d && typeof d.version === 'string' && d.files && typeof d.files === 'object') map.set(d.version, d);
+        } catch (e) {
+            console.warn(`[native-baselines] ${f} ignored: ${e.message}`);
+        }
+    }
+    nativeBaselineCache = { at: Date.now(), map };
+    return map;
+}
 const RELEASE_BASELINES_PATH = path.join(__dirname, 'release-baselines.json');
 async function loadReleaseBaselines() {
     const fromBuildDb = await buildKvGetJSON('release-baselines', null, { strict: true });
@@ -15003,6 +15024,7 @@ app.post('/relay/backup-checkin', requireApiKey, rateLimit('backup-checkin', 20,
 });
 app.post('/relay/integrity-checkin', requireApiKey, requireAllowedDevice, rateLimit('integrity-checkin', 300, 60 * 60 * 1000, (req) => req.body?.installationId), (req, res) => {
     const { installationId, version, files, watcherActive } = req.body || {};
+    const isNativeRuntime = String((req.body || {}).runtime || '') === 'native';
     const watcherActiveFlag = typeof watcherActive === 'boolean' ? watcherActive : null;
     if (!installationId) {
         return res.status(400).json({ success: false, message: 'Missing installationId.' });
@@ -15012,8 +15034,12 @@ app.post('/relay/integrity-checkin', requireApiKey, requireAllowedDevice, rateLi
     }
     recordDeviceSeen(installationId, {});
     const baselineVersion = String(version || '').trim() || null;
-    const baseline = baselineVersion ? releaseBaselines.get(baselineVersion) : null;
-    if (!baseline) {
+    const releaseBaseline = baselineVersion ? releaseBaselines.get(baselineVersion) : null;
+    // The Android app runs the files bundled in its APK (not the obfuscated release), so it has its own baseline
+    // in native-baselines/<version>.json. A native device is checked against whichever baseline fits it best:
+    // the native one after a normal install, the release one after it self-updated to a published release.
+    const nativeBaseline = isNativeRuntime && baselineVersion ? loadNativeBaselines().get(baselineVersion) : null;
+    if (!releaseBaseline && !nativeBaseline) {
         integrityStatus[installationId] = {
             checkedAt: Date.now(),
             baselineVersion,
@@ -15032,29 +15058,37 @@ app.post('/relay/integrity-checkin', requireApiKey, requireAllowedDevice, rateLi
         maybePersistIntegrityStatus(installationId, integrityStatus[installationId]);
         return res.json({ success: true, hasBaseline: false, flagged: false, message: `Walang naka-imbak na baseline para sa version "${baselineVersion}" — hindi muna ito na-compare.` });
     }
-    const baselineFiles = baseline.files || {};
-    const modified = [];
-    const deleted = [];
-    const added = [];
-    for (const [relPath, baseHash] of Object.entries(baselineFiles)) {
-        const clientHash = files[relPath];
-        if (clientHash === undefined) {
-            deleted.push(relPath);
-        } else if (clientHash !== baseHash) {
-            modified.push(relPath);
+    function diffAgainst(baselineFiles) {
+        const m = [];
+        const d = [];
+        const a = [];
+        for (const [relPath, baseHash] of Object.entries(baselineFiles)) {
+            // Files that only exist for the Termux setup are not part of the Android app.
+            if (isNativeRuntime && NATIVE_RUNTIME_EXEMPT_FILES.has(relPath)) continue;
+            const clientHash = files[relPath];
+            if (clientHash === undefined) d.push(relPath);
+            else if (clientHash !== baseHash) m.push(relPath);
         }
+        for (const relPath of Object.keys(files)) {
+            if (isNativeRuntime && NATIVE_RUNTIME_EXEMPT_FILES.has(relPath)) continue;
+            if (!(relPath in baselineFiles)) a.push(relPath);
+        }
+        m.sort();
+        d.sort();
+        a.sort();
+        return { modified: m, deleted: d, added: a, total: m.length + d.length + a.length };
     }
-    for (const relPath of Object.keys(files)) {
-        if (!(relPath in baselineFiles)) added.push(relPath);
-    }
-    modified.sort();
-    deleted.sort();
-    added.sort();
+    const candidates = [];
+    if (releaseBaseline) candidates.push(diffAgainst(releaseBaseline.files || {}));
+    if (nativeBaseline) candidates.push(diffAgainst(nativeBaseline.files || {}));
+    candidates.sort((x, y) => x.total - y.total);
+    const { modified, deleted, added } = candidates[0];
     const flagged = modified.length > 0 || deleted.length > 0 || added.length > 0;
     integrityStatus[installationId] = {
         checkedAt: Date.now(),
         baselineVersion,
         hasBaseline: true,
+        runtime: isNativeRuntime ? 'native' : 'standard',
         flagged,
         modified,
         deleted,
@@ -21260,6 +21294,46 @@ app.post('/relay/request-receipt-credit-purchase',
         res.json({ success: true, message: 'Naipadala ang purchase request. Tignan ng developer ang RELAY admin panel (Pending Receipt Customization Credit Purchases) para sa confirmation code, matapos ang bayad.', quote });
     }
 );
+// ---------------------------------------------------------------------------------------------------------------
+// LANGUAGE PACKS for OMNIPOS (display-only translations).
+// Put one file per language in RELAY/lang-packs/<code>.json (see lang-packs/README.txt). OMNIPOS clients list and
+// download them; every pack is validated again on the client before it is installed.
+// ---------------------------------------------------------------------------------------------------------------
+const { validateLangPack: validateRelayLangPack, LANG_CODE_RE: RELAY_LANG_CODE_RE } = require('./lang-pack-validate');
+const RELAY_LANG_PACK_DIR = path.join(__dirname, 'lang-packs');
+let relayLangPackCache = { at: 0, packs: new Map() };
+function loadRelayLangPacks() {
+    if (Date.now() - relayLangPackCache.at < 60 * 1000) return relayLangPackCache.packs;
+    const packs = new Map();
+    let files = [];
+    try { files = fs.readdirSync(RELAY_LANG_PACK_DIR); } catch (e) { files = []; }
+    for (const f of files) {
+        const m = /^([a-z]{2,3}(?:-[a-z0-9]{2,8})?)\.json$/.exec(f);
+        if (!m) continue;
+        try {
+            const checked = validateRelayLangPack(JSON.parse(fs.readFileSync(path.join(RELAY_LANG_PACK_DIR, f), 'utf8')), m[1]);
+            if (checked.ok) packs.set(m[1], checked);
+            else console.warn(`[lang-packs] ${f} ignored: ${checked.error}`);
+        } catch (e) {
+            console.warn(`[lang-packs] ${f} ignored: ${e.message}`);
+        }
+    }
+    relayLangPackCache = { at: Date.now(), packs };
+    return packs;
+}
+app.get('/relay/lang-packs', requireApiKey, requireAllowedDevice, (req, res) => {
+    const packs = [...loadRelayLangPacks().entries()].map(([code, c]) => ({
+        code, name: c.pack.name, native: c.pack.native, version: c.pack.version, count: c.count
+    }));
+    res.json({ success: true, packs });
+});
+app.get('/relay/lang-packs/:code', requireApiKey, requireAllowedDevice, (req, res) => {
+    const code = String(req.params.code || '').toLowerCase();
+    const found = RELAY_LANG_CODE_RE.test(code) ? loadRelayLangPacks().get(code) : null;
+    if (!found) return res.status(404).json({ success: false, message: 'Language pack not found.' });
+    res.json(found.pack);
+});
+
 app.get('/relay/receipt-credit-pricing', requireApiKey, requireAllowedDevice, (req, res) => {
     const pricing = { ...receiptCreditPricing };
     const quote = calculateReceiptCreditQuote(req.query.quantity || 1);
