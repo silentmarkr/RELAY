@@ -6037,7 +6037,18 @@ async function buildUrlCheckReport({ req, expectedOverride, skipPing }) {
     } else if (!configured) {
         add('url', 'fail', 'public-url-invalid', 'Hindi tamang format ang RELAY_PUBLIC_URL', `Laman: ${urls.configuredRaw}`, 'Dapat nagsisimula sa https:// at walang sobrang espasyo o quotes (hal. https://relay.example.com).');
     } else if (urls.detected && configured !== urls.detected) {
-        add('url', 'fail', 'public-url-differs', 'Iba ang RELAY_PUBLIC_URL sa URL na ginagamit mo ngayon', `RELAY_PUBLIC_URL: ${configured} | Ginamit mong URL sa page na ito: ${urls.detected}`, 'Kung bago ang tamang URL, palitan ang RELAY_PUBLIC_URL sa Render at i-redeploy. Kung sinadya (custom domain), buksan ang page na ito gamit ang public URL para mawala ang babalang ito.');
+        // Iba ang host na ginamit sa pag-bukas ng page. Mali lang ito kung ang RELAY_PUBLIC_URL
+        // ay HINDI tumuturo sa RELAY na ito (hal. sira ang Cloudflare/DNS).
+        let pointsHere = false;
+        try {
+            const pr = await urlCheckFetchJson(`${configured}/relay/url-check/ping`, {});
+            pointsHere = !!(pr.ok && pr.body && pr.body.instanceId === URL_CHECK_INSTANCE_ID);
+        } catch (e) { pointsHere = false; }
+        if (pointsHere) {
+            add('url', 'ok', 'public-url-ok', 'Tugma ang RELAY_PUBLIC_URL', `${configured} (tumuturo sa RELAY na ito; binuksan mo ang page gamit ang ${urls.detected})`);
+        } else {
+            add('url', 'fail', 'public-url-differs', 'Hindi maabot ng RELAY_PUBLIC_URL ang RELAY na ito', `RELAY_PUBLIC_URL: ${configured} | Ginamit mong URL sa page na ito: ${urls.detected}`, 'Hindi sumasagot ang RELAY_PUBLIC_URL bilang RELAY na ito. Tingnan ang Cloudflare/DNS at ang custom domain sa Render, o palitan ang RELAY_PUBLIC_URL kung bago ang tamang URL.');
+        }
     } else {
         add('url', 'ok', 'public-url-ok', 'Tugma ang RELAY_PUBLIC_URL', configured);
     }
@@ -6076,6 +6087,9 @@ async function buildUrlCheckReport({ req, expectedOverride, skipPing }) {
         const s = urlCheckWebhookStats.get(provider);
         if (!s) {
             add('payments', 'info', `${provider}-activity`, `${label}: wala pang webhook na natatanggap`, 'Mula nang huling restart ng RELAY. Normal ito kung wala pang bumibili.');
+        } else if (s.ok === 0 && s.rejected > 0 && (Date.now() - s.lastAt) > 24 * 60 * 60 * 1000) {
+            // Lumang tinanggihang webhook (hal. galing sa dating webhook/secret) at wala nang bago sa nakaraang 24 oras — hindi na problema.
+            add('payments', 'info', `${provider}-activity`, `${label}: may lumang tinanggihang webhook, wala nang bago`, `${s.rejected} ang tinanggihan, huli ${urlCheckAgo(s.lastAt)}. Wala nang dumating sa nakaraang 24 oras. Puwede mo itong i-clear gamit ang button na “I-clear ang lumang webhook history”.`);
         } else if (s.ok === 0 && s.rejected > 0) {
             add('payments', 'fail', `${provider}-activity`, `${label}: may dumating na webhook pero lahat tinanggihan`, `${s.rejected} ang tinanggihan (HTTP 4xx), huli ${urlCheckAgo(s.lastAt)}. Karaniwang sanhi: mali ang webhook secret/token, o hindi tugma ang live/test mode.`, 'Ihambing ang secret sa dashboard sa Render env, tapos i-restart.');
         } else if (s.errors > 0 && s.ok === 0) {
@@ -6095,7 +6109,7 @@ async function buildUrlCheckReport({ req, expectedOverride, skipPing }) {
         try {
             const list = await urlCheckPaymongoWebhooks();
             const enabled = list.filter((w) => w.status === 'enabled');
-            const required = ['source.chargeable', 'payment.paid', 'payment.failed', 'payment_intent.succeeded'];
+            const required = ['source.chargeable', 'payment.paid', 'payment.failed'];
             if (!expected) {
                 add('payments', 'warn', 'paymongo-hooks-nourl', 'PayMongo: walang URL na mapagbabatayan', `${enabled.length} enabled na webhook sa account.`);
             } else {
@@ -6162,7 +6176,16 @@ async function buildUrlCheckReport({ req, expectedOverride, skipPing }) {
     const hasPrivateKey = envPresent('RELAY_PRIVATE_KEY_PEM') || fs.existsSync(path.join(__dirname, 'relay-private-key.pem'));
     add('env', hasPrivateKey ? 'ok' : 'fail', 'env-private-key', hasPrivateKey ? 'May private key' : 'Walang private key', hasPrivateKey ? 'Kailangang PAREHO sa lumang service — kung nag-iba, mawawalan ng bisa ang mga naibigay na unlock token.' : 'Ilagay ang RELAY_PRIVATE_KEY_PEM (parehong key ng luma).');
     add('env', ADMIN_KEY ? 'ok' : 'warn', 'env-admin-key', ADMIN_KEY ? 'May RELAY_ADMIN_KEY' : 'Walang RELAY_ADMIN_KEY');
-    add('env', REDIS_URL ? 'ok' : 'info', 'env-redis', REDIS_URL ? 'May REDIS_URL' : 'Walang REDIS_URL', REDIS_URL ? '' : 'Okay lang kung hindi mo ginagamit ang Redis; kung ginamit mo dati, ilagay ulit.');
+    if (!REDIS_URL) {
+        const hasPg = !!(DATABASE_URL || DEVICES_DATABASE_URL);
+        add('env', hasPg ? 'ok' : 'info', 'env-redis', hasPg ? 'Walang REDIS_URL — Postgres (Neon) ang storage' : 'Walang REDIS_URL', hasPg ? 'Okay ito: lahat ng settings at datos ay nasa Postgres. Ang online status ng mga device ay hawak na lang sa memory ng RELAY.' : 'Okay lang kung hindi mo ginagamit ang Redis; kung ginamit mo dati, ilagay ulit.');
+    } else if (redisBackfillResult && redisBackfillResult.finishedAt) {
+        const b = redisBackfillResult;
+        const safe = b.failed === 0 && !b.error;
+        add('env', safe ? 'info' : 'warn', 'env-redis', safe ? 'May REDIS_URL — ligtas na itong alisin' : 'May REDIS_URL — may hindi nakopya sa Postgres', `Backfill: ${b.scanned} key na na-scan, ${b.copied} ang nakopya, ${b.alreadyThere} ang nasa Postgres na, ${b.failed} ang pumalya${b.error ? ' | error: ' + b.error : ''}.`, safe ? 'Alisin ang REDIS_URL sa Render → Environment at i-redeploy; mawawala ang Render Key Value warning.' : 'Tingnan ang Render logs, i-redeploy para subukan ulit, at huwag pa alisin ang REDIS_URL.');
+    } else {
+        add('env', 'info', 'env-redis', 'May REDIS_URL', redisBackfillResult ? 'Tumatakbo pa ang backfill papuntang Postgres — i-check ulit pagkatapos ng ilang segundo.' : '');
+    }
 
     // ---- 3b) Mga dagdag na env at resources na madalas makalimutan kapag nagpalit ng Render account ----
     // (presence / host lang ang ipinapakita — hindi kailanman ang value ng secret)
@@ -6280,6 +6303,15 @@ async function buildUrlCheckReport({ req, expectedOverride, skipPing }) {
     };
 }
 
+// I-clear ang bilang ng natanggap/tinanggihang webhook (in-memory lang) — para mawala ang lumang failed na galing sa dating webhook/secret.
+app.post('/relay/admin/api/url-check/reset-webhook-stats', requireAdminKey, rateLimit('url-check-reset', 20, 10 * 60 * 1000), (req, res) => {
+    const provider = req.query.provider ? String(req.query.provider).toLowerCase().slice(0, 30) : null;
+    let cleared = 0;
+    if (provider) { if (urlCheckWebhookStats.delete(provider)) cleared = 1; }
+    else { cleared = urlCheckWebhookStats.size; urlCheckWebhookStats.clear(); }
+    res.set('Cache-Control', 'no-store');
+    res.json({ success: true, cleared });
+});
 app.get('/relay/admin/api/url-check', requireAdminKey, rateLimit('url-check', 30, 10 * 60 * 1000), async (req, res) => {
     try {
         const report = await buildUrlCheckReport({ req, expectedOverride: req.query.expected ? String(req.query.expected).slice(0, 300) : null, skipPing: false });
@@ -23720,12 +23752,51 @@ require('./marketplace').registerMarketplaceRoutes(app, {
     getSubscriptionPrice: () => MODULE_SUBSCRIPTION_PLANS.marketplace_hub.price,
     featureName: () => FEATURE_CATALOG_BASE.marketplace_hub.name
 });
+
+// Isang beses (kada boot) na ligtas na backfill: kopyahin sa Postgres (relay_kv_store) ang anumang key na NASA REDIS LANG.
+// INSERT ... ON CONFLICT DO NOTHING — hindi kailanman nag-ooverwrite ng umiiral nang datos sa Postgres, at hindi ginagalaw ang Redis.
+// Kapag natapos ito na may failed=0, ligtas nang alisin ang REDIS_URL sa Render.
+let redisBackfillResult = null;
+async function backfillRedisToPostgres() {
+    const pool = pgPoolDevices || pgPool;
+    if (!redisClient || !pool) return;
+    const result = { startedAt: Date.now(), finishedAt: null, scanned: 0, copied: 0, alreadyThere: 0, skipped: 0, failed: 0, error: null };
+    redisBackfillResult = result;
+    try {
+        const stream = redisClient.scanStream({ match: REDIS_KEY_PREFIX + '*', count: 200 });
+        for await (const keys of stream) {
+            for (const key of keys) {
+                if (key.startsWith(ONLINE_KEY_PREFIX)) { result.skipped++; continue; }
+                result.scanned++;
+                try {
+                    const raw = await redisClient.get(key);
+                    if (raw === null) { result.skipped++; continue; }
+                    JSON.parse(raw); // siguraduhing valid JSON
+                    const r = await queryWithRetry(pool,
+                        `INSERT INTO relay_kv_store (key, value, updated_at) VALUES ($1, $2::jsonb, now()) ON CONFLICT (key) DO NOTHING`,
+                        [key, raw], { maxAttempts: 3 });
+                    if (r.rowCount > 0) result.copied++; else result.alreadyThere++;
+                } catch (err) {
+                    if (/WRONGTYPE/.test(String(err && err.message))) { result.skipped++; continue; }
+                    result.failed++;
+                    console.error(`⚠️  Redis→Postgres backfill: hindi nakopya ang key "${key}":`, err && err.message);
+                }
+            }
+        }
+    } catch (err) {
+        result.error = err && err.message ? err.message : String(err);
+        console.error('⚠️  Redis→Postgres backfill error:', result.error);
+    }
+    result.finishedAt = Date.now();
+    console.log(`ℹ️  Redis→Postgres backfill tapos: ${result.scanned} key na na-scan, ${result.copied} ang nakopya (Redis lang dati), ${result.alreadyThere} ang nasa Postgres na, ${result.failed} ang pumalya.${result.failed === 0 && !result.error ? ' Ligtas nang alisin ang REDIS_URL.' : ' HUWAG pa alisin ang REDIS_URL.'}`);
+}
 bootstrapStores()
     .then(async () => {
         await loadReceiptCreditPricing();
         const server = app.listen(PORT, () => {
             console.log(`OmniPOS Unlock Relay running sa port ${PORT}`);
         });
+        backfillRedisToPostgres().catch((err) => console.error('⚠️  Redis→Postgres backfill:', err && err.message));
         server.requestTimeout = 60 * 60 * 1000;
         // CRITICAL FIX: walang SIGTERM handler dati, kaya kapag nag-deploy/nag-restart ang host (Render) ay agad namamatay ang RELAY at
         // nawawala ang mga write na kakapasok lang (hal. unlock na kababayad lang). Ngayon: huminto sa pagtanggap ng bagong connection,

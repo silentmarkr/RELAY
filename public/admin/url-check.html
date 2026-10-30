@@ -25,7 +25,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .verdict.bad{background:#2a0e14;border-color:#7a2230;color:var(--red)}
 .verdict.meh{background:#2a2108;border-color:#6b5514;color:var(--amber)}
 .item{border-left:4px solid var(--line);padding:8px 10px;margin:8px 0;background:#0a0f1c;border-radius:6px}
-.item.ok{border-color:var(--green)}.item.warn{border-color:var(--amber)}.item.fail{border-color:var(--red)}.item.info{border-color:#4b5b7c}.item.manual{border-color:var(--blue)}
+.item.ok{border-color:var(--green)}.item.warn{border-color:var(--amber)}.item.fail{border-color:var(--red)}.item.info{border-color:#4b5b7c}.item.manual{border-color:var(--amber)}.item.manual.done{border-color:var(--green);background:#0a1a14}.item.manual .t{color:var(--amber)}.item.manual.done .t{color:var(--green)}
 .item .t{font-weight:600}.item .d{font-size:.84rem;color:var(--muted);word-break:break-word;margin-top:2px}.item .f{font-size:.84rem;color:var(--amber);margin-top:3px;word-break:break-word}
 .item label{display:flex;gap:8px;align-items:flex-start;cursor:pointer}
 .copyrow{display:flex;gap:8px;align-items:center;margin:6px 0}
@@ -39,7 +39,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
 <section class="card"><h2>Admin authentication</h2>
 <label class="field">RELAY admin key<input id="adminKey" type="password" autocomplete="current-password" placeholder="Enter ADMIN_KEY"></label>
 <label class="field">Bagong URL na i-che-check (opsyonal — iwan kung ang kasalukuyang RELAY_PUBLIC_URL ang gusto mo)<input id="expected" type="text" placeholder="https://relay.example.com" autocomplete="off" spellcheck="false"></label>
-<div style="margin-top:8px"><button id="runBtn" class="primary">I-check ngayon</button></div>
+<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap"><button id="runBtn" class="primary">I-check ngayon</button><button id="clearBtn">I-clear ang lumang webhook history</button></div>
 <p class="small">Tip: buksan ang page na ito gamit mismo ang bagong public URL para awtomatikong makita ng RELAY kung saan ka nakakonekta.</p></section>
 
 <div id="notice" class="notice" role="status"></div>
@@ -67,8 +67,8 @@ button:disabled{opacity:.5;cursor:not-allowed}
     if(i.status==='manual'&&checkKey){
       const lab=el('label');const cb=document.createElement('input');cb.type='checkbox';
       let store={};try{store=JSON.parse(localStorage.getItem(checkKey)||'{}')}catch(_){}
-      cb.checked=!!store[i.id];
-      cb.onchange=()=>{let s={};try{s=JSON.parse(localStorage.getItem(checkKey)||'{}')}catch(_){}s[i.id]=cb.checked;try{localStorage.setItem(checkKey,JSON.stringify(s))}catch(_){}};
+      cb.checked=!!store[i.id];box.classList.toggle('done',cb.checked);
+      cb.onchange=()=>{box.classList.toggle('done',cb.checked);let s={};try{s=JSON.parse(localStorage.getItem(checkKey)||'{}')}catch(_){}s[i.id]=cb.checked;try{localStorage.setItem(checkKey,JSON.stringify(s))}catch(_){}};
       lab.appendChild(cb);const w=el('div');w.appendChild(el('div','t',i.title));if(i.detail)w.appendChild(el('div','d',i.detail));if(i.fix)w.appendChild(el('div','f',i.fix));lab.appendChild(w);box.appendChild(lab);return box;
     }
     head.textContent=(ICON[i.status]||'')+' '+i.title;box.appendChild(head);
@@ -120,6 +120,17 @@ button:disabled{opacity:.5;cursor:not-allowed}
       say(e.message,true);
     }finally{btn.disabled=false;btn.textContent='I-check ngayon'}
   }
+  async function clearStats(){
+    const btn=$('clearBtn');btn.disabled=true;
+    try{
+      const r=await fetch('/relay/admin/api/url-check/reset-webhook-stats',{method:'POST',headers:{'x-relay-admin-key':$('adminKey').value}});
+      let j={};try{j=await r.json()}catch(_){}
+      if(!r.ok||j.success===false)throw new Error(j.message||('HTTP '+r.status));
+      say('Na-clear na ang lumang webhook history.');
+      await run();
+    }catch(e){say(e.message,true)}finally{btn.disabled=false}
+  }
+  $('clearBtn').onclick=clearStats;
   $('runBtn').onclick=run;
   let saved='';try{saved=sessionStorage.getItem('relayAdminKey')||''}catch(_){}
   if(saved){$('adminKey').value=saved;run()}
