@@ -17211,7 +17211,34 @@ async function fetchMergedTransactionHistory(installationId, { category = null, 
         LIMIT $5 OFFSET $6
     `;
     const result = await queryWithRetry(pgPool, sql, params);
-    return result.rows;
+    const rows = result.rows;
+    // BAGO: dinadagdagan ang mga TOKEN_PURCHASE row ng purchase_id / amount_php / method (galing sa cloud_token_purchases)
+    // para magamit ng OMNIPOS sa Purchase Confirmation ng client (halaga ng ₱ na binayad at paraan ng bayad).
+    // Kapag pumalya ito, walang mawawala: ibabalik pa rin ang orihinal na rows (kaya ng client ang fallback).
+    try {
+        const ids = [];
+        for (const row of rows) {
+            if (row && row.category === 'TOKEN_PURCHASE' && typeof row.note === 'string') {
+                const m = row.note.match(/^Purchase (TKN-\S+) \(/);
+                if (m) { row.purchase_id = m[1]; ids.push(m[1]); }
+            }
+        }
+        if (ids.length) {
+            const pr = await queryWithRetry(
+                pgPool,
+                'SELECT purchase_id, amount_php, method FROM cloud_token_purchases WHERE installation_id = $1 AND purchase_id = ANY($2::text[])',
+                [installationId, ids]
+            );
+            const byId = new Map(pr.rows.map((x) => [x.purchase_id, x]));
+            for (const row of rows) {
+                const hit = row.purchase_id ? byId.get(row.purchase_id) : null;
+                if (hit) { row.amount_php = Number(hit.amount_php); row.method = hit.method || null; }
+            }
+        }
+    } catch (enrichErr) {
+        console.warn('fetchMergedTransactionHistory: hindi na-enrich ang purchase details:', enrichErr.message);
+    }
+    return rows;
 }
 app.get('/relay/cloud-tokens/wallet', requireApiKey, requireAllowedDevice, rateLimit('cloud-tokens-wallet', 120, 60 * 60 * 1000, (req) => req.query?.installationId), async (req, res) => {
     const installationId = String(req.query.installationId || '').trim();
