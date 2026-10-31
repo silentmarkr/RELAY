@@ -40,8 +40,21 @@ th{color:var(--muted);font-weight:600}
 td.num{text-align:right;font-variant-numeric:tabular-nums}
 .st-verified,.st-copied{color:var(--green)}.st-copying{color:var(--accent)}.st-waiting{color:var(--muted)}
 details{margin-top:10px}summary{cursor:pointer;color:var(--muted);font-size:.85rem}
+.prov{border:1px solid var(--line);border-radius:10px;margin:8px 0;background:#0a0f1c}
+.prov>summary{list-style:none;padding:10px 12px;display:grid;grid-template-columns:1fr auto;gap:2px 10px;align-items:center;color:var(--text);font-size:.95rem}
+.prov>summary::-webkit-details-marker{display:none}
+.prov .pn{font-weight:600}.prov .pg{grid-column:1;font-size:.78rem;color:var(--muted)}
+.prov .pp{grid-column:2;grid-row:1;text-align:right;font-weight:700;color:var(--accent);white-space:nowrap}
+.prov .pf{grid-column:1 / span 2;font-size:.8rem}
+.prov .pbody{padding:0 12px 12px}
+.prov .pbody p{margin:6px 0}
+.guide-tools{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
+.guide-tools select,.guide-tools input{background:#0a0f1c;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px;font:inherit;min-width:0}
+.guide-tools input{flex:1;min-width:140px}
 @media(max-width:520px){.kv{grid-template-columns:1fr}.kv span:nth-child(odd){margin-top:6px}}
-</style></head><body><main>
+</style><link rel="stylesheet" href="admin-ui.css">
+<script src="admin-ui.js" defer></script>
+</head><body><main>
 <p><a href="index.html#system">← RELAY Admin</a></p>
 <h1>Database Migration</h1>
 <div class="box warn">Move any of RELAY's three Neon (Postgres) databases to a <b>new connection URL</b> — with all its data. The new database must be <b>brand-new and empty</b>; nothing on it is ever overwritten, and the old database is never changed or deleted. While one database is being copied, RELAY <b>holds</b> the requests for that database for a short moment (they are not lost) and then continues on the new one. Best done at a quiet time.</div>
@@ -52,6 +65,12 @@ details{margin-top:10px}summary{cursor:pointer;color:var(--muted);font-size:.85r
 <div class="row"><button id="connectBtn" class="primary">Load databases</button></div>
 </section>
 
+<section class="card" id="guideCard">
+<h2>Where can I move it? (any PostgreSQL service)</h2>
+<p class="small">RELAY's data is PostgreSQL, so it can move to <b>any PostgreSQL provider</b> — from free tiers to big-cloud plans, or your own server. Cheapest first; the free tier / trial ("pre-tier") of each provider is listed first in its plans.</p>
+<div id="guideBody" class="small">Load the databases above to see the provider list.</div>
+</section>
+
 <div id="notice" class="notice" role="status"></div>
 <div id="cards"></div>
 
@@ -59,7 +78,7 @@ details{margin-top:10px}summary{cursor:pointer;color:var(--muted);font-size:.85r
 (function(){
   const $=id=>document.getElementById(id);
   const keyEl=$('adminKey');
-  const state={status:null,tests:{},typed:{},newUrls:{},poll:null,busy:{}};
+  const state={status:null,tests:{},typed:{},newUrls:{},poll:null,busy:{},providers:null,guide:{filter:'all',order:'asc',q:''}};
   const PHASE={queued:'Starting…',preflight:'Checking both databases…',pausing:'Holding RELAY requests for this database…',schema:'Creating tables on the new database…',data:'Copying rows…',constraints:'Building keys, indexes and triggers…',verify:'Verifying every table…',switching:'Switching RELAY to the new database…',done:'Finished',failed:'Failed',cancelled:'Cancelled'};
   function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
   function say(m,bad){const n=$('notice');n.textContent=m;n.className='notice show'+(bad?' error':'')}
@@ -81,6 +100,7 @@ details{margin-top:10px}summary{cursor:pointer;color:var(--muted);font-size:.85r
       const j=await api('status');
       try{sessionStorage.setItem('relayAdminKey',keyEl.value)}catch(_){}
       state.status=j;if(quiet)update();else render();
+      if(!state.providers)api('providers').then(p=>{state.providers=p;renderGuide()}).catch(()=>{});
       if(!quiet)say('Loaded.');
       schedulePoll();
     }catch(e){
@@ -97,6 +117,64 @@ details{margin-top:10px}summary{cursor:pointer;color:var(--muted);font-size:.85r
   }
   function jobOf(d){return d.job||null}
   function isRunning(d){const j=jobOf(d);return !!(j&&j.state==='running')}
+
+  // ---------- provider guide ----------
+  function fmtUsd(n){if(n==null)return 'usage-based';if(n===0)return 'Free';return '$'+Number(n).toLocaleString(undefined,{minimumFractionDigits:n%1?2:0,maximumFractionDigits:2})+'/mo'}
+  function providerById(id){return state.providers&&(state.providers.providers||[]).find(p=>p.id===id)||null}
+  function renderGuide(){
+    const host=$('guideBody');if(!state.providers){return}
+    host.textContent='';
+    const g=state.guide;
+    const tools=el('div','guide-tools');
+    const f=el('select');[['all','All providers'],['free','Has a free tier / trial (pre-tier)'],['u10','Paid plan from $10/mo or less'],['u25','Paid plan from $25/mo or less'],['u100','Paid plan from $100/mo or less']].forEach(o=>{const op=el('option',null,o[1]);op.value=o[0];if(g.filter===o[0])op.selected=true;f.appendChild(op)});
+    const o=el('select');[['asc','Cheapest first'],['desc','Most expensive first']].forEach(x=>{const op=el('option',null,x[1]);op.value=x[0];if(g.order===x[0])op.selected=true;o.appendChild(op)});
+    const q=el('input');q.type='text';q.placeholder='Search provider…';q.value=g.q;
+    f.onchange=()=>{g.filter=f.value;renderGuide()};o.onchange=()=>{g.order=o.value;renderGuide()};
+    q.oninput=()=>{g.q=q.value;renderGuideList(list,count)};
+    tools.appendChild(f);tools.appendChild(o);tools.appendChild(q);host.appendChild(tools);
+    const count=el('div','small');host.appendChild(count);
+    const list=el('div');host.appendChild(list);
+    renderGuideList(list,count);
+    const un=el('div','box warn');un.appendChild(el('b',null,'Cannot be used (not PostgreSQL): '));
+    un.appendChild(document.createTextNode((state.providers.unsupported||[]).join('; ')+'.'));host.appendChild(un);
+    host.appendChild(el('p','small',(state.providers.disclaimer||'')+' Checked: '+(state.providers.checkedAt||'')+'.'));
+  }
+  function renderGuideList(list,count){
+    const g=state.guide;list.textContent='';
+    let rows=(state.providers.providers||[]).slice();
+    rows=rows.filter(p=>{
+      if(g.q&&(p.name+' '+p.group).toLowerCase().indexOf(g.q.toLowerCase())<0)return false;
+      if(g.filter==='free')return !!(p.free&&p.free.available);
+      const lim={u10:10,u25:25,u100:100}[g.filter];
+      if(lim)return p.sortUSD!=null&&p.sortUSD<=lim;
+      return true;
+    });
+    const byName=(x,y)=>x.name.localeCompare(y.name);
+    const priced=rows.filter(p=>p.sortUSD!=null).sort((x,y)=>(x.sortUSD-y.sortUSD)||byName(x,y));
+    const unpriced=rows.filter(p=>p.sortUSD==null).sort(byName);   // usage-based / self-hosted: always last
+    if(g.order==='desc')priced.reverse();
+    rows=priced.concat(unpriced);
+    count.textContent=rows.length+' provider(s)';
+    rows.forEach(p=>list.appendChild(providerRow(p)));
+    if(!rows.length)list.appendChild(el('p','small','No provider matches this filter.'));
+  }
+  function providerRow(p){
+    const d=el('details','prov');
+    const sm=el('summary');
+    sm.appendChild(el('span','pn',p.name));
+    sm.appendChild(el('span','pp',p.sortUSD==null?'usage-based':('from '+fmtUsd(p.sortUSD))));
+    sm.appendChild(el('span','pg',p.group));
+    sm.appendChild(el('span','pf '+(p.free&&p.free.available?'badge green':'badge'),'Pre-tier: '+(p.free&&p.free.available?p.free.summary:'none')));
+    d.appendChild(sm);
+    const body=el('div','pbody');
+    const t=el('table');const h=el('tr');['Plan','Price','What you get'].forEach(x=>h.appendChild(el('th',null,x)));t.appendChild(h);
+    (p.tiers||[]).forEach(x=>{const tr=el('tr');tr.appendChild(el('td',null,x.name));tr.appendChild(el('td','num',fmtUsd(x.usd)));tr.appendChild(el('td',null,[x.specs,x.note].filter(Boolean).join(' — ')));t.appendChild(tr)});
+    body.appendChild(t);
+    const how=el('p');how.appendChild(el('b',null,'Where to find the URL: '));how.appendChild(document.createTextNode(p.urlHelp||''));body.appendChild(how);
+    (p.caveats||[]).forEach(c=>body.appendChild(el('p','small','⚠️ '+c)));
+    if(p.pricingUrl){const a=el('a',null,'Official pricing page ↗');a.href=p.pricingUrl;a.target='_blank';a.rel='noopener noreferrer';const pp=el('p');pp.appendChild(a);body.appendChild(pp)}
+    d.appendChild(body);return d;
+  }
 
   // Full render (after the admin's own actions) and a gentler per-card update for the background polling, so a card
   // is never rebuilt while the admin is typing in it.
@@ -225,7 +303,8 @@ details{margin-top:10px}summary{cursor:pointer;color:var(--muted);font-size:.85r
     const box=el('div','box '+(test.ok?'good':'bad'));
     if(test.ok)box.appendChild(el('b',null,'✅ Ready to migrate'));
     else box.appendChild(el('b',null,'❌ Cannot migrate yet'));
-    if(r.target&&r.target.host){box.appendChild(el('div','small','New database: '+r.target.host+'/'+r.target.database+(r.target.version?' — '+r.target.version:'')))}
+    if(r.target&&r.target.host){box.appendChild(el('div','small','New database: '+r.target.host+'/'+r.target.database+(r.target.version?' — '+r.target.version:'')+(r.provider?' — detected provider: '+r.provider.name:' — provider not recognised (fine, any PostgreSQL works)')))}
+    (r.notes||[]).forEach(n=>box.appendChild(el('div','small','ℹ️ '+n)));
     if((r.blocking||[]).length){const ul=el('ul');r.blocking.forEach(m=>ul.appendChild(el('li',null,m)));box.appendChild(ul)}
     if((r.warnings||[]).length){const ul=el('ul');r.warnings.forEach(m=>ul.appendChild(el('li',null,'⚠️ '+m)));box.appendChild(ul)}
     if(r.source&&r.source.tables){

@@ -20,6 +20,7 @@
 //      does not silently fall back to the stale old database while the env var still has the old URL. If it cannot be
 //      persisted anywhere, the switch is NOT done (the verified copy stays on the new database, nothing changes).
 const crypto = require('crypto');
+const providers = require('./db-providers');
 
 const REDIRECT_TABLE = 'relay_db_redirect';
 // Tables that are never copied (they describe the old location itself).
@@ -40,6 +41,8 @@ function parsePgUrl(url) {
     let u;
     try { u = new URL(raw); } catch (_e) { return { ok: false, message: 'That is not a valid URL. Expected: postgresql://user:password@host/dbname' }; }
     if (u.protocol !== 'postgres:' && u.protocol !== 'postgresql:') {
+        const other = providers.unsupportedEngineForUrl(raw);
+        if (other) return { ok: false, message: `That is a ${other.name} URL. RELAY stores its data in PostgreSQL, so it can only be moved to another PostgreSQL database (any provider). Create a PostgreSQL database and use its postgresql:// URL.` };
         return { ok: false, message: 'The URL must start with postgresql:// (or postgres://).' };
     }
     if (!u.hostname) return { ok: false, message: 'The URL has no host name.' };
@@ -89,6 +92,11 @@ class SwitchablePool {
     get rawPool() { return this._pool; }   // bypasses the gate — only for the migration engine and read-only status checks
     get isPaused() { return !!this._gate; }
     createRawPool(url) { return this._createPool(url); }
+    // Same read-only counters as pg.Pool (used by the Database Health panel in server.js).
+    get totalCount() { return this._pool.totalCount; }
+    get idleCount() { return this._pool.idleCount; }
+    get waitingCount() { return this._pool.waitingCount; }
+    get options() { return this._pool.options; }
 
     on(event, fn) {
         this._handlers.push([event, fn]);
@@ -259,8 +267,12 @@ async function resolveStartupRedirects({ pools, store, log = console.log, warn =
                 firstHop = false;
                 if (!next) {
                     let marker = null;
-                    try { marker = await withTimeout(readRedirectMarker(currentRaw, slot), 8000, 'redirect marker check'); }
-                    catch (err) { warn(`⚠️  Could not check the redirect marker for "${slot}": ${err.message}`); }
+                    // Up to 3 tries: a sleeping Neon database can need a few seconds to wake up. Silently skipping the check
+                    // would leave RELAY on the stale old database.
+                    for (let attempt = 1; attempt <= 3 && !marker; attempt++) {
+                        try { marker = await withTimeout(readRedirectMarker(currentRaw, slot), 10000, 'redirect marker check'); break; }
+                        catch (err) { warn(`⚠️  Could not check the redirect marker for "${slot}" (try ${attempt}/3): ${err.message}`); if (attempt < 3) await sleep(1500); }
+                    }
                     if (marker && marker.url) next = marker.url;
                 }
                 if (!next || visited.has(next)) break;
@@ -445,27 +457,49 @@ function dataColumns(t) { return t.columns.filter((c) => c.generated !== 's'); }
 // ===================================================================
 async function preflight({ sourcePool, targetUrl, createPool }) {
     const parsed = parsePgUrl(targetUrl);
-    if (!parsed.ok) return { ok: false, blocking: [parsed.message] };
-    const result = { ok: false, blocking: [], warnings: [], target: { host: parsed.host, database: parsed.database }, source: null };
+    if (!parsed.ok) return { ok: false, blocking: [parsed.message], warnings: [], notes: [] };
+    const provider = providers.detectProvider(targetUrl);
+    const result = {
+        ok: false, blocking: [], warnings: [], notes: [], source: null,
+        target: { host: parsed.host, database: parsed.database },
+        provider: provider ? { id: provider.id, name: provider.name } : null
+    };
     let targetPool = null;
+    let targetVersionNum = 0;
     try {
         targetPool = createPool(targetUrl);
-        const tq = (text, params) => withTimeout(targetPool.query(text, params), 30000, 'target query');
-        const info = await tq('SELECT version() AS version, current_database() AS db, current_user AS usr', []);
-        result.target.version = String(info.rows[0].version || '').split(' ').slice(0, 2).join(' ');
+        targetPool.on('error', () => {});
+        const tq = (text, params) => withTimeout(targetPool.query(text, params), 45000, 'target query');
+        const info = await tq('SELECT version() AS version, current_database() AS db, current_user AS usr, current_setting(\'server_version_num\') AS num', []);
+        const versionText = String(info.rows[0].version || '');
+        targetVersionNum = Number(info.rows[0].num) || 0;
+        result.target.version = versionText.split(' ').slice(0, 2).join(' ');
+        const partial = providers.PARTIAL_POSTGRES_PATTERNS.find((re) => re.test(versionText));
+        if (partial) result.blocking.push(`The new database reports itself as "${versionText.slice(0, 60)}". It speaks the PostgreSQL protocol but lacks the system catalogs RELAY needs, so it cannot be used. Use a real PostgreSQL database.`);
+        else if (targetVersionNum && targetVersionNum < 120000) result.blocking.push(`The new database runs PostgreSQL ${Math.floor(targetVersionNum / 10000)}; PostgreSQL 12 or newer is required.`);
         const existing = await listTargetExistingObjects(tq);
         result.target.existingObjects = existing.slice(0, 20);
         if (existing.length) result.blocking.push(`The new database is not empty (it already has: ${existing.slice(0, 8).join(', ')}${existing.length > 8 ? ', …' : ''}). Use a brand-new, empty database — nothing is ever overwritten.`);
         // Can we create objects there?
         const canCreate = await tq(`SELECT has_schema_privilege(current_user, 'public', 'CREATE') AS ok`, []);
         if (!canCreate.rows[0].ok) result.blocking.push('The database user has no permission to create tables in the public schema of the new database.');
+        // Is the connection encrypted? (Not visible on every provider; ignore if the view is not readable.)
+        try {
+            const ssl = await tq('SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()', []);
+            const local = /^(localhost|127\.|::1$)/.test(parsed.host);
+            if (ssl.rows[0] && ssl.rows[0].ssl === false && !local) result.warnings.push('The connection to the new database is NOT encrypted. Add ?sslmode=require to the URL.');
+        } catch (_e) { /* pg_stat_ssl not readable */ }
     } catch (err) {
-        result.blocking.push(`Cannot use the new database: ${scrubSecrets(err.message, [targetUrl])}`);
+        result.blocking.push(`Cannot use the new database: ${scrubSecrets(err.message, [targetUrl])}${providers.explainConnectError(err, provider)}`);
     } finally {
         if (targetPool) { try { await targetPool.end(); } catch (_e) { /* ignore */ } }
     }
     try {
         const sq = (text, params) => withTimeout(sourcePool.query(text, params), 30000, 'source query');
+        const srcNum = Number((await sq(`SELECT current_setting('server_version_num') AS num`, [])).rows[0].num) || 0;
+        if (srcNum && targetVersionNum && Math.floor(targetVersionNum / 10000) < Math.floor(srcNum / 10000)) {
+            result.warnings.push(`The new database is on an older PostgreSQL major version (${Math.floor(targetVersionNum / 10000)}) than the current one (${Math.floor(srcNum / 10000)}). It usually works, but pick the same or a newer version if you can.`);
+        }
         const schema = await inspectSchema(sq);
         if (schema.unsupported.length) result.blocking.push(`The current database has objects this tool cannot copy: ${schema.unsupported.join(', ')}.`);
         const tables = [];
@@ -478,6 +512,8 @@ async function preflight({ sourcePool, targetUrl, createPool }) {
         // Rough guess (about 3 MB/s end to end, at least 5 s) of how long RELAY will hold requests for this database.
         result.source = { tables, totalBytes, totalRows: tables.reduce((s, t) => s + (t.rows || 0), 0), estimateSeconds: Math.max(5, Math.ceil(totalBytes / (3 * 1024 * 1024))) };
         if (!tables.length) result.warnings.push('The current database has no tables to copy.');
+        const fit = providers.storageFitWarning(provider, totalBytes);
+        if (fit) result.warnings.push(fit);
     } catch (err) {
         result.blocking.push(`Cannot read the current database: ${scrubSecrets(err.message, [targetUrl])}`);
     }
@@ -528,6 +564,7 @@ async function runMigration({ slot, wrapper, targetUrl, store, job, maxPauseMs =
         await srcClient.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
         await srcClient.query(`SET LOCAL TIME ZONE 'UTC'`);
         await srcClient.query(`SET LOCAL DateStyle = 'ISO, MDY'`);
+        await srcClient.query(`SET LOCAL extra_float_digits = 3`);   // exact float text on every PostgreSQL version
         const sq = (text, params) => srcClient.query(text, params);
         const schema = await inspectSchema(sq);
         if (schema.unsupported.length) throw new Error(`The current database has objects this tool cannot copy: ${schema.unsupported.join(', ')}.`);
@@ -550,6 +587,7 @@ async function runMigration({ slot, wrapper, targetUrl, store, job, maxPauseMs =
         await dq(`SET LOCAL check_function_bodies = off`, []);
         await dq(`SET LOCAL TIME ZONE 'UTC'`, []);
         await dq(`SET LOCAL DateStyle = 'ISO, MDY'`, []);
+        await dq(`SET LOCAL extra_float_digits = 3`, []);
 
         setPhase('schema', 'Creating tables on the new database');
         const warnings = [];

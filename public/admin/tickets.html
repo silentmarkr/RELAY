@@ -73,6 +73,8 @@
     .topbar-actions .icon-btn { flex: 1 1 auto; justify-content: center; font-size: .82rem; padding: 9px 10px; }
   }
 </style>
+<link rel="stylesheet" href="admin-ui.css">
+<script src="admin-ui.js" defer></script>
 </head>
 <body>
 <div id="loginWrap">
@@ -176,7 +178,7 @@ function renderTicket(t) {
   if (d) { t = { ...t, status: d.status, adminNote: d.note }; }
   const created = t.createdAt ? new Date(t.createdAt).toLocaleString() : '';
   const received = t.receivedAt ? new Date(t.receivedAt).toLocaleString() : '';
-  const store = t.storeName ? `${escapeHtml(t.storeName)} • ` : '';
+  const store = t.storeName ? `<span class="ent-name">${escapeHtml(t.storeName)}</span> • ` : '';
   const transcript = (t.transcript || []).map(l => `<div class="transcript-line"><b>${l.role === 'assistant' ? 'Omni AI' : 'User'}:</b> ${escapeHtml(l.text)}</div>`).join('');
   const diag = t.diagnostics ? `<pre class="diag">${escapeHtml(JSON.stringify(t.diagnostics, null, 2))}</pre>` : '';
   const options = Object.keys(STATUS_LABELS).map(k => `<option value="${k}"${t.status === k ? ' selected' : ''}>${STATUS_LABELS[k]}</option>`).join('');

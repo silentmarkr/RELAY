@@ -1,0 +1,205 @@
+/* ===================================================================
+   RELAY ADMIN — shared design layer (loaded by every admin page, after the page's own <style>)
+   1. Entity "name plates": customer names and labels stand out from IDs, meta text and badges.
+   2. Quality-of-life polish: focus rings, selection, scrollbars, tabular numbers, reduced motion.
+   3. Global menu button + quick-search palette (see admin-ui.js).
+   Everything here is additive and uses fallbacks, so a page that lacks a variable still renders.
+   =================================================================== */
+:root {
+  --ent-text: #ffffff;
+  --ent-bg: rgba(34, 229, 255, .16);
+  --ent-bg-strong: rgba(34, 229, 255, .26);
+  --ent-line: rgba(34, 229, 255, .7);
+  --ent-glow: rgba(34, 229, 255, .42);
+  --ent-name-text: #f4fdff;
+  --id-text: #9db1d6;
+}
+
+/* ---------- 1. Entity highlighting ---------- */
+/* Customer / store NAME: bold, bright, with a cyan marker so it is the first thing the eye lands on in any row. */
+.ent-name,
+.sponsor-who,
+.store-name:not(.empty-name) {
+  font-weight: 700;
+  color: var(--ent-name-text);
+  text-shadow: 0 0 14px var(--ent-glow);
+  letter-spacing: .01em;
+}
+.ent-name { font-size: 1.04em; }
+strong.ent-name { font-size: 15.5px; }
+.store-name:not(.empty-name) { font-size: 15.5px; }
+.store-name.empty-name { font-style: italic; color: var(--muted, #8ea3c9); }
+.sponsor-who { font-size: 15px; }
+
+/* Customer LABEL (🏷️): a filled pill that stays readable on every row background. */
+.ent-label,
+.dev-label,
+.row-label-inline {
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: middle;
+  font-family: var(--font-ui, system-ui, sans-serif);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.35;
+  color: var(--ent-text);
+  background: linear-gradient(90deg, var(--ent-bg-strong), var(--ent-bg));
+  border: 1px solid var(--ent-line);
+  border-radius: 999px;
+  padding: 1px 11px;
+  text-shadow: 0 0 10px var(--ent-glow);
+  box-shadow: 0 0 0 1px rgba(5, 7, 13, .5), 0 4px 14px -8px var(--ent-glow);
+  overflow-wrap: anywhere;
+}
+#tabPanel-clients .dev-label { font-size: 14px; padding: 1px 11px; margin-bottom: 4px; }
+.row-label-inline { margin-left: 8px; font-size: 12.5px; }
+
+/* Cards that already style their own title (cost allocation): keep their layout, raise the weight and colour. */
+.client-card-label {
+  font-size: 1.02rem !important;
+  font-weight: 700 !important;
+  color: var(--ent-name-text) !important;
+  text-shadow: 0 0 14px var(--ent-glow);
+  border-left: 3px solid var(--ent-line);
+  padding-left: 8px;
+}
+
+/* IDs, hashes and meta lines step back so names and labels win the hierarchy. */
+.id,
+.id-text,
+.client-card-id,
+.client-card-id.has-label {
+  color: var(--id-text);
+}
+.row .id { font-size: 11.5px; }
+#tabPanel-clients .id { color: var(--id-text); }
+.meta { color: var(--muted, #8ea3c9); }
+
+/* Detail screen header: the label / store name is the title. */
+#detailStoreName {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--ent-name-text);
+  text-shadow: 0 0 14px var(--ent-glow);
+}
+
+/* A row that contains a name plate gets a left marker, so rows are easy to scan top to bottom. */
+.row:has(.dev-label),
+.row:has(.ent-label),
+.row:has(.ent-name),
+.row:has(.sponsor-who) {
+  border-left: 3px solid var(--ent-line);
+}
+.inst-row .cell-name { border-left: 3px solid transparent; }
+.inst-row:hover .cell-name { border-left-color: var(--ent-line); }
+
+/* Tables: the first cell (customer) reads as a name plate */
+table td > strong.ent-name { display: block; margin-bottom: 2px; }
+table td .ent-label { font-size: 12.5px; }
+
+/* ---------- 2. Polish ---------- */
+html { scroll-behavior: smooth; }
+::selection { background: rgba(34, 229, 255, .3); color: #fff; }
+:focus-visible {
+  outline: 2px solid var(--accent, #22e5ff);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.stat-num, .stat-card, td, th, .badge { font-variant-numeric: tabular-nums; }
+* { scrollbar-width: thin; scrollbar-color: #2a3a5c transparent; }
+*::-webkit-scrollbar { width: 9px; height: 9px; }
+*::-webkit-scrollbar-thumb { background: #2a3a5c; border-radius: 8px; }
+*::-webkit-scrollbar-thumb:hover { background: #3a507c; }
+.row { transition: border-color .2s ease, background .2s ease; }
+.row:hover { background: rgba(34, 229, 255, .045); }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+}
+
+/* ---------- 3. Global menu button + quick search ---------- */
+#relayNavFab {
+  position: fixed;
+  left: 14px;
+  bottom: 14px;
+  z-index: 900;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  border: 1.5px solid var(--ent-line);
+  background: rgba(8, 12, 22, .88);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  color: #eafcff;
+  font: 600 14px/1 var(--font-ui, system-ui, sans-serif);
+  cursor: pointer;
+  box-shadow: 0 10px 28px -10px rgba(0, 0, 0, .8), 0 0 0 1px rgba(5, 7, 13, .6);
+}
+#relayNavFab:hover { background: rgba(16, 24, 42, .95); }
+#relayNavFab kbd { font: 600 11px var(--font-mono, monospace); padding: 2px 6px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, .2); color: #9db1d6; }
+@media (max-width: 680px) { #relayNavFab kbd { display: none; } #relayNavFab { padding: 12px 14px; } }
+@media print { #relayNavFab, #relayPalette { display: none !important; } }
+
+#relayPalette {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  display: none;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 8vh 12px 12px;
+  background: rgba(2, 4, 9, .72);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+#relayPalette.open { display: flex; }
+#relayPalette .rp-box {
+  width: min(640px, 100%);
+  max-height: 84vh;
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
+  border: 1.5px solid var(--ent-line);
+  background: #0b101c;
+  box-shadow: 0 30px 80px -20px rgba(0, 0, 0, .9);
+  overflow: hidden;
+  color: #eafcff;
+  font-family: var(--font-ui, system-ui, sans-serif);
+}
+#relayPalette .rp-input {
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid #1f2a44;
+  background: transparent;
+  color: #fff;
+  font: 500 17px/1.3 var(--font-ui, system-ui, sans-serif);
+  padding: 16px 18px;
+  outline: none;
+}
+#relayPalette .rp-list { overflow-y: auto; padding: 6px; }
+#relayPalette .rp-group { font: 700 11px var(--font-mono, monospace); letter-spacing: .1em; text-transform: uppercase; color: #7186ab; padding: 12px 12px 4px; }
+#relayPalette .rp-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+#relayPalette .rp-item .rp-ico { font-size: 20px; width: 28px; text-align: center; flex: 0 0 28px; }
+#relayPalette .rp-item .rp-t { font-weight: 700; font-size: 15px; }
+#relayPalette .rp-item .rp-d { font-size: 12.5px; color: #8ea3c9; }
+#relayPalette .rp-item .rp-cur { margin-left: auto; font: 700 10.5px var(--font-mono, monospace); color: #3ddc84; border: 1px solid rgba(61, 220, 132, .4); border-radius: 999px; padding: 2px 8px; }
+#relayPalette .rp-item[aria-selected="true"], #relayPalette .rp-item:hover { background: rgba(34, 229, 255, .14); }
+#relayPalette .rp-empty { padding: 22px; text-align: center; color: #8ea3c9; }
+#relayPalette .rp-foot { display: flex; gap: 14px; flex-wrap: wrap; padding: 8px 14px; border-top: 1px solid #1f2a44; font-size: 12px; color: #7186ab; }
+#relayPalette .rp-foot kbd { font: 600 11px var(--font-mono, monospace); padding: 1px 6px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, .2); color: #9db1d6; }

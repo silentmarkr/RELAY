@@ -1429,6 +1429,8 @@ a:focus-visible,
 #cardHistory .timeline-item .timeline-time { font-size: 10px; }
 .show-more-btn { width: 100%; margin-top: 6px; padding: 8px; border-radius: 8px; border: 1px dashed var(--border-color, #475569); background: transparent; color: var(--muted); font-size: 12px; cursor: pointer; }
 </style>
+<link rel="stylesheet" href="admin-ui.css">
+<script src="admin-ui.js" defer></script>
 </head>
 <body>
 <div class="hud-corner tl"></div>
@@ -2365,6 +2367,10 @@ function withScrollPreserved(fn) {
     return result;
   };
 }
+// HTML-escape for customer-controlled text (store names / labels) that is shown highlighted as .ent-name / .ent-label.
+function entEsc(v) {
+  return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]; });
+}
 function escapeAttr(str) {
   return String(str).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
 }
@@ -2656,7 +2662,7 @@ function renderHomeExpiring() {
     return `<div class="expiring-item">
       <div>
         <div class="feature-name">${icons[s.featureId] || ''} ${sponsorEsc(s.featureName)}${s.tier ? ' · ' + sponsorEsc(s.tier) : ''}</div>
-        <div class="feature-meta">${sponsorEsc(s.label || 'No label')} · <a href="#" onclick="switchTab('clients'); openDeviceDetail('${escapeAttr(s.installationId)}'); return false;">open client</a></div>
+        <div class="feature-meta"><span class="ent-label">${sponsorEsc(s.label || 'No label')}</span> · <a href="#" onclick="switchTab('clients'); openDeviceDetail('${escapeAttr(s.installationId)}'); return false;">open client</a></div>
       </div>
       <div class="expiring-days ${urgency}">${daysLabel}</div>
     </div>`;
@@ -3572,7 +3578,7 @@ function renderDownloadCodesList() {
     return `
     <div class="row" ${(expired || exhausted) ? 'style="opacity:0.55;"' : ''}>
       <div class="row-info">
-        <div class="id">${c.label || '(no label)'}
+        <div class="id"><span class="ent-label">${entEsc(c.label) || '(no label)'}</span>
           ${expired ? '<span class="badge badge-blocked">EXPIRED</span>' : ''}
           ${!expired && exhausted ? '<span class="badge badge-blocked">NAUBOS ANG USES</span>' : ''}
           ${!expired && !exhausted ? '<span class="badge badge-allowed">AKTIBO</span>' : ''}
@@ -3914,7 +3920,7 @@ async function loadDevices() {
       return `<div class="row">
         <input type="checkbox" class="device-select-checkbox" data-id="${escapeAttr(id)}" ${checked} onchange="onDeviceCheckboxChange('${escapeAttr(id)}', this.checked)" style="flex:0 0 auto; width:16px; height:16px; cursor:pointer;">
         <div class="row-info">
-          ${devLabel ? `<div class="dev-label">🏷️ ${devLabel}</div>` : ''}
+          ${devLabel ? `<div class="dev-label">🏷️ ${entEsc(devLabel)}</div>` : ''}
           <div class="id">${id}
             <span class="badge" style="${online ? 'background:var(--green-bg,#0f2e1c); color:var(--green,#4ade80);' : 'background:var(--gray-bg,#2a2a2a); color:var(--gray,#888);'}">${online ? '🟢 ONLINE' : '⚪ OFFLINE'}</span>
           </div>
@@ -4066,7 +4072,7 @@ function renderSubscriptionsList() {
     return `<div class="expiring-item">
       <div>
         <div class="feature-name">${featureIcon[s.featureId] || ''} ${s.featureName}${cycleLabel ? ' · ' + cycleLabel : ''}${s.tier ? ' · ' + s.tier : ''}</div>
-        <div class="feature-meta">${s.label || 'No label'} · <a href="#" onclick="closeAnalyticsIfOpen(); switchTab('clients'); openDeviceDetail('${s.installationId}'); return false;">open device</a></div>
+        <div class="feature-meta"><span class="ent-label">${entEsc(s.label) || 'No label'}</span> · <a href="#" onclick="closeAnalyticsIfOpen(); switchTab('clients'); openDeviceDetail('${s.installationId}'); return false;">open device</a></div>
       </div>
       <div class="expiring-days ${urgency}">${daysLabel}</div>
     </div>`;
@@ -4108,7 +4114,7 @@ function renderSeenList() {
   seenEl.innerHTML = list.map(d => `
     <div class="row row-seen" ${(d.cloneFlagged || d.integrityFlagged) ? 'style="border:1px solid var(--red);"' : ''}>
       <div class="row-info">
-        ${d.label ? `<div class="dev-label">🏷️ ${d.label}</div>` : ''}
+        ${d.label ? `<div class="dev-label">🏷️ ${entEsc(d.label)}</div>` : ''}
         <div class="id">${d.installationId}
           <span class="badge ${d.allowed ? 'badge-allowed' : 'badge-blocked'}">${d.allowed ? 'ALLOWED' : 'BLOCKED'}</span>
           <span class="badge" style="${d.online ? 'background:var(--green-bg,#0f2e1c); color:var(--green,#4ade80);' : 'background:var(--gray-bg,#2a2a2a); color:var(--gray,#888);'}">${d.online ? '🟢 ONLINE' : '⚪ OFFLINE'}</span>
@@ -4198,7 +4204,7 @@ function renderOtps(list) {
         : `<div class="requestor-photo-placeholder" title="No photo (camera permission may have been denied, or the device has no camera)">🚫</div>`}
       <div class="row-info">
         <div><strong>${label}</strong>${o.price ? ' · ₱' + o.price : ''}${o.billingCycle ? ' · ' + (o.billingCycle === 'yearly' ? 'Yearly' : 'Monthly') + ' subscription' : ''}</div>
-        <div class="meta">${o.storeName || 'No store name'} · requested by ${o.requestedBy}</div>
+        <div class="meta"><span class="ent-name">${entEsc(o.storeName) || 'No store name'}</span> · requested by ${o.requestedBy}</div>
         <div style="margin:6px 0;">${statusHtml}</div>
         <div class="countdown">Mag-e-expire sa ${minsLeft(o.expiresAt)}</div>
       </div>
@@ -4271,7 +4277,7 @@ function renderAdminResets(list) {
     }
     return `<div class="row" style="align-items:flex-start;">
       <div class="row-info">
-        <div><strong>${r.storeName || 'No store name'}</strong></div>
+        <div><strong class="ent-name">${entEsc(r.storeName) || 'No store name'}</strong></div>
         <div class="meta">Installation: ${r.installationId} · possible account: ${r.hintUsername || 'Unknown'}</div>
         <div style="margin:6px 0;">${statusHtml}</div>
         <div class="countdown">Mag-e-expire sa ${minsLeft(r.expiresAt)}</div>
@@ -4317,7 +4323,7 @@ function renderReceiptResets(list) {
     }
     return `<div class="row" style="align-items:flex-start;">
       <div class="row-info">
-        <div><strong>${r.storeName || 'No store name'}</strong></div>
+        <div><strong class="ent-name">${entEsc(r.storeName) || 'No store name'}</strong></div>
         <div class="meta">Installation: ${r.installationId} · requested by: ${r.requestedBy || 'Unknown'}</div>
         <div style="margin:6px 0;">${statusHtml}</div>
         <div class="countdown">Mag-e-expire sa ${minsLeft(r.expiresAt)}</div>
@@ -4363,7 +4369,7 @@ function renderReceiptCreditPurchases(list) {
     }
     return `<div class="row" style="align-items:flex-start;">
       <div class="row-info">
-        <div><strong>${r.storeName || 'No store name'}</strong></div>
+        <div><strong class="ent-name">${entEsc(r.storeName) || 'No store name'}</strong></div>
         <div class="meta">Installation: ${r.installationId} · requested by: ${r.requestedBy || 'Unknown'}</div>
         <div class="meta">Price: ₱${r.pricePHP != null ? r.pricePHP : '?'} · Credits: ${r.credits || 1}</div>
         <div style="margin:6px 0;">${statusHtml}</div>
@@ -5548,7 +5554,7 @@ function renderAnalytics(a) {
         return `<div class="expiring-item">
           <div>
             <div class="feature-name">${e.featureName}</div>
-            <div class="feature-meta">${e.label || 'No label'} · <a href="#" onclick="closeAnalytics(true); openDeviceDetail('${e.installationId}'); return false;">open device</a></div>
+            <div class="feature-meta"><span class="ent-label">${entEsc(e.label) || 'No label'}</span> · <a href="#" onclick="closeAnalytics(true); openDeviceDetail('${e.installationId}'); return false;">open device</a></div>
           </div>
           <div class="expiring-days ${urgency}">${daysLeft <= 0 ? 'today' : daysLeft + ' day(s) left'}</div>
         </div>`;

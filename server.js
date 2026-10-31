@@ -194,6 +194,7 @@ const REDIS_KEY_PREFIX = 'omnipos-relay:';
 const { Pool } = require('pg');
 // Database migration support (admin "Migrate" buttons) — see db-migrate.js.
 const dbMigrate = require('./db-migrate');
+const dbProviders = require('./db-providers');
 // AYOS: dating IISANG DATABASE_URL/pgPool lang ang ginagamit PAREHO ng
 // (1) Cloud Backup (cloud_backup_modules/cloud_backup_meta) AT (2) Device/
 // license data (relay_devices/relay_device_fingerprints/relay_clone_splits),
@@ -234,7 +235,7 @@ const DB_URL_OVERRIDE_FILE = path.join(__dirname, 'db-url-overrides.json');
 const dbUrlOverrideStore = dbMigrate.createOverrideStore({
     filePath: DB_URL_OVERRIDE_FILE,
     readText: (f) => fs.readFileSync(f, 'utf8'),
-    writeText: (f, data) => { atomicWriteFileSync(f, data); try { fs.chmodSync(f, 0o600); } catch (_e) { /* best effort */ } }
+    writeText: (f, data) => { atomicWriteFileSync(f, data); for (const x of [f, `${f}.bak`]) { try { fs.chmodSync(x, 0o600); } catch (_e) { /* best effort (the .bak copy holds the same secret) */ } } }
 });
 
 const pgPool = makePgPool(DATABASE_URL, 'cloud');
@@ -22157,8 +22158,10 @@ async function checkPgPoolReachable(pool, timeoutMs = 5000) {
         waitingCount: pool.waitingCount
     });
     try {
+        // rawPool (when this is a SwitchablePool) skips the "held during migration" gate, so a running database
+        // migration is not reported as the database being down.
         await Promise.race([
-            pool.query('SELECT 1'),
+            (pool.rawPool || pool).query('SELECT 1'),
             new Promise((_, reject) => setTimeout(() => reject(new Error('Timed out while checking this database.')), timeoutMs))
         ]);
         return { configured: true, reachable: true, error: null, latencyMs: Date.now() - startedAt, pool: poolStats() };
@@ -22278,7 +22281,7 @@ app.get('/relay/admin/api/db-status', requireAdminKey, async (req, res) => {
 async function getPgDatabaseSizeBytes(pool) {
     if (!pool) return null;
     try {
-        const result = await pool.query('SELECT pg_database_size(current_database()) AS bytes');
+        const result = await (pool.rawPool || pool).query('SELECT pg_database_size(current_database()) AS bytes');
         const bytes = result.rows && result.rows[0] ? Number(result.rows[0].bytes) : null;
         return Number.isFinite(bytes) ? bytes : null;
     } catch (err) {
@@ -23704,6 +23707,12 @@ async function dbMigrationSizeBytes(pool) {
     } catch (_e) { return null; }
 }
 
+// Provider guide: every PostgreSQL service from the cheapest to the most expensive, with its free tier / trial first.
+app.get('/relay/admin/api/database-migration/providers', requireAdminKey, (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.json(Object.assign({ success: true }, dbProviders.listProviders()));
+});
+
 app.get('/relay/admin/api/database-migration/status', requireAdminKey, async (req, res) => {
     try {
         const out = [];
@@ -23738,18 +23747,21 @@ app.get('/relay/admin/api/database-migration/status', requireAdminKey, async (re
 app.post('/relay/admin/api/database-migration/test', requireAdminKey, rateLimit('db-migrate-test', 20, 10 * 60 * 1000), async (req, res) => {
     const found = dbMigrationFindSlot(req.body && req.body.slot);
     if (found.error) return res.status(400).json({ success: false, message: found.error });
-    const targetUrl = String((req.body && req.body.targetUrl) || '').trim();
-    const parsed = dbMigrate.parsePgUrl(targetUrl);
+    const typedUrl = String((req.body && req.body.targetUrl) || '').trim();
+    const parsed = dbMigrate.parsePgUrl(typedUrl);
     if (!parsed.ok) return res.status(400).json({ success: false, message: parsed.message });
+    const prepared = dbProviders.prepareTargetUrl(typedUrl);   // e.g. sslmode=no-verify for providers with a private CA
+    const targetUrl = prepared.url;
     const conflict = dbMigrationTargetConflict(targetUrl);
     if (conflict) return res.status(400).json({ success: false, message: conflict });
     try {
         const pf = await dbMigrate.preflight({ sourcePool: found.def.pool.rawPool, targetUrl, createPool: (u) => found.def.pool.createRawPool(u) });
+        pf.notes = (pf.notes || []).concat(prepared.notes);
         if (pf.source && pf.source.estimateSeconds * 1000 > DB_MIGRATE_MAX_PAUSE_MS) {
             pf.warnings.push(`The copy may take about ${Math.round(pf.source.estimateSeconds / 60)} minutes, longer than the ${Math.round(DB_MIGRATE_MAX_PAUSE_MS / 60000)}-minute limit; it would be cancelled safely. Raise DB_MIGRATE_MAX_PAUSE_MS on the host first.`);
         }
         res.set('Cache-Control', 'no-store');
-        res.json({ success: true, ok: pf.ok, blocking: pf.blocking, warnings: pf.warnings, target: pf.target, source: pf.source });
+        res.json({ success: true, ok: pf.ok, blocking: pf.blocking, warnings: pf.warnings, notes: pf.notes, provider: pf.provider, target: pf.target, source: pf.source });
     } catch (err) {
         res.status(500).json({ success: false, message: dbMigrate.scrubSecrets(err && err.message, [targetUrl]) });
     }
@@ -23758,9 +23770,10 @@ app.post('/relay/admin/api/database-migration/test', requireAdminKey, rateLimit(
 app.post('/relay/admin/api/database-migration/start', requireAdminKey, rateLimit('db-migrate-start', 10, 10 * 60 * 1000), (req, res) => {
     const found = dbMigrationFindSlot(req.body && req.body.slot);
     if (found.error) return res.status(400).json({ success: false, message: found.error });
-    const targetUrl = String((req.body && req.body.targetUrl) || '').trim();
-    const parsed = dbMigrate.parsePgUrl(targetUrl);
+    const typedUrl = String((req.body && req.body.targetUrl) || '').trim();
+    const parsed = dbMigrate.parsePgUrl(typedUrl);
     if (!parsed.ok) return res.status(400).json({ success: false, message: parsed.message });
+    const targetUrl = dbProviders.prepareTargetUrl(typedUrl).url;   // same adjustment as the Test step
     if (!req.body || req.body.confirm !== 'MIGRATE') return res.status(400).json({ success: false, message: 'Confirmation missing. Type MIGRATE to confirm.' });
     const conflict = dbMigrationTargetConflict(targetUrl);
     if (conflict) return res.status(400).json({ success: false, message: conflict });
