@@ -39,3 +39,6 @@ relay-private-key.pem
 
 # Local fallback store for hashed customer activation/license records.
 data/
+
+# Where a migrated database now lives (contains connection strings — a secret). Written by Admin -> Database Migration.
+db-url-overrides.json

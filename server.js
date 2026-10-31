@@ -192,6 +192,8 @@ if (redisClient) {
 }
 const REDIS_KEY_PREFIX = 'omnipos-relay:';
 const { Pool } = require('pg');
+// Database migration support (admin "Migrate" buttons) — see db-migrate.js.
+const dbMigrate = require('./db-migrate');
 // AYOS: dating IISANG DATABASE_URL/pgPool lang ang ginagamit PAREHO ng
 // (1) Cloud Backup (cloud_backup_modules/cloud_backup_meta) AT (2) Device/
 // license data (relay_devices/relay_device_fingerprints/relay_clone_splits),
@@ -208,8 +210,7 @@ const DATABASE_URL = process.env.DATABASE_URL || null;
 const DEVICES_DATABASE_URL = process.env.RELAY_DEVICES_DATABASE_URL || DATABASE_URL || null;
 const DEVICES_DB_IS_SEPARATE = !!(process.env.RELAY_DEVICES_DATABASE_URL && process.env.RELAY_DEVICES_DATABASE_URL !== DATABASE_URL);
 
-function makePgPool(connectionString) {
-    if (!connectionString) return null;
+function makeRawPgPool(connectionString) {
     return new Pool({
         connectionString,
         ssl: process.env.PGSSL === 'false' ? false : { rejectUnauthorized: false },
@@ -221,8 +222,22 @@ function makePgPool(connectionString) {
         connectionTimeoutMillis: 15000
     });
 }
+// Every database connection goes through a SwitchablePool (same query/connect/on API as pg.Pool). It lets the admin move a
+// database to a NEW connection URL at runtime (Admin -> Database Migration) without a restart. It starts "held" until
+// bootstrapStores() has checked for an earlier migration (resolveStartupRedirects), so no query ever reaches a stale database.
+function makePgPool(connectionString, label) {
+    if (!connectionString) return null;
+    return new dbMigrate.SwitchablePool({ label, url: connectionString, createPool: makeRawPgPool, holdUntilReady: true });
+}
+// Remembers where a database moved to (the env var on the host may still hold the old URL). Holds a secret: git-ignored, mode 600.
+const DB_URL_OVERRIDE_FILE = path.join(__dirname, 'db-url-overrides.json');
+const dbUrlOverrideStore = dbMigrate.createOverrideStore({
+    filePath: DB_URL_OVERRIDE_FILE,
+    readText: (f) => fs.readFileSync(f, 'utf8'),
+    writeText: (f, data) => { atomicWriteFileSync(f, data); try { fs.chmodSync(f, 0o600); } catch (_e) { /* best effort */ } }
+});
 
-const pgPool = makePgPool(DATABASE_URL);
+const pgPool = makePgPool(DATABASE_URL, 'cloud');
 if (pgPool) {
     pgPool.on('error', (err) => {
         console.error('⚠️  Postgres pool error (cloud backup storage):', err.message);
@@ -233,7 +248,7 @@ if (pgPool) {
 
 // Kung magkapareho ang connection string, muling gamitin ang parehong Pool
 // instance (huwag gumawa ng dobleng koneksyon papunta sa iisang database).
-const pgPoolDevices = DEVICES_DB_IS_SEPARATE ? makePgPool(DEVICES_DATABASE_URL) : pgPool;
+const pgPoolDevices = DEVICES_DB_IS_SEPARATE ? makePgPool(DEVICES_DATABASE_URL, 'devices') : pgPool;
 if (DEVICES_DB_IS_SEPARATE && pgPoolDevices) {
     pgPoolDevices.on('error', (err) => {
         console.error('⚠️  Postgres pool error (device/license storage):', err.message);
@@ -256,7 +271,7 @@ if (DEVICES_DB_IS_SEPARATE && pgPoolDevices) {
 // gustong iwasan) — babalik na lang sa lokal na file (na alam nating
 // ephemeral sa Render, pero mas mabuti pa rin kesa ihalo sa ibang DB).
 const BUILD_DATABASE_URL = process.env.RELAY_BUILD_DATABASE_URL || null;
-const pgPoolBuild = makePgPool(BUILD_DATABASE_URL);
+const pgPoolBuild = makePgPool(BUILD_DATABASE_URL, 'build');
 if (pgPoolBuild) {
     pgPoolBuild.on('error', (err) => {
         console.error('⚠️  Postgres pool error (build/push storage):', err.message);
@@ -23629,7 +23644,184 @@ app.get('/relay/bootstrap', rateLimit('bootstrap', 30, 10 * 60 * 1000), async (r
 });
 
 app.get('/relay/health', (req, res) => res.json({ success: true, status: 'ok' }));
+// ===================================================================
+// DATABASE MIGRATION (admin) — one "Migrate" button per Neon/Postgres database (page: admin/database-migration.html)
+// The engine lives in db-migrate.js. Summary of the guarantees:
+//   - the NEW database must be empty; nothing is ever dropped/overwritten there
+//   - the old database is only read (plus one small redirect-marker table)
+//   - copy + verification happen in ONE transaction on the new database; any problem rolls it back to empty
+//   - RELAY queries for that database are HELD (not failed) during the copy, then continue on the new database
+//   - the new URL is saved (local file + marker in the old database) so a restart does not go back to stale data
+// After a successful migration the admin should still replace the env var on the host with the new URL.
+// ===================================================================
+function dbMigrationSlots() {
+    return [
+        { slot: 'cloud', label: 'Cloud Backup', envVar: 'DATABASE_URL', pool: pgPool, sharedWith: null,
+          what: 'Cloud backups, Omni Token wallets and purchases' },
+        { slot: 'devices', label: 'Devices & Licensing', envVar: 'RELAY_DEVICES_DATABASE_URL', pool: pgPoolDevices,
+          sharedWith: DEVICES_DB_IS_SEPARATE ? null : 'cloud', what: 'Devices, licences, AI credits and admin settings' },
+        { slot: 'build', label: 'Build & Push', envVar: 'RELAY_BUILD_DATABASE_URL', pool: pgPoolBuild, sharedWith: null,
+          what: 'Download codes, build history and the release package' }
+    ];
+}
+const dbMigrationJobs = new Map();   // slot -> latest job (kept in memory so the page can show the last result)
+let dbMigrationRunningSlot = null;   // only one migration at a time
+const DB_MIGRATE_MAX_PAUSE_MS = Math.max(60 * 1000, readNonNegativeEnvNumber('DB_MIGRATE_MAX_PAUSE_MS', 15 * 60 * 1000));
+
+function dbMigrationPublicJob(job) {
+    if (!job) return null;
+    return {
+        id: job.id, slot: job.slot, state: job.state, phase: job.phase, message: job.message || '',
+        startedAt: job.startedAt, finishedAt: job.finishedAt || null, error: job.error || null,
+        rowsDone: job.rowsDone, rowsTotal: job.rowsTotal, bytesTotal: job.bytesTotal || 0,
+        cancelRequested: !!job.cancelRequested, result: job.result || null,
+        tables: (job.tables || []).map((t) => ({ name: t.name, rows: t.rows, done: t.done, state: t.state, verifiedBy: t.verifiedBy || null }))
+    };
+}
+function dbMigrationFindSlot(name) {
+    const def = dbMigrationSlots().find((x) => x.slot === String(name || ''));
+    if (!def) return { error: 'Unknown database. Use cloud, devices or build.' };
+    if (!def.pool) return { error: `${def.label} has no database configured (${def.envVar} is not set), so there is nothing to migrate.` };
+    if (def.sharedWith) return { error: `${def.label} currently shares the same database as Cloud Backup. Migrate it with the Cloud Backup button — that copies everything in that database, including the devices/licence tables.` };
+    return { def };
+}
+// A new URL must point at a DIFFERENT database than any RELAY database in use.
+function dbMigrationTargetConflict(targetUrl) {
+    const target = dbMigrate.maskUrl(targetUrl);
+    for (const d of dbMigrationSlots()) {
+        if (d.pool && dbMigrate.maskUrl(d.pool.url) === target) return `The new URL points to the database RELAY already uses for ${d.label}. Create a new, empty database and use its URL.`;
+    }
+    return null;
+}
+async function dbMigrationSizeBytes(pool) {
+    try {
+        const r = await Promise.race([
+            pool.rawPool.query('SELECT pg_database_size(current_database()) AS bytes'),
+            new Promise((_r, reject) => setTimeout(() => reject(new Error('timeout')), 6000))
+        ]);
+        const n = Number(r.rows[0].bytes);
+        return Number.isFinite(n) ? n : null;
+    } catch (_e) { return null; }
+}
+
+app.get('/relay/admin/api/database-migration/status', requireAdminKey, async (req, res) => {
+    try {
+        const out = [];
+        const sizes = await Promise.all(dbMigrationSlots().map((d) => (d.pool && !d.sharedWith ? dbMigrationSizeBytes(d.pool) : Promise.resolve(null))));
+        for (const [idx, d] of dbMigrationSlots().entries()) {
+            const envUrl = process.env[d.envVar] || '';
+            const configured = !!d.pool;
+            const item = {
+                slot: d.slot, label: d.label, envVar: d.envVar, what: d.what, configured,
+                sharedWith: d.sharedWith || null,
+                host: configured ? dbMigrate.maskUrl(d.pool.url) : null,
+                source: configured ? d.pool.source : null,
+                redirected: configured && d.pool.source !== 'env',
+                envHost: envUrl ? dbMigrate.maskUrl(envUrl) : null,
+                // true while RELAY runs on a migrated database but the host env var still has the old URL
+                envNeedsUpdate: configured && !!envUrl && envUrl !== d.pool.url,
+                paused: configured && d.pool.isPaused,
+                sizeBytes: sizes[idx],
+                job: dbMigrationPublicJob(dbMigrationJobs.get(d.slot))
+            };
+            out.push(item);
+        }
+        res.set('Cache-Control', 'no-store');
+        res.json({ success: true, running: dbMigrationRunningSlot, maxPauseMinutes: Math.round(DB_MIGRATE_MAX_PAUSE_MS / 60000), databases: out });
+    } catch (err) {
+        console.error('database-migration status error:', err);
+        res.status(500).json({ success: false, message: 'Could not read the database status.' });
+    }
+});
+
+// Read-only check of the new URL and of what would be copied. Changes nothing anywhere.
+app.post('/relay/admin/api/database-migration/test', requireAdminKey, rateLimit('db-migrate-test', 20, 10 * 60 * 1000), async (req, res) => {
+    const found = dbMigrationFindSlot(req.body && req.body.slot);
+    if (found.error) return res.status(400).json({ success: false, message: found.error });
+    const targetUrl = String((req.body && req.body.targetUrl) || '').trim();
+    const parsed = dbMigrate.parsePgUrl(targetUrl);
+    if (!parsed.ok) return res.status(400).json({ success: false, message: parsed.message });
+    const conflict = dbMigrationTargetConflict(targetUrl);
+    if (conflict) return res.status(400).json({ success: false, message: conflict });
+    try {
+        const pf = await dbMigrate.preflight({ sourcePool: found.def.pool.rawPool, targetUrl, createPool: (u) => found.def.pool.createRawPool(u) });
+        if (pf.source && pf.source.estimateSeconds * 1000 > DB_MIGRATE_MAX_PAUSE_MS) {
+            pf.warnings.push(`The copy may take about ${Math.round(pf.source.estimateSeconds / 60)} minutes, longer than the ${Math.round(DB_MIGRATE_MAX_PAUSE_MS / 60000)}-minute limit; it would be cancelled safely. Raise DB_MIGRATE_MAX_PAUSE_MS on the host first.`);
+        }
+        res.set('Cache-Control', 'no-store');
+        res.json({ success: true, ok: pf.ok, blocking: pf.blocking, warnings: pf.warnings, target: pf.target, source: pf.source });
+    } catch (err) {
+        res.status(500).json({ success: false, message: dbMigrate.scrubSecrets(err && err.message, [targetUrl]) });
+    }
+});
+
+app.post('/relay/admin/api/database-migration/start', requireAdminKey, rateLimit('db-migrate-start', 10, 10 * 60 * 1000), (req, res) => {
+    const found = dbMigrationFindSlot(req.body && req.body.slot);
+    if (found.error) return res.status(400).json({ success: false, message: found.error });
+    const targetUrl = String((req.body && req.body.targetUrl) || '').trim();
+    const parsed = dbMigrate.parsePgUrl(targetUrl);
+    if (!parsed.ok) return res.status(400).json({ success: false, message: parsed.message });
+    if (!req.body || req.body.confirm !== 'MIGRATE') return res.status(400).json({ success: false, message: 'Confirmation missing. Type MIGRATE to confirm.' });
+    const conflict = dbMigrationTargetConflict(targetUrl);
+    if (conflict) return res.status(400).json({ success: false, message: conflict });
+    if (dbMigrationRunningSlot) return res.status(409).json({ success: false, message: `A migration is already running (${dbMigrationRunningSlot}). Wait for it to finish.` });
+    const def = found.def;
+    const job = {
+        id: crypto.randomBytes(6).toString('hex'), slot: def.slot, state: 'running', phase: 'queued', message: 'Starting…',
+        startedAt: Date.now(), finishedAt: null, error: null, rowsDone: 0, rowsTotal: 0, bytesTotal: 0, tables: [], result: null,
+        cancelRequested: false, deadlineAt: Infinity
+    };
+    dbMigrationJobs.set(def.slot, job);
+    dbMigrationRunningSlot = def.slot;
+    console.log(`🗄️  Database migration requested by admin: ${def.label} (${dbMigrate.maskUrl(def.pool.url)} -> ${dbMigrate.maskUrl(targetUrl)})`);
+    dbMigrate.runMigration({ slot: def.slot, wrapper: def.pool, targetUrl, store: dbUrlOverrideStore, job, maxPauseMs: DB_MIGRATE_MAX_PAUSE_MS })
+        .then(() => { console.log(`✅ Database migration finished: ${def.label} is now on ${dbMigrate.maskUrl(targetUrl)}. Update ${def.envVar} on the host to the new URL.`); })
+        .catch(() => { /* the job already holds the (secret-free) error message */ })
+        .finally(() => { job.finishedAt = Date.now(); if (dbMigrationRunningSlot === def.slot) dbMigrationRunningSlot = null; });
+    res.status(202).json({ success: true, jobId: job.id });
+});
+
+app.post('/relay/admin/api/database-migration/cancel', requireAdminKey, (req, res) => {
+    const slot = String((req.body && req.body.slot) || '');
+    const job = dbMigrationJobs.get(slot);
+    if (!job || job.state !== 'running') return res.status(409).json({ success: false, message: 'No migration is running for that database.' });
+    job.cancelRequested = true;
+    res.json({ success: true, message: 'Cancelling… nothing will be changed.' });
+});
+
+// Forget an earlier migration: after the next restart RELAY uses whatever the env var holds. Use only to roll back
+// (the old database will NOT contain data written after the migration).
+app.post('/relay/admin/api/database-migration/clear-redirect', requireAdminKey, rateLimit('db-migrate-clear', 10, 10 * 60 * 1000), async (req, res) => {
+    const def = dbMigrationSlots().find((x) => x.slot === String((req.body && req.body.slot) || ''));
+    if (!def) return res.status(400).json({ success: false, message: 'Unknown database.' });
+    if (!req.body || req.body.confirm !== 'FORGET') return res.status(400).json({ success: false, message: 'Confirmation missing. Type FORGET to confirm.' });
+    if (dbMigrationRunningSlot) return res.status(409).json({ success: false, message: 'A migration is running. Try again when it is finished.' });
+    try {
+        dbUrlOverrideStore.remove(def.slot);
+        const envUrl = process.env[def.envVar] || '';
+        let markerCleared = false;
+        if (envUrl) {
+            markerCleared = (await dbMigrate.clearRedirectChain({ createPool: makeRawPgPool, startUrl: envUrl, slot: def.slot })) > 0;
+        }
+        res.json({ success: true, markerCleared, message: 'Saved redirect removed. After the next restart RELAY will use the URL in the env var.' });
+    } catch (err) {
+        res.status(500).json({ success: false, message: dbMigrate.scrubSecrets(err && err.message, [process.env[def.envVar]]) });
+    }
+});
+
 async function bootstrapStores() {
+    // If a database was migrated earlier but the env var still holds the old URL, follow the migration BEFORE any query runs.
+    // The pools were created "held"; they are always released here (even if the check itself fails).
+    try {
+        await dbMigrate.resolveStartupRedirects({
+            pools: dbMigrationSlots().filter((x) => x.pool && !x.sharedWith).map((x) => ({ slot: x.slot, pool: x.pool })),
+            store: dbUrlOverrideStore
+        });
+    } catch (err) {
+        console.error('⚠️  Database redirect check failed (continuing with the env var URLs):', err && err.message);
+    } finally {
+        [pgPool, pgPoolDevices, pgPoolBuild].forEach((p) => { if (p && p.markReady) p.markReady(); });
+    }
     // Siguraduhing tapos na ang CREATE TABLE bago mag-SELECT — iwas race condition sa Neon cold-start
     await Promise.all([
         ensureCloudBackupSchema(),

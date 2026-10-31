@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#05070d"><title>Database Migration — RELAY Admin</title>
+<style>
+:root{color-scheme:dark;--bg:#05070d;--card:#101625;--line:#26334f;--text:#eafcff;--muted:#9aabc9;--accent:#22e5ff;--green:#3ddc84;--red:#ff5c72;--amber:#ffc857;--blue:#7aa7ff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{max-width:820px;margin:0 auto;padding:18px 14px 80px}
+a{color:var(--accent)}h1{font-size:1.4rem;margin:.4rem 0}h2{font-size:1.1rem;margin:0}h3{font-size:.95rem;margin:14px 0 6px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:14px 0}
+.card.running{border-color:var(--accent)}
+.field{display:flex;flex-direction:column;gap:4px;font-size:.85rem;color:var(--muted);margin:8px 0}
+input[type=text],input[type=password]{background:#0a0f1c;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px;font:inherit;width:100%}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.row>input{flex:1;min-width:200px}
+button{background:#16213a;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px 16px;font:inherit;cursor:pointer}
+button.primary{background:var(--accent);color:#04222a;border-color:var(--accent);font-weight:700}
+button.danger{background:#3a1019;border-color:#7a2230;color:#ffd5db}
+button.mini{padding:4px 10px;font-size:.78rem}
+button:disabled{opacity:.45;cursor:not-allowed}
+.small{font-size:.8rem;color:var(--muted)}
+.notice{margin:10px 0;padding:9px 12px;border-radius:8px;background:#0a1a14;border:1px solid #1f5a3d;color:var(--green);display:none}
+.notice.error{background:#2a0e14;border-color:#7a2230;color:var(--red)}.notice.show{display:block}
+.box{margin:10px 0;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:#0a0f1c}
+.box.warn{background:#2a2108;border-color:#6b5514;color:var(--amber)}
+.box.bad{background:#2a0e14;border-color:#7a2230;color:var(--red)}
+.box.good{background:#0a1a14;border-color:#1f5a3d;color:var(--green)}
+.box ul,.box ol{margin:6px 0 0;padding-left:20px}
+.box li{margin:3px 0;color:var(--text)}
+.head{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline}
+.badge{display:inline-block;padding:2px 10px;border-radius:999px;border:1px solid var(--line);font-size:.75rem;font-weight:600;color:var(--muted)}
+.badge.green{color:var(--green)}.badge.amber{color:var(--amber)}.badge.blue{color:var(--blue)}.badge.red{color:var(--red)}
+.kv{display:grid;grid-template-columns:max-content 1fr;gap:3px 12px;font-size:.88rem;margin:8px 0}
+.kv span:nth-child(odd){color:var(--muted)}
+code{background:#0a0f1c;border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:.82rem;word-break:break-all}
+.bar{height:10px;border-radius:999px;background:#0a0f1c;border:1px solid var(--line);overflow:hidden;margin:8px 0}
+.bar>i{display:block;height:100%;width:0;background:var(--accent);transition:width .3s}
+table{width:100%;border-collapse:collapse;font-size:.83rem;margin-top:6px}
+th,td{text-align:left;padding:4px 6px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:600}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+.st-verified,.st-copied{color:var(--green)}.st-copying{color:var(--accent)}.st-waiting{color:var(--muted)}
+details{margin-top:10px}summary{cursor:pointer;color:var(--muted);font-size:.85rem}
+@media(max-width:520px){.kv{grid-template-columns:1fr}.kv span:nth-child(odd){margin-top:6px}}
+</style></head><body><main>
+<p><a href="index.html#system">← RELAY Admin</a></p>
+<h1>Database Migration</h1>
+<div class="box warn">Move any of RELAY's three Neon (Postgres) databases to a <b>new connection URL</b> — with all its data. The new database must be <b>brand-new and empty</b>; nothing on it is ever overwritten, and the old database is never changed or deleted. While one database is being copied, RELAY <b>holds</b> the requests for that database for a short moment (they are not lost) and then continues on the new one. Best done at a quiet time.</div>
+
+<section class="card">
+<h2>Admin authentication</h2>
+<label class="field">RELAY admin key<input id="adminKey" type="password" autocomplete="current-password" placeholder="Enter ADMIN_KEY"></label>
+<div class="row"><button id="connectBtn" class="primary">Load databases</button></div>
+</section>
+
+<div id="notice" class="notice" role="status"></div>
+<div id="cards"></div>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const keyEl=$('adminKey');
+  const state={status:null,tests:{},typed:{},newUrls:{},poll:null,busy:{}};
+  const PHASE={queued:'Starting…',preflight:'Checking both databases…',pausing:'Holding RELAY requests for this database…',schema:'Creating tables on the new database…',data:'Copying rows…',constraints:'Building keys, indexes and triggers…',verify:'Verifying every table…',switching:'Switching RELAY to the new database…',done:'Finished',failed:'Failed',cancelled:'Cancelled'};
+  function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
+  function say(m,bad){const n=$('notice');n.textContent=m;n.className='notice show'+(bad?' error':'')}
+  function fmtBytes(n){if(n==null)return '—';const u=['B','KB','MB','GB','TB'];let i=0,v=n;while(v>=1024&&i<u.length-1){v/=1024;i++}return (i?v.toFixed(v<10?2:1):v)+' '+u[i]}
+  function fmtNum(n){return n==null?'—':Number(n).toLocaleString()}
+  async function api(path,opts){
+    const o=opts||{};
+    const r=await fetch('/relay/admin/api/database-migration/'+path,{method:o.body?'POST':'GET',headers:Object.assign({'x-relay-admin-key':keyEl.value},o.body?{'Content-Type':'application/json'}:{}),body:o.body?JSON.stringify(o.body):undefined});
+    let j={};try{j=await r.json()}catch(_){}
+    if(!r.ok||j.success===false){const e=new Error(j.message||('HTTP '+r.status));e.status=r.status;e.data=j;throw e}
+    return j;
+  }
+  async function copyText(text,btn){
+    try{await navigator.clipboard.writeText(text)}catch(_){const t=document.createElement('textarea');t.value=text;document.body.appendChild(t);t.select();try{document.execCommand('copy')}catch(_e){}t.remove()}
+    const old=btn.textContent;btn.textContent='Copied';setTimeout(()=>{btn.textContent=old},1200);
+  }
+  async function load(quiet){
+    try{
+      const j=await api('status');
+      try{sessionStorage.setItem('relayAdminKey',keyEl.value)}catch(_){}
+      state.status=j;if(quiet)update();else render();
+      if(!quiet)say('Loaded.');
+      schedulePoll();
+    }catch(e){
+      if(e.status===401||e.status===403){try{sessionStorage.removeItem('relayAdminKey')}catch(_){}}
+      if(!quiet||!state.status)say(e.message,true);
+      schedulePoll();
+    }
+  }
+  function schedulePoll(){
+    clearTimeout(state.poll);
+    const running=state.status&&state.status.running;
+    if(!state.status)return;
+    state.poll=setTimeout(()=>load(true),running?1500:20000);
+  }
+  function jobOf(d){return d.job||null}
+  function isRunning(d){const j=jobOf(d);return !!(j&&j.state==='running')}
+
+  // Full render (after the admin's own actions) and a gentler per-card update for the background polling, so a card
+  // is never rebuilt while the admin is typing in it.
+  function sig(d){const c=Object.assign({},d);delete c.sizeBytes;return JSON.stringify([c,state.newUrls[d.slot]?1:0])}
+  function render(){
+    const host=$('cards');host.textContent='';state.cards={};
+    (state.status.databases||[]).forEach(d=>{const c=card(d);state.cards[d.slot]={el:c,sig:sig(d)};host.appendChild(c)});
+  }
+  function update(){
+    const dbs=state.status.databases||[];
+    if(!state.cards||Object.keys(state.cards).length!==dbs.length){render();return}
+    dbs.forEach(d=>{
+      const cur=state.cards[d.slot];const s=sig(d);
+      if(!cur||cur.sig===s)return;
+      const a=document.activeElement;
+      if(a&&a.tagName==='INPUT'&&cur.el.contains(a))return;
+      const n=card(d);cur.el.replaceWith(n);state.cards[d.slot]={el:n,sig:s};
+    });
+  }
+  function card(d){
+    const j=jobOf(d);
+    const running=isRunning(d);
+    const c=el('section','card'+(running?' running':''));
+    const head=el('div','head');
+    head.appendChild(el('h2',null,d.label));
+    const badges=el('span');
+    if(!d.configured)badges.appendChild(el('span','badge red','Not configured'));
+    else if(d.sharedWith)badges.appendChild(el('span','badge amber','Shares the Cloud Backup database'));
+    else if(d.redirected)badges.appendChild(el('span','badge blue','Following an earlier migration'));
+    else badges.appendChild(el('span','badge green','Using env var'));
+    head.appendChild(badges);c.appendChild(head);
+    c.appendChild(el('div','small',d.what));
+
+    const kv=el('div','kv');
+    kv.appendChild(el('span',null,'Environment variable'));kv.appendChild(el('span',null,d.envVar));
+    kv.appendChild(el('span',null,'In use now'));kv.appendChild(el('span',null,d.host||'—'));
+    if(d.configured&&!d.sharedWith){kv.appendChild(el('span',null,'Size'));kv.appendChild(el('span',null,fmtBytes(d.sizeBytes)))}
+    c.appendChild(kv);
+
+    if(!d.configured){
+      c.appendChild(el('div','box',d.slot==='build'?'No RELAY_BUILD_DATABASE_URL is set, so RELAY keeps this data in local files. Set that env var to a Neon database first; then it can be migrated here.':'This database is not configured, so there is nothing to migrate.'));
+      return c;
+    }
+    if(d.sharedWith){
+      c.appendChild(el('div','box warn','This uses the same database as Cloud Backup. Use the Cloud Backup button — it copies everything in that database, including the devices and licence tables.'));
+      return c;
+    }
+    if(d.envNeedsUpdate){
+      const b=el('div','box warn');
+      b.appendChild(el('b',null,'Action needed on your host: '));
+      b.appendChild(document.createTextNode('RELAY is running on the migrated database ('+d.host+'), but the env var '));
+      b.appendChild(el('code',null,d.envVar));
+      b.appendChild(document.createTextNode(' still holds the old one'+(d.envHost?' ('+d.envHost+')':'')+'. RELAY follows the migration automatically after restarts, but please replace the env var with the new URL so it stays correct (the old database is not updated any more).'));
+      const nu=state.newUrls[d.slot];
+      if(nu){const r=el('div','row');r.style.marginTop='8px';const cb=el('button','mini','Copy new URL');cb.onclick=()=>copyText(nu,cb);r.appendChild(cb);b.appendChild(r)}
+      c.appendChild(b);
+    }
+
+    if(running||(j&&(j.state==='done'||j.state==='failed'||j.state==='cancelled')))c.appendChild(progress(d,j));
+    if(!running)c.appendChild(form(d));
+    if(d.redirected&&!running){
+      const det=el('details');det.appendChild(el('summary',null,'Advanced: undo the saved redirect'));
+      det.appendChild(el('p','small','Use only to roll back. After the next restart RELAY will use whatever the env var holds. The old database does NOT contain data written after the migration.'));
+      const r=el('div','row');const inp=el('input');inp.type='text';inp.placeholder='Type FORGET to confirm';inp.autocomplete='off';
+      const b=el('button','danger','Forget redirect');b.disabled=true;
+      inp.oninput=()=>{b.disabled=inp.value.trim()!=='FORGET'};
+      b.onclick=async()=>{b.disabled=true;try{const k=await api('clear-redirect',{body:{slot:d.slot,confirm:'FORGET'}});say(k.message);await load(true)}catch(e){say(e.message,true)}};
+      r.appendChild(inp);r.appendChild(b);det.appendChild(r);c.appendChild(det);
+    }
+    return c;
+  }
+
+  function form(d){
+    const wrap=el('div');
+    wrap.appendChild(el('h3',null,'Move to a new database'));
+    const lab=el('label','field','New connection URL (empty Neon database)');
+    const row=el('div','row');
+    const inp=el('input');inp.type='password';inp.autocomplete='off';inp.spellcheck=false;
+    inp.placeholder='postgresql://user:password@ep-xxxx.neon.tech/neondb?sslmode=require';
+    inp.value=state.typed[d.slot+':url']||'';
+    const eye=el('button','mini','Show');eye.type='button';
+    eye.onclick=()=>{const show=inp.type==='password';inp.type=show?'text':'password';eye.textContent=show?'Hide':'Show'};
+    row.appendChild(inp);row.appendChild(eye);lab.appendChild(row);wrap.appendChild(lab);
+
+    const actions=el('div','row');
+    const testBtn=el('button',null,'Test connection');
+    const test=state.tests[d.slot];
+    const conf=el('input');conf.type='text';conf.autocomplete='off';conf.placeholder='Type MIGRATE to confirm';conf.style.maxWidth='230px';
+    conf.value=state.typed[d.slot+':confirm']||'';
+    const go=el('button','primary','Migrate now');
+    function sync(){
+      const urlOk=inp.value.trim()===(test&&test.url);
+      go.disabled=!(test&&test.ok&&urlOk&&conf.value.trim()==='MIGRATE')||!!state.busy[d.slot];
+      testBtn.disabled=!inp.value.trim()||!!state.busy[d.slot];
+    }
+    inp.oninput=()=>{state.typed[d.slot+':url']=inp.value;sync()};
+    conf.oninput=()=>{state.typed[d.slot+':confirm']=conf.value;sync()};
+    testBtn.onclick=async()=>{
+      state.busy[d.slot]=true;sync();testBtn.textContent='Testing…';
+      try{
+        const r=await api('test',{body:{slot:d.slot,targetUrl:inp.value.trim()}});
+        state.tests[d.slot]={ok:r.ok,url:inp.value.trim(),result:r};
+      }catch(e){state.tests[d.slot]={ok:false,url:inp.value.trim(),result:{blocking:[e.message],warnings:[]}}}
+      state.busy[d.slot]=false;render();
+    };
+    go.onclick=async()=>{
+      if(!window.confirm('Migrate '+d.label+' to the new database now?\n\nRELAY will briefly hold requests for this database while the data is copied and verified. The old database is not changed.'))return;
+      state.busy[d.slot]=true;sync();go.textContent='Starting…';
+      try{
+        state.newUrls[d.slot]=inp.value.trim();
+        await api('start',{body:{slot:d.slot,targetUrl:inp.value.trim(),confirm:'MIGRATE'}});
+        state.typed[d.slot+':url']='';state.typed[d.slot+':confirm']='';delete state.tests[d.slot];
+        say('Migration started.');
+      }catch(e){say(e.message,true);delete state.newUrls[d.slot]}
+      state.busy[d.slot]=false;await load(true);
+    };
+    actions.appendChild(testBtn);actions.appendChild(conf);actions.appendChild(go);wrap.appendChild(actions);
+    wrap.appendChild(el('div','small','Step 1: create an empty database (a new Neon project or database) and paste its URL. Step 2: Test connection. Step 3: type MIGRATE and press Migrate now.'));
+    if(test){wrap.appendChild(testResult(test));}
+    sync();
+    return wrap;
+  }
+
+  function testResult(test){
+    const r=test.result||{};
+    const box=el('div','box '+(test.ok?'good':'bad'));
+    if(test.ok)box.appendChild(el('b',null,'✅ Ready to migrate'));
+    else box.appendChild(el('b',null,'❌ Cannot migrate yet'));
+    if(r.target&&r.target.host){box.appendChild(el('div','small','New database: '+r.target.host+'/'+r.target.database+(r.target.version?' — '+r.target.version:'')))}
+    if((r.blocking||[]).length){const ul=el('ul');r.blocking.forEach(m=>ul.appendChild(el('li',null,m)));box.appendChild(ul)}
+    if((r.warnings||[]).length){const ul=el('ul');r.warnings.forEach(m=>ul.appendChild(el('li',null,'⚠️ '+m)));box.appendChild(ul)}
+    if(r.source&&r.source.tables){
+      box.appendChild(el('div','small','To copy: '+r.source.tables.length+' table(s), '+fmtNum(r.source.totalRows)+' row(s), about '+fmtBytes(r.source.totalBytes)+'. RELAY will hold requests for this database for roughly '+(r.source.estimateSeconds||5)+' second(s).'));
+      box.appendChild(tableList(r.source.tables.map(t=>({name:t.name,rows:t.rows,state:null,bytes:t.bytes}))));
+    }
+    return box;
+  }
+
+  function tableList(tables){
+    const t=el('table');
+    const thead=el('tr');['Table','Rows','Status'].forEach(h=>thead.appendChild(el('th',null,h)));t.appendChild(thead);
+    tables.forEach(x=>{
+      const tr=el('tr');
+      tr.appendChild(el('td',null,x.name));
+      tr.appendChild(el('td','num',x.state?(fmtNum(x.done!=null?x.done:0)+' / '+fmtNum(x.rows)):fmtNum(x.rows)));
+      const label=x.state==='verified'?('✅ verified'+(x.verifiedBy?' ('+x.verifiedBy+')':'')):x.state==='copied'?'copied':x.state==='copying'?'copying…':x.state==='waiting'?'waiting':(x.bytes!=null?fmtBytes(x.bytes):'');
+      tr.appendChild(el('td',x.state?'st-'+x.state:null,label));
+      t.appendChild(tr);
+    });
+    return t;
+  }
+
+  function progress(d,j){
+    const wrap=el('div');
+    wrap.appendChild(el('h3',null,j.state==='running'?'Migration in progress':j.state==='done'?'Migration finished':j.state==='cancelled'?'Migration cancelled':'Migration failed'));
+    if(j.state==='running'){
+      wrap.appendChild(el('div','small',(PHASE[j.phase]||j.phase)+(j.message&&j.phase!=='done'?' ':'')));
+      const pct=j.rowsTotal>0?Math.min(100,Math.round(j.rowsDone*100/j.rowsTotal)):(j.phase==='verify'||j.phase==='switching'?100:0);
+      const bar=el('div','bar');const i=el('i');i.style.width=pct+'%';bar.appendChild(i);wrap.appendChild(bar);
+      wrap.appendChild(el('div','small',fmtNum(j.rowsDone)+' of '+fmtNum(j.rowsTotal)+' rows ('+pct+'%). Please keep this page open; closing it does not stop the migration.'));
+      const cb=el('button','danger','Cancel migration');cb.style.marginTop='8px';
+      cb.disabled=!!j.cancelRequested;if(j.cancelRequested)cb.textContent='Cancelling…';
+      cb.onclick=async()=>{cb.disabled=true;try{await api('cancel',{body:{slot:d.slot}});say('Cancelling — nothing will be changed.')}catch(e){say(e.message,true)}};
+      wrap.appendChild(cb);
+    }
+    if(j.state==='failed'){
+      const b=el('div','box bad');b.appendChild(el('b',null,'Nothing was changed. '));b.appendChild(document.createTextNode(j.error||'Unknown error.'));
+      b.appendChild(el('div','small','The old database is untouched and RELAY is still using it. If the new database was partly created it was rolled back to empty.'));wrap.appendChild(b);
+    }
+    if(j.state==='cancelled')wrap.appendChild(el('div','box','Cancelled. Nothing was changed and RELAY is still using the old database.'));
+    if(j.state==='done'&&j.result){
+      const r=j.result;const b=el('div','box good');
+      b.appendChild(el('b',null,'✅ RELAY is now using the new database'));
+      b.appendChild(el('div','small',r.fromHost+' → '+r.toHost+' — '+fmtNum(r.tables)+' table(s), '+fmtNum(r.rows)+' row(s), all verified.'));
+      const ol=el('ol');
+      const li1=el('li');li1.appendChild(document.createTextNode('On your host (e.g. Render → Environment) replace '));li1.appendChild(el('code',null,d.envVar));li1.appendChild(document.createTextNode(' with the new URL. RELAY already follows the migration after restarts, but the env var should match.'));ol.appendChild(li1);
+      const nu=state.newUrls[d.slot];
+      if(nu){const li=el('li');const cb=el('button','mini','Copy new URL');cb.onclick=()=>copyText(nu,cb);li.appendChild(cb);ol.appendChild(li)}
+      ol.appendChild(el('li',null,'If the new database is in a different Neon project, also update the matching NEON_*_PROJECT_ID env var so the cost and usage monitor reads the right project.'));
+      ol.appendChild(el('li',null,'Keep the old database for a few days as a safety copy; delete it only after you have confirmed everything works.'));
+      b.appendChild(ol);
+      if(!r.persisted||(!r.persisted.marker||!r.persisted.file)){
+        b.appendChild(el('div','small','Note: the new location was saved '+(r.persisted&&r.persisted.file?'in a local file':'')+(r.persisted&&r.persisted.file&&r.persisted.marker?' and ':'')+(r.persisted&&r.persisted.marker?'in the old database':'')+' only — updating the env var is therefore especially important.'));
+      }
+      (r.warnings||[]).forEach(w=>b.appendChild(el('div','small','⚠️ '+w)));
+      wrap.appendChild(b);
+    }
+    if(j.tables&&j.tables.length)wrap.appendChild(tableList(j.tables));
+    return wrap;
+  }
+
+  $('connectBtn').onclick=()=>load(false);
+  keyEl.addEventListener('keydown',e=>{if(e.key==='Enter')load(false)});
+  let saved='';try{saved=sessionStorage.getItem('relayAdminKey')||''}catch(_){}
+  if(saved){keyEl.value=saved;load(false)}
+})();
+</script></main></body></html>
