@@ -40,6 +40,17 @@ th{color:var(--muted);font-weight:600}
 td.num{text-align:right;font-variant-numeric:tabular-nums}
 .st-verified,.st-copied{color:var(--green)}.st-copying{color:var(--accent)}.st-waiting{color:var(--muted)}
 details{margin-top:10px}summary{cursor:pointer;color:var(--muted);font-size:.85rem}
+.top5{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:6px 0 12px}
+@media(max-width:760px){.top5{grid-template-columns:1fr}}
+.top5 .tbox{border:1px solid var(--line);border-radius:10px;background:#0a0f1c;padding:10px 12px}
+.top5 h3{margin:0 0 2px;font-size:.98rem}
+.top5 .tsub{font-size:.76rem;color:var(--muted);margin-bottom:6px}
+.top5 .trow{display:grid;grid-template-columns:28px 1fr auto;gap:2px 8px;align-items:center;padding:6px 0;border-top:1px solid var(--line)}
+.top5 .trow .tn{font-weight:700;color:var(--text);overflow-wrap:anywhere}
+.top5 .trow .tm{grid-column:2/4;font-size:.78rem;color:var(--muted);overflow-wrap:anywhere}
+.top5 .medal{font-size:1.15rem;text-align:center}
+.top5 .tv{font-weight:700;color:var(--green);white-space:nowrap}
+.rk{display:inline-block;margin-left:6px;padding:1px 8px;border-radius:999px;border:1px solid var(--line);font-size:.7rem;font-weight:700;color:var(--blue);white-space:nowrap}
 .prov{border:1px solid var(--line);border-radius:10px;margin:8px 0;background:#0a0f1c}
 .prov>summary{list-style:none;padding:10px 12px;display:grid;grid-template-columns:1fr auto;gap:2px 10px;align-items:center;color:var(--text);font-size:.95rem}
 .prov>summary::-webkit-details-marker{display:none}
@@ -125,6 +136,7 @@ details{margin-top:10px}summary{cursor:pointer;color:var(--muted);font-size:.85r
     const host=$('guideBody');if(!state.providers){return}
     host.textContent='';
     const g=state.guide;
+    host.appendChild(topFive());
     const tools=el('div','guide-tools');
     const f=el('select');[['all','All providers'],['free','Has a free tier / trial (pre-tier)'],['u10','Paid plan from $10/mo or less'],['u25','Paid plan from $25/mo or less'],['u100','Paid plan from $100/mo or less']].forEach(o=>{const op=el('option',null,o[1]);op.value=o[0];if(g.filter===o[0])op.selected=true;f.appendChild(op)});
     const o=el('select');[['asc','Cheapest first'],['desc','Most expensive first']].forEach(x=>{const op=el('option',null,x[1]);op.value=x[0];if(g.order===x[0])op.selected=true;o.appendChild(op)});
@@ -138,6 +150,34 @@ details{margin-top:10px}summary{cursor:pointer;color:var(--muted);font-size:.85r
     const un=el('div','box warn');un.appendChild(el('b',null,'Cannot be used (not PostgreSQL): '));
     un.appendChild(document.createTextNode((state.providers.unsupported||[]).join('; ')+'.'));host.appendChild(un);
     host.appendChild(el('p','small',(state.providers.disclaimer||'')+' Checked: '+(state.providers.checkedAt||'')+'.'));
+  }
+  // Auto-ranked Top 5 (the ranking itself is computed by the server from the catalog data, so it updates whenever
+  // the catalog does). "Fits" compares the largest of your databases with the free plan's storage.
+  function biggestDbBytes(){const ds=(state.status&&state.status.databases)||[];let m=null;ds.forEach(d=>{if(d.sizeBytes!=null&&(m==null||d.sizeBytes>m))m=d.sizeBytes});return m}
+  function topFive(){
+    const all=(state.providers&&state.providers.providers)||[];
+    const wrap=el('div','top5');const medals=['🥇','🥈','🥉','4️⃣','5️⃣'];
+    const big=biggestDbBytes();
+    function box(title,sub,rows,valFn,metaFn){
+      const b=el('div','tbox');b.appendChild(el('h3',null,title));b.appendChild(el('div','tsub',sub));
+      rows.forEach((p,i)=>{
+        const r=el('div','trow');r.appendChild(el('span','medal',medals[i]));r.appendChild(el('span','tn',p.name));r.appendChild(el('span','tv',valFn(p)));
+        r.appendChild(el('span','tm',metaFn(p)));b.appendChild(r);
+      });
+      if(!rows.length)b.appendChild(el('p','small','No data.'));
+      return b;
+    }
+    const free=all.filter(p=>p.rankFree).sort((a,b)=>a.rankFree-b.rankFree).slice(0,5);
+    const paid=all.filter(p=>p.rankPaid).sort((a,b)=>a.rankPaid-b.rankPaid).slice(0,5);
+    wrap.appendChild(box('🏆 Top 5 free tier','Auto-ranked: free forever > trial, more storage, always-on, no sleeping.',free,
+      p=>'score '+p.freeScore,
+      p=>{let t=(p.free&&p.free.summary)||'';
+        if(big!=null&&p.freeStorageMB){t+=big<=p.freeStorageMB*1048576?' · ✅ fits your biggest database ('+fmtBytes(big)+')':' · ⚠️ your biggest database ('+fmtBytes(big)+') is bigger than this free plan'}
+        return t}));
+    wrap.appendChild(box('💰 Top 5 cheapest paid plans','Auto-ranked by lowest paid entry price per month (ties: the one with a free tier to try first).',paid,
+      p=>'from '+fmtUsd(p.paidEntryUSD),
+      p=>{const t=(p.tiers||[]).filter(x=>x.usd>0).sort((a,b)=>a.usd-b.usd)[0];return t?[t.name,t.specs].filter(Boolean).join(' — '):''}));
+    return wrap;
   }
   function renderGuideList(list,count){
     const g=state.guide;list.textContent='';
@@ -161,7 +201,10 @@ details{margin-top:10px}summary{cursor:pointer;color:var(--muted);font-size:.85r
   function providerRow(p){
     const d=el('details','prov');
     const sm=el('summary');
-    sm.appendChild(el('span','pn',p.name));
+    const nm=el('span','pn',p.name);
+    if(p.rankFree&&p.rankFree<=5)nm.appendChild(el('span','rk','#'+p.rankFree+' free'));
+    if(p.rankPaid&&p.rankPaid<=5)nm.appendChild(el('span','rk','#'+p.rankPaid+' cheapest'));
+    sm.appendChild(nm);
     sm.appendChild(el('span','pp',p.sortUSD==null?'usage-based':('from '+fmtUsd(p.sortUSD))));
     sm.appendChild(el('span','pg',p.group));
     sm.appendChild(el('span','pf '+(p.free&&p.free.available?'badge green':'badge'),'Pre-tier: '+(p.free&&p.free.available?p.free.summary:'none')));

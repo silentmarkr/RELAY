@@ -325,12 +325,78 @@ function storageFitWarning(provider, totalBytes) {
 }
 
 // Catalog for the admin page: cheapest paid entry first, entries without a fixed price (usage-based/self-hosted) last.
+// ---------------------------------------------------------------------------------------------------------------
+// AUTO RANKING (recomputed from the catalog data every time the list is served — edit the catalog and the ranking
+// follows by itself).
+//   Free tier score (0-100):  60 for a free tier that does not expire, 20 for a time-limited trial/credits
+//                             + up to 30 for storage (1 GB or more = 30; unknown storage = 10)
+//                             + 10 when the free database stays always-on
+//                             - 20 when it pauses/powers off/expires after inactivity
+//   Providers without a real free tier (self-hosted software, no free plan) are not ranked.
+//   Paid ranking: cheapest paid entry plan first (usage-based providers are not ranked); ties go to the provider
+//   with the better free-tier score, so you can try it before paying, then by name.
+// FREE_META is the only hand-maintained input: how the free tier behaves.
+const FREE_META = {
+    northflank: { kind: 'forever', alwaysOn: true },
+    aiven: { kind: 'forever', idle: true },
+    render: { kind: 'forever', idle: true },
+    prisma: { kind: 'forever' },
+    neon: { kind: 'forever' },
+    tigerdata: { kind: 'forever' },
+    supabase: { kind: 'forever', idle: true },
+    railway: { kind: 'trial' },
+    gcp: { kind: 'trial' },
+    azure: { kind: 'trial' },
+    rds: { kind: 'trial' },
+    aurora: { kind: 'trial' },
+    alloydb: { kind: 'trial' },
+    selfhosted: { kind: 'none' }
+};
+
+function freeScore(p) {
+    if (!p.free || !p.free.available) return null;
+    const meta = FREE_META[p.id] || { kind: 'trial' };   // unknown free tier: assume the cautious (time-limited) case
+    if (meta.kind === 'none') return null;
+    let score = meta.kind === 'forever' ? 60 : 20;
+    score += p.free.storageMB ? Math.min(30, (p.free.storageMB / 1024) * 30) : 10;
+    if (meta.alwaysOn) score += 10;
+    if (meta.idle) score -= 20;
+    return Math.round(score * 10) / 10;
+}
+
+function paidEntryUSD(p) {
+    const paid = (p.tiers || []).map((t) => t.usd).filter((n) => typeof n === 'number' && n > 0);
+    return paid.length ? Math.min.apply(null, paid) : null;
+}
+
+function computeRankings(list) {
+    const free = list.map((p) => ({ id: p.id, score: freeScore(p) })).filter((x) => x.score != null)
+        .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+    const byId = {};
+    list.forEach((p) => { byId[p.id] = p; });
+    const fs = {};
+    free.forEach((x) => { fs[x.id] = x.score; });
+    const paid = list.map((p) => ({ id: p.id, usd: paidEntryUSD(p) })).filter((x) => x.usd != null)
+        .sort((a, b) => a.usd - b.usd || (fs[b.id] || 0) - (fs[a.id] || 0) || byId[a.id].name.localeCompare(byId[b.id].name));
+    return { free, paid };
+}
+
 function listProviders() {
     const rows = PROVIDERS.map((p) => ({
         id: p.id, name: p.name, group: p.group, sortUSD: p.sortUSD, pricingUrl: p.pricingUrl,
         free: p.free, tiers: p.tiers, urlHelp: p.urlHelp, caveats: p.caveats || [],
         sslNoVerify: !!p.sslNoVerify, freeStorageMB: (p.free && p.free.storageMB) || null
     }));
+    const ranks = computeRankings(PROVIDERS);
+    const freeRank = {}; const paidRank = {};
+    ranks.free.forEach((x, i) => { freeRank[x.id] = { rank: i + 1, score: x.score }; });
+    ranks.paid.forEach((x, i) => { paidRank[x.id] = { rank: i + 1, usd: x.usd }; });
+    rows.forEach((r) => {
+        r.rankFree = freeRank[r.id] ? freeRank[r.id].rank : null;
+        r.freeScore = freeRank[r.id] ? freeRank[r.id].score : null;
+        r.rankPaid = paidRank[r.id] ? paidRank[r.id].rank : null;
+        r.paidEntryUSD = paidRank[r.id] ? paidRank[r.id].usd : null;
+    });
     rows.sort((a, b) => {
         const av = a.sortUSD == null ? Infinity : a.sortUSD;
         const bv = b.sortUSD == null ? Infinity : b.sortUSD;
@@ -346,5 +412,6 @@ function listProviders() {
 
 module.exports = {
     PROVIDERS, UNSUPPORTED_ENGINES, PARTIAL_POSTGRES_PATTERNS, CATALOG_CHECKED_AT,
-    detectProvider, unsupportedEngineForUrl, prepareTargetUrl, explainConnectError, storageFitWarning, listProviders
+    detectProvider, unsupportedEngineForUrl, prepareTargetUrl, explainConnectError, storageFitWarning, listProviders,
+    FREE_META, freeScore, paidEntryUSD, computeRankings
 };
