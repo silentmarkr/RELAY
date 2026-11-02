@@ -19,6 +19,11 @@ const ONLINE_MS = 45 * 1000;            // a client that polled within this wind
 const WAIT_ENTRY_TTL_MS = 2 * 60 * 1000; // an entry with nothing to deliver disappears this long after its last poll
 const DELIVERY_TTL_MS = 15 * 60 * 1000;  // a sent secret is kept this long (survives a page reload on the client)
 const MAX_ENTRIES = 300;
+const DEVICE_TEXT_MAX = 60;
+// Device name / model typed by the customer on the activation screen: plain text only, no control or invisible characters, no < or >.
+function cleanDeviceText(v) {
+  return String(v == null ? '' : v).normalize('NFKC').replace(/[\u0000-\u001F\u007F-\u009F\u200B-\u200D\u2060\uFEFF<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, DEVICE_TEXT_MAX);
+}
 const ID_RE = /^[a-zA-Z0-9._:-]{8,200}$/;
 const FP_RE = /^[a-fA-F0-9]{32,128}$/;
 
@@ -50,7 +55,7 @@ function createActivationInbox(options = {}) {
   }
 
   // Called by the waiting client. Returns its pairing code and, when the admin has sent something, the delivery.
-  function poll({ installationId, fingerprint, ip }) {
+  function poll({ installationId, fingerprint, ip, deviceName, deviceModel }) {
     if (!ID_RE.test(String(installationId || '')) || !FP_RE.test(String(fingerprint || ''))) return { ok: false, code: 'INVALID_INPUT' };
     sweep();
     const t = now();
@@ -61,16 +66,22 @@ function createActivationInbox(options = {}) {
       let code = generatePairingCode();
       for (let i = 0; i < 50 && codeInUse(code); i++) code = generatePairingCode();
       if (codeInUse(code)) return { ok: false, code: 'INBOX_FULL' };
-      e = { pairingCode: code, installationId: String(installationId), fingerprint: String(fingerprint).toLowerCase(), firstSeenAt: t, lastSeenAt: t, ip: ip || null, delivery: null };
+      e = { pairingCode: code, installationId: String(installationId), fingerprint: String(fingerprint).toLowerCase(), firstSeenAt: t, lastSeenAt: t, ip: ip || null, deviceName: '', deviceModel: '', deviceChangedAt: t, delivery: null };
       entries.set(id, e);
     }
     e.lastSeenAt = t;
     if (ip) e.ip = ip;
+    // Remember WHEN the customer last changed the text, so RELAY never auto-issues from half-typed values ("Ga" of "Galaxy S25").
+    if (deviceName !== undefined) { const v = cleanDeviceText(deviceName); if (v !== e.deviceName) { e.deviceName = v; e.deviceChangedAt = t; } }
+    if (deviceModel !== undefined) { const v = cleanDeviceText(deviceModel); if (v !== e.deviceModel) { e.deviceModel = v; e.deviceChangedAt = t; } }
     if (e.delivery && !e.delivery.pickedUpAt) e.delivery.pickedUpAt = t;
     return {
       ok: true,
       pairingCode: e.pairingCode,
-      delivery: e.delivery ? { deliveryId: e.delivery.deliveryId, activationKey: e.delivery.secret } : null
+      delivery: e.delivery ? { deliveryId: e.delivery.deliveryId, activationKey: e.delivery.secret } : null,
+      // internal only (the route never forwards these to the client):
+      deliveryLicenseId: e.delivery ? e.delivery.licenseId : null,
+      deviceStableMs: t - e.deviceChangedAt
     };
   }
 
@@ -111,11 +122,22 @@ function createActivationInbox(options = {}) {
         pairingCode: e.pairingCode,
         installationId: e.installationId,
         ip: e.ip,
+        deviceName: e.deviceName || '',
+        deviceModel: e.deviceModel || '',
         firstSeenAt: e.firstSeenAt,
         lastSeenAt: e.lastSeenAt,
         online: t - e.lastSeenAt <= ONLINE_MS,
         delivery: e.delivery ? { sentAt: e.delivery.sentAt, pickedUpAt: e.delivery.pickedUpAt, expiresAt: e.delivery.expiresAt, licenseId: e.delivery.licenseId } : null
       }));
+  }
+
+  // Read-only: what the customer typed on the activation screen for this device (no secrets). Used by /relay/client/activate to
+  // record the device name/model on the license BEFORE the waiting entry is wiped, so the admin can still see it for reference.
+  function peekDevice(installationId, fingerprint) {
+    if (!installationId || !fingerprint) return null;
+    const e = entries.get(entryIdOf(installationId, fingerprint));
+    if (!e) return null;
+    return { deviceName: e.deviceName || '', deviceModel: e.deviceModel || '' };
   }
 
   // The device activated successfully: its waiting entry (and any stored secret) is removed immediately.
@@ -127,7 +149,7 @@ function createActivationInbox(options = {}) {
     for (const [id, e] of entries) if (e.installationId === installationId) entries.delete(id);
   }
 
-  return { poll, lookup, send, list, clearDevice, clearInstallation, _size: () => entries.size };
+  return { poll, lookup, send, list, peekDevice, clearDevice, clearInstallation, _size: () => entries.size };
 }
 
-module.exports = { createActivationInbox, ONLINE_MS, WAIT_ENTRY_TTL_MS, DELIVERY_TTL_MS, MAX_ENTRIES };
+module.exports = { cleanDeviceText, createActivationInbox, ONLINE_MS, WAIT_ENTRY_TTL_MS, DELIVERY_TTL_MS, MAX_ENTRIES };

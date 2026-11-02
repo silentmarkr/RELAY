@@ -9135,7 +9135,8 @@ const CLIENT_ACTIVATIONS_KV = 'per-client-activations-v1';
 const CLIENT_CREDENTIALS_KV = 'per-client-credentials-v1';
 const DEVICE_REPLACEMENT_KV = 'per-client-device-replacements-v1';
 const { hashClientSecret, secureRandomSecret, generateSecureOtp, generateShortActivationKey, normalizeShortActivationKey, diagnoseShortKeyInput, hashShortActivationKey, validateActivation, validateCredential, validateInstallationScope } = require('./client-activation-security')
-const { createActivationInbox } = require('./client-activation-inbox')
+const { createActivationInbox, cleanDeviceText } = require('./client-activation-inbox')
+const autoActivationStateStore = require('./auto-activation-state')
 // Waiting (not yet activated) clients and the keys the admin sends to them. Memory only; see client-activation-inbox.js.
 const activationInbox = createActivationInbox();
 // Maikling cache para hindi 3 Postgres read ang bawat authenticated request ng bawat client.
@@ -9460,27 +9461,244 @@ app.post('/relay/client/activate', rateLimit('client-activate', 10, 60 * 60 * 10
         license.deviceFingerprint = fingerprint;
         license.activatedAt = license.activatedAt || Date.now();
         license.lastActivatedAt = Date.now();
+        // For reference in the admin list: keep what the customer picked/typed on the activation screen (device name + model), whether the key
+        // was sent by hand or auto-issued. Only overwritten when the screen really had a value (a retry after the waiting entry was wiped keeps the old one).
+        const enteredDevice = activationInbox.peekDevice(installationId, fingerprint);
+        if (enteredDevice) {
+            if (enteredDevice.deviceModel) license.deviceModel = enteredDevice.deviceModel;
+            if (enteredDevice.deviceName) license.enteredDeviceName = enteredDevice.deviceName;
+        }
         state.credentials[credentialHash] = { credentialId, licenseId: license.licenseId, installationId, fingerprint, createdAt: Date.now(), expiresAt: license.expiresAt || null, revokedAt: null };
+        const trialDemo = await grantTrialDemoOnActivation(license, installationId);   // only for auto-trial licenses and only if the admin checkbox is ON
         await saveClientSecurityState(state, installationId);
         allowedDevices.add(installationId);
         syncDeviceLabelFromLicense(installationId, license);
         activationInbox.clearDevice(installationId, fingerprint);   // the sent key (if any) is no longer needed: wipe it from memory
-        return res.json({ success: true, credential, credentialId, installationId, expiresAt: license.expiresAt || null, message: 'Activation successful. Store the credential securely; it will not be shown again.' });
+        return res.json({ success: true, credential, credentialId, installationId, expiresAt: license.expiresAt || null, demoExpiresAt: trialDemo ? trialDemo.expiresAt : null, message: 'Activation successful. Store the credential securely; it will not be shown again.' });
     } catch (err) {
         console.error('Client activation failed:', err.message);
         return res.status(503).json({ success: false, code: 'ACTIVATION_STORE_UNAVAILABLE', message: 'Activation could not be completed safely. Please retry later.' });
     } finally { if (releaseSecurityLock) await releaseSecurityLock().catch(err => console.error('Activation lock release failed:', err.message)); }
 });
+// ===== AUTO-ACTIVATION (free trial) =====
+// Kapag naka-ON (checkbox sa admin page), ang bawat bagong client na pumasok sa waiting room ay kusang gagawan ng RELAY ng
+// license (customer name = device name na nilagay ng client, branch "main", 7-araw na trial) at kusang ipapadala sa pairing code nito.
+// Kailangang magbigay ang client ng device name at model sa activation screen; kung wala, walang kusang activation. Kapag OFF, walang kusang activation.
+// Naka-save ang setting (nakaligtas sa restart) at default ay OFF. Hindi nito nilalaktawan ang anumang check: ang key ay kailangan pa ring
+// i-submit ng client sa /relay/client/activate.
+// Proteksyon: (1) hihintayin munang tumigil sa pagta-type ang customer (AUTO_ACTIVATION_SETTLE_MS) para hindi ma-issue ang kalahating pangalan;
+// (2) limit kada oras, global at kada IP; (3) ang hindi nagamit na auto-issued license ay binubura (hindi nag-iipon); (4) kapag binago ng
+// customer ang pangalan/model pagkatapos ma-issue pero bago mag-activate, awtomatikong papalitan ang license ng tama.
+const AUTO_ACTIVATION_KV = 'auto-activation-v1';
+const AUTO_ACTIVATION_STATE_KV = 'auto-activation-state-v1';   // naka-save: mga limit kada oras (global/IP), issuedFor, at skip list: nakaligtas sa restart ng RELAY
+const AUTO_ACTIVATION_TRIAL_DAYS = 7;
+const AUTO_ACTIVATION_MAX_PER_HOUR = 30;       // global na limit (pampublikong endpoint ito)
+const AUTO_ACTIVATION_MAX_PER_IP_HOUR = 5;     // limit kada IP para hindi maubos ng isang abusador ang global na limit
+const AUTO_ACTIVATION_SETTLE_MS = 5000;        // gaano katagal dapat hindi nagbago ang device name/model bago mag-issue
+const AUTO_ACTIVATION_UNUSED_TTL_MS = 24 * 60 * 60 * 1000; // ang auto-issued na hindi kailanman na-activate ay binubura pagkalipas nito
+let autoActivationSettings = null;             // { enabled, demoEnabled }
+let autoActivationLoading = null;
+const autoActivationInFlight = new Set();
+let autoActivationIssuedAt = [];
+const autoActivationIpIssued = new Map();      // ip -> [timestamps]
+const autoActivationIssuedFor = new Map();     // installationId -> { licenseId, deviceName, deviceModel, at }
+const autoActivationSkipUntil = new Map();     // installationId -> oras; device na may license na, hindi na muna sinusuri (iwas sa lock kada poll)
+async function getAutoActivationSettings() {
+    if (autoActivationSettings) return autoActivationSettings;
+    if (!autoActivationLoading) {
+        autoActivationLoading = (async () => {
+            let saved = null;
+            try { saved = await getPersistentJSON(AUTO_ACTIVATION_KV, null); } catch (_) { saved = null; }
+            autoActivationSettings = { enabled: !!(saved && saved.enabled === true), demoEnabled: !!(saved && saved.demoEnabled === true) };
+            return autoActivationSettings;
+        })().finally(() => { autoActivationLoading = null; });
+    }
+    return autoActivationLoading;
+}
+function saveAutoActivationSettings() { setPersistentJSON(AUTO_ACTIVATION_KV, autoActivationSettings); }
+
+// ----- Naka-save na tracking (limits, issuedFor, skip list) -----
+// Dati ay memory lang ang mga ito: sa bawat restart ng RELAY (deploy/restart sa Render) nawawala ang bilang ng limit kada oras/IP (kaya
+// puwedeng lampasan ang limit sa pamamagitan ng pag-restart) at ang issuedFor (kaya hindi na natutukoy na binago ng customer ang pangalan
+// pagkatapos ma-issue). Ngayon ay isinusulat ito sa parehong KV store (Postgres) ng iba pang setting, at binabasa bago ang unang gamit.
+// FAIL-CLOSED: kapag hindi mabasa ang naka-save na estado (Neon cold start/outage), HINDI mag-iissue ng bagong key (ibabalik ang false at susubukan
+// ulit sa susunod na poll); hindi tayo magpapanggap na blangko dahil mabubura nito ang tunay na bilang sa susunod na save.
+let autoActivationStateLoaded = false;
+let autoActivationStateLoading = null;
+async function loadAutoActivationState() {
+    if (autoActivationStateLoaded) return true;
+    if (!autoActivationStateLoading) {
+        autoActivationStateLoading = (async () => {
+            let saved;
+            try { saved = await getPersistentJSON(AUTO_ACTIVATION_STATE_KV, null, { strict: true }); }
+            catch (err) { console.error('⚠️  Auto-activation: hindi mabasa ang naka-save na estado; walang bagong issue hangga\'t hindi ito nababasa:', err.message); return false; }
+            const h = autoActivationStateStore.hydrateState(saved, Date.now());
+            // Pagsamahin sa anumang nasa memory na (hindi dapat mangyari dahil naghihintay ang lahat ng gumagamit dito, pero walang mawawala kung sakali).
+            autoActivationIssuedAt = autoActivationIssuedAt.concat(h.issuedAt).sort((a, b) => a - b);
+            for (const [k, v] of h.ipIssued) autoActivationIpIssued.set(k, (autoActivationIpIssued.get(k) || []).concat(v).sort((a, b) => a - b));
+            for (const [k, v] of h.issuedFor) if (!autoActivationIssuedFor.has(k)) autoActivationIssuedFor.set(k, v);
+            for (const [k, v] of h.skipUntil) if ((autoActivationSkipUntil.get(k) || 0) < v) autoActivationSkipUntil.set(k, v);
+            autoActivationStateLoaded = true;
+            return true;
+        })().finally(() => { autoActivationStateLoading = null; });
+    }
+    return autoActivationStateLoading;
+}
+function saveAutoActivationState() {
+    if (!autoActivationStateLoaded) return;   // huwag kailanman mag-overwrite ng estadong hindi pa nababasa
+    setPersistentJSON(AUTO_ACTIVATION_STATE_KV, autoActivationStateStore.serializeState({
+        issuedAt: autoActivationIssuedAt, ipIssued: autoActivationIpIssued, issuedFor: autoActivationIssuedFor, skipUntil: autoActivationSkipUntil
+    }, Date.now()));
+}
+
+// ===== TRIAL DEMO MODE =====
+// Second admin checkbox (default OFF). When ON, the moment an auto-issued free-trial license (license.trial === true) is really activated by
+// the client, RELAY also issues the same signed Full Demo Mode token that the admin "Activate demo" button issues, valid for the same number of
+// days as the trial. The device picks it up by itself through its normal /relay/restore-tokens sync (every ~30 s), so no OTP and no manual step.
+// Guards: only once per license (license.demoGrantedAt survives retries, device replacement and an early "End demo" on the POS), never for
+// manually-issued licenses, and never longer than the license itself.
+const AUTO_DEMO_DAYS = AUTO_ACTIVATION_TRIAL_DAYS;
+// Returns { expiresAt } when a demo was issued, otherwise null. Must be called while holding the client-security lock, BEFORE the state is saved,
+// so that license.demoGrantedAt is persisted together with the activation. Never throws.
+async function grantTrialDemoOnActivation(license, installationId) {
+    try {
+        if (!license || license.trial !== true || license.demoGrantedAt) return null;
+        const settings = await getAutoActivationSettings();
+        if (!settings.demoEnabled) return null;
+        const now = Date.now();
+        // Idempotent: kung may trial-auto demo token na ang device na ito at aktibo pa (hal. pumalya ang save ng activation pagkatapos ma-issue ang token,
+        // kaya nag-retry ang client at nawala ang license.demoGrantedAt), gamitin ulit ito at huwag mag-issue ng pangalawa.
+        const prior = issuedUnlocks[installationId] && issuedUnlocks[installationId][DEMO_FEATURE_ID];
+        if (prior && prior.source === 'trial-auto' && typeof prior.expiresAt === 'number' && prior.expiresAt > now + 60 * 1000) {
+            license.demoGrantedAt = prior.issuedAt || now;
+            license.demoExpiresAt = prior.expiresAt;
+            return { expiresAt: prior.expiresAt };
+        }
+        let durationMs = AUTO_DEMO_DAYS * 24 * 60 * 60 * 1000;
+        if (typeof license.expiresAt === 'number') durationMs = Math.min(durationMs, license.expiresAt - now);   // the demo never outlives the trial license
+        if (!(durationMs > 60 * 1000)) return null;
+        const token = issueSignedToken(installationId, DEMO_FEATURE_ID, durationMs);
+        recordIssuedUnlock(installationId, DEMO_FEATURE_ID, token, { featureName: 'Full Demo Mode', price: null, source: 'trial-auto' });
+        license.demoGrantedAt = now;
+        license.demoExpiresAt = token.payload.expiresAt;
+        logActivity(installationId, 'unlock_issued', { featureId: DEMO_FEATURE_ID, featureName: 'Full Demo Mode', source: 'trial-auto', licenseId: license.licenseId, durationDays: Math.round(durationMs / 864000) / 100 });
+        return { expiresAt: token.payload.expiresAt };
+    } catch (err) {
+        console.error('Trial demo grant failed (activation continues without it):', err && err.message);
+        return null;
+    }
+}
+
+// Binubura ang auto-issued na license na hindi kailanman na-activate at lampas na sa TTL (hindi nag-iipon ang basura sa listahan).
+function pruneUnusedAutoLicenses(state, t) {
+    let removed = 0;
+    for (const [hash, l] of Object.entries(state.activations)) {
+        if (!l || !l.autoIssuedFor || l.activatedInstallationId || l.activatedAt) continue;
+        if (t - (l.createdAt || 0) < AUTO_ACTIVATION_UNUSED_TTL_MS) continue;
+        delete state.activations[hash];
+        delete state.replacements[l.licenseId];
+        removed++;
+    }
+    return removed;
+}
+
+// Gumagawa ng trial license para sa waiting device at ipinapadala agad sa inbox nito. Hindi kailanman nagtatapon ng error palabas.
+async function tryAutoActivate(installationId, fingerprint, pairingCode, deviceName, deviceModel, ip) {
+    // Kailangang nilagay ng client ang device name AT model; kung wala, walang kusang activation.
+    if (deviceName.length < 2 || deviceModel.length < 2) return false;
+    const key = String(installationId);
+    if (!(await loadAutoActivationState())) return false;   // fail-closed (tingnan ang paliwanag sa itaas)
+    if (autoActivationInFlight.has(key)) return false;
+    if ((autoActivationSkipUntil.get(key) || 0) > Date.now()) return false;
+    autoActivationInFlight.add(key);
+    let release = null;
+    try {
+        const t = Date.now();
+        autoActivationIssuedAt = autoActivationIssuedAt.filter(x => t - x < 60 * 60 * 1000);
+        if (autoActivationIssuedAt.length >= AUTO_ACTIVATION_MAX_PER_HOUR) {
+            console.warn('⚠️  Auto-activation: naabot ang limit kada oras; hindi muna mag-iissue.');
+            return false;
+        }
+        const ipKey = String(ip || 'unknown');
+        const ipList = (autoActivationIpIssued.get(ipKey) || []).filter(x => t - x < 60 * 60 * 1000);
+        if (ipList.length >= AUTO_ACTIVATION_MAX_PER_IP_HOUR) {
+            console.warn(`⚠️  Auto-activation: naabot ang limit kada IP (${ipKey}); hindi muna mag-iissue.`);
+            return false;
+        }
+        release = await acquireClientSecurityLock();
+        const settings = await getAutoActivationSettings();
+        if (!settings.enabled) return false;   // tingnan ulit pagkatapos maghintay sa lock: baka na-off habang naghihintay
+        const state = await loadClientSecurityState();
+        const fp = String(fingerprint).toLowerCase();
+        const licenses = Object.values(state.activations).filter(Boolean);
+        // Hindi bibigyan ng bagong trial ang device na may license na (aktibo, expired o revoked): reissue/renew ang trabaho ng admin.
+        if (licenses.some(l => l.activatedInstallationId === installationId || (l.deviceFingerprint && String(l.deviceFingerprint).toLowerCase() === fp))) {
+            autoActivationSkipUntil.set(key, t + 60 * 1000);
+            if (autoActivationSkipUntil.size > 500) for (const [k, v] of autoActivationSkipUntil) if (v <= t) autoActivationSkipUntil.delete(k);
+            saveAutoActivationState();
+            return false;
+        }
+        // Dati nang auto-issued para sa device na ito pero hindi pa nagagamit (nawala/na-expire ang padala, o binago ang pangalan): burahin at gumawa ng bago.
+        // Hindi ito nagagamit kailanman, kaya walang credential o history na mawawala.
+        for (const [hash, l] of Object.entries(state.activations)) {
+            if (l && l.autoIssuedFor === installationId && !l.activatedAt && !l.activatedInstallationId) { delete state.activations[hash]; delete state.replacements[l.licenseId]; }
+        }
+        pruneUnusedAutoLicenses(state, t);
+        const customerName = deviceName;
+        let activationKey, keyHash;
+        do { activationKey = generateShortActivationKey(); keyHash = activationKeyHash(activationKey); } while (state.activations[keyHash]);
+        const licenseId = crypto.randomUUID();
+        const expiresAt = t + AUTO_ACTIVATION_TRIAL_DAYS * 24 * 60 * 60 * 1000;
+        state.activations[keyHash] = { licenseId, customerId: crypto.randomUUID(), label: 'main', customerName, deviceModel, createdAt: t, expiresAt, revokedAt: null, activatedInstallationId: null, deviceFingerprint: null, autoIssuedFor: installationId, trial: true };
+        await saveClientSecurityState(state);   // i-save muna bago ipadala: hindi kailanman maihahatid ang key na hindi pa naka-save
+        const sent = activationInbox.send(pairingCode, activationKey, licenseId);
+        if (!sent.ok) return false;   // hindi na naghihintay ang client; ang bagong unused license ay papalitan sa susunod nitong poll o buburahin pagkalipas ng 24 oras
+        autoActivationIssuedAt.push(t);
+        ipList.push(t); autoActivationIpIssued.set(ipKey, ipList);
+        autoActivationIssuedFor.set(key, { licenseId, deviceName, deviceModel, at: t });
+        if (autoActivationIssuedFor.size > 500) for (const [k, v] of autoActivationIssuedFor) if (t - v.at > 60 * 60 * 1000) autoActivationIssuedFor.delete(k);
+        if (autoActivationIpIssued.size > 500) for (const [k, v] of autoActivationIpIssued) if (!v.some(x => t - x < 60 * 60 * 1000)) autoActivationIpIssued.delete(k);
+        saveAutoActivationState();
+        logActivity(installationId, 'client_activation_key_auto_sent', { licenseId, customerName, deviceModel, trialDays: AUTO_ACTIVATION_TRIAL_DAYS });
+        return true;
+    } catch (err) {
+        console.error('Auto-activation failed:', err && err.message);
+        return false;
+    } finally {
+        if (release) await release().catch(e => console.error('Auto-activation lock release failed:', e.message));
+        autoActivationInFlight.delete(key);
+    }
+}
+
 // WAITING ROOM: the activation screen of a not-yet-activated client polls here. RELAY answers with a pairing code (shown to the
 // customer so the developer can pick the right device) and, once the admin has sent one, the activation key / credential.
 // Public like /relay/client/activate (the client has no credential yet), so it is rate-limited and returns nothing unless the admin
 // sent something to THIS installationId + fingerprint. It activates nothing by itself.
-app.post('/relay/client/activation-inbox', rateLimit('client-activation-inbox', 40, 60 * 1000), (req, res) => {
+app.post('/relay/client/activation-inbox', rateLimit('client-activation-inbox', 40, 60 * 1000), async (req, res) => {
     try {
-        const r = activationInbox.poll({ installationId: String(req.body?.installationId || '').trim(), fingerprint: String(req.body?.fingerprint || '').trim(), ip: req.ip || null });
+        const installationId = String(req.body?.installationId || '').trim();
+        const fingerprint = String(req.body?.fingerprint || '').trim();
+        const deviceName = cleanDeviceText(req.body?.deviceName);
+        const deviceModel = cleanDeviceText(req.body?.deviceModel);
+        const ip = req.ip || null;
+        let r = activationInbox.poll({ installationId, fingerprint, ip, deviceName, deviceModel });
         if (!r.ok) {
             const status = r.code === 'INVALID_INPUT' ? 400 : 503;
             return res.status(status).json({ success: false, code: r.code === 'INVALID_INPUT' ? 'INVALID_ACTIVATION_INPUT' : 'ACTIVATION_INBOX_BUSY', message: status === 400 ? 'Installation ID or device fingerprint is invalid.' : 'The activation waiting room is busy. Please try again shortly.' });
+        }
+        // Kusang activation: kapag walang naipadala pa, O kapag ang naipadalang kusang-key ay para sa lumang pangalan/model (binago ng customer).
+        // Hihintayin munang tumigil sa pagta-type ang customer. Ang key na manu-manong ipinadala ng admin ay hindi kailanman pinapalitan.
+        if (r.deviceStableMs >= AUTO_ACTIVATION_SETTLE_MS && deviceName.length >= 2 && deviceModel.length >= 2) {
+            await loadAutoActivationState();   // kailangan ang naka-save na issuedFor bago ihambing; kapag pumalya, walang issuedFor at tryAutoActivate mismo ang hihinto (fail-closed)
+            const issued = autoActivationIssuedFor.get(installationId);
+            const needsNew = !r.delivery || (issued && issued.licenseId === r.deliveryLicenseId && (issued.deviceName !== deviceName || issued.deviceModel !== deviceModel));
+            if (needsNew) {
+                const settings = await getAutoActivationSettings();
+                if (settings.enabled && await tryAutoActivate(installationId, fingerprint, r.pairingCode, deviceName, deviceModel, ip)) {
+                    const again = activationInbox.poll({ installationId, fingerprint, ip, deviceName, deviceModel });
+                    if (again.ok) r = again;
+                }
+            }
         }
         res.set('Cache-Control', 'no-store');
         return res.json({ success: true, pairingCode: r.pairingCode, delivery: r.delivery });
@@ -9488,6 +9706,25 @@ app.post('/relay/client/activation-inbox', rateLimit('client-activation-inbox', 
         console.error('Activation inbox poll failed:', err.message);
         return res.status(503).json({ success: false, code: 'ACTIVATION_INBOX_BUSY', message: 'The activation waiting room is unavailable. Please try again shortly.' });
     }
+});
+// Admin: ang checkbox na nag-o-on/off ng auto-activation.
+app.get('/relay/admin/api/auto-activation', requireAdminKey, async (req, res) => {
+    const s = await getAutoActivationSettings();
+    res.set('Cache-Control', 'no-store');
+    return res.json({ success: true, enabled: s.enabled, demoEnabled: s.demoEnabled, trialDays: AUTO_ACTIVATION_TRIAL_DAYS, demoDays: AUTO_DEMO_DAYS });
+});
+// Body may carry `enabled` (auto-activation checkbox), `demoEnabled` (trial Demo Mode checkbox) or both; a missing field is left unchanged.
+app.post('/relay/admin/api/auto-activation', requireAdminKey, async (req, res) => {
+    const hasEnabled = typeof req.body?.enabled === 'boolean';
+    const hasDemo = typeof req.body?.demoEnabled === 'boolean';
+    if (!hasEnabled && !hasDemo) return res.status(400).json({ success: false, message: 'enabled and/or demoEnabled must be true or false.' });
+    const s = await getAutoActivationSettings();
+    if (hasEnabled) s.enabled = req.body.enabled;
+    if (hasDemo) s.demoEnabled = req.body.demoEnabled;
+    saveAutoActivationSettings();
+    if (hasEnabled) console.log(`⚙️  Auto-activation ay ${s.enabled ? 'NAKA-ON' : 'NAKA-OFF'} (via admin page).`);
+    if (hasDemo) console.log(`⚙️  Trial Demo Mode ay ${s.demoEnabled ? 'NAKA-ON' : 'NAKA-OFF'} (via admin page).`);
+    return res.json({ success: true, enabled: s.enabled, demoEnabled: s.demoEnabled, trialDays: AUTO_ACTIVATION_TRIAL_DAYS, demoDays: AUTO_DEMO_DAYS });
 });
 // Ginagamit ng client para i-verify ang isang reissued credential bago ito i-save (requireApiKey ang gumagawa ng binding check).
 app.post('/relay/client/credential-check', requireApiKey, (req, res) => {
@@ -9502,7 +9739,7 @@ function buildLicenseList(state) {
         if (c && !c.revokedAt) activeCredentialCounts[c.licenseId] = (activeCredentialCounts[c.licenseId] || 0) + 1;
     }
     return Object.values(state.activations).filter(Boolean).map(item => ({
-        licenseId: item.licenseId, customerId: effectiveCustomerId(item), label: item.label || '', customerName: item.customerName || '', createdAt: item.createdAt || null,
+        licenseId: item.licenseId, customerId: effectiveCustomerId(item), label: item.label || '', customerName: item.customerName || '', enteredDeviceName: item.enteredDeviceName || '', deviceModel: item.deviceModel || '', trial: !!item.trial, demoGrantedAt: item.demoGrantedAt || null, demoExpiresAt: item.demoExpiresAt || null, createdAt: item.createdAt || null,
         expiresAt: item.expiresAt || null, revokedAt: item.revokedAt || null,
         installationId: item.activatedInstallationId || null, activatedAt: item.activatedAt || null,
         status: item.revokedAt ? 'revoked' : (item.expiresAt && item.expiresAt <= Date.now() ? 'expired' : (item.activatedInstallationId ? 'activated' : 'unused')),

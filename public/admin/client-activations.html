@@ -8,8 +8,9 @@
 </head><body><main>
 <p><a href="index.html#clients">← Clients</a></p><h1>Client Activation & Device Licensing</h1><p>Issue one-time activation keys, inspect license status, renew or revoke licenses, reissue a lost credential for the same registered device, and approve device replacement requests.</p>
 <section class="card"><h2>Admin authentication</h2><div class="row"><label class="field">RELAY admin key<input id="adminKey" type="password" autocomplete="current-password" placeholder="Enter ADMIN_KEY"></label><button id="connect">Connect & load licenses</button></div><p class="small">The key is held only in this page's memory and is not saved in local storage.</p><div id="notice" role="status" aria-live="polite"></div></section>
+<section class="card"><h2>Auto-activation (free trial)</h2><label style="display:flex;gap:10px;align-items:center;cursor:pointer"><input id="autoAct" type="checkbox" style="width:22px;height:22px;padding:0" disabled><span><strong>Auto-activate new clients</strong></span></label><p class="small" id="autoActInfo">Connect to load this setting.</p><label style="display:flex;gap:10px;align-items:center;cursor:pointer;margin-top:12px"><input id="autoDemo" type="checkbox" style="width:22px;height:22px;padding:0" disabled><span><strong>Also activate Demo Mode for auto-trial clients</strong></span></label><p class="small" id="autoDemoInfo">Connect to load this setting.</p></section>
 <section class="card"><h2>Issue activation key</h2><div class="row"><label class="field">Customer name<input id="customerName" maxlength="160" placeholder="Customer / business name"></label><label class="field">Branch / terminal label (optional)<input id="label" maxlength="120" placeholder="e.g. Main branch"></label><label class="field">Count<input id="count" type="number" min="1" max="100" value="1"></label><label class="field">Expiration date & time (optional)<input id="expiresAt" type="datetime-local"></label><button id="issue">Generate key(s)</button></div><div id="issued" class="output hidden"><div id="issuedText"></div><div id="issuedButtons" class="actions sendline"></div></div></section>
-<section class="card"><div class="row"><div style="flex:1"><h2>Waiting clients</h2><p class="small">Clients showing the activation screen appear here with a pairing code. After issuing a key, press <strong>Send to client</strong> and enter the code the customer reads to you; the key then fills in on their screen automatically. This list refreshes by itself.</p></div><button id="waitingRefresh">Refresh</button></div><div class="table-wrap"><table style="min-width:640px"><thead><tr><th>Pairing code</th><th>Device</th><th>Last seen</th><th>Delivery</th></tr></thead><tbody id="waiting"><tr><td colspan="4" class="muted">Connect to see waiting clients.</td></tr></tbody></table></div></section>
+<section class="card"><div class="row"><div style="flex:1"><h2>Waiting clients</h2><p class="small">Clients showing the activation screen appear here with a pairing code. After issuing a key, press <strong>Send to client</strong> and enter the code the customer reads to you; the key then fills in on their screen automatically. This list refreshes by itself.</p></div><button id="waitingRefresh">Refresh</button></div><div class="table-wrap"><table style="min-width:720px"><thead><tr><th>Pairing code</th><th>Device name / model</th><th>Connection</th><th>Last seen</th><th>Delivery</th></tr></thead><tbody id="waiting"><tr><td colspan="5" class="muted">Connect to see waiting clients.</td></tr></tbody></table></div></section>
 <section class="card"><div class="row"><div style="flex:1"><h2>Licenses</h2><p class="small">Activation keys are never listed again after issuance. Reissue only works for the license-bound installation.</p></div><button id="refresh">Refresh</button></div><div class="table-wrap"><table><thead><tr><th>Customer / License</th><th>Status</th><th>Installation</th><th>Expiry</th><th>Credentials</th><th>Actions</th></tr></thead><tbody id="licenses"><tr><td colspan="6" class="muted">Connect to load licenses.</td></tr></tbody></table></div></section>
 <section class="card"><div class="row"><div style="flex:1"><h2>Pending device replacements</h2><p class="small">Approve only after confirming the customer's device replacement.</p></div><button id="pendingRefresh">Refresh pending</button></div><div class="table-wrap"><table><thead><tr><th>License</th><th>Current installation</th><th>Requested installation</th><th>Requested</th><th>Action</th></tr></thead><tbody id="pending"><tr><td colspan="5" class="muted">Connect to load requests.</td></tr></tbody></table></div></section>
 </main>
@@ -64,7 +65,7 @@
       const actions = st !== 'revoked'
         ? `<button data-action="edit" data-id="${esc(x.licenseId)}"${off}>Edit</button><button data-action="renew" data-id="${esc(x.licenseId)}"${off}>Renew</button><button data-action="reissue" data-id="${esc(x.licenseId)}"${off}>Reissue credential</button><button class="danger" data-action="revoke" data-id="${esc(x.licenseId)}"${off}>Revoke</button>`
         : `<button class="danger" data-action="delete" data-id="${esc(x.licenseId)}"${off}>Delete</button>`;
-      return `<tr class="${busy.has(x.licenseId) ? 'busy' : ''}"><td><strong class="ent-name">${esc(x.customerName || 'Unnamed customer')}</strong>${x.label ? `<div class="small"><span class="ent-label">${esc(x.label)}</span></div>` : ''}<div class="small muted">${esc(counts[x.customerId] || 1)} license(s) under this customer</div><div class="small muted">${esc(x.licenseId)}</div><div class="small muted">Created ${esc(fmt(x.createdAt))}</div></td><td class="status ${esc(st)}">${esc(st)}</td><td>${esc(x.installationId || 'Not activated')}</td><td>${esc(fmt(x.expiresAt))}</td><td>${esc(x.credentialCount)}</td><td><div class="actions">${actions}</div></td></tr>`;
+      return `<tr class="${busy.has(x.licenseId) ? 'busy' : ''}"><td><strong class="ent-name">${esc(x.customerName || 'Unnamed customer')}</strong>${x.label ? `<div class="small"><span class="ent-label">${esc(x.label)}</span></div>` : ''}${x.trial ? `<div class="small"><span class="ent-label">Auto trial</span>${x.demoGrantedAt ? ` <span class="ent-label">Demo until ${esc(fmt(x.demoExpiresAt))}</span>` : ''}</div>` : ''}${x.deviceModel ? `<div class="small muted">Model: ${esc(x.deviceModel)}</div>` : ''}${x.enteredDeviceName && String(x.enteredDeviceName).toLowerCase() !== String(x.customerName || '').toLowerCase() ? `<div class="small muted">Device: ${esc(x.enteredDeviceName)}</div>` : ''}<div class="small muted">${esc(counts[x.customerId] || 1)} license(s) under this customer</div><div class="small muted">${esc(x.licenseId)}</div><div class="small muted">Created ${esc(fmt(x.createdAt))}</div></td><td class="status ${esc(st)}">${esc(st)}</td><td>${esc(x.installationId || 'Not activated')}</td><td>${esc(fmt(x.expiresAt))}</td><td>${esc(x.credentialCount)}</td><td><div class="actions">${actions}</div></td></tr>`;
     }).join('') : '<tr><td colspan="6">No licenses issued yet.</td></tr>';
   }
   function renderPending() {
@@ -85,8 +86,8 @@
   function renderWaiting() {
     $('waiting').innerHTML = waiting.length ? waiting.map(w => {
       const delivery = w.delivery ? (w.delivery.pickedUpAt ? 'Received by client' : 'Sent — waiting for the client to pick it up') : '—';
-      return `<tr><td><strong>${esc(w.pairingCode)}</strong></td><td><span class="dot ${w.online ? 'on' : ''}"></span>${w.online ? 'Waiting now' : 'Not polling'}<div class="small muted">${esc(String(w.installationId || '').slice(0, 14))}… ${w.ip ? '· ' + esc(w.ip) : ''}</div></td><td>${esc(fmt(w.lastSeenAt))}</td><td>${esc(delivery)}</td></tr>`;
-    }).join('') : '<tr><td colspan="4">No client is waiting for a key right now.</td></tr>';
+      return `<tr><td><strong>${esc(w.pairingCode)}</strong></td><td>${w.deviceName ? `<strong>${esc(w.deviceName)}</strong><div class="small muted">${esc(w.deviceModel || '—')}</div>` : '<span class="muted">Not entered yet</span>'}</td><td><span class="dot ${w.online ? 'on' : ''}"></span>${w.online ? 'Waiting now' : 'Not polling'}<div class="small muted">${esc(String(w.installationId || '').slice(0, 14))}… ${w.ip ? '· ' + esc(w.ip) : ''}</div></td><td>${esc(fmt(w.lastSeenAt))}</td><td>${esc(delivery)}</td></tr>`;
+    }).join('') : '<tr><td colspan="5">No client is waiting for a key right now.</td></tr>';
   }
   async function loadWaiting() {
     if (!adminKey) return;
@@ -245,12 +246,42 @@
     });
   }
 
+
+  // ---------- auto-activation checkbox ----------
+  function renderAuto(d) {
+    const cb = $('autoAct');
+    cb.disabled = false; cb.checked = !!d.enabled;
+    $('autoActInfo').textContent = d.enabled
+      ? `ON: a client that enters its device name and model gets a license named after the device name, branch "main", ${d.trialDays}-day trial, and the key is sent automatically — even if this page is closed. Uncheck to stop.`
+      : `OFF: clients wait for you to send a key. When ON, a client that enters its device name and model is activated automatically (${d.trialDays}-day trial, branch "main").`;
+  }
+  function renderDemo(d) {
+    const cb = $('autoDemo');
+    cb.disabled = false; cb.checked = !!d.demoEnabled;
+    $('autoDemoInfo').textContent = d.demoEnabled
+      ? `ON: when an auto-trial client really activates, RELAY also turns on Full Demo Mode (all features) for ${d.demoDays || d.trialDays} days, ending with the trial. It reaches the device by itself within about 30 seconds. Given once per license. Uncheck to stop giving it to new activations.`
+      : `OFF: auto-trial clients get the ${d.trialDays}-day license only. When ON, they also get Full Demo Mode for ${d.demoDays || d.trialDays} days right after they activate.`;
+  }
+  async function loadAuto() { const d = await api('auto-activation'); renderAuto(d); renderDemo(d); }
+  $('autoDemo').onchange = async () => {
+    const cb = $('autoDemo'); const want = cb.checked;
+    cb.disabled = true;
+    try { const d = await api('auto-activation', 'POST', { demoEnabled: want }); renderDemo(d); say(want ? 'Trial Demo Mode is ON.' : 'Trial Demo Mode is OFF.'); }
+    catch (e) { cb.checked = !want; cb.disabled = false; say(e.message, true); }
+  };
+  $('autoAct').onchange = async () => {
+    const cb = $('autoAct'); const want = cb.checked;
+    cb.disabled = true;
+    try { const d = await api('auto-activation', 'POST', { enabled: want }); renderAuto(d); renderDemo(d); say(want ? 'Auto-activation is ON.' : 'Auto-activation is OFF.'); }
+    catch (e) { cb.checked = !want; cb.disabled = false; say(e.message, true); }
+  };
+
   // ---------- top-level handlers ----------
   $('connect').onclick = async () => {
     const key = $('adminKey').value.trim();
     if (!key) { say('Enter the RELAY admin key.', true); return; }
     adminKey = key;
-    try { await withButton($('connect'), 'Connecting…', load); try { sessionStorage.setItem('relayAdminKey', key); } catch (_s) {} say('Connected.'); loadWaiting().catch(() => {}); startWaitingLoop(); }
+    try { await withButton($('connect'), 'Connecting…', load); try { sessionStorage.setItem('relayAdminKey', key); } catch (_s) {} say('Connected.'); loadAuto().catch(() => {}); loadWaiting().catch(() => {}); startWaitingLoop(); }
     catch (e) { adminKey = ''; loaded = false; clearInterval(waitingTimer); try { sessionStorage.removeItem('relayAdminKey'); } catch (_s) {} say(e.message, true); }
   };
   $('adminKey').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('connect').click(); } });
