@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="fil">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#2E7D32">
+<meta name="robots" content="noindex, nofollow">
+<title>Parent Watch - Attendance ng Anak</title>
+<style>
+:root{--bg:#f2f6f3;--card:#fff;--text:#14201a;--muted:#667a6e;--line:#e3ebe5;--brand:#2E7D32;--brand2:#1B5E20;--danger:#c62828;--warn:#ef6c00}
+@media (prefers-color-scheme:dark){:root{--bg:#0e1511;--card:#17211b;--text:#e8f1ea;--muted:#93a89a;--line:#263229}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding-bottom:env(safe-area-inset-bottom)}
+.wrap{max-width:560px;margin:0 auto;padding:0 14px 40px}
+header{background:linear-gradient(135deg,var(--brand),var(--brand2));color:#fff;padding:calc(18px + env(safe-area-inset-top)) 16px 26px;border-radius:0 0 26px 26px;margin:0 -14px 14px}
+header h1{margin:0;font-size:1.35rem}header p{margin:4px 0 0;opacity:.85;font-size:.9rem}
+.chips{display:flex;gap:8px;overflow-x:auto;padding:2px 0 10px;scrollbar-width:none}
+.chip{flex:0 0 auto;border:1.5px solid var(--line);background:var(--card);color:var(--text);padding:8px 14px;border-radius:999px;font-weight:600;cursor:pointer;font-size:.92rem}
+.chip.on{background:var(--brand);border-color:var(--brand);color:#fff}
+.card{background:var(--card);border-radius:18px;padding:16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.hero{text-align:center;padding:22px 16px}
+.hero .ico{width:74px;height:74px;border-radius:50%;margin:0 auto 10px;display:flex;align-items:center;justify-content:center;font-size:2.2rem;color:#fff}
+.hero h2{margin:0;font-size:1.25rem}.hero .sub{color:var(--muted);margin-top:4px;font-size:.92rem}
+.pill{display:inline-block;margin-top:10px;padding:4px 12px;border-radius:999px;font-size:.8rem;font-weight:700;background:#fff3e0;color:var(--warn)}
+.journey{display:flex;justify-content:space-between;margin:14px 2px 2px}
+.step{flex:1;text-align:center;font-size:.68rem;color:var(--muted)}
+.step i{display:block;width:12px;height:12px;border-radius:50%;background:var(--line);margin:0 auto 5px}
+.step.done i{background:var(--brand)}.step.done{color:var(--text)}
+.nav{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.nav button{border:0;background:var(--card);color:var(--text);width:44px;height:44px;border-radius:14px;font-size:1.1rem;font-weight:700;cursor:pointer}
+.nav button:disabled{opacity:.35}.nav div{font-weight:700;text-align:center}
+.tl{list-style:none;margin:0;padding:0}
+.tl li{display:flex;gap:12px;padding:11px 0;border-bottom:1px solid var(--line)}.tl li:last-child{border:0}
+.dot{flex:0 0 14px;height:14px;border-radius:50%;margin-top:5px}
+.tl b{display:block}.tl small{color:var(--muted)}
+.late{color:var(--warn);font-weight:700}
+input{width:100%;padding:14px;border-radius:14px;border:1.5px solid var(--line);background:var(--bg);color:var(--text);font-size:1.05rem;letter-spacing:.08em;text-transform:uppercase}
+.btn{display:block;width:100%;border:0;background:var(--brand);color:#fff;padding:14px;border-radius:14px;font-size:1rem;font-weight:700;margin-top:10px;cursor:pointer}
+.btn.ghost{background:transparent;color:var(--muted);font-weight:600}
+.err{color:var(--danger);font-weight:600;margin-top:8px}
+.muted{color:var(--muted);font-size:.85rem}
+.foot{text-align:center;margin-top:18px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header><h1>Parent Watch</h1><p id="school">Alamin kung nasa school na at nasaan ang anak mo</p></header>
+  <div class="chips" id="chips"></div>
+  <div id="view"></div>
+  <div class="foot muted" id="foot"></div>
+</div>
+<script>
+(function(){
+  var META={
+    GATE_IN:{label:'Pumasok sa gate ng school',status:'Nasa school na',color:'#1565C0',icon:'\u{1F3EB}',step:0},
+    ROOM_IN:{label:'Pumasok sa room',status:'Nasa room na',color:'#2E7D32',icon:'\u{1F4DA}',step:1},
+    BREAK_OUT:{label:'Lumabas para sa breaktime (canteen)',status:'Nasa labas - breaktime/canteen',color:'#EF6C00',icon:'\u{1F34E}',step:2},
+    BREAK_IN:{label:'Bumalik sa room galing breaktime',status:'Nasa room na (balik sa breaktime)',color:'#2E7D32',icon:'\u{1F4DA}',step:1},
+    LUNCH_OUT:{label:'Lumabas para mag-lunch sa bahay',status:'Umuwi para mag-lunch',color:'#6A1B9A',icon:'\u{1F371}',step:3},
+    LUNCH_IN:{label:'Bumalik sa school galing lunch',status:'Nasa school na (balik galing lunch)',color:'#1565C0',icon:'\u{1F3EB}',step:3},
+    DISMISS:{label:'Uwian - lumabas ng gate',status:'Umuwi na (uwian)',color:'#C62828',icon:'\u{1F3E0}',step:4}
+  };
+  var STEPS=['Gate','Room','Breaktime','Lunch','Uwian'];
+  var kids=[],cur=null,date=null,today=null,timer=null;
+  function load(){try{kids=JSON.parse(localStorage.getItem('pw_kids')||'[]')}catch(e){kids=[]}}
+  function save(){try{localStorage.setItem('pw_kids',JSON.stringify(kids))}catch(e){}}
+  function clean(c){return String(c||'').toUpperCase().replace(/[^A-Z0-9]/g,'')}
+  function fmt(ts){return new Date(ts).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}
+  function shift(d,n){var t=new Date(d+'T00:00:00Z');t.setUTCDate(t.getUTCDate()+n);return t.toISOString().slice(0,10)}
+  function label(d){try{return new Date(d+'T12:00:00Z').toLocaleDateString([], {weekday:'short',month:'short',day:'numeric',year:'numeric',timeZone:'UTC'})}catch(e){return d}}
+  function el(id){return document.getElementById(id)}
+  function esc(s){return String(s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+
+  function chips(){
+    var h='';kids.forEach(function(k){h+='<button class="chip'+(cur===k.code?' on':'')+'" data-c="'+k.code+'">'+esc(k.name||'Anak')+'</button>'});
+    h+='<button class="chip" data-add="1">+ Dagdag</button>';
+    el('chips').innerHTML=h;
+    Array.prototype.forEach.call(el('chips').children,function(b){b.onclick=function(){
+      if(b.getAttribute('data-add')){cur=null;showAdd();chips()}else{cur=b.getAttribute('data-c');date=null;fetchDay()}}});
+  }
+  function showAdd(msg){
+    clearInterval(timer);
+    el('view').innerHTML='<div class="card"><b>Ilagay ang Parent code</b><p class="muted">Nasa Parent card na ibinigay ng school (10 letra/numero).</p>'+
+      '<input id="code" maxlength="14" autocomplete="off" placeholder="HAL. 7KQ4M9XPTA"><button class="btn" id="go">Tingnan</button>'+
+      (msg?'<div class="err">'+esc(msg)+'</div>':'')+'</div>'+
+      '<div class="card muted">Mas mabilis sa app: i-install ang <b>Parent Watch</b> para may notification tuwing pumapasok o lumalabas ang anak.</div>';
+    el('go').onclick=function(){var c=clean(el('code').value);if(c.length<8){showAdd('Masyadong maikli ang code.');return}fetchDay(c,true)};
+    el('code').onkeydown=function(e){if(e.key==='Enter')el('go').click()};
+  }
+  function fetchDay(code,adding){
+    var c=code||cur;if(!c)return showAdd();
+    var url='/relay/school/parent/events?code='+encodeURIComponent(c)+(date?'&date='+date:'');
+    fetch(url,{cache:'no-store'}).then(function(r){return r.json().then(function(j){return{ok:r.ok,j:j}})}).then(function(x){
+      if(!x.ok||!x.j.success){
+        if(adding||!kids.some(function(k){return k.code===c})){showAdd(x.j&&x.j.message||'Hindi nahanap ang code.');return}
+        el('view').innerHTML='<div class="card err">\u26A0 '+esc(x.j&&x.j.message||'Walang koneksyon')+'</div>';return}
+      var d=x.j;cur=c;date=d.date;today=d.today;
+      var k=kids.filter(function(k){return k.code===c})[0];
+      if(!k){k={code:c};kids.push(k)}k.name=d.student.name;k.section=d.student.section;save();
+      el('school').textContent=d.schoolName||'';
+      chips();render(d);
+      clearInterval(timer);if(date===today)timer=setInterval(function(){fetchDay()},15000);
+    }).catch(function(){
+      if(cur)el('view').insertAdjacentHTML('afterbegin','<div class="card err">\u26A0 Walang koneksyon. Susubukan ulit.</div>');else showAdd('Walang koneksyon sa server.')
+    });
+  }
+  function render(d){
+    var evs=d.events,last=evs.length?evs[evs.length-1]:null,m=last?META[last.type]:null,isToday=d.date===d.today;
+    var late=evs.some(function(e){return e.late});
+    var done={};evs.forEach(function(e){if(META[e.type])done[META[e.type].step]=1});
+    var hero='<div class="card hero"><div class="ico" style="background:'+(m?m.color:'#90A4AE')+'">'+(m?m.icon:'\u{1F552}')+'</div>'+
+      '<h2>'+esc(d.student.name)+'</h2><div class="sub">'+esc(d.student.section||'')+'</div>'+
+      '<h2 style="margin-top:14px;color:'+(m?m.color:'var(--muted)')+'">'+(m?m.status:(isToday?'Wala pang naitalang pasok ngayon':'Walang naitala sa araw na ito'))+'</h2>'+
+      (last?'<div class="sub">Huling galaw: '+fmt(last.ts)+'</div>':'')+(late?'<span class="pill">LATE</span>':'')+
+      '<div class="journey">'+STEPS.map(function(s,i){return'<div class="step'+(done[i]?' done':'')+'"><i></i>'+s+'</div>'}).join('')+'</div></div>';
+    var nav='<div class="nav"><button id="prev">\u25C0</button><div>'+(isToday?'Ngayon - ':'')+label(d.date)+'</div><button id="next"'+(isToday?' disabled':'')+'>\u25B6</button></div>';
+    var tl='<div class="card"><b>Oras ng araw</b>'+(evs.length?'<ul class="tl">'+evs.map(function(e){var mm=META[e.type]||{label:e.type,color:'#999'};
+      return'<li><span class="dot" style="background:'+mm.color+'"></span><div><b>'+fmt(e.ts)+' &nbsp;'+esc(mm.label)+(e.late?' <span class="late">(LATE)</span>':'')+'</b>'+(e.station?'<small>'+esc(e.station)+'</small>':'')+'</div></li>'}).join('')+'</ul>':'<p class="muted">Wala pang laman.</p>')+'</div>';
+    var rm='<button class="btn ghost" id="rm">Alisin ang batang ito sa phone na ito</button>';
+    el('view').innerHTML=hero+nav+tl+rm;
+    el('prev').onclick=function(){date=shift(d.date,-1);fetchDay()};
+    el('next').onclick=function(){if(d.date<d.today){date=shift(d.date,1);fetchDay()}};
+    el('rm').onclick=function(){if(confirm('Alisin si '+d.student.name+'?')){kids=kids.filter(function(k){return k.code!==cur});save();cur=null;date=null;chips();kids.length?(cur=kids[0].code,fetchDay()):showAdd()}};
+    el('foot').textContent=isToday?'Awtomatikong nagre-refresh kada 15 segundo':'';
+  }
+  load();
+  var fromUrl=clean((location.pathname.split('/s/')[1]||'')||location.hash.replace('#',''));
+  if(fromUrl.length>=8){cur=fromUrl;chips();fetchDay(fromUrl,true);history.replaceState(null,'','/s')}
+  else if(kids.length){cur=kids[0].code;chips();fetchDay()}
+  else{chips();showAdd()}
+})();
+</script>
+</body>
+</html>

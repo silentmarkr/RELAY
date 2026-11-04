@@ -19,6 +19,7 @@
       { t: 'Installation Data', d: 'Cloud backups per installation', ico: '🗄️', href: 'installations.html', k: 'cloud backup neon storage' },
       { t: 'Client Activation & Licensing', d: 'Issue and manage activation keys', ico: '🔑', href: 'client-activations.html', k: 'license key customer' },
       { t: 'Support Tickets', d: 'Tickets sent from the Help chatbot', ico: '🎫', href: 'tickets.html', k: 'help support' },
+      { t: 'Schools (Attendance)', d: 'School Gate / Parent Watch accounts', ico: '🏫', href: 'schools.html', k: 'school attendance parent qr' },
       { t: 'Client Cost Allocation', d: 'Neon cost per client, safety net', ico: '📊', href: 'client-cost-allocation.html', k: 'neon cost profit' }
     ] },
     { group: 'Pricing', items: [

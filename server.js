@@ -24259,6 +24259,22 @@ async function backfillRedisToPostgres() {
     result.finishedAt = Date.now();
     console.log(`ℹ️  Redis→Postgres backfill tapos: ${result.scanned} key na na-scan, ${result.copied} ang nakopya (Redis lang dati), ${result.alreadyThere} ang nasa Postgres na, ${result.failed} ang pumalya.${result.failed === 0 && !result.error ? ' Ligtas nang alisin ang REDIS_URL.' : ' HUWAG pa alisin ang REDIS_URL.'}`);
 }
+// ===================================================================
+// SCHOOL ATTENDANCE MODULE (School Gate + Parent Watch apps) — tingnan ang school-relay.js
+// ===================================================================
+require('./school-relay')({
+    app, express,
+    pool: () => pgPoolDevices || pgPool,
+    ticketPool: () => pgPoolDevices,
+    purchasePool: () => pgPool,
+    queryWithRetry, requireAdminKey, rateLimit, safeCompare, logActivity,
+    sendSlackNotification, sendTelegramNotification,
+    getSupportDesk: () => SUPPORT_DESK,
+    refreshPaymongoCapabilities, getAvailablePaymentMethods, isPaymentMethodAvailable, createPaymentCheckout,
+    parseSponsorAmount, backfillPaidOnlineDonations,
+    SPONSOR_MIN_PHP, SPONSOR_MAX_PHP, SPONSOR_ONLINE_MIN_PHP
+});
+
 bootstrapStores()
     .then(async () => {
         await loadReceiptCreditPricing();

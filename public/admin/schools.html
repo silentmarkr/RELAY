@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Schools (Attendance) — RELAY Admin</title>
+<style>
+  :root { --bg:#05070d; --bg-raise:#101625; --card:rgba(11,15,26,.72); --border:#1f2a44; --border-soft:rgba(34,229,255,.28); --text:#eafcff; --muted:#8ea3c9; --accent:#22e5ff; --accent-soft:rgba(34,229,255,.16); --green:#3ddc84; --red:#ff5c72; --amber:#ffb545;
+    --font-ui:'Rajdhani','Inter','Segoe UI',system-ui,sans-serif; --font-heading:'Orbitron','Space Grotesk',sans-serif; --radius:6px; --radius-lg:8px; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:var(--font-ui); min-height:100vh; }
+  .topbar { display:flex; align-items:center; justify-content:space-between; padding:14px 20px; border-bottom:1.5px solid var(--border); background:var(--bg-raise); }
+  .topbar-title { font-family:var(--font-heading); font-size:1.1rem; } .topbar-sub { color:var(--muted); font-size:.8rem; }
+  .icon-btn,.btn { background:transparent; border:1.5px solid var(--border); color:var(--text); border-radius:var(--radius); padding:8px 12px; cursor:pointer; font-family:var(--font-ui); font-size:.9rem; text-decoration:none; }
+  .icon-btn:hover,.btn:hover { border-color:var(--border-soft); }
+  #loginWrap { max-width:360px; margin:90px auto; text-align:center; }
+  #loginWrap input { width:100%; padding:10px 12px; margin-top:14px; border-radius:var(--radius); border:1.5px solid var(--border); background:var(--bg-raise); color:var(--text); }
+  #loginError { color:var(--red); font-size:.85rem; margin-top:8px; min-height:1.2em; }
+  main { max-width:1000px; margin:0 auto; padding:24px 20px 60px; }
+  .intro { color:var(--muted); font-size:.92rem; line-height:1.5; margin-bottom:16px; }
+  .stats { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:16px; }
+  .stat { background:var(--card); border:1.5px solid var(--border); border-radius:var(--radius-lg); padding:10px 16px; } .stat b { display:block; font-family:var(--font-heading); font-size:1.3rem; color:var(--accent); }
+  .school { background:var(--card); border:1.5px solid var(--border); border-radius:var(--radius-lg); padding:14px 16px; margin-bottom:10px; display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:center; }
+  .school h3 { margin:0; font-size:1rem; } .meta { color:var(--muted); font-size:.8rem; margin-top:3px; word-break:break-all; }
+  .badge { font-size:.68rem; padding:2px 8px; border-radius:999px; border:1px solid var(--border); color:var(--muted); text-transform:uppercase; }
+  .badge.on { border-color:rgba(61,220,132,.4); color:var(--green); } .badge.blocked { border-color:rgba(255,92,114,.4); color:var(--red); }
+  .btn.del:hover { border-color:var(--red); color:var(--red); } .empty { color:var(--muted); padding:30px; text-align:center; }
+</style>
+</head>
+<body>
+<div class="topbar"><div><div class="topbar-title">🏫 Schools (Attendance)</div><div class="topbar-sub">School Gate / Parent Watch accounts</div></div><div><a class="icon-btn" href="index.html">← Admin home</a> <button class="icon-btn" id="logout" style="display:none">Log out</button></div></div>
+<div id="loginWrap" style="display:none"><h2>Admin key</h2><input type="password" id="adminKeyInput" placeholder="Admin key" autocomplete="off"><button class="btn" style="margin-top:12px" id="loginBtn">Log in</button><div id="loginError"></div></div>
+<main id="app" style="display:none">
+  <p class="intro">Bawat School Gate app na nag-register ay lalabas dito. Ang mga support ticket nila ay nasa <a href="tickets.html" style="color:var(--accent)">Support Tickets</a> (may markang 🏫 / [School]), at ang mga donasyon ay nasa sponsor donations gaya ng OmniPOS. Ang <b>Block</b> ay titigil sa sync at sa Parent Watch ng school na iyon; ang <b>Delete</b> ay buburahin ang lahat ng data nila.</p>
+  <div class="stats" id="stats"></div>
+  <div id="list"></div>
+</main>
+<script>
+let adminKey = sessionStorage.getItem('relayAdminKey') || '';
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
+async function api(path, opts = {}) {
+  const r = await fetch(path, { ...opts, headers: { 'Content-Type': 'application/json', 'x-relay-admin-key': adminKey, ...(opts.headers || {}) } });
+  const j = await r.json().catch(() => ({}));
+  if (r.status === 403) { logout(); throw new Error('Invalid admin key'); }
+  return j;
+}
+function ago(t) { if (!t) return 'never'; const m = Math.round((Date.now() - new Date(t).getTime()) / 60000); return m < 1 ? 'ngayon lang' : m < 60 ? m + ' min' : m < 1440 ? Math.round(m / 60) + ' oras' : Math.round(m / 1440) + ' araw'; }
+async function load() {
+  const j = await api('/relay/admin/api/schools');
+  if (!j.success) { $('list').innerHTML = '<div class="empty">' + esc(j.message || 'Hindi ma-load') + '</div>'; return; }
+  const s = j.schools;
+  $('stats').innerHTML = `<div class="stat"><b>${s.length}</b>schools</div><div class="stat"><b>${s.reduce((a, x) => a + x.students, 0)}</b>estudyante</div><div class="stat"><b>${s.reduce((a, x) => a + x.eventsToday, 0)}</b>scan ngayon</div>`;
+  $('list').innerHTML = s.length ? s.map((x) => `<div class="school"><div><h3>${esc(x.name)} <span class="badge ${x.blocked ? 'blocked' : 'on'}">${x.blocked ? 'blocked' : 'active'}</span></h3>
+    <div class="meta">${esc(x.schoolId)} · ${x.students} estudyante · ${x.eventsToday} scan ngayon · huling sync ${ago(x.lastSeen)} ago · ${esc(x.device || '')} ${esc(x.appVersion || '')}</div></div>
+    <div><button class="btn" data-block="${esc(x.schoolId)}" data-to="${!x.blocked}">${x.blocked ? 'Unblock' : 'Block'}</button> <button class="btn del" data-del="${esc(x.schoolId)}">Delete</button></div></div>`).join('') : '<div class="empty">Wala pang school na nag-register.</div>';
+  document.querySelectorAll('[data-block]').forEach((b) => b.onclick = async () => { await api('/relay/admin/api/schools/' + encodeURIComponent(b.dataset.block) + '/block', { method: 'POST', body: JSON.stringify({ blocked: b.dataset.to === 'true' }) }); load(); });
+  document.querySelectorAll('[data-del]').forEach((b) => b.onclick = async () => { if (confirm('Burahin ang school at LAHAT ng estudyante at attendance data nito?')) { await api('/relay/admin/api/schools/' + encodeURIComponent(b.dataset.del), { method: 'DELETE' }); load(); } });
+}
+function show() { const on = !!adminKey; $('loginWrap').style.display = on ? 'none' : 'block'; $('app').style.display = on ? 'block' : 'none'; $('logout').style.display = on ? 'inline-block' : 'none'; if (on) load().catch(() => {}); }
+function logout() { adminKey = ''; sessionStorage.removeItem('relayAdminKey'); show(); }
+$('loginBtn').onclick = () => { const v = $('adminKeyInput').value.trim(); if (!v) return; adminKey = v; sessionStorage.setItem('relayAdminKey', v); show(); };
+$('adminKeyInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('loginBtn').click(); });
+$('logout').onclick = logout;
+show();
+</script>
+</body>
+</html>
