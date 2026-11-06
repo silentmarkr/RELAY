@@ -7,27 +7,33 @@
 <meta name="robots" content="noindex, nofollow">
 <title>Parent Watch - Attendance ng Anak</title>
 <style>
-:root{--bg:#f2f6f3;--card:#fff;--text:#14201a;--muted:#667a6e;--line:#e3ebe5;--brand:#2E7D32;--brand2:#1B5E20;--danger:#c62828;--warn:#ef6c00}
-@media (prefers-color-scheme:dark){:root{--bg:#0e1511;--card:#17211b;--text:#e8f1ea;--muted:#93a89a;--line:#263229}}
+/* Mga tema: pareho ng Parent Watch app. Ang "Auto" ay sumusunod sa phone (maliwanag = Notebook, madilim = Chalkboard). */
+:root,[data-theme="light"]{color-scheme:light;--bg:#FBF7EC;--card:#fff;--text:#1F2A27;--muted:#5B6B66;--line:#E1DAC4;--brand:#1F6F5C;--onbrand:#fff;--hd1:#1F6F5C;--hd2:#2A8A74;--danger:#CF3F33;--warn:#B35A00;--pillbg:#FFF1D6;--green:#15804F;--blue:#1E78C8;--orange:#B35A00;--purple:#7C5CE0;--red:#CF3F33;--gray:#7C8782;--tc:#1F6F5C}
+@media (prefers-color-scheme:dark){:root:not([data-theme]){color-scheme:dark;--bg:#0B2220;--card:#153A36;--text:#F4F1E8;--muted:#A9C4BC;--line:#25483F;--brand:#5ED6A0;--onbrand:#04121F;--hd1:#0A1A19;--hd2:#153A36;--danger:#FF7B6B;--warn:#FFD35A;--pillbg:rgba(255,211,90,.16);--green:#5ED6A0;--blue:#6CC3FF;--orange:#FFA64D;--purple:#B79CFF;--red:#FF7B6B;--gray:#8FA9A1;--tc:#0A1A19}}
+[data-theme="dark"]{color-scheme:dark;--bg:#0B2220;--card:#153A36;--text:#F4F1E8;--muted:#A9C4BC;--line:#25483F;--brand:#5ED6A0;--onbrand:#04121F;--hd1:#0A1A19;--hd2:#153A36;--danger:#FF7B6B;--warn:#FFD35A;--pillbg:rgba(255,211,90,.16);--green:#5ED6A0;--blue:#6CC3FF;--orange:#FFA64D;--purple:#B79CFF;--red:#FF7B6B;--gray:#8FA9A1;--tc:#0A1A19}
+[data-theme="sky"]{color-scheme:light;--bg:#F3F8FD;--card:#fff;--text:#14202E;--muted:#51647A;--line:#DCE7F3;--brand:#0B63C5;--onbrand:#fff;--hd1:#0E4C94;--hd2:#1E7BDB;--danger:#CC3333;--warn:#946200;--pillbg:#FFF1D6;--green:#0F8A55;--blue:#1565C0;--orange:#B35A00;--purple:#6446D0;--red:#CC3333;--gray:#6F8296;--tc:#0E4C94}
+[data-theme="midnight"]{color-scheme:dark;--bg:#0E1224;--card:#1A2142;--text:#EEF1FB;--muted:#A5AEC9;--line:#232A4A;--brand:#8CA8FF;--onbrand:#090C1A;--hd1:#090C1A;--hd2:#1A2142;--danger:#FF7A85;--warn:#FFD166;--pillbg:rgba(255,209,102,.16);--green:#4ADE9B;--blue:#66B2FF;--orange:#FFAA5C;--purple:#C09CFF;--red:#FF7A85;--gray:#8892B0;--tc:#090C1A}
+[data-theme="sunrise"]{color-scheme:light;--bg:#FFF6EE;--card:#fff;--text:#2B1D16;--muted:#6F574A;--line:#F0DDCC;--brand:#B93A0B;--onbrand:#fff;--hd1:#9A3412;--hd2:#D8541F;--danger:#C62828;--warn:#8F6200;--pillbg:#FFF1D6;--green:#147A3A;--blue:#1D6AB0;--orange:#B45309;--purple:#7433C9;--red:#C62828;--gray:#85705F;--tc:#9A3412}
+[data-theme="violet"]{color-scheme:light;--bg:#F2F1F7;--card:#fff;--text:#1E1B2E;--muted:#5F5B73;--line:#E6E3F1;--brand:#5B49BF;--onbrand:#fff;--hd1:#6A58C8;--hd2:#8070E0;--danger:#C8304A;--warn:#946200;--pillbg:#FFF1D6;--green:#177A4B;--blue:#1C74B8;--orange:#B35A00;--purple:#6A58C8;--red:#C8304A;--gray:#7A7790;--tc:#6A58C8}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding-bottom:env(safe-area-inset-bottom)}
 .wrap{max-width:560px;margin:0 auto;padding:0 14px 40px}
-header{background:linear-gradient(135deg,var(--brand),var(--brand2));color:#fff;padding:calc(18px + env(safe-area-inset-top)) 16px 26px;border-radius:0 0 26px 26px;margin:0 -14px 14px}
+header{position:relative;background:linear-gradient(135deg,var(--hd1),var(--hd2));color:#fff;padding:calc(18px + env(safe-area-inset-top)) 16px 26px;border-radius:0 0 26px 26px;margin:0 -14px 14px}
 header h1{margin:0;font-size:1.35rem}header p{margin:4px 0 0;opacity:.85;font-size:.9rem}
 .chips{display:flex;gap:8px;overflow-x:auto;padding:2px 0 10px;scrollbar-width:none}
 .chip{flex:0 0 auto;border:1.5px solid var(--line);background:var(--card);color:var(--text);padding:8px 14px;border-radius:999px;font-weight:600;cursor:pointer;font-size:.92rem}
-.chip.on{background:var(--brand);border-color:var(--brand);color:#fff}
-.card{background:var(--card);border-radius:18px;padding:16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.chip.on{background:var(--brand);border-color:var(--brand);color:var(--onbrand)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
 .hero{text-align:center;padding:22px 16px}
-.hero .ico{width:74px;height:74px;border-radius:50%;margin:0 auto 10px;display:flex;align-items:center;justify-content:center;font-size:2.2rem;color:#fff}
+.hero .ico{width:74px;height:74px;border-radius:50%;margin:0 auto 10px;display:flex;align-items:center;justify-content:center;font-size:2.2rem;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.25)}
 .hero h2{margin:0;font-size:1.25rem}.hero .sub{color:var(--muted);margin-top:4px;font-size:.92rem}
-.pill{display:inline-block;margin-top:10px;padding:4px 12px;border-radius:999px;font-size:.8rem;font-weight:700;background:#fff3e0;color:var(--warn)}
+.pill{display:inline-block;margin-top:10px;padding:4px 12px;border-radius:999px;font-size:.8rem;font-weight:700;background:var(--pillbg);color:var(--warn)}
 .journey{display:flex;justify-content:space-between;margin:14px 2px 2px}
 .step{flex:1;text-align:center;font-size:.68rem;color:var(--muted)}
 .step i{display:block;width:12px;height:12px;border-radius:50%;background:var(--line);margin:0 auto 5px}
 .step.done i{background:var(--brand)}.step.done{color:var(--text)}
 .nav{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
-.nav button{border:0;background:var(--card);color:var(--text);width:44px;height:44px;border-radius:14px;font-size:1.1rem;font-weight:700;cursor:pointer}
+.nav button{border:1px solid var(--line);background:var(--card);color:var(--text);width:44px;height:44px;border-radius:14px;font-size:1.1rem;font-weight:700;cursor:pointer}
 .nav button:disabled{opacity:.35}.nav div{font-weight:700;text-align:center}
 .tl{list-style:none;margin:0;padding:0}
 .tl li{display:flex;gap:12px;padding:11px 0;border-bottom:1px solid var(--line)}.tl li:last-child{border:0}
@@ -35,30 +41,40 @@ header h1{margin:0;font-size:1.35rem}header p{margin:4px 0 0;opacity:.85;font-si
 .tl b{display:block}.tl small{color:var(--muted)}
 .late{color:var(--warn);font-weight:700}
 input{width:100%;padding:14px;border-radius:14px;border:1.5px solid var(--line);background:var(--bg);color:var(--text);font-size:1.05rem;letter-spacing:.08em;text-transform:uppercase}
-.btn{display:block;width:100%;border:0;background:var(--brand);color:#fff;padding:14px;border-radius:14px;font-size:1rem;font-weight:700;margin-top:10px;cursor:pointer}
+.btn{display:block;width:100%;border:0;background:var(--brand);color:var(--onbrand);padding:14px;border-radius:14px;font-size:1rem;font-weight:700;margin-top:10px;cursor:pointer}
 .btn.ghost{background:transparent;color:var(--muted);font-weight:600}
 .err{color:var(--danger);font-weight:600;margin-top:8px}
 .muted{color:var(--muted);font-size:.85rem}
 .foot{text-align:center;margin-top:18px}
+.tbtn{position:absolute;right:14px;top:calc(14px + env(safe-area-inset-top));width:42px;height:42px;border-radius:50%;border:1.5px solid rgba(255,255,255,.55);background:rgba(255,255,255,.16);color:#fff;font-size:1.2rem;cursor:pointer}
+.sheet{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:flex-end;justify-content:center;z-index:20}
+.sheet[hidden]{display:none}
+.sheet .box{background:var(--card);color:var(--text);width:100%;max-width:560px;border-radius:22px 22px 0 0;padding:16px 14px calc(16px + env(safe-area-inset-bottom));max-height:80vh;overflow:auto}
+.sheet h3{margin:0 4px 10px}
+.opt{display:flex;align-items:center;gap:14px;width:100%;border:1.5px solid var(--line);background:transparent;color:var(--text);padding:10px;border-radius:14px;margin-bottom:8px;font-size:1rem;cursor:pointer;text-align:left}
+.opt.on{border-color:var(--brand);font-weight:700}
+.sw{flex:0 0 64px;height:40px;border-radius:9px;border:1px solid rgba(128,128,128,.4);position:relative;overflow:hidden}
+.sw i{position:absolute;left:0;right:0;top:0;height:30%}.sw b{position:absolute;left:8%;top:44%;width:54%;height:46%;border-radius:5px}.sw u{position:absolute;right:10%;top:52%;width:22%;height:34%;border-radius:50%}
 </style>
 </head>
 <body>
 <div class="wrap">
-  <header><h1>Parent Watch</h1><p id="school">Alamin kung nasa school na at nasaan ang anak mo</p></header>
+  <header><button class="tbtn" id="tbtn" aria-label="Tema" title="Tema">&#127912;</button><h1>Parent Watch</h1><p id="school">Alamin kung nasa school na at nasaan ang anak mo</p></header>
   <div class="chips" id="chips"></div>
   <div id="view"></div>
   <div class="foot muted" id="foot"></div>
 </div>
+<div class="sheet" id="sheet" hidden><div class="box"><h3>Tema</h3><div id="themes"></div><button class="btn ghost" id="tclose">Isara</button></div></div>
 <script>
 (function(){
   var META={
-    GATE_IN:{label:'Pumasok sa gate ng school',status:'Nasa school na',color:'#1565C0',icon:'\u{1F3EB}',step:0},
-    ROOM_IN:{label:'Pumasok sa room',status:'Nasa room na',color:'#2E7D32',icon:'\u{1F4DA}',step:1},
-    BREAK_OUT:{label:'Lumabas para sa breaktime (canteen)',status:'Nasa labas - breaktime/canteen',color:'#EF6C00',icon:'\u{1F34E}',step:2},
-    BREAK_IN:{label:'Bumalik sa room galing breaktime',status:'Nasa room na (balik sa breaktime)',color:'#2E7D32',icon:'\u{1F4DA}',step:1},
-    LUNCH_OUT:{label:'Lumabas para mag-lunch sa bahay',status:'Umuwi para mag-lunch',color:'#6A1B9A',icon:'\u{1F371}',step:3},
-    LUNCH_IN:{label:'Bumalik sa school galing lunch',status:'Nasa school na (balik galing lunch)',color:'#1565C0',icon:'\u{1F3EB}',step:3},
-    DISMISS:{label:'Uwian - lumabas ng gate',status:'Umuwi na (uwian)',color:'#C62828',icon:'\u{1F3E0}',step:4}
+    GATE_IN:{label:'Pumasok sa gate ng school',status:'Nasa school na',color:'var(--blue)',icon:'\u{1F3EB}',step:0},
+    ROOM_IN:{label:'Pumasok sa room',status:'Nasa room na',color:'var(--green)',icon:'\u{1F4DA}',step:1},
+    BREAK_OUT:{label:'Lumabas para sa breaktime (canteen)',status:'Nasa labas - breaktime/canteen',color:'var(--orange)',icon:'\u{1F34E}',step:2},
+    BREAK_IN:{label:'Bumalik sa room galing breaktime',status:'Nasa room na (balik sa breaktime)',color:'var(--green)',icon:'\u{1F4DA}',step:1},
+    LUNCH_OUT:{label:'Lumabas para mag-lunch sa bahay',status:'Umuwi para mag-lunch',color:'var(--purple)',icon:'\u{1F371}',step:3},
+    LUNCH_IN:{label:'Bumalik sa school galing lunch',status:'Nasa school na (balik galing lunch)',color:'var(--blue)',icon:'\u{1F3EB}',step:3},
+    DISMISS:{label:'Uwian - lumabas ng gate',status:'Umuwi na (uwian)',color:'var(--red)',icon:'\u{1F3E0}',step:4}
   };
   var STEPS=['Gate','Room','Breaktime','Lunch','Uwian'];
   var kids=[],cur=null,date=null,today=null,timer=null;
@@ -108,13 +124,13 @@ input{width:100%;padding:14px;border-radius:14px;border:1.5px solid var(--line);
     var evs=d.events,last=evs.length?evs[evs.length-1]:null,m=last?META[last.type]:null,isToday=d.date===d.today;
     var late=evs.some(function(e){return e.late});
     var done={};evs.forEach(function(e){if(META[e.type])done[META[e.type].step]=1});
-    var hero='<div class="card hero"><div class="ico" style="background:'+(m?m.color:'#90A4AE')+'">'+(m?m.icon:'\u{1F552}')+'</div>'+
+    var hero='<div class="card hero"><div class="ico" style="background:'+(m?m.color:'var(--gray)')+'">'+(m?m.icon:'\u{1F552}')+'</div>'+
       '<h2>'+esc(d.student.name)+'</h2><div class="sub">'+esc(d.student.section||'')+'</div>'+
       '<h2 style="margin-top:14px;color:'+(m?m.color:'var(--muted)')+'">'+(m?m.status:(isToday?'Wala pang naitalang pasok ngayon':'Walang naitala sa araw na ito'))+'</h2>'+
       (last?'<div class="sub">Huling galaw: '+fmt(last.ts)+'</div>':'')+(late?'<span class="pill">LATE</span>':'')+
       '<div class="journey">'+STEPS.map(function(s,i){return'<div class="step'+(done[i]?' done':'')+'"><i></i>'+s+'</div>'}).join('')+'</div></div>';
     var nav='<div class="nav"><button id="prev">\u25C0</button><div>'+(isToday?'Ngayon - ':'')+label(d.date)+'</div><button id="next"'+(isToday?' disabled':'')+'>\u25B6</button></div>';
-    var tl='<div class="card"><b>Oras ng araw</b>'+(evs.length?'<ul class="tl">'+evs.map(function(e){var mm=META[e.type]||{label:e.type,color:'#999'};
+    var tl='<div class="card"><b>Oras ng araw</b>'+(evs.length?'<ul class="tl">'+evs.map(function(e){var mm=META[e.type]||{label:e.type,color:'var(--gray)'};
       return'<li><span class="dot" style="background:'+mm.color+'"></span><div><b>'+fmt(e.ts)+' &nbsp;'+esc(mm.label)+(e.late?' <span class="late">(LATE)</span>':'')+'</b>'+(e.station?'<small>'+esc(e.station)+'</small>':'')+'</div></li>'}).join('')+'</ul>':'<p class="muted">Wala pang laman.</p>')+'</div>';
     var rm='<button class="btn ghost" id="rm">Alisin ang batang ito sa phone na ito</button>';
     el('view').innerHTML=hero+nav+tl+rm;
@@ -123,6 +139,35 @@ input{width:100%;padding:14px;border-radius:14px;border:1.5px solid var(--line);
     el('rm').onclick=function(){if(confirm('Alisin si '+d.student.name+'?')){kids=kids.filter(function(k){return k.code!==cur});save();cur=null;date=null;chips();kids.length?(cur=kids[0].code,fetchDay()):showAdd()}};
     el('foot').textContent=isToday?'Awtomatikong nagre-refresh kada 15 segundo':'';
   }
+
+  var THEMES=[
+    {k:'',n:'Auto (sunod sa phone)',c:['#FBF7EC','#1F6F5C','#fff','#1F6F5C']},
+    {k:'dark',n:'Chalkboard (madilim)',c:['#0B2220','#0A1A19','#153A36','#5ED6A0']},
+    {k:'light',n:'Notebook (maliwanag)',c:['#FBF7EC','#1F6F5C','#fff','#1F6F5C']},
+    {k:'sky',n:'Sky (maliwanag)',c:['#F3F8FD','#0E4C94','#fff','#0B63C5']},
+    {k:'midnight',n:'Midnight (madilim)',c:['#0E1224','#090C1A','#1A2142','#8CA8FF']},
+    {k:'sunrise',n:'Sunrise (maliwanag)',c:['#FFF6EE','#9A3412','#fff','#B93A0B']},
+    {k:'violet',n:'Violet (maliwanag)',c:['#F2F1F7','#6A58C8','#fff','#5B49BF']}
+  ];
+  function curTheme(){try{return localStorage.getItem('pw_theme')||''}catch(e){return ''}}
+  function applyTheme(k){
+    var r=document.documentElement;
+    if(k)r.setAttribute('data-theme',k);else r.removeAttribute('data-theme');
+    var tc=getComputedStyle(r).getPropertyValue('--tc').trim();
+    var m=document.querySelector('meta[name=theme-color]');if(m&&tc)m.setAttribute('content',tc);
+  }
+  function setTheme(k){try{if(k)localStorage.setItem('pw_theme',k);else localStorage.removeItem('pw_theme')}catch(e){}applyTheme(k)}
+  function showThemes(){
+    var cur=curTheme(),h='';
+    THEMES.forEach(function(t){h+='<button class="opt'+(t.k===cur?' on':'')+'" data-k="'+t.k+'"><span class="sw" style="background:'+t.c[0]+'"><i style="background:'+t.c[1]+'"></i><b style="background:'+t.c[2]+'"></b><u style="background:'+t.c[3]+'"></u></span><span>'+t.n+(t.k===cur?' \u2713':'')+'</span></button>'});
+    el('themes').innerHTML=h;
+    Array.prototype.forEach.call(el('themes').children,function(b){b.onclick=function(){setTheme(b.getAttribute('data-k'));showThemes()}});
+    el('sheet').hidden=false;
+  }
+  el('tbtn').onclick=showThemes;
+  el('tclose').onclick=function(){el('sheet').hidden=true};
+  el('sheet').onclick=function(e){if(e.target===el('sheet'))el('sheet').hidden=true};
+  applyTheme(curTheme());
   load();
   var fromUrl=clean((location.pathname.split('/s/')[1]||'')||location.hash.replace('#',''));
   if(fromUrl.length>=8){cur=fromUrl;chips();fetchDay(fromUrl,true);history.replaceState(null,'','/s')}

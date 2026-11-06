@@ -10,6 +10,8 @@
  *   GET  /support-tickets/status (school)
  *   POST /sponsor/create  (school)  -> donasyon online (PayMongo/atbp., gamit ang parehong checkout ng OmniPOS)
  *   GET  /sponsor/status  (school)
+ *   POST /parent/sponsor/create     -> donasyon mula sa Parent Watch (deviceId lang, walang school login)
+ *   GET  /parent/sponsor/status
  *   GET  /parent/events             -> para sa Parent Watch app at sa web viewer (parent code lang)
  * Admin (x-relay-admin-key): GET /relay/admin/api/schools, POST .../:id/block, DELETE .../:id
  * Web viewer ng magulang: /s  at  /s/<CODE>   (public/school-viewer.html)
@@ -32,6 +34,7 @@ function rnd(len) {
 const sha = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 const clamp = (v, n) => String(v === undefined || v === null ? '' : v).trim().slice(0, n);
 const normSecret = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+const TZ_SQL = Number.isFinite(TZ_OFFSET_MIN) ? TZ_OFFSET_MIN : 480;
 const dayOf = (ts) => new Date(ts + TZ_OFFSET_MIN * 60000).toISOString().slice(0, 10);
 
 module.exports = function mountSchool(d) {
@@ -50,6 +53,7 @@ module.exports = function mountSchool(d) {
                     school_id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', secret_hash TEXT NOT NULL,
                     blocked BOOLEAN NOT NULL DEFAULT FALSE, device_name TEXT, app_version TEXT, ip TEXT,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(), last_seen TIMESTAMPTZ)`);
+                await p.query(`ALTER TABLE relay_schools ADD COLUMN IF NOT EXISTS absent_after_min INT NOT NULL DEFAULT 600`);
                 await p.query(`CREATE TABLE IF NOT EXISTS relay_school_students (
                     school_id TEXT NOT NULL, student_id TEXT NOT NULL, name TEXT NOT NULL, section TEXT NOT NULL DEFAULT '',
                     guardian TEXT NOT NULL DEFAULT '', parent_code TEXT NOT NULL, updated_at BIGINT NOT NULL DEFAULT 0,
@@ -62,6 +66,18 @@ module.exports = function mountSchool(d) {
                     received_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (school_id, event_id))`);
                 await p.query(`CREATE INDEX IF NOT EXISTS idx_school_events_student ON relay_school_events (school_id, student_id, ts)`);
                 await p.query(`CREATE INDEX IF NOT EXISTS idx_school_events_seq ON relay_school_events (school_id, seq)`);
+                // Larawan ng estudyante (320x320 JPEG). Para lang sa mga scanner phone ng school (school ID + secret); hindi ibinibigay sa parent endpoint.
+                await p.query(`CREATE TABLE IF NOT EXISTS relay_school_photos (
+                    school_id TEXT NOT NULL, student_id TEXT NOT NULL, data BYTEA, deleted BOOLEAN NOT NULL DEFAULT FALSE,
+                    updated_at BIGINT NOT NULL DEFAULT 0, srv_ts BIGINT NOT NULL DEFAULT 0, PRIMARY KEY (school_id, student_id))`);
+                await p.query(`CREATE INDEX IF NOT EXISTS idx_school_photos_srv ON relay_school_photos (school_id, srv_ts)`);
+                // Isang event kada estudyante, kada uri ng scan, kada araw (oras sa Pilipinas). Ang pinakaunang scan ang nananatili.
+                await p.query(`ALTER TABLE relay_school_events ADD COLUMN IF NOT EXISTS day TEXT`);
+                await p.query(`UPDATE relay_school_events SET day = to_char(to_timestamp((ts + ${TZ_SQL}::bigint * 60000)::double precision / 1000.0) AT TIME ZONE 'UTC', 'YYYY-MM-DD') WHERE day IS NULL`);
+                await p.query(`DELETE FROM relay_school_events a USING relay_school_events b
+                    WHERE a.school_id = b.school_id AND a.student_id = b.student_id AND a.type = b.type AND a.day = b.day
+                      AND (a.ts > b.ts OR (a.ts = b.ts AND a.event_id > b.event_id))`);
+                await p.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_school_event_day ON relay_school_events (school_id, student_id, type, day)`);
             })().catch((e) => { schemaPromise = null; throw e; });
         }
         return schemaPromise;
@@ -153,6 +169,11 @@ module.exports = function mountSchool(d) {
         const body = req.body || {};
         const now = Date.now();
         touch(sid, req, { device: body.device, version: body.appVersion, name: body.name });
+        // Oras (minuto mula hatinggabi) pagkatapos nito, ang walang scan ay ituturing na ABSENT sa magulang.
+        const aam = Number(body.absentAfterMin);
+        if (Number.isInteger(aam) && aam >= 0 && aam < 1440) {
+            q('UPDATE relay_schools SET absent_after_min = $2 WHERE school_id = $1 AND absent_after_min <> $2', [sid, aam]).catch(() => {});
+        }
 
         // 1) estudyante (upsert; mas bago lang ang papalit)
         const students = Array.isArray(body.students) ? body.students.slice(0, 1000) : [];
@@ -178,20 +199,31 @@ module.exports = function mountSchool(d) {
         const del = Array.isArray(body.deletedStudents) ? body.deletedStudents.slice(0, 1000).map((x) => clamp(x, 40)).filter(Boolean) : [];
         if (del.length) {
             await q('DELETE FROM relay_school_events WHERE school_id = $1 AND student_id = ANY($2::text[])', [sid, del]);
+            await q('DELETE FROM relay_school_photos WHERE school_id = $1 AND student_id = ANY($2::text[])', [sid, del]);
             await q('DELETE FROM relay_school_students WHERE school_id = $1 AND student_id = ANY($2::text[])', [sid, del]);
         }
         // 3) events (idempotent; para lang sa estudyanteng nasa school na ito)
         const evs = (Array.isArray(body.events) ? body.events.slice(0, 500) : []).filter((e) => e && e.id && e.studentId && VALID_TYPES.includes(e.type));
         let accepted = 0;
+        let duplicates = [];
         if (evs.length) {
-            const r = await q(`INSERT INTO relay_school_events (school_id, event_id, student_id, type, ts, late, station)
-                SELECT $1::text, t.id, t.sid, t.type, t.ts, t.late, t.station
+            evs.sort((a, b) => (Number(a.ts) || 0) - (Number(b.ts) || 0)); // pinakaunang scan ang unang papasok
+            const r = await q(`INSERT INTO relay_school_events (school_id, event_id, student_id, type, ts, late, station, day)
+                SELECT $1::text, t.id, t.sid, t.type, t.ts, t.late, t.station,
+                       to_char(to_timestamp((t.ts + $8::bigint * 60000)::double precision / 1000.0) AT TIME ZONE 'UTC', 'YYYY-MM-DD')
                 FROM unnest($2::text[], $3::text[], $4::text[], $5::bigint[], $6::boolean[], $7::text[]) AS t(id, sid, type, ts, late, station)
                 WHERE EXISTS (SELECT 1 FROM relay_school_students s WHERE s.school_id = $1 AND s.student_id = t.sid)
                 ON CONFLICT DO NOTHING`,
                 [sid, evs.map((e) => clamp(e.id, 80)), evs.map((e) => clamp(e.studentId, 40)), evs.map((e) => e.type),
-                    evs.map((e) => Number(e.ts) || now), evs.map((e) => !!e.late), evs.map((e) => clamp(e.station, 60))]);
+                    evs.map((e) => Number(e.ts) || now), evs.map((e) => !!e.late), evs.map((e) => clamp(e.station, 60)), TZ_SQL]);
             accepted = r.rowCount || 0;
+            if (accepted < evs.length) {
+                // Alin ang tinanggihan dahil may naka-tala na ngayong araw (ibang phone)? Ibabalik para mabura sa phone.
+                const ids = evs.map((e) => clamp(e.id, 80));
+                const have = new Set((await q('SELECT event_id FROM relay_school_events WHERE school_id = $1 AND event_id = ANY($2::text[])', [sid, ids])).rows.map((x) => x.event_id));
+                const known = new Set((await q('SELECT student_id FROM relay_school_students WHERE school_id = $1 AND student_id = ANY($2::text[])', [sid, evs.map((e) => clamp(e.studentId, 40))])).rows.map((x) => x.student_id));
+                duplicates = evs.filter((e) => !have.has(clamp(e.id, 80)) && known.has(clamp(e.studentId, 40))).map((e) => clamp(e.id, 80));
+            }
         }
         // 4) para sa phone: bagong estudyante at events galing sa ibang scanner phone
         const cursor = Math.max(0, Number(body.cursor) || 0);
@@ -202,14 +234,48 @@ module.exports = function mountSchool(d) {
             [sid, evSeq, now - days * 86400000]);
         const lastSeq = er.rows.length ? Number(er.rows[er.rows.length - 1].seq) : evSeq;
         const newCursor = sr.rows.length ? Number(sr.rows[sr.rows.length - 1].srv_ts) : cursor;
+        // larawan: ano ang bago/nabago mula sa huling photoCursor ng phone (metadata lang; hiwalay ang pag-download)
+        const pcur = Math.max(0, Number(body.photoCursor) || 0);
+        const pr = await q('SELECT student_id, deleted, updated_at, srv_ts FROM relay_school_photos WHERE school_id = $1 AND srv_ts > $2 ORDER BY srv_ts LIMIT 100', [sid, pcur]);
+        const photoCursor = pr.rows.length ? Number(pr.rows[pr.rows.length - 1].srv_ts) : pcur;
         // paminsan-minsan: linisin ang lumang events
         if (Math.random() < 0.02) q('DELETE FROM relay_school_events WHERE school_id = $1 AND ts < $2', [sid, now - KEEP_DAYS * 86400000]).catch(() => {});
         res.json({
-            success: true, accepted, conflicts, serverTime: now, schoolName: req.school.name, cursor: newCursor, eventSeq: lastSeq,
-            hasMoreEvents: er.rows.length >= 3000, hasMoreStudents: sr.rows.length >= 2000,
+            success: true, accepted, duplicates, conflicts, serverTime: now, schoolName: req.school.name, cursor: newCursor, eventSeq: lastSeq,
+            hasMoreEvents: er.rows.length >= 3000, photoCursor, hasMorePhotos: pr.rows.length >= 100,
+            photos: pr.rows.map((r) => ({ studentId: r.student_id, deleted: !!r.deleted, updatedAt: Number(r.updated_at) })), hasMoreStudents: sr.rows.length >= 2000,
             students: sr.rows.map((r) => ({ id: r.student_id, name: r.name, section: r.section, guardian: r.guardian, parentCode: r.parent_code, updatedAt: Number(r.updated_at) })),
             events: er.rows.map((r) => ({ id: r.event_id, studentId: r.student_id, type: r.type, ts: Number(r.ts), late: r.late, station: r.station }))
         });
+    }));
+
+    // ------------------------------------------------------------------ photos (school auth lang)
+    const photoLimiter = (name) => d.rateLimit(name, 900, 60 * 60 * 1000, (req) => req.headers['x-school-id']);
+    app.post('/relay/school/photo', schoolAuth, photoLimiter('school-photo-up'), withSchema(async (req, res) => {
+        const sid = req.school.school_id;
+        const b = req.body || {};
+        const studentId = clamp(b.studentId, 40);
+        if (!studentId) return res.status(400).json({ success: false, message: 'Walang studentId.' });
+        const ex = await q('SELECT 1 FROM relay_school_students WHERE school_id = $1 AND student_id = $2', [sid, studentId]);
+        if (!ex.rows[0]) return res.status(404).json({ success: false, message: 'Hindi nahanap ang estudyante.' });
+        const now = Date.now();
+        const updatedAt = Math.min(now + 86400000, Math.max(1, Number(b.updatedAt) || now));
+        let data = null;
+        const del = b.delete === true;
+        if (!del) {
+            if (typeof b.photo !== 'string' || b.photo.length < 100 || b.photo.length > 400000) return res.status(400).json({ success: false, message: 'Hindi tanggap ang larawan.' });
+            data = Buffer.from(b.photo, 'base64');
+            if (data.length > 200 * 1024 || data.length < 100 || data[0] !== 0xFF || data[1] !== 0xD8) return res.status(400).json({ success: false, message: 'JPEG lang, hanggang 200 KB.' });
+        }
+        await q(`INSERT INTO relay_school_photos (school_id, student_id, data, deleted, updated_at, srv_ts) VALUES ($1,$2,$3,$4,$5,$6)
+                 ON CONFLICT (school_id, student_id) DO UPDATE SET data = EXCLUDED.data, deleted = EXCLUDED.deleted, updated_at = EXCLUDED.updated_at, srv_ts = EXCLUDED.srv_ts
+                 WHERE relay_school_photos.updated_at <= EXCLUDED.updated_at`, [sid, studentId, data, del, updatedAt, now]);
+        res.json({ success: true });
+    }));
+    app.get('/relay/school/photo', schoolAuth, photoLimiter('school-photo-down'), withSchema(async (req, res) => {
+        const r = await q('SELECT data, updated_at FROM relay_school_photos WHERE school_id = $1 AND student_id = $2 AND deleted = FALSE', [req.school.school_id, clamp(req.query.studentId, 40)]);
+        if (!r.rows[0] || !r.rows[0].data) return res.status(404).json({ success: false, message: 'Walang larawan.' });
+        res.json({ success: true, photo: Buffer.from(r.rows[0].data).toString('base64'), updatedAt: Number(r.rows[0].updated_at) });
     }));
 
     // ------------------------------------------------------------------ support tickets
@@ -295,6 +361,54 @@ module.exports = function mountSchool(d) {
         res.json({ success: true, status: r.rows[0].status, amountPHP: Number(r.rows[0].amount_php), method: r.rows[0].method });
     }));
 
+    // ------------------------------------------------------------------ sponsor (Parent Watch)
+    // Walang school login ang magulang, kaya ang pagkakakilanlan ay random na "deviceId" ng app (PARENT-<id>).
+    // Parehong checkout at talaan ng donasyon ng School Gate (DON-... purchase_id), kaya lalabas din ito sa sponsor donations ng admin.
+    const parentInst = (raw) => {
+        const id = String(raw || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 32);
+        return id.length >= 12 ? 'PARENT-' + id : '';
+    };
+    app.post('/relay/school/parent/sponsor/create', d.rateLimit('parent-sponsor-create', 20, 60 * 60 * 1000, (req) => clientIp(req)), withSchema(async (req, res) => {
+        const inst = parentInst(req.body && req.body.deviceId);
+        if (!inst) return res.status(400).json({ success: false, message: 'Invalid device.' });
+        const { method, returnBaseUrl } = req.body || {};
+        const amount = d.parseSponsorAmount(req.body && req.body.amount);
+        if (amount === null) return res.status(400).json({ success: false, message: `Maglagay ng buong halaga mula ₱${d.SPONSOR_MIN_PHP} hanggang ₱${d.SPONSOR_MAX_PHP}.` });
+        if (amount < d.SPONSOR_ONLINE_MIN_PHP) return res.status(400).json({ success: false, message: `Ang online payment ay mula ₱${d.SPONSOR_ONLINE_MIN_PHP} pataas.` });
+        const pp = d.purchasePool();
+        if (!pp) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured.' });
+        await d.refreshPaymongoCapabilities(false);
+        if (!d.isPaymentMethodAvailable(method)) {
+            const available = d.getAvailablePaymentMethods().map((m) => m.label).join(', ') || 'wala pang naka-configure';
+            return res.status(400).json({ success: false, message: `Hindi available ang paraan ng bayad na ito. Available ngayon: ${available}.` });
+        }
+        const purchaseId = `DON-${inst.slice(7, 15)}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+        const base = (returnBaseUrl && /^https?:\/\//.test(returnBaseUrl)) ? String(returnBaseUrl).replace(/\/$/, '') : `${req.protocol}://${req.get('host')}`;
+        try {
+            const checkout = await d.createPaymentCheckout({ method, amountPHP: amount, purchaseId, base, description: `Parent Watch Sponsor Donation (PHP ${amount})` });
+            await d.queryWithRetry(pp,
+                `INSERT INTO cloud_token_purchases (purchase_id, installation_id, package_id, tokens, amount_php, method, source_id, provider, status)
+                 VALUES ($1, $2, 'DONATION', 0, $3, $4, $5, $6, 'pending')`,
+                [purchaseId, inst, amount, method, checkout.providerRefId, checkout.provider]);
+            try { d.logActivity(inst, 'sponsor_donation_created', { purchaseId, amountPHP: amount, method, provider: checkout.provider, app: 'parent-watch' }); } catch (_) {}
+            res.json({ success: true, purchaseId, checkoutUrl: checkout.checkoutUrl || null, qrCodeImageUrl: checkout.qrCodeImageUrl || null, expiresAt: checkout.expiresAt || null, amountPHP: amount });
+        } catch (err) {
+            const cfg = /_NOT_CONFIGURED$/.test(String(err.code || '')) || err.code === 'PROVIDER_NOT_CONFIGURED';
+            res.status(cfg ? 503 : 502).json({ success: false, message: err.message });
+        }
+    }));
+    app.get('/relay/school/parent/sponsor/status', d.rateLimit('parent-sponsor-status', 300, 60 * 60 * 1000, (req) => clientIp(req)), withSchema(async (req, res) => {
+        const inst = parentInst(req.query.deviceId);
+        const purchaseId = clamp(req.query.purchaseId, 120);
+        if (!inst || !purchaseId.startsWith('DON-')) return res.status(400).json({ success: false, message: 'Invalid request.' });
+        const pp = d.purchasePool();
+        if (!pp) return res.status(503).json({ success: false, message: 'Postgres (DATABASE_URL) is not configured.' });
+        const r = await d.queryWithRetry(pp, 'SELECT status, amount_php, method FROM cloud_token_purchases WHERE purchase_id = $1 AND installation_id = $2', [purchaseId, inst]);
+        if (!r.rows[0]) return res.status(404).json({ success: false, message: 'Hindi nahanap ang donasyon.' });
+        if (r.rows[0].status === 'paid') { try { await d.backfillPaidOnlineDonations(); } catch (_) {} }
+        res.json({ success: true, status: r.rows[0].status, amountPHP: Number(r.rows[0].amount_php), method: r.rows[0].method });
+    }));
+
     // ------------------------------------------------------------------ parent (app + web viewer)
     const parentFails = new Map();
     app.get('/relay/school/parent/events', d.rateLimit('school-parent', 900, 10 * 60 * 1000, (req) => clientIp(req)), withSchema(async (req, res) => {
@@ -302,7 +416,7 @@ module.exports = function mountSchool(d) {
         const f = parentFails.get(ip);
         if (f && f.count >= 30 && Date.now() - f.first < 10 * 60000) return res.status(429).json({ success: false, message: 'Masyadong maraming maling subok. Subukan ulit mamaya.' });
         const code = clamp(req.query.code, 20).toUpperCase().replace(/[^A-Z0-9]/g, '');
-        const sr = code.length >= 8 ? await q(`SELECT s.school_id, s.student_id, s.name, s.section, c.name AS school_name, c.blocked
+        const sr = code.length >= 8 ? await q(`SELECT s.school_id, s.student_id, s.name, s.section, c.name AS school_name, c.blocked, c.absent_after_min
                                                FROM relay_school_students s JOIN relay_schools c ON c.school_id = s.school_id WHERE s.parent_code = $1`, [code]) : { rows: [] };
         const st = sr.rows[0];
         if (!st || st.blocked) {
@@ -315,9 +429,18 @@ module.exports = function mountSchool(d) {
         const start = Date.parse(date + 'T00:00:00Z') - TZ_OFFSET_MIN * 60000;
         const er = await q('SELECT event_id, type, ts, late, station FROM relay_school_events WHERE school_id = $1 AND student_id = $2 AND ts >= $3 AND ts < $4 ORDER BY ts',
             [st.school_id, st.student_id, start, start + 86400000]);
+        // ABSENT: ngayon lang, walang scan ang bata, lampas na sa oras ng absent, at may nag-scan na ibang estudyante
+        // sa school ngayong araw (para hindi magkamali tuwing Sabado/Linggo o walang klase).
+        let absent = false;
+        const absentAfter = st.absent_after_min != null ? Number(st.absent_after_min) : 600;
+        const nowMin = Math.floor((((Date.now() + TZ_SQL * 60000) % 86400000) + 86400000) % 86400000 / 60000);
+        if (date === today && er.rows.length === 0 && nowMin >= absentAfter) {
+            const act = await q('SELECT 1 FROM relay_school_events WHERE school_id = $1 AND ts >= $2 AND ts < $3 LIMIT 1', [st.school_id, start, start + 86400000]);
+            absent = act.rows.length > 0;
+        }
         res.json({
             success: true, student: { name: st.name, section: st.section }, schoolName: st.school_name,
-            date, today, now: Date.now(),
+            date, today, now: Date.now(), absent, absentAfterMin: absentAfter,
             events: er.rows.map((r) => ({ id: r.event_id, type: r.type, ts: Number(r.ts), late: r.late, station: r.station }))
         });
     }));
@@ -344,6 +467,7 @@ module.exports = function mountSchool(d) {
     app.delete('/relay/admin/api/schools/:id', d.requireAdminKey, withSchema(async (req, res) => {
         const id = clamp(req.params.id, 40);
         await q('DELETE FROM relay_school_events WHERE school_id = $1', [id]);
+        await q('DELETE FROM relay_school_photos WHERE school_id = $1', [id]);
         await q('DELETE FROM relay_school_students WHERE school_id = $1', [id]);
         const r = await q('DELETE FROM relay_schools WHERE school_id = $1', [id]);
         schoolCache.clear();
