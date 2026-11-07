@@ -24275,6 +24275,15 @@ require('./school-relay')({
     SPONSOR_MIN_PHP, SPONSOR_MAX_PHP, SPONSOR_ONLINE_MIN_PHP
 });
 
+// ===================================================================
+// FAMILY REMITTANCE TRACKER MODULE — tingnan ang family-relay.js
+// ===================================================================
+require('./family-relay')({
+    app, express,
+    pool: () => pgPoolDevices || pgPool,
+    queryWithRetry, requireAdminKey, rateLimit, safeCompare
+});
+
 bootstrapStores()
     .then(async () => {
         await loadReceiptCreditPricing();

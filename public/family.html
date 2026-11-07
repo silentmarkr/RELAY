@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Family Tracker — RELAY Admin</title>
+<style>
+  :root { --bg:#05070d; --bg-raise:#101625; --card:rgba(11,15,26,.72); --border:#1f2a44; --border-soft:rgba(34,229,255,.28); --text:#eafcff; --muted:#8ea3c9; --accent:#22e5ff; --green:#3ddc84; --red:#ff5c72; --amber:#ffb545;
+    --font-ui:'Rajdhani','Inter','Segoe UI',system-ui,sans-serif; --font-heading:'Orbitron','Space Grotesk',sans-serif; --radius:6px; --radius-lg:8px; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:var(--font-ui); min-height:100vh; }
+  .topbar { display:flex; align-items:center; justify-content:space-between; padding:14px 20px; border-bottom:1.5px solid var(--border); background:var(--bg-raise); }
+  .topbar-title { font-family:var(--font-heading); font-size:1.1rem; } .topbar-sub { color:var(--muted); font-size:.8rem; }
+  .icon-btn,.btn { background:transparent; border:1.5px solid var(--border); color:var(--text); border-radius:var(--radius); padding:8px 12px; cursor:pointer; font-family:var(--font-ui); font-size:.9rem; text-decoration:none; }
+  .icon-btn:hover,.btn:hover { border-color:var(--border-soft); }
+  #loginWrap { max-width:360px; margin:90px auto; text-align:center; }
+  #loginWrap input { width:100%; padding:10px 12px; margin-top:14px; border-radius:var(--radius); border:1.5px solid var(--border); background:var(--bg-raise); color:var(--text); }
+  main { max-width:1000px; margin:0 auto; padding:24px 20px 60px; }
+  .intro { color:var(--muted); font-size:.92rem; line-height:1.5; margin-bottom:16px; }
+  .stats { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:16px; }
+  .stat { background:var(--card); border:1.5px solid var(--border); border-radius:var(--radius-lg); padding:10px 16px; } .stat b { display:block; font-family:var(--font-heading); font-size:1.3rem; color:var(--accent); }
+  .fam { background:var(--card); border:1.5px solid var(--border); border-radius:var(--radius-lg); padding:14px 16px; margin-bottom:12px; }
+  .fam h3 { margin:0; font-size:1.05rem; } .meta { color:var(--muted); font-size:.8rem; margin-top:3px; word-break:break-all; }
+  .dev { display:flex; justify-content:space-between; gap:10px; align-items:center; flex-wrap:wrap; border-top:1px solid var(--border); padding:8px 0; }
+  .dev:first-of-type { margin-top:10px; }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:8px; background:#556; }
+  .dot.online { background:var(--green); box-shadow:0 0 6px var(--green); } .dot.recent { background:var(--amber); } .dot.revoked,.dot.expired { background:var(--red); }
+  .badge { font-size:.68rem; padding:2px 8px; border-radius:999px; border:1px solid var(--border); color:var(--muted); text-transform:uppercase; margin-left:6px; }
+  .btn.del:hover { border-color:var(--red); color:var(--red); } .empty { color:var(--muted); padding:30px; text-align:center; }
+</style>
+</head>
+<body>
+<div class="topbar"><div><div class="topbar-title">👨‍👩‍👧 Family Tracker</div><div class="topbar-sub">Sino ang active · mga pamilya at device</div></div><div><a class="icon-btn" href="index.html">← Admin home</a> <button class="icon-btn" id="refresh">Refresh</button> <button class="icon-btn" id="logout" style="display:none">Log out</button></div></div>
+<div id="loginWrap" style="display:none"><h2>Admin key</h2><input type="password" id="adminKeyInput" placeholder="Admin key" autocomplete="off"><button class="btn" style="margin-top:12px" id="loginBtn">Log in</button><div id="loginError" style="color:var(--red);font-size:.85rem;margin-top:8px"></div></div>
+<main id="app" style="display:none">
+  <p class="intro"><span class="dot online"></span>Online = may request sa nakaraang 5 minuto (ang Admin app ay nagpo-poll kada 1 minuto habang bukas ang screen; ang Client ay nagpapadala kapag nag-save o nagbukas ng app). <span class="dot recent"></span>Recent = sa nakaraang 24 oras. Walang halaga o detalye ng transaksyon na ipinapakita dito, bilang lang ng record.</p>
+  <div class="stats" id="stats"></div>
+  <div id="list"></div>
+</main>
+<script>
+let adminKey = sessionStorage.getItem('relayAdminKey') || '';
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+async function api(path, opts = {}) {
+  const r = await fetch(path, { ...opts, headers: { 'Content-Type': 'application/json', 'x-relay-admin-key': adminKey, ...(opts.headers || {}) } });
+  const j = await r.json().catch(() => ({}));
+  if (r.status === 403) { logout(); throw new Error('Invalid admin key'); }
+  return j;
+}
+function ago(t) { if (!t) return 'never'; const m = Math.round((Date.now() - t) / 60000); return m < 1 ? 'ngayon lang' : m < 60 ? m + ' min na' : m < 1440 ? Math.round(m / 60) + ' oras na' : Math.round(m / 1440) + ' araw na'; }
+async function load() {
+  const j = await api('/relay/admin/api/family');
+  if (!j.success) { $('list').innerHTML = '<div class="empty">' + esc(j.message || 'Hindi ma-load. Na-deploy ba ang family-relay.js?') + '</div>'; return; }
+  const f = j.families, all = f.flatMap((x) => x.devices);
+  const n = (st) => all.filter((d) => d.state === st).length;
+  $('stats').innerHTML = `<div class="stat"><b>${f.length}</b>pamilya</div><div class="stat"><b>${n('online')}</b>online ngayon</div><div class="stat"><b>${n('recent')}</b>recent (24h)</div><div class="stat"><b>${all.filter((d) => d.role === 'client' && d.state !== 'revoked').length}</b>client devices</div>`;
+  $('list').innerHTML = f.length ? f.map((x) => `<div class="fam"><h3>${esc(x.name)}</h3>
+    <div class="meta">${esc(x.workspaceId)} · admin: ${esc(x.adminEmail || '-')} · ${x.records} record · huling data ${ago(x.lastRecordAt)} · bukas na code: ${x.openCodes}</div>
+    ${x.devices.length ? x.devices.map((d) => `<div class="dev"><div><span class="dot ${esc(d.state)}"></span><b>${esc(d.name)}</b><span class="badge">${esc(d.role)}</span><span class="badge">${esc(d.state)}</span>
+      <div class="meta">huling kita ${ago(d.lastSeen)} · naka-pair ${ago(d.pairedAt)}</div></div>
+      ${d.state === 'revoked' || d.state === 'expired' ? '' : `<button class="btn del" data-rev="${esc(d.id)}">Revoke</button>`}</div>`).join('') : '<div class="meta" style="margin-top:8px">Walang device.</div>'}</div>`).join('') : '<div class="empty">Wala pang pamilyang nakarehistro.</div>';
+  document.querySelectorAll('[data-rev]').forEach((b) => b.onclick = async () => { if (confirm('I-revoke ang device na ito? Mawawalan agad ito ng access.')) { await api('/relay/admin/api/family/devices/' + encodeURIComponent(b.dataset.rev) + '/revoke', { method: 'POST', body: '{}' }); load(); } });
+}
+function show() { const on = !!adminKey; $('loginWrap').style.display = on ? 'none' : 'block'; $('app').style.display = on ? 'block' : 'none'; $('logout').style.display = on ? 'inline-block' : 'none'; if (on) load().catch(() => {}); }
+function logout() { adminKey = ''; sessionStorage.removeItem('relayAdminKey'); show(); }
+$('loginBtn').onclick = () => { const v = $('adminKeyInput').value.trim(); if (!v) return; adminKey = v; sessionStorage.setItem('relayAdminKey', v); show(); };
+$('adminKeyInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('loginBtn').click(); });
+$('logout').onclick = logout; $('refresh').onclick = () => load().catch(() => {});
+show(); setInterval(() => { if (adminKey) load().catch(() => {}); }, 30000);
+</script>
+</body>
+</html>
