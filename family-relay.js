@@ -27,7 +27,10 @@
  *   POST /relay/admin/api/family/:id/reset-key         bagong Recovery Key kapag nawala
  *   DELETE /relay/admin/api/family/:id                 burahin ang pamilya at lahat ng data
  *   POST /relay/admin/api/family/devices/:id/revoke
- * Env (opsyonal): FAMILY_ADMIN_TOKEN_DAYS=365, FAMILY_CLIENT_TOKEN_DAYS=365.
+ *   DELETE /relay/admin/api/family/devices/:id         burahin ang isang revoked/expired na device (hindi ang active)
+ *   POST /relay/admin/api/family/:id/devices/purge     burahin ang lahat ng revoked/expired na device ng pamilya
+ * Env (opsyonal): FAMILY_ADMIN_TOKEN_DAYS=365, FAMILY_CLIENT_TOKEN_DAYS=365, FAMILY_MAX_RECORDS=20000 (limit ng record kada pamilya).
+ * Kalinisan: awtomatikong binubura ang lumang idempotency keys (60 araw), audit (180 araw) at revoked (7 araw) at expired (30 araw) na device.
  * Walang key/token/halaga na isinusulat sa log.
  */
 const crypto = require('crypto');
@@ -45,6 +48,20 @@ const ENTITIES = {
     category: ['name', 'createdAt']
 };
 const MONEY_FIELDS = ['sentMinor', 'receivedMinor', 'amountMinor', 'targetMinor'];
+// Mahigpit na hugis ng record: ang app ay laging nagpapadala ng mga ito (tingnan ang LedgerRepository F_REM/F_EXP/F_SAV/F_GOAL/F_CAT).
+const TS_FIELDS = ['sentAt', 'receivedAt', 'confirmedAt', 'occurredAt', 'createdAt', 'updatedAt'];
+const STR_FIELDS = ['id', 'workspaceId', 'senderId', 'receiverId', 'currency', 'reference', 'notes', 'status', 'category', 'description', 'paymentMethod', 'receiptRef', 'createdBy', 'type', 'goalId', 'name'];
+const REQUIRED = {
+    remittance: ['id', 'currency', 'sentMinor', 'status', 'createdAt', 'updatedAt'],
+    expense: ['id', 'category', 'amountMinor', 'currency', 'occurredAt', 'createdAt', 'updatedAt'],
+    savings: ['id', 'type', 'amountMinor', 'currency', 'occurredAt', 'createdAt', 'updatedAt'],
+    goal: ['id', 'name', 'targetMinor', 'currency', 'createdAt', 'updatedAt']
+};
+const STATUSES = ['PENDING', 'SENT', 'RECEIVED', 'CONFIRMED'];
+const SAVINGS_TYPES = ['DEPOSIT', 'WITHDRAWAL'];
+const MAX_TS = 4102444800000; // 2100-01-01 UTC
+const MAX_RECORDS = Math.max(100, parseInt(process.env.FAMILY_MAX_RECORDS || '20000', 10) || 20000);
+const PULL_SETTLE_SECONDS = 2; // huwag ibigay ang record na kasisulat lang: iwas-lagpas kapag magkasabay ang dalawang push (seq vs commit)
 
 const sha = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 const clamp = (v, n) => String(v === undefined || v === null ? '' : v).trim().slice(0, n);
@@ -75,6 +92,9 @@ module.exports = function mountFamily(d) {
                 await p.query(`CREATE INDEX IF NOT EXISTS idx_family_devices_ws ON family_devices (workspace_id, role)`);
                 await p.query(`ALTER TABLE family_devices ADD COLUMN IF NOT EXISTS app_version TEXT`);
                 await p.query(`ALTER TABLE family_devices ADD COLUMN IF NOT EXISTS ip TEXT`);
+                await p.query(`ALTER TABLE family_devices ADD COLUMN IF NOT EXISTS install_id TEXT`);
+                // Isang entry kada phone kada pamilya: ang sign-out at muling join ay hindi gumagawa ng bagong device.
+                await p.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_family_device_install ON family_devices (workspace_id, install_id) WHERE install_id IS NOT NULL`);
                 await p.query(`CREATE SEQUENCE IF NOT EXISTS family_record_seq`);
                 await p.query(`CREATE TABLE IF NOT EXISTS family_records (workspace_id TEXT NOT NULL, entity TEXT NOT NULL, entity_id TEXT NOT NULL,
                     payload JSONB NOT NULL, voided BOOLEAN NOT NULL DEFAULT FALSE, client_updated_at BIGINT NOT NULL DEFAULT 0,
@@ -138,11 +158,30 @@ module.exports = function mountFamily(d) {
             [deviceId, req.ip, clamp(req.headers['x-app-version'], 30)]).catch(() => {});
     }
 
+    const INSTALL_ID_RE = /^[A-Za-z0-9-]{16,64}$/;
+
+    /** Bagong device entry, O kapag kilala na ang phone (installId) sa pamilyang ito: ginagamit muli ang entry (parehong deviceId),
+     *  nagpapalit lang ng token at na-a-un-revoke. Kaya hindi dumadami ang naka-register kahit paulit-ulit mag-sign out/join. */
     async function issueDevice(workspaceId, role, name, days, req) {
-        const token = newToken(), deviceId = uid('dev');
-        await q('INSERT INTO family_devices (device_id, workspace_id, role, name, token_hash, expires_at, last_seen, ip, app_version) VALUES ($1,$2,$3,$4,$5, now() + ($6 || \' days\')::interval, now(), $7, $8)',
-            [deviceId, workspaceId, role, clamp(name, 60) || (role === 'admin' ? 'Admin phone' : 'Family phone'), sha(token), String(days), req.ip, clamp(req.headers['x-app-version'] || (req.body && req.body.appVersion), 30)]);
-        return { token, deviceId };
+        const token = newToken();
+        const dname = clamp(name, 60) || (role === 'admin' ? 'Admin phone' : 'Family phone');
+        const ver = clamp(req.headers['x-app-version'] || (req.body && req.body.appVersion), 30);
+        const rawInstall = clamp(req.body && req.body.installId, 64);
+        const installId = INSTALL_ID_RE.test(rawInstall) ? rawInstall : null;
+        const fresh = uid('dev');
+        const cols = '(device_id, workspace_id, role, name, token_hash, expires_at, last_seen, ip, app_version, install_id)';
+        const vals = "($1,$2,$3,$4,$5, now() + ($6 || ' days')::interval, now(), $7, $8, $9)";
+        const params = [fresh, workspaceId, role, dname, sha(token), String(days), req.ip, ver, installId];
+        if (!installId) { // lumang app na walang installId: gaya ng dati
+            await q('INSERT INTO family_devices ' + cols + ' VALUES ' + vals, params);
+            return { token, deviceId: fresh, reused: false };
+        }
+        const r = await q('INSERT INTO family_devices ' + cols + ' VALUES ' + vals
+            + ' ON CONFLICT (workspace_id, install_id) WHERE install_id IS NOT NULL DO UPDATE SET role = EXCLUDED.role, name = EXCLUDED.name,'
+            + ' token_hash = EXCLUDED.token_hash, expires_at = EXCLUDED.expires_at, revoked_at = NULL, last_seen = now(), ip = EXCLUDED.ip,'
+            + ' app_version = COALESCE(NULLIF(EXCLUDED.app_version, \'\'), family_devices.app_version) RETURNING device_id', params);
+        const deviceId = r.rows[0] ? r.rows[0].device_id : fresh;
+        return { token, deviceId, reused: deviceId !== fresh };
     }
 
     // ------------------------------------------------------------------ health
@@ -181,7 +220,7 @@ module.exports = function mountFamily(d) {
         if (!g || !g.secret_hash || !d.safeCompare(sha(secret), g.secret_hash)) { noteFail(req.ip); joinFail(familyId); return fail(res, 401, 'INVALID_CREDENTIAL', 'Wrong Family ID or Recovery Key.'); }
         if (g.blocked) return fail(res, 403, 'FAMILY_BLOCKED', 'This family is blocked. Contact the developer.');
         const dev = await issueDevice(g.workspace_id, role, req.body && req.body.deviceName, role === 'admin' ? ADMIN_TOKEN_DAYS : CLIENT_TOKEN_DAYS, req);
-        audit(g.workspace_id, dev.deviceId, 'device_joined', role);
+        audit(g.workspace_id, dev.deviceId, dev.reused ? 'device_rejoined' : 'device_joined', role);
         res.json({ success: true, role, token: dev.token, familyId: g.workspace_id, workspaceId: g.workspace_id, deviceId: dev.deviceId, displayName: g.name });
     }));
 
@@ -214,19 +253,32 @@ module.exports = function mountFamily(d) {
     }));
 
     // -------------------------------------------------------------------- sync
-    function cleanRecord(entity, p) {
-        if (!p || typeof p !== 'object') return null;
+    function cleanRecord(entity, p, entityId) {
+        if (!p || typeof p !== 'object' || Array.isArray(p)) return null;
         const out = {};
         for (const k of ENTITIES[entity]) if (p[k] !== undefined) out[k] = p[k];
+        // Tamang uri ng bawat field (null ay puwede sa optional). Hindi pinipilit ang mali: itinatanggi.
+        for (const k of STR_FIELDS) if (out[k] !== undefined && out[k] !== null && typeof out[k] !== 'string') return null;
+        for (const k of TS_FIELDS) if (out[k] !== undefined && out[k] !== null && (!Number.isInteger(out[k]) || out[k] < 0 || out[k] > MAX_TS)) return null;
+        if (out.voided !== undefined && typeof out.voided !== 'boolean') return null;
+        if (entity === 'category') { out.name = clamp(out.name, 40); return out.name ? out : null; }
+        for (const k of REQUIRED[entity]) if (out[k] === undefined || out[k] === null) return null;
+        // Ang id sa loob ng record ay dapat kapareho ng entityId: kung hindi, maaaring mapalitan ng ibang device ang ibang record.
+        if (out.id !== entityId) return null;
         for (const k of MONEY_FIELDS) {
             if (out[k] === undefined || out[k] === null) continue;
             if (!Number.isInteger(out[k]) || out[k] < 0 || out[k] > MAX_MINOR) return null;
             if (k !== 'sentMinor' && out[k] === 0) return null; // sent may be 0 (unknown); other amounts must be > 0
         }
-        if (entity === 'category') { out.name = clamp(out.name, 40); return out.name ? out : null; }
-        if (out.currency !== undefined && !/^[A-Z]{3}$/.test(out.currency)) return null;
-        if (!Number.isFinite(out.updatedAt)) return null;
+        if (!/^[A-Z]{3}$/.test(out.currency)) return null;
+        if (entity === 'remittance') {
+            if (!STATUSES.includes(out.status)) return null;
+            // kapareho ng Remittance.counts() sa app: ang CONFIRMED ay may natanggap na halaga at oras ng kumpirmasyon
+            if (out.status === 'CONFIRMED' && (!Number.isInteger(out.receivedMinor) || !Number.isInteger(out.confirmedAt))) return null;
+        }
+        if (entity === 'savings' && !SAVINGS_TYPES.includes(out.type)) return null;
         for (const k of ['description', 'notes', 'reference', 'category', 'name']) if (out[k] !== undefined) out[k] = clamp(out[k], k === 'notes' ? 500 : 120);
+        for (const k of ['senderId', 'receiverId', 'paymentMethod', 'receiptRef', 'createdBy', 'goalId']) if (typeof out[k] === 'string') out[k] = out[k].slice(0, 120);
         return out;
     }
 
@@ -235,11 +287,18 @@ module.exports = function mountFamily(d) {
         if (!ops || ops.length === 0 || ops.length > MAX_OPS) return fail(res, 400, 'BAD_REQUEST', 'ops must be 1-' + MAX_OPS + ' items.');
         const ws = req.fam.workspaceId; // NEVER taken from the body
         const results = [];
+        // Limit ng record kada pamilya (proteksyon laban sa spam): kapag puno na, ang umiiral na record ay puwede pa ring i-update/i-void, bagong record lang ang tinatanggihan.
+        const have = await q('SELECT count(*)::int AS n FROM family_records WHERE workspace_id = $1', [ws]);
+        const full = Number(have.rows[0] && have.rows[0].n) >= MAX_RECORDS;
         for (const op of ops) {
             const opId = clamp(op && op.opId, 80), entity = clamp(op && op.entity, 20), entityId = clamp(op && op.entityId, 120);
             if (!opId || !ENTITIES[entity] || !entityId) { results.push({ opId, status: 'rejected', reason: 'bad_op' }); continue; }
-            const rec = cleanRecord(entity, op.payload);
+            const rec = cleanRecord(entity, op.payload, entityId);
             if (!rec) { results.push({ opId, status: 'rejected', reason: 'invalid_payload' }); continue; }
+            if (full) {
+                const ex = await q('SELECT 1 FROM family_records WHERE workspace_id = $1 AND entity = $2 AND entity_id = $3', [ws, entity, entityId]);
+                if (!ex.rows[0]) { results.push({ opId, status: 'rejected', reason: 'quota' }); continue; }
+            }
             const prior = await q('SELECT result FROM family_ops WHERE workspace_id = $1 AND op_id = $2', [ws, opId]);
             if (prior.rows[0]) { results.push({ opId, status: 'duplicate' }); continue; } // idempotency key
             rec.workspaceId = ws;
@@ -261,11 +320,24 @@ module.exports = function mountFamily(d) {
 
     app.get('/relay/family/sync/pull', auth(null), d.rateLimit('family-pull', 240, 10 * 60 * 1000), wrap(async (req, res) => {
         const since = Math.max(0, parseInt(req.query.since, 10) || 0);
-        const r = await q('SELECT entity, entity_id, payload, seq, server_version FROM family_records WHERE workspace_id = $1 AND seq > $2 ORDER BY seq ASC LIMIT 500', [req.fam.workspaceId, since]);
+        const r = await q('SELECT entity, entity_id, payload, seq, server_version FROM family_records WHERE workspace_id = $1 AND seq > $2 AND updated_at <= now() - interval \'' + PULL_SETTLE_SECONDS + ' seconds\' ORDER BY seq ASC LIMIT 500', [req.fam.workspaceId, since]);
         const next = r.rows.length ? Number(r.rows[r.rows.length - 1].seq) : since;
         res.json({ success: true, records: r.rows.map((x) => ({ entity: x.entity, entityId: x.entity_id, payload: x.payload, serverVersion: x.server_version, seq: Number(x.seq) })),
             nextSince: next, more: r.rows.length === 500, serverTime: Date.now() });
     }));
+
+    // ------------------------------------------------------------ kalinisan
+    // Para hindi lumaki nang walang hangganan ang idempotency keys, audit at patay na device. Ang mga record ng pamilya ay HINDI ginagalaw.
+    async function housekeeping() {
+        await ensureSchema();
+        await q("DELETE FROM family_ops WHERE created_at < now() - interval '60 days'");
+        await q("DELETE FROM family_audit WHERE created_at < now() - interval '180 days'");
+        await q("DELETE FROM family_devices WHERE (revoked_at IS NOT NULL AND revoked_at < now() - interval '7 days') OR expires_at < now() - interval '30 days'");
+    }
+    const runHousekeeping = () => housekeeping().catch((e) => console.error('Family housekeeping:', e && e.message));
+    const hkFirst = setTimeout(runHousekeeping, 2 * 60 * 1000), hkEvery = setInterval(runHousekeeping, 6 * 3600 * 1000);
+    if (hkFirst.unref) hkFirst.unref();
+    if (hkEvery.unref) hkEvery.unref();
 
     // ------------------------------------------------ OWNER VIEW (admin key)
     // Page: /relay/admin/family.html . Lahat ng activated na device at ang data nila na galing sa relay.
@@ -330,6 +402,20 @@ module.exports = function mountFamily(d) {
             devices: dv.rows.map((x) => devView(x, now)), totals: summarize(r.rows), records: out, truncated: r.rows.length >= 5000 });
     }));
 
+    // Burahin ang revoked/expired na device sa listahan (ang active ay kailangang i-revoke muna). Hindi ginagalaw ang mga record ng pamilya.
+    app.delete('/relay/admin/api/family/devices/:id', d.requireAdminKey, d.rateLimit('family-owner-devdel', 60, 60 * 60 * 1000), wrap(async (req, res) => {
+        const id = clamp(req.params.id, 60);
+        const r = await q('DELETE FROM family_devices WHERE device_id = $1 AND (revoked_at IS NOT NULL OR expires_at < now()) RETURNING workspace_id', [id]);
+        if (!r.rows[0]) return fail(res, 404, 'NOT_FOUND', 'Device not found, or it is still active (revoke it first).');
+        audit(r.rows[0].workspace_id, 'owner', 'device_deleted_by_owner', id);
+        res.json({ success: true });
+    }));
+    app.post('/relay/admin/api/family/:id/devices/purge', d.requireAdminKey, d.rateLimit('family-owner-purge', 30, 60 * 60 * 1000), wrap(async (req, res) => {
+        const ws = clamp(req.params.id, 40);
+        const r = await q('DELETE FROM family_devices WHERE workspace_id = $1 AND (revoked_at IS NOT NULL OR expires_at < now()) RETURNING device_id', [ws]);
+        audit(ws, 'owner', 'devices_purged_by_owner', String(r.rows.length));
+        res.json({ success: true, deleted: r.rows.length });
+    }));
     app.post('/relay/admin/api/family/devices/:id/revoke', d.requireAdminKey, d.rateLimit('family-owner-revoke', 30, 60 * 60 * 1000), wrap(async (req, res) => {
         const r = await q('UPDATE family_devices SET revoked_at = now() WHERE device_id = $1 AND revoked_at IS NULL RETURNING workspace_id', [clamp(req.params.id, 60)]);
         if (!r.rows[0]) return fail(res, 404, 'NOT_FOUND', 'Device not found.');

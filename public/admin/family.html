@@ -53,6 +53,7 @@
 let adminKey = sessionStorage.getItem('relayAdminKey') || '';
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+const roleLabel = (r) => (r === 'client' ? 'device' : r); // 'client' ang internal na pangalan; 'device' ang ipinapakita
 async function api(path, opts = {}) {
   const r = await fetch(path, { ...opts, headers: { 'Content-Type': 'application/json', 'x-relay-admin-key': adminKey, ...(opts.headers || {}) } });
   const j = await r.json().catch(() => ({}));
@@ -80,7 +81,7 @@ function dataHtml(id, j) {
   else if (tab === 'savings') body = table([['Petsa', (r) => day(r.data.occurredAt)], ['Uri', (r) => esc(r.data.type)], ['Halaga', (r) => money(r.data.amountMinor, cur(r)), 'num'], ['Tala', (r) => esc(r.data.notes)], ['Device', (r) => esc(r.device)]], rec.savings);
   else if (tab === 'goal') body = table([['Goal', (r) => esc(r.data.name)], ['Target', (r) => money(r.data.targetMinor, cur(r)), 'num'], ['Ginawa', (r) => day(r.data.createdAt)]], rec.goal);
   else if (tab === 'category') body = table([['Kategorya', (r) => esc(r.data.name)], ['Device', (r) => esc(r.device)]], rec.category);
-  else body = table([['Device', (r) => esc(r.name)], ['Role', (r) => esc(r.role)], ['Estado', (r) => esc(r.state)], ['Huling kita', (r) => dt(r.lastSeen)], ['Naka-activate', (r) => dt(r.pairedAt)], ['App', (r) => esc(r.appVersion || '-')], ['IP', (r) => esc(r.ip || '-')]], j.devices);
+  else body = table([['Device', (r) => esc(r.name)], ['Role', (r) => esc(roleLabel(r.role))], ['Estado', (r) => esc(r.state)], ['Huling kita', (r) => dt(r.lastSeen)], ['Naka-activate', (r) => dt(r.pairedAt)], ['App', (r) => esc(r.appVersion || '-')], ['IP', (r) => esc(r.ip || '-')]], j.devices);
   return `<div class="data"><div class="tabs">${tabs.map((t) => `<button class="btn sm ${t[0] === tab ? 'on' : ''}" data-tab="${t[0]}" data-fam="${esc(id)}">${t[1]} (${t[2]})</button>`).join('')}</div>${body}${j.truncated ? '<div class="meta">Ipinapakita ang pinakabagong 5000 record.</div>' : ''}<div class="meta" style="margin-top:6px">Huling na-load ${dt(j.serverTime)}. Ang may guhit ay voided (binura sa app).</div></div>`;
 }
 function render() {
@@ -92,23 +93,31 @@ function render() {
   $('list').innerHTML = f.length ? f.map((x) => `<div class="fam"><h3>${esc(x.name)} ${x.blocked ? '<span class="badge warn">blocked</span>' : ''}</h3>
     <div class="meta">${esc(x.familyId)} · ginawa ${day(x.createdAt)} · ${x.records} record · huling data ${ago(x.lastRecordAt)}</div>
     <div class="tot">${totalsHtml(x.totals)}</div>
-    ${x.devices.length ? x.devices.map((d) => `<div class="dev"><div><span class="dot ${esc(d.state)}"></span><b>${esc(d.name)}</b><span class="badge">${esc(d.role)}</span><span class="badge ${d.state === 'online' ? 'ok' : ''}">${esc(d.state)}</span>
+    ${x.devices.length ? x.devices.map((d) => `<div class="dev"><div><span class="dot ${esc(d.state)}"></span><b>${esc(d.name)}</b><span class="badge">${esc(roleLabel(d.role))}</span><span class="badge ${d.state === 'online' ? 'ok' : ''}">${esc(d.state)}</span>
       <div class="meta">huling kita ${ago(d.lastSeen)} · naka-activate ${ago(d.pairedAt)}${d.appVersion ? ' · v' + esc(d.appVersion) : ''}${d.ip ? ' · ' + esc(d.ip) : ''}</div></div>
-      ${d.state === 'revoked' || d.state === 'expired' ? '' : `<button class="btn del sm" data-rev="${esc(d.id)}">Revoke</button>`}</div>`).join('') : '<div class="meta" style="margin-top:8px">Walang device.</div>'}
+      ${d.state === 'revoked' || d.state === 'expired' ? `<button class="btn del sm" data-deldev="${esc(d.id)}">Burahin</button>` : `<button class="btn del sm" data-rev="${esc(d.id)}">Revoke</button>`}</div>`).join('') : '<div class="meta" style="margin-top:8px">Walang device.</div>'}
     <div class="toolbar"><button class="btn sm pri" data-data="${esc(x.familyId)}">${open[x.familyId] ? 'Itago ang data' : 'Tingnan ang data'}</button>
       <button class="btn sm" data-block="${esc(x.familyId)}" data-to="${x.blocked ? 0 : 1}">${x.blocked ? 'I-unblock' : 'I-block'}</button>
       <button class="btn sm" data-reset="${esc(x.familyId)}">Bagong Recovery Key</button>
-      <button class="btn sm del" data-del="${esc(x.familyId)}">Burahin</button></div>
+      ${x.devices.some((d) => d.state === 'revoked' || d.state === 'expired') ? `<button class="btn sm" data-purge="${esc(x.familyId)}">Linisin ang revoked (${x.devices.filter((d) => d.state === 'revoked' || d.state === 'expired').length})</button>` : ''}
+      <button class="btn sm del" data-del="${esc(x.familyId)}">Burahin ang pamilya</button></div>
     <div id="data-${esc(x.familyId)}">${open[x.familyId] && cache[x.familyId] ? dataHtml(x.familyId, cache[x.familyId]) : ''}</div></div>`).join('') : '<div class="empty">Wala pang pamilyang nakarehistro.</div>';
   const on = (sel, fn) => document.querySelectorAll(sel).forEach((b) => (b.onclick = () => fn(b)));
   on('[data-rev]', async (b) => { if (confirm('I-revoke ang device na ito? Mawawalan agad ito ng access.')) { await api('/relay/admin/api/family/devices/' + encodeURIComponent(b.dataset.rev) + '/revoke', { method: 'POST', body: '{}' }); load(); } });
+  on('[data-deldev]', async (b) => { if (!confirm('Burahin ang device na ito sa listahan? (Hindi nito ginagalaw ang data ng pamilya.)')) return;
+    const j = await api('/relay/admin/api/family/devices/' + encodeURIComponent(b.dataset.deldev), { method: 'DELETE' }); if (!j.success) alert(j.message || 'Hindi nabura.'); load(); });
+  on('[data-purge]', async (b) => { if (!confirm('Burahin ang LAHAT ng revoked at expired na device ng pamilyang ito sa listahan? (Hindi nito ginagalaw ang data ng pamilya.)')) return;
+    const j = await api('/relay/admin/api/family/' + encodeURIComponent(b.dataset.purge) + '/devices/purge', { method: 'POST', body: '{}' }); if (!j.success) alert(j.message || 'Hindi nabura.'); load(); });
   on('[data-data]', async (b) => { const id = b.dataset.data; open[id] = !open[id]; if (open[id]) await loadData(id); render(); });
   on('[data-tab]', (b) => { tabOf[b.dataset.fam] = b.dataset.tab; render(); });
   on('[data-block]', async (b) => { await api('/relay/admin/api/family/' + encodeURIComponent(b.dataset.block) + '/block', { method: 'POST', body: JSON.stringify({ blocked: b.dataset.to === '1' }) }); load(); });
   on('[data-reset]', async (b) => { if (!confirm('Gumawa ng bagong Recovery Key? Hindi na gagana ang dati; mananatiling naka-login ang mga activated na device.')) return;
     const j = await api('/relay/admin/api/family/' + encodeURIComponent(b.dataset.reset) + '/reset-key', { method: 'POST', body: '{}' });
     if (j.success) { $('keyNotice').innerHTML = `<div class="keybox">Family ID: ${esc(j.familyId)}<br>Bagong Recovery Key: ${esc(j.recoveryKey.match(/.{4}/g).join('-'))}<div class="meta">Ipinapakita lang ito ngayon. Ibigay sa may-ari ng pamilya.</div></div>`; window.scrollTo(0, 0); } });
-  on('[data-del]', async (b) => { if (!confirm('BURAHIN ang buong pamilya at LAHAT ng data nito sa relay? Hindi na maibabalik.')) return; if (prompt('I-type ang Family ID para kumpirmahin:') !== b.dataset.del) return;
+  on('[data-del]', async (b) => { if (!confirm('BURAHIN ang BUONG PAMILYA at LAHAT ng data nito sa relay? Hindi na maibabalik. (Para sa device lang, gamitin ang Burahin sa tabi ng device.)')) return;
+    // Hindi case-sensitive at tinatanggal ang espasyo: ang keyboard ng phone ay madalas gumagawang malaking letra ang una.
+    const typed = (prompt('I-type ang Family ID para kumpirmahin:') || '').replace(/\s+/g, '').toLowerCase();
+    if (typed !== String(b.dataset.del).toLowerCase()) { alert('Hindi tumugma ang Family ID. Walang nabura.'); return; }
     await api('/relay/admin/api/family/' + encodeURIComponent(b.dataset.del), { method: 'DELETE' }); delete open[b.dataset.del]; load(); });
 }
 async function loadData(id) { const j = await api('/relay/admin/api/family/' + encodeURIComponent(id) + '/data'); if (j.success) cache[id] = j; else { open[id] = false; alert(j.message || 'Hindi ma-load ang data.'); } }
