@@ -24281,7 +24281,7 @@ require('./school-relay')({
 require('./family-relay')({
     app, express,
     pool: () => pgPoolDevices || pgPool,
-    queryWithRetry, requireAdminKey, rateLimit, safeCompare
+    queryWithRetry, requireAdminKey, rateLimit, safeCompare, logActivity, sendTelegramNotification
 });
 
 bootstrapStores()

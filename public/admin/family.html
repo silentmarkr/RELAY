@@ -26,15 +26,27 @@
   .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:8px; background:#556; }
   .dot.online { background:var(--green); box-shadow:0 0 6px var(--green); } .dot.recent { background:var(--amber); } .dot.revoked,.dot.expired { background:var(--red); }
   .badge { font-size:.68rem; padding:2px 8px; border-radius:999px; border:1px solid var(--border); color:var(--muted); text-transform:uppercase; margin-left:6px; }
+  .toolbar { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+  .btn.sm { padding:5px 10px; font-size:.8rem; } .btn.pri { border-color:var(--border-soft); color:var(--accent); }
+  .badge.warn { color:var(--red); border-color:var(--red); } .badge.ok { color:var(--green); border-color:var(--green); }
+  .data { margin-top:12px; border-top:1px solid var(--border); padding-top:10px; }
+  .tot { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0 12px; } .tot .stat { padding:8px 12px; } .tot .stat b { font-size:1.05rem; } .tot .stat.neg b { color:var(--red); }
+  .tabs { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px; } .tabs .btn.on { background:var(--accent); color:#001018; border-color:var(--accent); }
+  table { width:100%; border-collapse:collapse; font-size:.82rem; } th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--border); vertical-align:top; } th { color:var(--muted); font-weight:600; }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; } tr.void td { opacity:.45; text-decoration:line-through; }
+  .tablewrap { overflow-x:auto; max-height:420px; overflow-y:auto; } #search { padding:8px 12px; border-radius:var(--radius); border:1.5px solid var(--border); background:var(--bg-raise); color:var(--text); min-width:220px; }
+  .keybox { background:var(--bg-raise); border:1.5px solid var(--accent); border-radius:var(--radius); padding:10px 14px; margin-top:10px; font-family:monospace; font-size:1rem; word-break:break-all; }
   .btn.del:hover { border-color:var(--red); color:var(--red); } .empty { color:var(--muted); padding:30px; text-align:center; }
 </style>
 </head>
 <body>
-<div class="topbar"><div><div class="topbar-title">👨‍👩‍👧 Family Tracker</div><div class="topbar-sub">Sino ang active · mga pamilya at device</div></div><div><a class="icon-btn" href="index.html">← Admin home</a> <button class="icon-btn" id="refresh">Refresh</button> <button class="icon-btn" id="logout" style="display:none">Log out</button></div></div>
+<div class="topbar"><div><div class="topbar-title">👨‍👩‍👧 Family Tracker</div><div class="topbar-sub">Mga pamilya, activated devices at data nila</div></div><div><a class="icon-btn" href="index.html">← Admin home</a> <button class="icon-btn" id="refresh">Refresh</button> <button class="icon-btn" id="logout" style="display:none">Log out</button></div></div>
 <div id="loginWrap" style="display:none"><h2>Admin key</h2><input type="password" id="adminKeyInput" placeholder="Admin key" autocomplete="off"><button class="btn" style="margin-top:12px" id="loginBtn">Log in</button><div id="loginError" style="color:var(--red);font-size:.85rem;margin-top:8px"></div></div>
 <main id="app" style="display:none">
-  <p class="intro"><span class="dot online"></span>Online = may request sa nakaraang 5 minuto (ang Admin app ay nagpo-poll kada 1 minuto habang bukas ang screen; ang Client ay nagpapadala kapag nag-save o nagbukas ng app). <span class="dot recent"></span>Recent = sa nakaraang 24 oras. Walang halaga o detalye ng transaksyon na ipinapakita dito, bilang lang ng record.</p>
+  <p class="intro"><span class="dot online"></span>Online = may request sa nakaraang 5 minuto (ang Admin app ay nagpo-poll kada 1 minuto habang bukas ang screen; ang Client ay nagpapadala kapag nag-save o nagbukas ng app). <span class="dot recent"></span>Recent = sa nakaraang 24 oras. Ang bawat pamilya ay nag-activate gamit ang Family ID + Recovery Key na ginawa ng app (kagaya ng School). Pindutin ang <b>Tingnan ang data</b> para makita ang laman na galing sa relay.</p>
   <div class="stats" id="stats"></div>
+  <div class="toolbar" style="margin:0 0 12px"><input id="search" placeholder="Hanapin: pamilya, Family ID, device…"></div>
+  <div id="keyNotice"></div>
   <div id="list"></div>
 </main>
 <script>
@@ -48,25 +60,72 @@ async function api(path, opts = {}) {
   return j;
 }
 function ago(t) { if (!t) return 'never'; const m = Math.round((Date.now() - t) / 60000); return m < 1 ? 'ngayon lang' : m < 60 ? m + ' min na' : m < 1440 ? Math.round(m / 60) + ' oras na' : Math.round(m / 1440) + ' araw na'; }
+const money = (m, c) => (Number(m || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ' + esc(c || '');
+const dt = (t) => t ? new Date(t).toLocaleString() : '-';
+const day = (t) => t ? new Date(t).toLocaleDateString() : '-';
+let families = [], open = {}, tabOf = {}, cache = {};
+const totalsHtml = (tot) => Object.keys(tot || {}).map((c) => { const x = tot[c];
+  return `<div class="stat"><b>${money(x.received, c)}</b>natanggap (confirmed)</div><div class="stat"><b>${money(x.expenses, c)}</b>gastos</div><div class="stat"><b>${money(x.savingsBalance, c)}</b>ipon</div><div class="stat ${x.available < 0 ? 'neg' : ''}"><b>${money(x.available, c)}</b>natitira (natanggap − gastos − ipon)</div>`; }).join('') || '<div class="meta">Wala pang data na naipapadala.</div>';
+function table(cols, rows) {
+  if (!rows.length) return '<div class="meta">Wala.</div>';
+  return '<div class="tablewrap"><table><tr>' + cols.map((c) => `<th>${esc(c[0])}</th>`).join('') + '</tr>' + rows.map((r) => `<tr class="${r.voided ? 'void' : ''}">` + cols.map((c) => `<td class="${c[2] || ''}">${c[1](r)}</td>`).join('') + '</tr>').join('') + '</table></div>';
+}
+function dataHtml(id, j) {
+  const rec = j.records, tab = tabOf[id] || 'expense';
+  const cur = (r) => r.data.currency || 'PHP';
+  const tabs = [['remittance', 'Remittance', rec.remittance.length], ['expense', 'Gastos', rec.expense.length], ['savings', 'Ipon', rec.savings.length], ['goal', 'Goals', rec.goal.length], ['category', 'Kategorya', rec.category.length], ['devices', 'Devices', j.devices.length]];
+  let body = '';
+  if (tab === 'remittance') body = table([['Petsa', (r) => day(r.data.confirmedAt || r.data.sentAt || r.data.createdAt)], ['Status', (r) => esc(r.data.status)], ['Ipinadala', (r) => money(r.data.sentMinor, cur(r)), 'num'], ['Natanggap', (r) => r.data.receivedMinor == null ? '-' : money(r.data.receivedMinor, cur(r)), 'num'], ['Ref / tala', (r) => esc([r.data.reference, r.data.notes].filter(Boolean).join(' · '))], ['Device', (r) => esc(r.device)]], rec.remittance);
+  else if (tab === 'expense') body = table([['Petsa', (r) => day(r.data.occurredAt)], ['Kategorya', (r) => esc(r.data.category)], ['Paglalarawan', (r) => esc(r.data.description)], ['Halaga', (r) => money(r.data.amountMinor, cur(r)), 'num'], ['Bayad', (r) => esc(r.data.paymentMethod)], ['Tala', (r) => esc(r.data.notes)], ['Device', (r) => esc(r.device)]], rec.expense);
+  else if (tab === 'savings') body = table([['Petsa', (r) => day(r.data.occurredAt)], ['Uri', (r) => esc(r.data.type)], ['Halaga', (r) => money(r.data.amountMinor, cur(r)), 'num'], ['Tala', (r) => esc(r.data.notes)], ['Device', (r) => esc(r.device)]], rec.savings);
+  else if (tab === 'goal') body = table([['Goal', (r) => esc(r.data.name)], ['Target', (r) => money(r.data.targetMinor, cur(r)), 'num'], ['Ginawa', (r) => day(r.data.createdAt)]], rec.goal);
+  else if (tab === 'category') body = table([['Kategorya', (r) => esc(r.data.name)], ['Device', (r) => esc(r.device)]], rec.category);
+  else body = table([['Device', (r) => esc(r.name)], ['Role', (r) => esc(r.role)], ['Estado', (r) => esc(r.state)], ['Huling kita', (r) => dt(r.lastSeen)], ['Naka-activate', (r) => dt(r.pairedAt)], ['App', (r) => esc(r.appVersion || '-')], ['IP', (r) => esc(r.ip || '-')]], j.devices);
+  return `<div class="data"><div class="tabs">${tabs.map((t) => `<button class="btn sm ${t[0] === tab ? 'on' : ''}" data-tab="${t[0]}" data-fam="${esc(id)}">${t[1]} (${t[2]})</button>`).join('')}</div>${body}${j.truncated ? '<div class="meta">Ipinapakita ang pinakabagong 5000 record.</div>' : ''}<div class="meta" style="margin-top:6px">Huling na-load ${dt(j.serverTime)}. Ang may guhit ay voided (binura sa app).</div></div>`;
+}
+function render() {
+  const q = $('search').value.trim().toLowerCase();
+  const f = families.filter((x) => !q || (x.name + ' ' + x.familyId + ' ' + x.devices.map((d) => d.name).join(' ')).toLowerCase().includes(q));
+  const all = families.flatMap((x) => x.devices);
+  const n = (st) => all.filter((d) => d.state === st).length;
+  $('stats').innerHTML = `<div class="stat"><b>${families.length}</b>pamilya</div><div class="stat"><b>${all.filter((d) => d.state !== 'revoked' && d.state !== 'expired').length}</b>activated devices</div><div class="stat"><b>${n('online')}</b>online ngayon</div><div class="stat"><b>${n('recent')}</b>recent (24h)</div>`;
+  $('list').innerHTML = f.length ? f.map((x) => `<div class="fam"><h3>${esc(x.name)} ${x.blocked ? '<span class="badge warn">blocked</span>' : ''}</h3>
+    <div class="meta">${esc(x.familyId)} · ginawa ${day(x.createdAt)} · ${x.records} record · huling data ${ago(x.lastRecordAt)}</div>
+    <div class="tot">${totalsHtml(x.totals)}</div>
+    ${x.devices.length ? x.devices.map((d) => `<div class="dev"><div><span class="dot ${esc(d.state)}"></span><b>${esc(d.name)}</b><span class="badge">${esc(d.role)}</span><span class="badge ${d.state === 'online' ? 'ok' : ''}">${esc(d.state)}</span>
+      <div class="meta">huling kita ${ago(d.lastSeen)} · naka-activate ${ago(d.pairedAt)}${d.appVersion ? ' · v' + esc(d.appVersion) : ''}${d.ip ? ' · ' + esc(d.ip) : ''}</div></div>
+      ${d.state === 'revoked' || d.state === 'expired' ? '' : `<button class="btn del sm" data-rev="${esc(d.id)}">Revoke</button>`}</div>`).join('') : '<div class="meta" style="margin-top:8px">Walang device.</div>'}
+    <div class="toolbar"><button class="btn sm pri" data-data="${esc(x.familyId)}">${open[x.familyId] ? 'Itago ang data' : 'Tingnan ang data'}</button>
+      <button class="btn sm" data-block="${esc(x.familyId)}" data-to="${x.blocked ? 0 : 1}">${x.blocked ? 'I-unblock' : 'I-block'}</button>
+      <button class="btn sm" data-reset="${esc(x.familyId)}">Bagong Recovery Key</button>
+      <button class="btn sm del" data-del="${esc(x.familyId)}">Burahin</button></div>
+    <div id="data-${esc(x.familyId)}">${open[x.familyId] && cache[x.familyId] ? dataHtml(x.familyId, cache[x.familyId]) : ''}</div></div>`).join('') : '<div class="empty">Wala pang pamilyang nakarehistro.</div>';
+  const on = (sel, fn) => document.querySelectorAll(sel).forEach((b) => (b.onclick = () => fn(b)));
+  on('[data-rev]', async (b) => { if (confirm('I-revoke ang device na ito? Mawawalan agad ito ng access.')) { await api('/relay/admin/api/family/devices/' + encodeURIComponent(b.dataset.rev) + '/revoke', { method: 'POST', body: '{}' }); load(); } });
+  on('[data-data]', async (b) => { const id = b.dataset.data; open[id] = !open[id]; if (open[id]) await loadData(id); render(); });
+  on('[data-tab]', (b) => { tabOf[b.dataset.fam] = b.dataset.tab; render(); });
+  on('[data-block]', async (b) => { await api('/relay/admin/api/family/' + encodeURIComponent(b.dataset.block) + '/block', { method: 'POST', body: JSON.stringify({ blocked: b.dataset.to === '1' }) }); load(); });
+  on('[data-reset]', async (b) => { if (!confirm('Gumawa ng bagong Recovery Key? Hindi na gagana ang dati; mananatiling naka-login ang mga activated na device.')) return;
+    const j = await api('/relay/admin/api/family/' + encodeURIComponent(b.dataset.reset) + '/reset-key', { method: 'POST', body: '{}' });
+    if (j.success) { $('keyNotice').innerHTML = `<div class="keybox">Family ID: ${esc(j.familyId)}<br>Bagong Recovery Key: ${esc(j.recoveryKey.match(/.{4}/g).join('-'))}<div class="meta">Ipinapakita lang ito ngayon. Ibigay sa may-ari ng pamilya.</div></div>`; window.scrollTo(0, 0); } });
+  on('[data-del]', async (b) => { if (!confirm('BURAHIN ang buong pamilya at LAHAT ng data nito sa relay? Hindi na maibabalik.')) return; if (prompt('I-type ang Family ID para kumpirmahin:') !== b.dataset.del) return;
+    await api('/relay/admin/api/family/' + encodeURIComponent(b.dataset.del), { method: 'DELETE' }); delete open[b.dataset.del]; load(); });
+}
+async function loadData(id) { const j = await api('/relay/admin/api/family/' + encodeURIComponent(id) + '/data'); if (j.success) cache[id] = j; else { open[id] = false; alert(j.message || 'Hindi ma-load ang data.'); } }
 async function load() {
   const j = await api('/relay/admin/api/family');
   if (!j.success) { $('list').innerHTML = '<div class="empty">' + esc(j.message || 'Hindi ma-load. Na-deploy ba ang family-relay.js?') + '</div>'; return; }
-  const f = j.families, all = f.flatMap((x) => x.devices);
-  const n = (st) => all.filter((d) => d.state === st).length;
-  $('stats').innerHTML = `<div class="stat"><b>${f.length}</b>pamilya</div><div class="stat"><b>${n('online')}</b>online ngayon</div><div class="stat"><b>${n('recent')}</b>recent (24h)</div><div class="stat"><b>${all.filter((d) => d.role === 'client' && d.state !== 'revoked').length}</b>client devices</div>`;
-  $('list').innerHTML = f.length ? f.map((x) => `<div class="fam"><h3>${esc(x.name)}</h3>
-    <div class="meta">${esc(x.workspaceId)} · admin: ${esc(x.adminEmail || '-')} · ${x.records} record · huling data ${ago(x.lastRecordAt)} · bukas na code: ${x.openCodes}</div>
-    ${x.devices.length ? x.devices.map((d) => `<div class="dev"><div><span class="dot ${esc(d.state)}"></span><b>${esc(d.name)}</b><span class="badge">${esc(d.role)}</span><span class="badge">${esc(d.state)}</span>
-      <div class="meta">huling kita ${ago(d.lastSeen)} · naka-pair ${ago(d.pairedAt)}</div></div>
-      ${d.state === 'revoked' || d.state === 'expired' ? '' : `<button class="btn del" data-rev="${esc(d.id)}">Revoke</button>`}</div>`).join('') : '<div class="meta" style="margin-top:8px">Walang device.</div>'}</div>`).join('') : '<div class="empty">Wala pang pamilyang nakarehistro.</div>';
-  document.querySelectorAll('[data-rev]').forEach((b) => b.onclick = async () => { if (confirm('I-revoke ang device na ito? Mawawalan agad ito ng access.')) { await api('/relay/admin/api/family/devices/' + encodeURIComponent(b.dataset.rev) + '/revoke', { method: 'POST', body: '{}' }); load(); } });
+  families = j.families;
+  await Promise.all(Object.keys(open).filter((id) => open[id]).map((id) => loadData(id)));
+  render();
 }
+$('search').addEventListener('input', render);
 function show() { const on = !!adminKey; $('loginWrap').style.display = on ? 'none' : 'block'; $('app').style.display = on ? 'block' : 'none'; $('logout').style.display = on ? 'inline-block' : 'none'; if (on) load().catch(() => {}); }
 function logout() { adminKey = ''; sessionStorage.removeItem('relayAdminKey'); show(); }
 $('loginBtn').onclick = () => { const v = $('adminKeyInput').value.trim(); if (!v) return; adminKey = v; sessionStorage.setItem('relayAdminKey', v); show(); };
 $('adminKeyInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('loginBtn').click(); });
 $('logout').onclick = logout; $('refresh').onclick = () => load().catch(() => {});
-show(); setInterval(() => { if (adminKey) load().catch(() => {}); }, 30000);
+show(); setInterval(() => { if (adminKey && document.activeElement !== $('search')) load().catch(() => {}); }, 30000);
 </script>
 </body>
 </html>

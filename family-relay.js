@@ -1,32 +1,39 @@
 'use strict';
 /**
- * Family Remittance & Expense Tracker module ng RELAY. Mount: tingnan ang apply-family-patch.js.
- * Lahat sa ilalim ng /relay/family. Gumagamit ng umiiral na Postgres pool ng RELAY (durable, hindi memory).
+ * Family Remittance & Expense Tracker module ng RELAY. Lahat sa ilalim ng /relay/family. Gumagamit ng umiiral na Postgres pool ng RELAY.
  *
- * Auth: "Authorization: Bearer <token>". Token = 32 random bytes; ang SHA-256 hash lang ang nasa DB.
- * Roles (galing sa SERVER, hindi sa app):  admin = view-only sa pera;  client = nagsusulat ng transaksyon.
+ * ACTIVATION (kagaya ng School): ang app mismo ang gumagawa ng pamilya -> Family ID (FAM-XXXXXXXX) + Recovery Key (16 char).
+ * Walang email/password at walang one-time code. Ang ibang phone ay sumasali gamit ang Family ID + Recovery Key.
+ * Ang Recovery Key ay SHA-256 hash lang ang naka-save sa server; ipinapakita lang ito nang buo kapag ginawa (o ni-reset).
+ *
+ * Auth ng device: "Authorization: Bearer <token>". Token = 32 random bytes; hash lang ang nasa DB (kaya may revoke).
+ * Roles (galing sa SERVER):  admin = view-only sa pera;  client = nagsusulat ng transaksyon.
  * Tenant isolation: ang workspace ay laging galing sa token ng device, HINDI sa body/query ng app.
  *
  * Endpoints:
  *   GET  /health                         (public) DB check
- *   POST /admin/register   [x-relay-admin-key]  gumawa ng family + admin account (gamit ang owner key mo, minsan lang, via curl)
- *   POST /admin/login                    email+password -> token (role admin)
- *   POST /binding-codes    [admin]       one-time code (hash lang ang naka-save, 10 min default)
- *   POST /join                           code -> client token (single-use, atomic)
- *   GET  /devices          [admin]       listahan ng client devices
+ *   POST /register                       gumawa ng pamilya -> {familyId, recoveryKey, token (admin device)}
+ *   POST /join                           {familyId, recoveryKey, deviceName, role: client|admin} -> token
+ *   POST /recovery-key/rotate [admin]    bagong Recovery Key (ipinapakita minsan); ang dating key ay hindi na gagana
+ *   GET  /devices          [admin]       lahat ng activated device ng pamilya (client + admin), may last seen
  *   POST /devices/:id/revoke [admin]
- *   GET  /relay/admin/api/family  [x-relay-admin-key] owner view: families + devices (online/recent/idle); page: /relay/admin/family.html
  *   POST /sign-out         [any]
  *   POST /sync/push        [client]      idempotent na batch ng ops
  *   GET  /sync/pull?since= [admin|client] mga record ng sariling workspace (seq > since)
- * Env (opsyonal): FAMILY_CODE_TTL_MIN=10, FAMILY_ADMIN_TOKEN_DAYS=30, FAMILY_CLIENT_TOKEN_DAYS=365.
- * Walang password/token/code/halaga na isinusulat sa log.
+ * OWNER (x-relay-admin-key), page: /relay/admin/family.html
+ *   GET  /relay/admin/api/family                       pamilya + activated devices + buod ng pera
+ *   GET  /relay/admin/api/family/:id/data              buong data mula sa relay (remittance, gastos, ipon, goal)
+ *   POST /relay/admin/api/family/:id/block {blocked}   i-block / i-unblock
+ *   POST /relay/admin/api/family/:id/reset-key         bagong Recovery Key kapag nawala
+ *   DELETE /relay/admin/api/family/:id                 burahin ang pamilya at lahat ng data
+ *   POST /relay/admin/api/family/devices/:id/revoke
+ * Env (opsyonal): FAMILY_ADMIN_TOKEN_DAYS=365, FAMILY_CLIENT_TOKEN_DAYS=365.
+ * Walang key/token/halaga na isinusulat sa log.
  */
 const crypto = require('crypto');
 
 const ALPHA = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
-const CODE_TTL_MIN = Math.max(1, parseInt(process.env.FAMILY_CODE_TTL_MIN || '10', 10) || 10);
-const ADMIN_TOKEN_DAYS = Math.max(1, parseInt(process.env.FAMILY_ADMIN_TOKEN_DAYS || '30', 10) || 30);
+const ADMIN_TOKEN_DAYS = Math.max(1, parseInt(process.env.FAMILY_ADMIN_TOKEN_DAYS || '365', 10) || 365);
 const CLIENT_TOKEN_DAYS = Math.max(1, parseInt(process.env.FAMILY_CLIENT_TOKEN_DAYS || '365', 10) || 365);
 const MAX_OPS = 100;
 const MAX_MINOR = 99999999999;
@@ -42,10 +49,9 @@ const MONEY_FIELDS = ['sentMinor', 'receivedMinor', 'amountMinor', 'targetMinor'
 const sha = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 const clamp = (v, n) => String(v === undefined || v === null ? '' : v).trim().slice(0, n);
 const rnd = (len) => { const b = crypto.randomBytes(len); let s = ''; for (let i = 0; i < len; i++) s += ALPHA[b[i] % ALPHA.length]; return s; };
-const normCode = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+const normSecret = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 const newToken = () => crypto.randomBytes(32).toString('base64url');
 const uid = (p) => p + '_' + crypto.randomBytes(9).toString('hex');
-const scrypt = (pw, salt) => new Promise((ok, no) => crypto.scrypt(pw, salt, 64, { N: 16384 }, (e, k) => (e ? no(e) : ok(k))));
 
 module.exports = function mountFamily(d) {
     const { app } = d;
@@ -60,17 +66,15 @@ module.exports = function mountFamily(d) {
                 if (!p) throw new Error('Postgres is not configured.');
                 await p.query(`CREATE TABLE IF NOT EXISTS family_groups (workspace_id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '',
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
-                await p.query(`CREATE TABLE IF NOT EXISTS family_users (user_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES family_groups(workspace_id),
-                    email TEXT NOT NULL, pw_salt TEXT NOT NULL, pw_hash TEXT NOT NULL, display_name TEXT NOT NULL DEFAULT '',
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
-                await p.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_family_user_email ON family_users (lower(email))`);
+                await p.query(`ALTER TABLE family_groups ADD COLUMN IF NOT EXISTS secret_hash TEXT NOT NULL DEFAULT ''`);
+                await p.query(`ALTER TABLE family_groups ADD COLUMN IF NOT EXISTS blocked BOOLEAN NOT NULL DEFAULT FALSE`);
                 await p.query(`CREATE TABLE IF NOT EXISTS family_devices (device_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, role TEXT NOT NULL,
                     user_id TEXT, name TEXT NOT NULL DEFAULT '', token_hash TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     expires_at TIMESTAMPTZ NOT NULL, revoked_at TIMESTAMPTZ, last_seen TIMESTAMPTZ)`);
                 await p.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_family_device_token ON family_devices (token_hash)`);
                 await p.query(`CREATE INDEX IF NOT EXISTS idx_family_devices_ws ON family_devices (workspace_id, role)`);
-                await p.query(`CREATE TABLE IF NOT EXISTS family_binding_codes (code_hash TEXT PRIMARY KEY, workspace_id TEXT NOT NULL,
-                    created_by TEXT, expires_at TIMESTAMPTZ NOT NULL, used_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+                await p.query(`ALTER TABLE family_devices ADD COLUMN IF NOT EXISTS app_version TEXT`);
+                await p.query(`ALTER TABLE family_devices ADD COLUMN IF NOT EXISTS ip TEXT`);
                 await p.query(`CREATE SEQUENCE IF NOT EXISTS family_record_seq`);
                 await p.query(`CREATE TABLE IF NOT EXISTS family_records (workspace_id TEXT NOT NULL, entity TEXT NOT NULL, entity_id TEXT NOT NULL,
                     payload JSONB NOT NULL, voided BOOLEAN NOT NULL DEFAULT FALSE, client_updated_at BIGINT NOT NULL DEFAULT 0,
@@ -111,12 +115,13 @@ module.exports = function mountFamily(d) {
             await ensureSchema();
             if (tooManyFails(req.ip)) return fail(res, 429, 'RATE_LIMITED', 'Too many attempts.');
             const t = bearer(req);
-            const r = t ? await q('SELECT device_id, workspace_id, role, user_id, expires_at, revoked_at FROM family_devices WHERE token_hash = $1', [sha(t)]) : { rows: [] };
+            const r = t ? await q('SELECT d.device_id, d.workspace_id, d.role, d.user_id, d.expires_at, d.revoked_at, g.blocked FROM family_devices d JOIN family_groups g ON g.workspace_id = d.workspace_id WHERE d.token_hash = $1', [sha(t)]) : { rows: [] };
             const row = r.rows[0];
             if (!row || row.revoked_at || new Date(row.expires_at).getTime() < Date.now()) { noteFail(req.ip); return fail(res, 401, 'UNAUTHORIZED', 'Session is not valid.'); }
+            if (row.blocked) return fail(res, 403, 'FAMILY_BLOCKED', 'This family is blocked. Contact the developer.');
             if (need && row.role !== need) return fail(res, 403, 'FORBIDDEN', 'Not allowed for this role.'); // server-side role check
             req.fam = { deviceId: row.device_id, workspaceId: row.workspace_id, role: row.role, userId: row.user_id };
-            q('UPDATE family_devices SET last_seen = now() WHERE device_id = $1', [row.device_id]).catch(() => {});
+            touchDevice(row.device_id, req);
             next();
         } catch (err) {
             console.error('Family auth error:', err && err.message);
@@ -124,10 +129,19 @@ module.exports = function mountFamily(d) {
         }
     };
 
-    async function issueDevice(workspaceId, role, userId, name, days) {
+    const lastTouch = new Map(); // deviceId -> ms (huwag mag-write sa DB sa bawat request)
+    function touchDevice(deviceId, req) {
+        const now = Date.now();
+        if (now - (lastTouch.get(deviceId) || 0) < 30000) return;
+        lastTouch.set(deviceId, now);
+        q('UPDATE family_devices SET last_seen = now(), ip = $2, app_version = COALESCE(NULLIF($3::text, \'\'), app_version) WHERE device_id = $1',
+            [deviceId, req.ip, clamp(req.headers['x-app-version'], 30)]).catch(() => {});
+    }
+
+    async function issueDevice(workspaceId, role, name, days, req) {
         const token = newToken(), deviceId = uid('dev');
-        await q('INSERT INTO family_devices (device_id, workspace_id, role, user_id, name, token_hash, expires_at) VALUES ($1,$2,$3,$4,$5,$6, now() + ($7 || \' days\')::interval)',
-            [deviceId, workspaceId, role, userId, clamp(name, 60) || (role === 'admin' ? 'Admin phone' : 'Family phone'), sha(token), String(days)]);
+        await q('INSERT INTO family_devices (device_id, workspace_id, role, name, token_hash, expires_at, last_seen, ip, app_version) VALUES ($1,$2,$3,$4,$5, now() + ($6 || \' days\')::interval, now(), $7, $8)',
+            [deviceId, workspaceId, role, clamp(name, 60) || (role === 'admin' ? 'Admin phone' : 'Family phone'), sha(token), String(days), req.ip, clamp(req.headers['x-app-version'] || (req.body && req.body.appVersion), 30)]);
         return { token, deviceId };
     }
 
@@ -137,76 +151,58 @@ module.exports = function mountFamily(d) {
         res.json({ success: true, status: 'ok', serverTime: Date.now() });
     }));
 
-    // ------------------------------------------- admin provisioning (owner only)
-    app.post('/relay/family/admin/register', d.requireAdminKey, d.rateLimit('family-register', 10, 60 * 60 * 1000), wrap(async (req, res) => {
-        const email = clamp(req.body && req.body.email, 120).toLowerCase();
-        const password = String((req.body && req.body.password) || '');
+    // ------------------------------------------------ activation (kagaya ng School)
+    const joinFails = new Map(); // familyId -> {count, first}: proteksyon laban sa paghula ng Recovery Key
+    const joinLocked = (id) => { const f = joinFails.get(id); return !!(f && f.count >= 20 && Date.now() - f.first < 10 * 60000); };
+    const joinFail = (id) => { const f = joinFails.get(id); if (!f || Date.now() - f.first > 10 * 60000) joinFails.set(id, { count: 1, first: Date.now() }); else f.count++; };
+
+    app.post('/relay/family/register', d.rateLimit('family-register', 10, 60 * 60 * 1000), wrap(async (req, res) => {
         const familyName = clamp(req.body && req.body.familyName, 80) || 'My Family';
-        const displayName = clamp(req.body && req.body.displayName, 60) || 'Admin';
-        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return fail(res, 400, 'BAD_REQUEST', 'Invalid email.');
-        if (password.length < 10 || password.length > 200) return fail(res, 400, 'BAD_REQUEST', 'Password must be 10-200 characters.');
-        const salt = crypto.randomBytes(16).toString('hex');
-        const hash = (await scrypt(password, salt)).toString('hex');
-        const ws = uid('fam'), userId = uid('usr');
-        const dup = await q('SELECT 1 FROM family_users WHERE lower(email) = $1', [email]);
-        if (dup.rows.length) return fail(res, 409, 'EXISTS', 'Email already registered.');
-        await q('INSERT INTO family_groups (workspace_id, name) VALUES ($1,$2)', [ws, familyName]);
-        await q('INSERT INTO family_users (user_id, workspace_id, email, pw_salt, pw_hash, display_name) VALUES ($1,$2,$3,$4,$5,$6)', [userId, ws, email, salt, hash, displayName]);
-        audit(ws, userId, 'admin_registered', '');
-        res.json({ success: true, workspaceId: ws });
+        const familyId = 'FAM-' + rnd(8);
+        const secret = rnd(16);
+        await q('INSERT INTO family_groups (workspace_id, name, secret_hash) VALUES ($1,$2,$3)', [familyId, familyName, sha(secret)]);
+        const dev = await issueDevice(familyId, 'admin', req.body && req.body.deviceName, ADMIN_TOKEN_DAYS, req);
+        audit(familyId, dev.deviceId, 'family_registered', '');
+        try { d.logActivity && d.logActivity(familyId, 'family_registered', { name: familyName }); } catch (_) {}
+        try { d.sendTelegramNotification && Promise.resolve(d.sendTelegramNotification('\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67 Bagong pamilya ang nag-register\n' + familyName + '\nID: ' + familyId)).catch(() => {}); } catch (_) {}
+        res.json({ success: true, role: 'admin', familyId, recoveryKey: secret, token: dev.token, workspaceId: familyId, deviceId: dev.deviceId, displayName: familyName });
     }));
 
-    app.post('/relay/family/admin/login', d.rateLimit('family-login', 20, 10 * 60 * 1000), wrap(async (req, res) => {
+    app.post('/relay/family/join', d.rateLimit('family-join', 20, 10 * 60 * 1000), wrap(async (req, res) => {
         if (tooManyFails(req.ip)) return fail(res, 429, 'RATE_LIMITED', 'Too many attempts.');
-        const email = clamp(req.body && req.body.email, 120).toLowerCase();
-        const password = String((req.body && req.body.password) || '').slice(0, 200);
-        const r = await q('SELECT user_id, workspace_id, pw_salt, pw_hash, display_name FROM family_users WHERE lower(email) = $1', [email]);
-        const u = r.rows[0];
-        // Always run scrypt (even for unknown email) so timing does not reveal which emails exist.
-        const calc = (await scrypt(password, u ? u.pw_salt : 'x'.repeat(32))).toString('hex');
-        if (!u || !d.safeCompare(calc, u.pw_hash)) { noteFail(req.ip); return fail(res, 401, 'BAD_CREDENTIALS', 'Wrong email or password.'); }
-        const dev = await issueDevice(u.workspace_id, 'admin', u.user_id, req.body && req.body.deviceName, ADMIN_TOKEN_DAYS);
-        audit(u.workspace_id, u.user_id, 'admin_login', '');
-        res.json({ success: true, role: 'admin', token: dev.token, workspaceId: u.workspace_id, deviceId: dev.deviceId, displayName: u.display_name });
+        const familyId = clamp(req.body && req.body.familyId, 40).toUpperCase();
+        const secret = normSecret(req.body && req.body.recoveryKey);
+        const role = String((req.body && req.body.role) || 'client') === 'admin' ? 'admin' : 'client';
+        if (!familyId || secret.length !== 16) { noteFail(req.ip); return fail(res, 400, 'INVALID_CREDENTIAL', 'Wrong Family ID or Recovery Key.'); }
+        if (joinLocked(familyId)) return fail(res, 429, 'RATE_LIMITED', 'Too many attempts.');
+        const r = await q('SELECT workspace_id, name, secret_hash, blocked FROM family_groups WHERE workspace_id = $1', [familyId]);
+        const g = r.rows[0];
+        // Parehong sagot kapag walang ganoong pamilya o mali ang key (hindi nagbubunyag kung alin).
+        if (!g || !g.secret_hash || !d.safeCompare(sha(secret), g.secret_hash)) { noteFail(req.ip); joinFail(familyId); return fail(res, 401, 'INVALID_CREDENTIAL', 'Wrong Family ID or Recovery Key.'); }
+        if (g.blocked) return fail(res, 403, 'FAMILY_BLOCKED', 'This family is blocked. Contact the developer.');
+        const dev = await issueDevice(g.workspace_id, role, req.body && req.body.deviceName, role === 'admin' ? ADMIN_TOKEN_DAYS : CLIENT_TOKEN_DAYS, req);
+        audit(g.workspace_id, dev.deviceId, 'device_joined', role);
+        res.json({ success: true, role, token: dev.token, familyId: g.workspace_id, workspaceId: g.workspace_id, deviceId: dev.deviceId, displayName: g.name });
     }));
 
-    // ----------------------------------------------------------- pairing codes
-    app.post('/relay/family/binding-codes', auth('admin'), d.rateLimit('family-code', 20, 60 * 60 * 1000), wrap(async (req, res) => {
-        const code = 'FTR-' + rnd(4) + '-' + rnd(4);
-        const expires = Date.now() + CODE_TTL_MIN * 60000;
-        await q('INSERT INTO family_binding_codes (code_hash, workspace_id, created_by, expires_at) VALUES ($1,$2,$3, to_timestamp($4::double precision / 1000.0))',
-            [sha(normCode(code)), req.fam.workspaceId, req.fam.deviceId, expires]);
-        audit(req.fam.workspaceId, req.fam.deviceId, 'code_created', '');
-        res.json({ success: true, code, expiresAt: expires });
-    }));
-
-    app.post('/relay/family/join', d.rateLimit('family-join', 15, 10 * 60 * 1000), wrap(async (req, res) => {
-        if (tooManyFails(req.ip)) return fail(res, 429, 'RATE_LIMITED', 'Too many attempts.');
-        const code = normCode(req.body && req.body.code);
-        if (code.length !== 11) { noteFail(req.ip); return fail(res, 400, 'INVALID_CODE', 'Invalid code.'); } // FTR + 8
-        // Atomic single use: only one request can flip used_at from NULL.
-        const r = await q('UPDATE family_binding_codes SET used_at = now() WHERE code_hash = $1 AND used_at IS NULL AND expires_at > now() RETURNING workspace_id', [sha(code)]);
-        if (!r.rows[0]) {
-            noteFail(req.ip);
-            const e = await q('SELECT used_at, expires_at FROM family_binding_codes WHERE code_hash = $1', [sha(code)]);
-            const row = e.rows[0];
-            if (row && !row.used_at && new Date(row.expires_at).getTime() <= Date.now()) return fail(res, 410, 'EXPIRED_CODE', 'Code expired.');
-            return fail(res, 400, 'INVALID_CODE', 'Invalid or already used code.');
-        }
-        const ws = r.rows[0].workspace_id;
-        const dev = await issueDevice(ws, 'client', null, req.body && req.body.deviceName, CLIENT_TOKEN_DAYS);
-        audit(ws, dev.deviceId, 'device_joined', '');
-        res.json({ success: true, role: 'client', token: dev.token, workspaceId: ws, deviceId: dev.deviceId, displayName: clamp(req.body && req.body.deviceName, 60) || 'Family phone' });
+    app.post('/relay/family/recovery-key/rotate', auth('admin'), d.rateLimit('family-rotate', 10, 60 * 60 * 1000), wrap(async (req, res) => {
+        const secret = rnd(16);
+        await q('UPDATE family_groups SET secret_hash = $2 WHERE workspace_id = $1', [req.fam.workspaceId, sha(secret)]);
+        audit(req.fam.workspaceId, req.fam.deviceId, 'key_rotated', '');
+        res.json({ success: true, familyId: req.fam.workspaceId, recoveryKey: secret });
     }));
 
     // ------------------------------------------------------------ device admin
     app.get('/relay/family/devices', auth('admin'), wrap(async (req, res) => {
-        const r = await q("SELECT device_id, name, created_at, revoked_at FROM family_devices WHERE workspace_id = $1 AND role = 'client' ORDER BY created_at DESC LIMIT 100", [req.fam.workspaceId]);
-        res.json({ success: true, devices: r.rows.map((x) => ({ id: x.device_id, name: x.name, pairedAt: new Date(x.created_at).getTime(), revoked: !!x.revoked_at })) });
+        const r = await q("SELECT device_id, role, name, created_at, last_seen, revoked_at FROM family_devices WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT 100", [req.fam.workspaceId]);
+        res.json({ success: true, devices: r.rows.map((x) => ({ id: x.device_id, role: x.role, name: x.name, pairedAt: new Date(x.created_at).getTime(),
+            lastSeen: x.last_seen ? new Date(x.last_seen).getTime() : 0, revoked: !!x.revoked_at, self: x.device_id === req.fam.deviceId })) });
     }));
 
     app.post('/relay/family/devices/:id/revoke', auth('admin'), d.rateLimit('family-revoke', 30, 60 * 60 * 1000), wrap(async (req, res) => {
-        const r = await q("UPDATE family_devices SET revoked_at = now() WHERE device_id = $1 AND workspace_id = $2 AND role = 'client' AND revoked_at IS NULL RETURNING device_id", [clamp(req.params.id, 60), req.fam.workspaceId]);
+        const id = clamp(req.params.id, 60);
+        if (id === req.fam.deviceId) return fail(res, 400, 'BAD_REQUEST', 'Use sign out for this device.');
+        const r = await q("UPDATE family_devices SET revoked_at = now() WHERE device_id = $1 AND workspace_id = $2 AND revoked_at IS NULL RETURNING device_id", [id, req.fam.workspaceId]);
         if (!r.rows[0]) return fail(res, 404, 'NOT_FOUND', 'Device not found.');
         audit(req.fam.workspaceId, req.fam.deviceId, 'device_revoked', r.rows[0].device_id);
         res.json({ success: true });
@@ -271,40 +267,99 @@ module.exports = function mountFamily(d) {
             nextSince: next, more: r.rows.length === 500, serverTime: Date.now() });
     }));
 
-    // ------------------------------------------------ OWNER VIEW (admin key): who is active
-    // Page: /relay/admin/family.html . Shows families and their devices, NEVER amounts or transaction contents.
-    const ONLINE_MS = 5 * 60 * 1000;   // seen within 5 min  = online now (the Admin app polls every 60 s while open)
+    // ------------------------------------------------ OWNER VIEW (admin key)
+    // Page: /relay/admin/family.html . Lahat ng activated na device at ang data nila na galing sa relay.
+    const ONLINE_MS = 5 * 60 * 1000;   // seen within 5 min  = online now
     const RECENT_MS = 24 * 3600 * 1000;
+    const deviceState = (x, now) => {
+        const seen = x.last_seen ? new Date(x.last_seen).getTime() : 0;
+        const revoked = !!x.revoked_at, expired = new Date(x.expires_at).getTime() < now;
+        return { seen, state: revoked ? 'revoked' : expired ? 'expired' : (seen && now - seen < ONLINE_MS) ? 'online' : (seen && now - seen < RECENT_MS) ? 'recent' : 'idle' };
+    };
+    const devView = (x, now) => { const s = deviceState(x, now);
+        return { id: x.device_id, role: x.role, name: x.name, pairedAt: new Date(x.created_at).getTime(), lastSeen: s.seen || null, state: s.state, appVersion: x.app_version || '', ip: x.ip || '' }; };
+
+    /** Buod ng pera kada currency, kapareho ng patakaran ng app: confirmed lang ang remittance, hindi binibilang ang voided. */
+    function summarize(rows) {
+        const t = {};
+        const cur = (c) => (t[c] || (t[c] = { received: 0, expenses: 0, savingsIn: 0, savingsOut: 0 }));
+        for (const r of rows) {
+            if (r.voided) continue;
+            const p = r.payload || {}, c = p.currency || 'PHP';
+            if (r.entity === 'remittance' && p.status === 'CONFIRMED' && Number.isInteger(p.receivedMinor) && p.confirmedAt) cur(c).received += p.receivedMinor;
+            else if (r.entity === 'expense' && Number.isInteger(p.amountMinor)) cur(c).expenses += p.amountMinor;
+            else if (r.entity === 'savings' && Number.isInteger(p.amountMinor)) { if (p.type === 'WITHDRAWAL') cur(c).savingsOut += p.amountMinor; else cur(c).savingsIn += p.amountMinor; }
+        }
+        for (const c of Object.keys(t)) { const x = t[c]; x.savingsBalance = x.savingsIn - x.savingsOut; x.available = x.received - x.expenses - x.savingsBalance; }
+        return t;
+    }
+
     app.get('/relay/admin/api/family', d.requireAdminKey, d.rateLimit('family-owner-list', 60, 10 * 60 * 1000), wrap(async (req, res) => {
-        const g = await q(`SELECT g.workspace_id, g.name, g.created_at,
-                (SELECT email FROM family_users u WHERE u.workspace_id = g.workspace_id ORDER BY created_at LIMIT 1) AS admin_email,
+        const g = await q(`SELECT g.workspace_id, g.name, g.created_at, g.blocked,
                 (SELECT count(*) FROM family_records r WHERE r.workspace_id = g.workspace_id) AS records,
-                (SELECT max(updated_at) FROM family_records r WHERE r.workspace_id = g.workspace_id) AS last_record,
-                (SELECT count(*) FROM family_binding_codes c WHERE c.workspace_id = g.workspace_id AND c.used_at IS NULL AND c.expires_at > now()) AS open_codes
+                (SELECT max(updated_at) FROM family_records r WHERE r.workspace_id = g.workspace_id) AS last_record
             FROM family_groups g ORDER BY g.created_at DESC LIMIT 200`);
         const ids = g.rows.map((x) => x.workspace_id);
-        const dv = ids.length ? await q(`SELECT device_id, workspace_id, role, name, created_at, last_seen, revoked_at, expires_at
+        const dv = ids.length ? await q(`SELECT device_id, workspace_id, role, name, created_at, last_seen, revoked_at, expires_at, app_version, ip
             FROM family_devices WHERE workspace_id = ANY($1) ORDER BY last_seen DESC NULLS LAST, created_at DESC LIMIT 3000`, [ids]) : { rows: [] };
+        const rec = ids.length ? await q(`SELECT workspace_id, entity, payload, voided FROM family_records WHERE workspace_id = ANY($1) AND entity IN ('remittance','expense','savings')`, [ids]) : { rows: [] };
         const now = Date.now();
-        const byWs = new Map();
-        for (const x of dv.rows) {
-            const seen = x.last_seen ? new Date(x.last_seen).getTime() : 0;
-            const revoked = !!x.revoked_at, expired = new Date(x.expires_at).getTime() < now;
-            const state = revoked ? 'revoked' : expired ? 'expired' : (seen && now - seen < ONLINE_MS) ? 'online' : (seen && now - seen < RECENT_MS) ? 'recent' : 'idle';
-            const list = byWs.get(x.workspace_id) || [];
-            list.push({ id: x.device_id, role: x.role, name: x.name, pairedAt: new Date(x.created_at).getTime(), lastSeen: seen || null, state });
-            byWs.set(x.workspace_id, list);
-        }
+        const byWs = new Map(), recByWs = new Map();
+        for (const x of dv.rows) { const l = byWs.get(x.workspace_id) || []; l.push(devView(x, now)); byWs.set(x.workspace_id, l); }
+        for (const x of rec.rows) { const l = recByWs.get(x.workspace_id) || []; l.push(x); recByWs.set(x.workspace_id, l); }
         res.json({ success: true, serverTime: now, families: g.rows.map((x) => ({
-            workspaceId: x.workspace_id, name: x.name, createdAt: new Date(x.created_at).getTime(), adminEmail: x.admin_email,
-            records: Number(x.records), lastRecordAt: x.last_record ? new Date(x.last_record).getTime() : null, openCodes: Number(x.open_codes),
-            devices: byWs.get(x.workspace_id) || [] })) });
+            familyId: x.workspace_id, workspaceId: x.workspace_id, name: x.name, createdAt: new Date(x.created_at).getTime(), blocked: !!x.blocked,
+            records: Number(x.records), lastRecordAt: x.last_record ? new Date(x.last_record).getTime() : null,
+            totals: summarize(recByWs.get(x.workspace_id) || []), devices: byWs.get(x.workspace_id) || [] })) });
+    }));
+
+    app.get('/relay/admin/api/family/:id/data', d.requireAdminKey, d.rateLimit('family-owner-data', 120, 10 * 60 * 1000), wrap(async (req, res) => {
+        const ws = clamp(req.params.id, 40);
+        const g = await q('SELECT workspace_id, name, created_at, blocked FROM family_groups WHERE workspace_id = $1', [ws]);
+        if (!g.rows[0]) return fail(res, 404, 'NOT_FOUND', 'Family not found.');
+        const now = Date.now();
+        const dv = await q(`SELECT device_id, workspace_id, role, name, created_at, last_seen, revoked_at, expires_at, app_version, ip FROM family_devices WHERE workspace_id = $1 ORDER BY created_at`, [ws]);
+        const names = new Map(dv.rows.map((x) => [x.device_id, x.name]));
+        const r = await q(`SELECT entity, entity_id, payload, voided, device_id, updated_at, server_version FROM family_records WHERE workspace_id = $1 ORDER BY updated_at DESC LIMIT 5000`, [ws]);
+        const out = { remittance: [], expense: [], savings: [], goal: [], category: [] };
+        for (const x of r.rows) {
+            const list = out[x.entity];
+            if (list && list.length < 500) list.push({ id: x.entity_id, voided: !!x.voided, device: names.get(x.device_id) || '', updatedAt: new Date(x.updated_at).getTime(), version: x.server_version, data: x.payload });
+        }
+        res.json({ success: true, serverTime: now, family: { familyId: g.rows[0].workspace_id, name: g.rows[0].name, createdAt: new Date(g.rows[0].created_at).getTime(), blocked: !!g.rows[0].blocked },
+            devices: dv.rows.map((x) => devView(x, now)), totals: summarize(r.rows), records: out, truncated: r.rows.length >= 5000 });
     }));
 
     app.post('/relay/admin/api/family/devices/:id/revoke', d.requireAdminKey, d.rateLimit('family-owner-revoke', 30, 60 * 60 * 1000), wrap(async (req, res) => {
         const r = await q('UPDATE family_devices SET revoked_at = now() WHERE device_id = $1 AND revoked_at IS NULL RETURNING workspace_id', [clamp(req.params.id, 60)]);
         if (!r.rows[0]) return fail(res, 404, 'NOT_FOUND', 'Device not found.');
         audit(r.rows[0].workspace_id, 'owner', 'device_revoked_by_owner', clamp(req.params.id, 60));
+        res.json({ success: true });
+    }));
+
+    app.post('/relay/admin/api/family/:id/block', d.requireAdminKey, d.rateLimit('family-owner-block', 60, 60 * 60 * 1000), wrap(async (req, res) => {
+        const blocked = !!(req.body && req.body.blocked);
+        const r = await q('UPDATE family_groups SET blocked = $2 WHERE workspace_id = $1 RETURNING workspace_id', [clamp(req.params.id, 40), blocked]);
+        if (!r.rows[0]) return fail(res, 404, 'NOT_FOUND', 'Family not found.');
+        audit(r.rows[0].workspace_id, 'owner', blocked ? 'family_blocked' : 'family_unblocked', '');
+        res.json({ success: true, blocked });
+    }));
+
+    app.post('/relay/admin/api/family/:id/reset-key', d.requireAdminKey, d.rateLimit('family-owner-resetkey', 20, 60 * 60 * 1000), wrap(async (req, res) => {
+        const secret = rnd(16);
+        const r = await q('UPDATE family_groups SET secret_hash = $2 WHERE workspace_id = $1 RETURNING workspace_id', [clamp(req.params.id, 40), sha(secret)]);
+        if (!r.rows[0]) return fail(res, 404, 'NOT_FOUND', 'Family not found.');
+        audit(r.rows[0].workspace_id, 'owner', 'key_reset_by_owner', '');
+        res.json({ success: true, familyId: r.rows[0].workspace_id, recoveryKey: secret });
+    }));
+
+    app.delete('/relay/admin/api/family/:id', d.requireAdminKey, d.rateLimit('family-owner-delete', 20, 60 * 60 * 1000), wrap(async (req, res) => {
+        const ws = clamp(req.params.id, 40);
+        const ex = await q('SELECT 1 FROM family_groups WHERE workspace_id = $1', [ws]);
+        if (!ex.rows[0]) return fail(res, 404, 'NOT_FOUND', 'Family not found.');
+        await q('DELETE FROM family_users WHERE workspace_id = $1', [ws]).catch(() => {}); // lumang email accounts, kung meron pa
+        for (const t of ['family_records', 'family_ops', 'family_devices', 'family_groups']) await q('DELETE FROM ' + t + ' WHERE workspace_id = $1', [ws]);
+        audit(ws, 'owner', 'family_deleted', '');
         res.json({ success: true });
     }));
 };
