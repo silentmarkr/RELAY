@@ -24281,7 +24281,15 @@ require('./school-relay')({
 require('./family-relay')({
     app, express,
     pool: () => pgPoolDevices || pgPool,
-    queryWithRetry, requireAdminKey, rateLimit, safeCompare, logActivity, sendTelegramNotification
+    queryWithRetry, requireAdminKey, rateLimit, safeCompare, logActivity, sendTelegramNotification,
+    // Developer Support + Sponsor (QR Ph) ng Family app — kailangan ng family-support-relay.js
+    ticketPool: () => pgPoolDevices,
+    purchasePool: () => pgPool,
+    sendSlackNotification,
+    getSupportDesk: () => SUPPORT_DESK,
+    refreshPaymongoCapabilities, getAvailablePaymentMethods, isPaymentMethodAvailable, createPaymentCheckout,
+    parseSponsorAmount, backfillPaidOnlineDonations,
+    SPONSOR_MIN_PHP, SPONSOR_MAX_PHP, SPONSOR_ONLINE_MIN_PHP
 });
 
 bootstrapStores()

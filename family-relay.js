@@ -135,12 +135,12 @@ module.exports = function mountFamily(d) {
             await ensureSchema();
             if (tooManyFails(req.ip)) return fail(res, 429, 'RATE_LIMITED', 'Too many attempts.');
             const t = bearer(req);
-            const r = t ? await q('SELECT d.device_id, d.workspace_id, d.role, d.user_id, d.expires_at, d.revoked_at, g.blocked FROM family_devices d JOIN family_groups g ON g.workspace_id = d.workspace_id WHERE d.token_hash = $1', [sha(t)]) : { rows: [] };
+            const r = t ? await q('SELECT d.device_id, d.workspace_id, d.role, d.user_id, d.expires_at, d.revoked_at, g.blocked, g.name AS family_name FROM family_devices d JOIN family_groups g ON g.workspace_id = d.workspace_id WHERE d.token_hash = $1', [sha(t)]) : { rows: [] };
             const row = r.rows[0];
             if (!row || row.revoked_at || new Date(row.expires_at).getTime() < Date.now()) { noteFail(req.ip); return fail(res, 401, 'UNAUTHORIZED', 'Session is not valid.'); }
             if (row.blocked) return fail(res, 403, 'FAMILY_BLOCKED', 'This family is blocked. Contact the developer.');
             if (need && row.role !== need) return fail(res, 403, 'FORBIDDEN', 'Not allowed for this role.'); // server-side role check
-            req.fam = { deviceId: row.device_id, workspaceId: row.workspace_id, role: row.role, userId: row.user_id };
+            req.fam = { deviceId: row.device_id, workspaceId: row.workspace_id, role: row.role, userId: row.user_id, familyName: row.family_name || '' };
             touchDevice(row.device_id, req);
             next();
         } catch (err) {
@@ -448,4 +448,15 @@ module.exports = function mountFamily(d) {
         audit(ws, 'owner', 'family_deleted', '');
         res.json({ success: true });
     }));
+
+    // ---- Developer Support + Sponsor (QR Ph, GCash, Maya...) — /relay/family/info, /support-tickets*, /sponsor/*
+    // Gumagamit ng parehong auth (Bearer per-device) kaya dito dapat i-mount. Walang laman ang `d.getSupportDesk` = lumang server.js.
+    if (typeof d.getSupportDesk === 'function') {
+        require('./family-support-relay')(d, {
+            familyAuth: auth(null),
+            identityOf: (req) => ({ familyId: req.fam.workspaceId, familyName: req.fam.familyName, deviceId: req.fam.deviceId })
+        });
+    } else {
+        console.warn('⚠️ family-support-relay not mounted: pass getSupportDesk/ticketPool/purchasePool/... to family-relay in server.js');
+    }
 };
