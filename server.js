@@ -5895,18 +5895,31 @@ function recordAdminLoginFailure(ip) {
     attempts.push(Date.now());
     adminLoginFailures.set(ip, attempts);
 }
+function adminLoginLockSecondsLeft(ip) {
+    const attempts = (adminLoginFailures.get(ip) || []).filter(ts => Date.now() - ts < ADMIN_LOGIN_WINDOW_MS);
+    if (attempts.length < ADMIN_LOGIN_MAX_FAILURES) return 0;
+    return Math.max(1, Math.ceil((attempts[0] + ADMIN_LOGIN_WINDOW_MS - Date.now()) / 1000));
+}
 function requireAdminKey(req, res, next) {
     if (isAdminLoginLocked(req.ip)) {
+        const retryAfterSec = adminLoginLockSecondsLeft(req.ip);
+        res.set('Retry-After', String(retryAfterSec));
         return res.status(429).json({
             success: false,
-            message: 'Sobra na sa maling pagtatangka. Subukan ulit mamaya.'
+            code: 'ADMIN_LOCKED',
+            message: `Too many wrong admin keys from this network. Locked for about ${Math.ceil(retryAfterSec / 60)} more minute(s). Close other RELAY admin tabs that still hold an old key.`,
+            retryAfterSec
         });
     }
-    const provided = req.headers['x-relay-admin-key'] || req.query.key;
-    if (!ADMIN_KEY || !safeCompare(String(provided || ''), ADMIN_KEY)) {
-        recordAdminLoginFailure(req.ip);
+    const provided = String(req.headers['x-relay-admin-key'] || req.query.key || '');
+    if (!ADMIN_KEY || !safeCompare(provided, ADMIN_KEY)) {
+        // A request with NO key at all (a logged-out or idle admin tab that is still polling) is not a password guess,
+        // so it must not count toward the lock-out; otherwise one forgotten tab locks the whole admin panel.
+        if (provided) recordAdminLoginFailure(req.ip);
         return res.status(403).json({ success: false, message: 'Invalid o walang admin key.' });
     }
+    // A correct key clears earlier typos from this network.
+    if (adminLoginFailures.has(req.ip)) adminLoginFailures.delete(req.ip);
     next();
 }
 app.use('/relay/admin', express.static(path.join(__dirname, 'public', 'admin')));
@@ -10216,6 +10229,78 @@ app.post('/relay/admin/api/env/delete', requireAdminKey, rateLimit('env-vault-de
         res.set('Cache-Control', 'no-store');
         res.json({ success: true, removed: r.names, dbMirrored: mirrored, restartNeeded: true, vault: envVault.status() });
     } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+});
+// ----- Import / Export (Render ".env" format) and system check -----
+// Import: paste or upload a .env file (the same NAME=value format as Render's "Add from .env"). Step 1 (apply:false) only returns a
+// per-variable plan WITHOUT any value; step 2 (apply:true) saves the selected names to the vault.
+// Export: returns the variables in the same format so they can be pasted into Render. Values leave the server only here, so it needs
+// HTTPS + admin key, is rate limited, audited (names only) and never includes RELAY_PRIVATE_KEY_PEM / RELAY_ENV_MASTER_KEY.
+const envVaultTools = require('./env-vault-tools');
+app.post('/relay/admin/api/env/import', requireAdminKey, rateLimit('env-vault-import', 60, 60 * 60 * 1000), async (req, res) => {
+    if (!envVaultSecureGate(req, res)) return;
+    try {
+        const text = String((req.body && req.body.text) || '');
+        if (!text.trim()) return res.status(400).json({ success: false, message: 'Nothing to import: paste the .env text or choose a file.' });
+        if (text.length > 400000) return res.status(400).json({ success: false, message: 'The text is too large (max 400 KB).' });
+        const parsed = envVaultTools.parseEnvText(text);
+        const plan = envVault.planImport(parsed.entries);
+        res.set('Cache-Control', 'no-store');
+        if (!(req.body && req.body.apply === true)) {
+            return res.json({ success: true, apply: false, rows: plan, errors: parsed.errors.slice(0, 50), duplicates: parsed.duplicates });
+        }
+        const wanted = Array.isArray(req.body.names) ? new Set(req.body.names.map(String)) : null;
+        const values = {};
+        for (const e of parsed.entries) {
+            const row = plan.find((r) => r.name === e.name);
+            if (!row || row.problem) continue;
+            if (wanted && !wanted.has(e.name)) continue;
+            if (row.vault === 'same') continue;
+            values[e.name] = e.value;
+        }
+        const names = Object.keys(values);
+        if (!names.length) return res.status(400).json({ success: false, message: 'Nothing to save: every selected variable is already in the vault with the same value, or was skipped.' });
+        const r = envVault.setValues(values);
+        const mirrored = await persistEnvVaultToDb(r.blob);
+        console.log(`🔐 ENV vault import via admin: ${r.names.join(', ')} (values hidden)`);
+        res.json({ success: true, apply: true, saved: r.names, hostWins: plan.filter((x) => names.includes(x.name) && x.effective === 'host-wins').map((x) => x.name), dbMirrored: mirrored, dbMirrorSkipped: !r.blob, restartNeeded: true, vault: envVault.status() });
+    } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+});
+app.post('/relay/admin/api/env/export', requireAdminKey, rateLimit('env-vault-export', 20, 10 * 60 * 1000), (req, res) => {
+    if (!envVaultSecureGate(req, res)) return;
+    try {
+        const scope = ['effective', 'vault', 'template'].includes(req.body && req.body.scope) ? req.body.scope : 'effective';
+        const format = (req.body && req.body.format) === 'json' ? 'json' : 'env';
+        let map;
+        if (scope === 'vault') map = envVault.vaultValues();
+        else if (scope === 'template') {
+            map = {};
+            for (const r of envVault.catalog(__dirname)) { if (!r.platform && !r.neverVault) map[r.name] = ''; }
+        } else {
+            map = envVault.effectiveValues(envVault.catalog(__dirname).map((r) => r.name));
+        }
+        for (const n of Object.keys(map)) { if (envVault.NEVER_VAULT.has(n)) delete map[n]; }
+        const names = Object.keys(map).sort();
+        console.log(`📤 ENV export via admin: scope=${scope}, ${names.length} variable(s) (values hidden in log)`);
+        res.set('Cache-Control', 'no-store');
+        const header = scope === 'template'
+            ? 'RELAY environment template: fill in the values, then paste into Render (Environment > Add from .env).'
+            : `RELAY environment export (${scope === 'vault' ? 'vault only' : 'values currently in effect: Render + vault'}) - ${new Date().toISOString()}\nKeep this file private: it contains secrets.\nNot included: RELAY_PRIVATE_KEY_PEM and RELAY_ENV_MASTER_KEY (copy those from where you keep them).`;
+        const textOut = format === 'json' ? JSON.stringify(map, null, 2) + '\n' : envVaultTools.formatEnv(map, { header });
+        res.json({ success: true, scope, format, count: names.length, text: textOut, filename: format === 'json' ? 'relay-env.json' : (scope === 'template' ? 'relay-env-template.env' : 'relay-env.env') });
+    } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+});
+// System check: tests the values currently in effect against the real services. Never returns a value; messages are scrubbed.
+app.post('/relay/admin/api/env/check', requireAdminKey, rateLimit('env-vault-check', 10, 10 * 60 * 1000), async (req, res) => {
+    try {
+        const live = !(req.body && req.body.live === false);
+        const out = await envVaultTools.runChecks({
+            env: process.env, live,
+            deps: { pg: require('pg'), Redis, nodemailer, maskUrl: dbMigrate.maskUrl }
+        });
+        console.log(`🩺 ENV check via admin: ${out.summary.ok} ok, ${out.summary.warn} warn, ${out.summary.fail} fail, ${out.summary.skip} skipped (live=${live})`);
+        res.set('Cache-Control', 'no-store');
+        res.json({ success: true, live, checkedAt: Date.now(), summary: out.summary, results: out.results, note: 'Checks use the values currently in effect. Modules that read their ENV at startup need a restart to use a value you just saved.' });
+    } catch (err) { res.status(500).json({ success: false, message: 'The check could not run: ' + String(err && err.message || err).slice(0, 200) }); }
 });
 // I-restart ang RELAY para mabasa ng lahat ng module ang bagong ENV (graceful: SIGTERM handler -> flush -> exit; auto-restart ng Render).
 app.post('/relay/admin/api/env/restart', requireAdminKey, rateLimit('env-vault-restart', 10, 60 * 60 * 1000), (req, res) => {

@@ -165,6 +165,39 @@ function sourceOf(name) {
     const host = state.hostKeys.has(name), inVault = Object.prototype.hasOwnProperty.call(state.values, name);
     return host && inVault ? 'host (Render) — nananaig sa vault' : host ? 'host (Render/.env)' : inVault ? 'vault' : 'wala';
 }
+// Compares parsed import entries with what is stored, WITHOUT returning any value.
+// vault: 'new' | 'changed' | 'same'.  effective: whether the value will actually be used after saving:
+//   'applied' (no host value), 'host-same' (Render already has the same value), 'host-wins' (Render has a different value, so
+//   the vault copy is only a backup until the Render variable is removed).
+function planImport(entries) {
+    return (entries || []).map((e) => {
+        const name = String(e.name || '');
+        const value = typeof e.value === 'string' ? e.value : '';
+        const row = { name, length: value.length, line: e.line || 0, vault: null, effective: null, problem: null };
+        if (!NAME_RE.test(name)) { row.problem = name === name.toUpperCase() ? 'Invalid name' : 'Name must be UPPERCASE letters, digits and _'; return row; }
+        if (NEVER_VAULT.has(name)) { row.problem = 'Not allowed in the vault (keep it in the host ENV)'; row.blocked = true; return row; }
+        if (!value.length) { row.problem = 'Empty value (skipped)'; return row; }
+        if (value.length > MAX_VALUE_LEN) { row.problem = 'Value too long'; return row; }
+        if (/\u0000/.test(value)) { row.problem = 'Contains an invalid character'; return row; }
+        const inVault = Object.prototype.hasOwnProperty.call(state.values, name);
+        row.vault = !inVault ? 'new' : (state.values[name] === value ? 'same' : 'changed');
+        if (state.hostKeys.has(name)) row.effective = process.env[name] === value ? 'host-same' : 'host-wins';
+        else row.effective = 'applied';
+        return row;
+    });
+}
+/** Effective (host + vault) values for export. Never includes NEVER_VAULT or platform variables. */
+function effectiveValues(names) {
+    const out = {};
+    for (const n of names || []) {
+        if (!NAME_RE.test(n) || NEVER_VAULT.has(n) || PLATFORM.has(n) || /^RENDER_/.test(n)) continue;
+        const v = process.env[n];
+        if (has(v)) out[n] = String(v);
+    }
+    return out;
+}
+function vaultValues() { return Object.assign({}, state.values); }
+function isPlatformName(n) { return PLATFORM.has(n) || /^RENDER_/.test(n); }
 function hasVault() { return Object.keys(state.values).length > 0; }
 function dbBlob() { return state.stable && hasVault() ? encrypt(state.values, state.key, state.updatedAt || Date.now()) : null; }
 
@@ -225,4 +258,4 @@ function status() {
     return { keyMode: state.keyMode, stable: state.stable, loadedFrom: state.loadedFrom, count: Object.keys(state.values).length, updatedAt: state.updatedAt, loadError: state.loadError };
 }
 
-module.exports = { sourceOf, DB_KEY, NAME_RE, NEVER_VAULT, loadSync, setValues, deleteNames, hasVault, dbBlob, catalog, status, encrypt, decrypt, deriveKey, _state: state };
+module.exports = { planImport, effectiveValues, vaultValues, isPlatformName, sourceOf, DB_KEY, NAME_RE, NEVER_VAULT, loadSync, setValues, deleteNames, hasVault, dbBlob, catalog, status, encrypt, decrypt, deriveKey, _state: state };

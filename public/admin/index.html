@@ -2797,7 +2797,14 @@ async function api(path, opts = {}) {
     throw new Error('forbidden');
   }
   if (res.status === 429) {
-    toast('Too many requests. Please wait a moment.', 'error');
+    // The auto-refresh polls run every few seconds, so show this notice at most once per 30 seconds instead of on every poll.
+    const now = Date.now();
+    if (!window.__lastRateLimitToastAt || now - window.__lastRateLimitToastAt > 30000) {
+      window.__lastRateLimitToastAt = now;
+      let msg = 'Too many requests. Please wait a moment.';
+      try { const j = await res.clone().json(); if (j && j.message) msg = j.message; } catch (e) {}
+      toast(msg, 'error');
+    }
     throw new Error('rate-limited');
   }
   return res.json();
