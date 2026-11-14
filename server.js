@@ -10373,6 +10373,74 @@ app.get('/relay/client/bir-profile', rateLimit('client-bir-profile', 120, 60 * 6
     } catch (err) { res.status(500).json({ success: false, message: 'Could not answer the BIR profile request right now.' }); }
 });
 
+// ===== SIGNED RECEIPT BRANDING (trade name lock + branding-logo authorization) =====
+// Ang trade name sa resibo ay kontrolado LANG ng RELAY (galing sa BIR profile business name kung mayroon, kung wala ay sa
+// "Trade name & Branding Logo" card ng admin page bir-profile.html). Ang RELAY din ang nag-a-authorize kung puwedeng maglagay
+// ang client ng branding logo (kaliwa/kanan/itaas ng trade name). Signed ang sagot. Tingnan ang receipt-branding.js.
+const receiptBranding = require('./receipt-branding');
+const RECEIPT_BRANDING_STATE_PATH = path.join(__dirname, 'receipt-branding-state.json');
+async function loadReceiptBrandingState() {
+    const fromStore = await getPersistentJSON('receipt-branding', null, { strict: true });
+    if (fromStore !== null) return receiptBranding.normalizeState(fromStore);
+    try { return receiptBranding.normalizeState(JSON.parse(readStateFileSync(RECEIPT_BRANDING_STATE_PATH))); } catch (err) { return receiptBranding.emptyState(); }
+}
+async function saveReceiptBrandingState(state) {
+    if (pgPoolDevices || pgPool || redisClient) { await setPersistentJSON('receipt-branding', state); return; }
+    atomicWriteFileSync(RECEIPT_BRANDING_STATE_PATH, JSON.stringify(state));
+}
+app.get('/relay/admin/api/receipt-branding', requireAdminKey, async (req, res) => {
+    try {
+        const st = await loadReceiptBrandingState();
+        const bir = await loadBirProfileState();
+        // Ipinapakita sa admin kung ano ang EFFECTIVE na trade name ng bawat client (BIR profile muna, saka branding record).
+        const ids = new Set(Object.keys(st.records).concat(Object.keys(bir.profiles)));
+        const effective = {};
+        ids.forEach((id) => { effective[id] = receiptBranding.effectiveTradeName(st.records[id] || null, bir.profiles[id] || null); });
+        res.set('Cache-Control', 'no-store');
+        res.json({ success: true, state: st, effective });
+    } catch (err) { res.status(500).json({ success: false, message: 'Could not read the receipt branding: ' + err.message }); }
+});
+function receiptBrandingWriteHandler(kind) {
+    return async (req, res) => {
+        try {
+            const body = req.body || {};
+            const current = await loadReceiptBrandingState();
+            let next;
+            if (kind === 'save') {
+                next = receiptBranding.upsertRecord(current, { installationId: body.installationId, tradeName: body.tradeName, logoAllowed: body.logoAllowed === true, label: body.label, reason: body.reason });
+            } else {
+                next = receiptBranding.removeRecord(current, { installationId: body.installationId, reason: body.reason });
+            }
+            await saveReceiptBrandingState(next);
+            logActivity(String(body.installationId || 'unknown'), 'receipt_branding_' + kind, { ip: req.ip || null, reason: String(body.reason || '').slice(0, 160) });
+            const bir = await loadBirProfileState();
+            const ids = new Set(Object.keys(next.records).concat(Object.keys(bir.profiles)));
+            const effective = {};
+            ids.forEach((id) => { effective[id] = receiptBranding.effectiveTradeName(next.records[id] || null, bir.profiles[id] || null); });
+            res.set('Cache-Control', 'no-store');
+            res.json({ success: true, state: next, effective });
+        } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+    };
+}
+app.post('/relay/admin/api/receipt-branding/save', requireAdminKey, rateLimit('receipt-branding-write', 60, 60 * 60 * 1000), receiptBrandingWriteHandler('save'));
+app.post('/relay/admin/api/receipt-branding/delete', requireAdminKey, rateLimit('receipt-branding-write', 60, 60 * 60 * 1000), receiptBrandingWriteHandler('delete'));
+// Client: "ano ang trade name at logo permission ko?" -> signed branding. Walang mapagkukunan = branding:null.
+app.get('/relay/client/receipt-branding', rateLimit('client-receipt-branding', 240, 60 * 60 * 1000), requireApiKey, async (req, res) => {
+    let installationId = req.relayClient ? req.relayClient.installationId : null;
+    if (!installationId && req.relayMasterAuthenticated) {
+        const fromQuery = String((req.query || {}).installationId || '').trim();
+        installationId = fromQuery && fromQuery.length <= 200 ? fromQuery : null;
+    }
+    if (!installationId) return res.status(403).json({ success: false, code: 'CLIENT_CREDENTIAL_REQUIRED', message: 'A per-client credential is required.' });
+    res.set('Cache-Control', 'no-store');
+    try {
+        const st = await loadReceiptBrandingState();
+        const bir = await loadBirProfileState();
+        const branding = receiptBranding.signBrandingFor(privateKey, st, bir, installationId);
+        res.json({ success: true, branding });
+    } catch (err) { res.status(500).json({ success: false, message: 'Could not answer the receipt branding request right now.' }); }
+});
+
 // ===== COMPANION APPS CONTROL (OmniKiosk / Kitchen Kiosk / Customer Display — remote allow/deny sa OmniPOS Native) =====
 // Default ng LAHAT ng client: LOCKED. Sa admin page companion-apps.html mo ina-allow ang bawat app: sa LAHAT ng client (global) o sa
 // ISANG client/store (override). Signed ang sagot sa client. Tingnan ang companion-apps-control.js.

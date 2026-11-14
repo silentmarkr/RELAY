@@ -82,6 +82,19 @@ button:disabled{opacity:.5;cursor:not-allowed}
 <div id="gateHint" class="small" style="margin-top:6px"></div>
 </section>
 
+<section class="card" id="brandingCard"><h2>🏷️ Trade name &amp; Branding Logo (resibo)</h2>
+<p class="small">Ang <b>trade name</b> sa resibo ay <b>RELAY lang</b> ang may kontrol — hindi na ito maieedit ng client sa app. Kung may <b>ACTIVE na BIR profile</b> ang client, ang <b>Business name</b> doon ang ginagamit (isang source lang, hindi nadodoble). Kung wala pa, ang itatakda mo rito ang gagamitin. Kapag naka-<b>authorize</b> ang logo, puwedeng mag-upload ang client ng <b>branding logo</b> at pumili kung <b>kaliwa, kanan o itaas</b> ng trade name; iyon lang ang puwede nilang baguhin.</p>
+<label class="field">Client<select id="bpick"><option value="">— piliin —</option></select></label>
+<label class="field">Installation ID<input id="biid" placeholder="installationId" autocomplete="off"></label>
+<label class="field">Label (para sa sarili mo)<input id="blabel" maxlength="80" autocomplete="off"></label>
+<label class="field">Trade name (kung walang BIR profile)<input id="b_tradeName" maxlength="80" placeholder="hal. Aling Nena's Store" autocomplete="off"></label>
+<div id="bEffective" class="small" style="margin:4px 0 8px"></div>
+<label class="check"><input id="b_logoAllowed" type="checkbox"><span>I-authorize ang client na maglagay ng branding logo sa tabi ng trade name (kaliwa / kanan / itaas).</span></label>
+<label class="field">Dahilan / reference (audit trail)<input id="breason" maxlength="160" autocomplete="off"></label>
+<button id="bSaveBtn" class="primary" disabled>💾 I-sign at i-save ang branding</button>
+<div id="bList" class="small" style="margin-top:10px">Mag-connect muna.</div>
+</section>
+
 <section class="card"><h2>Mga profile</h2>
 <div id="list" class="small">Mag-connect muna.</div>
 </section>
@@ -206,7 +219,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
     try{
       const body=Object.assign({reason:$('reason').value,developerPasskey:$('devPass').value,confirm:$('confirm').checked,acknowledgeUnknownDevice:$('unknownOk').checked},extra);
       const j=await api(path,'POST',body);
-      state=j.state;render();$('devPass').value='';resetCk();say('Na-save at napirmahan. Kukunin ito ng client sa susunod na refresh (hanggang ~5 minuto kapag online).');
+      state=j.state;render();bLoad();$('devPass').value='';resetCk();say('Na-save at napirmahan. Kukunin ito ng client sa susunod na refresh (hanggang ~5 minuto kapag online).');
     }catch(e){say(e.message,true)}
   }
   $('saveBtn').onclick=()=>{
@@ -219,15 +232,69 @@ button:disabled{opacity:.5;cursor:not-allowed}
   async function loadDevices(){
     try{
       const j=await api('/relay/admin/api/devices','GET');
-      const sel=$('pick');sel.innerHTML='<option value="">— piliin —</option>';
-      (j.seenDevices||[]).forEach(d=>{labels[d.installationId]=d.label||'';const o=document.createElement('option');o.value=d.installationId;o.textContent=(d.label||'(walang label)')+' — '+d.installationId.slice(0,12)+'…';sel.appendChild(o)});
+      const sel=$('pick');sel.innerHTML='<option value="">— piliin —</option>';$('bpick').innerHTML='<option value="">— piliin —</option>';
+      (j.seenDevices||[]).forEach(d=>{labels[d.installationId]=d.label||'';const o=document.createElement('option');o.value=d.installationId;o.textContent=(d.label||'(walang label)')+' — '+d.installationId.slice(0,12)+'…';sel.appendChild(o);const o2=o.cloneNode(true);$('bpick').appendChild(o2)});
     }catch(_){}
   }
+
+  // ---- Trade name & Branding Logo (signed ng RELAY; admin key lang ang kailangan) ----
+  let bState=null,bEff={};
+  function bRender(){
+    if(!bState)return;
+    const ids=Object.keys(Object.assign({},bState.records||{},bEff||{}));
+    $('bList').innerHTML=ids.length?ids.map(id=>{
+      const r=(bState.records||{})[id]||{},e=bEff[id]||{name:'',source:'none'};
+      const src=e.source==='bir-profile'?'galing sa BIR profile':(e.source==='branding'?'galing sa branding record':'walang trade name');
+      const lab=esc(r.label||labels[id]||'');
+      return '<div class="row"><div><b>'+esc(e.name||'(wala pa)')+'</b> <span class="badge">'+src+'</span> <span class="badge" style="color:'+(r.logoAllowed?'var(--green)':'var(--muted)')+'">'+(r.logoAllowed?'LOGO: PINAPAYAGAN':'LOGO: HINDI PINAPAYAGAN')+'</span>'+(lab?' · '+lab:'')+
+        '<br><span class="mono">'+esc(id)+'</span></div><div><button data-bact="edit" data-id="'+esc(id)+'">✏️ I-edit</button> '+(bState.records&&bState.records[id]?'<button class="danger" data-bact="delete" data-id="'+esc(id)+'">🗑</button>':'')+'</div></div>';
+    }).join(''):'Wala pang branding record.';
+    $('bList').querySelectorAll('button[data-bact]').forEach(b=>b.onclick=()=>bAction(b.dataset.bact,b.dataset.id));
+    bEffectiveHint();
+  }
+  function bEffectiveHint(){
+    const id=$('biid').value.trim(),e=id&&bEff[id];
+    const bir=id&&state&&state.profiles&&state.profiles[id];
+    $('bEffective').innerHTML=e&&e.name?('Trade name na gagamitin ngayon: <b>'+esc(e.name)+'</b> ('+(e.source==='bir-profile'?'galing sa ACTIVE na BIR profile; nauuna ito sa field sa itaas':'galing sa branding record')+')'):(bir&&bir.status==='active'?'':'Wala pang trade name para sa client na ito.');
+  }
+  async function bLoad(){
+    try{
+      const j=await api('/relay/admin/api/receipt-branding','GET');
+      bState=j.state;bEff=j.effective||{};bRender();
+      $('bSaveBtn').disabled=false;
+    }catch(e){$('bList').textContent=e.message}
+  }
+  function bAction(act,id){
+    if(act==='edit'){
+      const r=(bState.records||{})[id]||{};
+      $('biid').value=id;$('bpick').value=labels[id]!==undefined?id:'';$('blabel').value=r.label||'';
+      $('b_tradeName').value=r.tradeName||'';$('b_logoAllowed').checked=r.logoAllowed===true;
+      bEffectiveHint();$('brandingCard').scrollIntoView({behavior:'smooth'});return;
+    }
+    if(!confirm('BURAHIN ang branding record na ito? Mananatili sa client ang huling natanggap nitong trade name hanggang may bagong pirma.'))return;
+    bSend('/relay/admin/api/receipt-branding/delete',{installationId:id});
+  }
+  async function bSend(path,extra){
+    try{
+      const j=await api(path,'POST',Object.assign({reason:$('breason').value},extra));
+      bState=j.state;bEff=j.effective||{};bRender();
+      say('Na-save at napirmahan ang branding. Kukunin ito ng client sa susunod na refresh (hanggang ~5 minuto kapag online).');
+    }catch(e){say(e.message,true)}
+  }
+  $('bSaveBtn').onclick=()=>{
+    const iid=$('biid').value.trim();
+    if(!iid)return say('Maglagay o pumili ng installationId.',true);
+    const hasBir=state&&state.profiles&&state.profiles[iid]&&state.profiles[iid].status==='active';
+    if(!$('b_tradeName').value.trim()&&!hasBir)return say('Maglagay ng trade name (o gumawa muna ng BIR profile para sa client na ito).',true);
+    bSend('/relay/admin/api/receipt-branding/save',{installationId:iid,label:$('blabel').value,tradeName:$('b_tradeName').value,logoAllowed:$('b_logoAllowed').checked});
+  };
+  $('bpick').onchange=()=>{if($('bpick').value){$('biid').value=$('bpick').value;$('blabel').value=labels[$('bpick').value]||'';const r=bState&&(bState.records||{})[$('bpick').value];$('b_tradeName').value=r?r.tradeName:'';$('b_logoAllowed').checked=!!(r&&r.logoAllowed);bEffectiveHint()}};
+  $('biid').oninput=bEffectiveHint;
   async function connect(){
     try{
       await loadDevices();
       const j=await api('/relay/admin/api/bir-profiles','GET');
-      state=j.state;render();
+      state=j.state;render();await bLoad();
       try{sessionStorage.setItem('relayAdminKey',$('adminKey').value)}catch(_){}
       say('Connected.');
     }catch(e){
