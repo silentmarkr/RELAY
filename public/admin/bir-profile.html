@@ -25,6 +25,25 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.8rem;word-break:break-all}
 .check{display:flex;gap:8px;align-items:flex-start;font-size:.85rem;color:var(--muted);margin:8px 0}
 .check input{width:auto;margin-top:4px}
+.hrow{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}.hrow h2{margin:0}
+.infoBtn{padding:6px 12px;font-size:.85rem;white-space:nowrap}
+.infoBtn .cnt{display:inline-block;margin-left:6px;padding:0 8px;border-radius:999px;background:#0a0f1c;border:1px solid var(--line);font-size:.75rem}
+.infoBtn.done .cnt{color:var(--green);border-color:#1f5a3d}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:flex-end;justify-content:center;z-index:50}
+.modal.show{display:flex}
+.sheet{background:var(--card);border:1px solid var(--line);border-radius:14px 14px 0 0;width:100%;max-width:760px;max-height:92vh;display:flex;flex-direction:column}
+.sheet header{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line)}
+.sheet header h2{margin:0}
+.sheet .body{overflow-y:auto;padding:4px 14px 10px}
+.sheet footer{padding:10px 14px;border-top:1px solid var(--line);display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+.sheet h3{font-size:.95rem;margin:14px 0 4px;color:var(--accent)}
+.ck{display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-top:1px solid var(--line);font-size:.88rem;cursor:pointer}
+.ck:first-of-type{border-top:0}
+.ck input{width:auto;margin-top:5px;flex:none;transform:scale(1.2)}
+.ck b{color:var(--text)}.ck .d{display:block;color:var(--muted);font-size:.8rem}
+.ck.warnitem b{color:var(--amber)}
+.req{color:var(--red);font-size:.75rem;margin-left:4px}
+.bar{height:6px;background:#0a0f1c;border-radius:99px;overflow:hidden;flex:1;min-width:80px}.bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
 </style><link rel="stylesheet" href="admin-ui.css">
 <script src="admin-ui.js" defer></script>
 </head><body><main>
@@ -38,7 +57,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
 
 <div id="notice" class="notice" role="status"></div>
 
-<section class="card"><h2>Gumawa / palitan ang profile</h2>
+<section class="card"><div class="hrow"><h2>Gumawa / palitan ang profile</h2><button type="button" id="infoBtn" class="infoBtn" aria-haspopup="dialog">ℹ️ Checklist<span class="cnt" id="infoCnt">0/0</span></button></div>
 <p class="small">Ilagay ang eksaktong detalye ayon sa Certificate of Registration at PTU ng client. Bawat pag-save ay tumataas ang <b>version</b>; ang app ay hindi tatanggap ng mas mababang version.</p>
 <label class="field">Client<select id="pick"><option value="">— piliin —</option></select></label>
 <label class="field">Installation ID<input id="iid" placeholder="installationId" autocomplete="off"></label>
@@ -60,16 +79,43 @@ button:disabled{opacity:.5;cursor:not-allowed}
 <label class="check"><input id="confirm" type="checkbox"><span>Na-verify ko ang BIR registration documents ng client at tugma ang mga detalye sa itaas.</span></label>
 <label class="check"><input id="unknownOk" type="checkbox"><span>Alam kong wala ang installation na ito sa allowed-devices list pero tiyak akong client ko ito.</span></label>
 <button id="saveBtn" class="primary" disabled>💾 I-sign at i-save ang profile</button>
+<div id="gateHint" class="small" style="margin-top:6px"></div>
 </section>
 
 <section class="card"><h2>Mga profile</h2>
 <div id="list" class="small">Mag-connect muna.</div>
 </section>
 
-<section class="card"><h2>Audit trail (huling 50)</h2>
+<section class="card"><div class="hrow"><h2>Audit trail (huling 50)</h2><span><button type="button" id="auditCsv" disabled>⬇ CSV</button> <button type="button" id="auditJson" disabled>⬇ JSON</button></span></div>
+<p class="small">Ang export ay may <b>lahat</b> ng naka-save na entry (hanggang 1000), hindi lang ang huling 50. Pangalan lang ng binagong field ang nakatala, hindi ang laman.</p>
 <div id="audit" class="small">—</div>
 </section>
 
+<div id="ckModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="ckTitle">
+<div class="sheet">
+<header><h2 id="ckTitle">📋 RELAY Client Signing Checklist</h2><button type="button" id="ckClose" aria-label="Isara">✕</button></header>
+<div class="body">
+<p class="small">Lokal na checklist lang ito sa browser (hindi sine-save sa database). Ang mga markang <span class="req" style="margin:0">kailangan</span> ay dapat naka-tick bago maging clickable ang <b>I-sign at i-save</b>.</p>
+<h3>1. Mga dokumentong hihingin sa client</h3>
+<label class="ck"><input type="checkbox" data-ck="cor" data-req="1"><span><b>BIR Form 2303 (Certificate of Registration / COR)</b><span class="req">kailangan</span><span class="d">Dito kukunin ang opisyal na detalye. Bawal magkamali kahit isang letra o numero.</span></span></label>
+<label class="ck"><input type="checkbox" data-ck="name" data-req="1"><span><b>Registered Name</b><span class="req">kailangan</span><span class="d">Pangalan ng may-ari (Sole Proprietor) o korporasyon (Corp/OPC).</span></span></label>
+<label class="ck"><input type="checkbox" data-ck="trade" data-req="1"><span><b>Trade Name / Business Name</b><span class="req">kailangan</span><span class="d">Ang pangalan ng tindahan na lalabas sa pinakataas ng resibo.</span></span></label>
+<label class="ck"><input type="checkbox" data-ck="tin" data-req="1"><span><b>Business TIN at Branch Code</b><span class="req">kailangan</span><span class="d">Siguraduhing kasama at tamang 3- o 5-digit branch code (000 / 00000 = Main Office, 001 = branch).</span></span></label>
+<label class="ck"><input type="checkbox" data-ck="vat" data-req="1"><span><b>Tax Type (VAT vs. Non-VAT)</b><span class="req">kailangan</span><span class="d">Mahalaga para malaman kung SALES INVOICE (may 12% VAT breakdown) o Non-VAT Invoice; kung VAT REG TIN o NON-VAT REG TIN ang nakasulat sa header.</span></span></label>
+<label class="ck"><input type="checkbox" data-ck="addr" data-req="1"><span><b>Registered Business Address</b><span class="req">kailangan</span><span class="d">Eksaktong address sa COR (Barangay, City/Municipality, ZIP).</span></span></label>
+<label class="ck"><input type="checkbox" data-ck="ptu" data-req="0"><span><b>BIR Permit To Use (PTU) — kung mayroon nang approved</b><span class="d">Kunin ang PTU No., Date Issued, MIN (Machine Identification Number) at Serial No. (S/N) ng device/terminal.</span></span></label>
+<h3>2. Technical at system details na i-ve-verify</h3>
+<label class="ck"><input type="checkbox" data-ck="iid" data-req="1"><span><b>Tamang installationId</b><span class="req">kailangan</span><span class="d">Siguraduhing tugma ang installationId na ibinigay ng app sa device ng client. Kapag nagkamali kahit isang character, hindi gagana ang profile (fail-closed).</span></span></label>
+<label class="ck"><input type="checkbox" data-ck="ver" data-req="0"><span><b>Tamang Version / Baseline</b><span class="d">Naka-match ba sa active baseline ng OmniPOS (hal. 1.1.142) ang target device?</span></span></label>
+<label class="ck"><input type="checkbox" data-ck="contact" data-req="0"><span><b>Contact number / Header info</b><span class="d">Kumpleto ba ang contact number na ipapalagay sa ilalim ng address?</span></span></label>
+<label class="ck"><input type="checkbox" data-ck="supplier" data-req="1"><span><b>POS Supplier Name at Supplier TIN</b><span class="req">kailangan</span><span class="d">Tama ba ang naka-hardcode o naka-set na POS Supplier Name at Supplier TIN sa footer?</span></span></label>
+<h3>3. Mga paalala bago pindutin ang "Sign & Save"</h3>
+<label class="ck warnitem"><input type="checkbox" data-ck="norollback" data-req="1"><span><b>⚠️ Walang rolling back</b><span class="req">kailangan</span><span class="d">Tumataas ang version sa bawat save at hindi tatanggapin ng app ang lumang version. Siguraduhing tama ang spelling bago mag-sign para hindi sayang ang version increment.</span></span></label>
+<label class="ck warnitem"><input type="checkbox" data-ck="lock" data-req="1"><span><b>⚠️ Device lock</b><span class="req">kailangan</span><span class="d">Kapag na-sign, naka-bind na ito sa specific hardware/installation na iyon. Kung magpapalit ng tablet o phone ang client, kailangan nilang humingi ng panibagong profile / re-issue mula sa iyo.</span></span></label>
+<label class="ck warnitem"><input type="checkbox" data-ck="offline" data-req="0"><span><b>⚠️ Offline behavior</b><span class="d">Paalalahanan ang client na kapag nakapag-sync na sila nang isang beses, mananatili ang valid profile kahit mawalan ng internet; pero hindi sila dapat mag-clear ng data ng app dahil mawawala ang local state.</span></span></label>
+</div>
+<footer><div class="bar"><i id="ckBar"></i></div><span class="small" id="ckStat"></span><button type="button" id="ckReset">I-reset</button><button type="button" id="ckDone" class="primary">Tapos na</button></footer>
+</div></div>
 <script>
 (function(){
   const $=id=>document.getElementById(id);
@@ -83,6 +129,29 @@ button:disabled{opacity:.5;cursor:not-allowed}
     return j;
   }
   function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+
+  // ---- Signing checklist (browser memory only) ----
+  const cks=[].slice.call(document.querySelectorAll('[data-ck]'));
+  const reqCks=cks.filter(c=>c.dataset.req==='1');
+  function ckDone(){return reqCks.every(c=>c.checked)}
+  function updateGate(){
+    const n=reqCks.filter(c=>c.checked).length,t=reqCks.length,ok=n===t;
+    $('infoCnt').textContent=n+'/'+t;$('infoBtn').classList.toggle('done',ok);
+    $('ckBar').style.width=(t?n/t*100:0)+'%';
+    $('ckStat').textContent=n+' sa '+t+' kailangan';
+    $('saveBtn').disabled=!(state&&ok);
+    $('gateHint').textContent=!state?'Mag-connect muna.':ok?'':'I-tick muna lahat ng kailangan sa ℹ️ Checklist ('+n+'/'+t+') bago makapag-sign.';
+  }
+  function openCk(){$('ckModal').classList.add('show');document.body.style.overflow='hidden'}
+  function closeCk(){$('ckModal').classList.remove('show');document.body.style.overflow=''}
+  cks.forEach(c=>c.onchange=updateGate);
+  $('infoBtn').onclick=openCk;$('ckClose').onclick=closeCk;$('ckDone').onclick=closeCk;
+  $('ckModal').onclick=e=>{if(e.target===$('ckModal'))closeCk()};
+  document.addEventListener('keydown',e=>{if(e.key==='Escape')closeCk()});
+  function resetCk(){cks.forEach(c=>c.checked=false);updateGate()}
+  $('ckReset').onclick=resetCk;
+  // Auto-hint: i-tick ang installationId item kung may laman (hindi pa rin auto-check; paalala lang)
+  updateGate();
   function render(){
     const ids=Object.keys(state.profiles||{});
     $('list').innerHTML=ids.length?ids.map(id=>{
@@ -98,9 +167,29 @@ button:disabled{opacity:.5;cursor:not-allowed}
     }).join(''):'Wala pang BIR profile. Habang wala, fail-closed ang BIR ng lahat ng client.';
     $('list').querySelectorAll('button[data-id]').forEach(b=>b.onclick=()=>action(b.dataset.act,b.dataset.id));
     const au=(state.audit||[]).slice(-50).reverse();
-    $('audit').innerHTML=au.length?au.map(a=>'<div class="row"><span>'+esc(new Date(a.at).toLocaleString())+' · <b>'+esc(a.action)+'</b>'+(a.version?' v'+esc(a.version):'')+(a.reason?' — '+esc(a.reason):'')+'</span><span class="mono">'+esc(a.installationId||'')+'</span></div>').join(''):'Wala pa.';
-    $('saveBtn').disabled=false;
+    $('audit').innerHTML=au.length?au.map(a=>'<div class="row"><span>'+esc(new Date(a.at).toLocaleString())+' · <b>'+esc(a.action)+'</b>'+(a.version?' '+(a.previousVersion!==undefined?'v'+esc(a.previousVersion)+' → ':'')+'v'+esc(a.version):'')+(a.changedFields&&a.changedFields.length?' ['+esc(a.changedFields.join(', '))+']':'')+(a.reason?' — '+esc(a.reason):'')+'</span><span class="mono">'+esc(a.installationId||'')+'</span></div>').join(''):'Wala pa.';
+    updateGate();
+    $('auditCsv').disabled=$('auditJson').disabled=!(state.audit||[]).length;
   }
+  // ---- Audit export (CSV / JSON), client-side mula sa state na galing sa RELAY ----
+  function csvCell(v){let t=v==null?'':String(v);if(/^[=+\-@\t\r]/.test(t))t="'"+t;return /[",\n\r]/.test(t)?'"'+t.replace(/"/g,'""')+'"':t}
+  function download(name,mime,text){
+    const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type:mime}));a.download=name;
+    document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},500);
+  }
+  function stamp(){return new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}
+  $('auditCsv').onclick=()=>{
+    if(!state)return;
+    const head=['timestamp_iso','timestamp_local','action','installationId','previous_version','new_version','changed_fields','reason'];
+    const rows=(state.audit||[]).map(a=>[new Date(a.at).toISOString(),new Date(a.at).toLocaleString(),a.action,a.installationId||'',a.previousVersion==null?'':a.previousVersion,a.version==null?'':a.version,(a.changedFields||[]).join(' | '),a.reason||''].map(csvCell).join(','));
+    download('relay-bir-audit-'+stamp()+'.csv','text/csv;charset=utf-8','\ufeff'+[head.join(',')].concat(rows).join('\r\n')+'\r\n');
+    say('Na-export ang audit trail (CSV): '+rows.length+' entry.');
+  };
+  $('auditJson').onclick=()=>{
+    if(!state)return;
+    download('relay-bir-audit-'+stamp()+'.json','application/json',JSON.stringify({exportedAt:new Date().toISOString(),count:(state.audit||[]).length,audit:state.audit||[]},null,2));
+    say('Na-export ang audit trail (JSON): '+(state.audit||[]).length+' entry.');
+  };
   function action(act,id){
     if(act==='edit'){
       const p=state.profiles[id];if(!p)return;
@@ -117,7 +206,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
     try{
       const body=Object.assign({reason:$('reason').value,developerPasskey:$('devPass').value,confirm:$('confirm').checked,acknowledgeUnknownDevice:$('unknownOk').checked},extra);
       const j=await api(path,'POST',body);
-      state=j.state;render();$('devPass').value='';say('Na-save at napirmahan. Kukunin ito ng client sa susunod na refresh (hanggang ~5 minuto kapag online).');
+      state=j.state;render();$('devPass').value='';resetCk();say('Na-save at napirmahan. Kukunin ito ng client sa susunod na refresh (hanggang ~5 minuto kapag online).');
     }catch(e){say(e.message,true)}
   }
   $('saveBtn').onclick=()=>{

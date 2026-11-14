@@ -20,7 +20,7 @@ const PROFILE_FIELDS = Object.freeze([
 ]);
 const STATUSES = Object.freeze(['active', 'revoked']);
 const MAX_PROFILES = 5000;
-const MAX_AUDIT = 300;
+const MAX_AUDIT = 1000;
 const FIELD_LIMITS = Object.freeze({
     businessName: 80, tin: 20, ptuNo: 40, min: 40, serialNo: 40, supplierName: 80, supplierAddress: 120, supplierTin: 20
 });
@@ -142,7 +142,10 @@ function upsertProfile(state, { installationId, fields, label, reason, now }) {
     pushAudit(s, {
         action: prev ? (prev.status === 'revoked' ? 'reinstate' : 'update') : 'create',
         installationId: id,
+        previousVersion: prev ? prev.version : 0,
         version: s.profiles[id].version,
+        // Pangalan lang ng binagong field ang itinatala (hindi ang laman), para ma-audit nang hindi ginagawang kopya ng TIN ang log.
+        changedFields: prev ? Object.keys(v.fields).filter((k) => String((prev.fields || {})[k] || '') !== String(v.fields[k] || '')) : Object.keys(v.fields).filter((k) => String(v.fields[k] || '') !== ''),
         reason: cleanText(reason, 160)
     });
     return s;
@@ -159,7 +162,7 @@ function revokeProfile(state, { installationId, reason, now }) {
     prev.version += 1;
     prev.updatedAt = t;
     s.updatedAt = t;
-    pushAudit(s, { action: 'revoke', installationId: id, version: prev.version, reason: cleanText(reason, 160) });
+    pushAudit(s, { action: 'revoke', installationId: id, previousVersion: prev.version - 1, version: prev.version, reason: cleanText(reason, 160) });
     return s;
 }
 
