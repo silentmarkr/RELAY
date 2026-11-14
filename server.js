@@ -5900,6 +5900,185 @@ function adminLoginLockSecondsLeft(ip) {
     if (attempts.length < ADMIN_LOGIN_MAX_FAILURES) return 0;
     return Math.max(1, Math.ceil((attempts[0] + ADMIN_LOGIN_WINDOW_MS - Date.now()) / 1000));
 }
+// ===================================================================
+// ADMIN FINGERPRINT LOGIN (WebAuthn / passkey, platform authenticator)
+// Mag-register muna (naka-login gamit ang admin key) sa phone: Home > "Fingerprint login". Pagkatapos, sa login screen:
+// "Sign in with fingerprint" -> ang fingerprint na naka-register sa phone ang nagbubukas. Ang resulta ay isang
+// session token na 'RS1.<exp>.<hmac>' na tinatanggap ng requireAdminKey kapalit ng admin key (kapareho ng header kaya gumagana sa lahat ng admin page).
+// Stateless ang token (HMAC gamit ang RELAY_ADMIN_KEY): nabubura ang bisa nito kapag nagpalit ng admin key, at nakaligtas sa restart.
+// Ang bawat RP ID ay hostname (hal. relay.omniposph.com): ibang hostname = kailangan ulit mag-register.
+// ===================================================================
+const adminWebauthn = require('./webauthn');
+const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const ADMIN_PASSKEY_STORE_KEY = 'admin-passkeys';
+const adminPasskeyChallenges = new Map();   // challenge -> { type, expiresAt }
+let adminPasskeyCache = null;
+function adminSessionSig(exp) {
+    return crypto.createHmac('sha256', String(ADMIN_KEY || '')).update('relay-admin-session|' + exp).digest('hex');
+}
+function issueAdminSession() {
+    const exp = Date.now() + ADMIN_SESSION_TTL_MS;
+    return { token: 'RS1.' + exp + '.' + adminSessionSig(exp), expiresAt: exp };
+}
+function adminSessionValid(tok) {
+    if (!ADMIN_KEY || typeof tok !== 'string' || !tok.startsWith('RS1.')) return false;
+    const parts = tok.split('.');
+    if (parts.length !== 3) return false;
+    const exp = Number(parts[1]);
+    if (!Number.isFinite(exp) || exp < Date.now()) return false;
+    return safeCompare(parts[2], adminSessionSig(exp));
+}
+async function loadAdminPasskeys() {
+    if (adminPasskeyCache) return adminPasskeyCache;
+    const d = await getPersistentJSON(ADMIN_PASSKEY_STORE_KEY, { credentials: [] }, { strict: true });
+    adminPasskeyCache = { credentials: Array.isArray(d && d.credentials) ? d.credentials : [] };
+    return adminPasskeyCache;
+}
+function saveAdminPasskeys(d) { adminPasskeyCache = d; setPersistentJSON(ADMIN_PASSKEY_STORE_KEY, d); }
+function adminPasskeyRpId(req) { return req.hostname; }
+function adminPasskeyOriginOk(req, origin) {
+    const host = req.hostname;
+    return origin === 'https://' + host || (/^(localhost|127\.0\.0\.1)$/.test(host) && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(String(origin)));
+}
+function newAdminPasskeyChallenge(type) {
+    const now = Date.now();
+    for (const [k, v] of adminPasskeyChallenges) if (v.expiresAt < now) adminPasskeyChallenges.delete(k);
+    const challenge = adminWebauthn.randomChallenge();
+    adminPasskeyChallenges.set(challenge, { type, expiresAt: now + 3 * 60 * 1000 });
+    return challenge;
+}
+function takeAdminPasskeyChallenge(challenge, type) {
+    const c = adminPasskeyChallenges.get(challenge);
+    adminPasskeyChallenges.delete(challenge);
+    return !!(c && c.type === type && c.expiresAt >= Date.now());
+}
+// Public: may naka-register bang fingerprint? (walang detalye)
+app.get('/relay/admin/api/passkey/status', rateLimit('admin-passkey-status', 60, 10 * 60 * 1000), async (req, res) => {
+    try {
+        const d = await loadAdminPasskeys();
+        res.json({ success: true, enrolled: d.credentials.length > 0 });
+    } catch (e) { res.json({ success: true, enrolled: false }); }
+});
+app.post('/relay/admin/api/passkey/login-options', rateLimit('admin-passkey-login-options', 20, 10 * 60 * 1000), async (req, res) => {
+    if (isAdminLoginLocked(req.ip)) return res.status(429).json({ success: false, message: 'Too many failed attempts. Try again later.' });
+    try {
+        const d = await loadAdminPasskeys();
+        if (!ADMIN_KEY || !d.credentials.length) return res.status(404).json({ success: false, message: 'Fingerprint login is not set up yet.' });
+        res.json({
+            success: true,
+            challenge: newAdminPasskeyChallenge('get'),
+            rpId: adminPasskeyRpId(req),
+            userVerification: 'required',
+            timeout: 60000,
+            allowCredentials: d.credentials.map(c => ({ id: c.id, type: 'public-key' }))
+        });
+    } catch (e) { res.status(500).json({ success: false, message: 'Could not start fingerprint login.' }); }
+});
+app.post('/relay/admin/api/passkey/login-verify', rateLimit('admin-passkey-login-verify', 20, 10 * 60 * 1000), async (req, res) => {
+    if (isAdminLoginLocked(req.ip)) return res.status(429).json({ success: false, message: 'Too many failed attempts. Try again later.' });
+    const fail = (msg) => { recordAdminLoginFailure(req.ip); return res.status(403).json({ success: false, message: msg || 'Fingerprint was not accepted.' }); };
+    try {
+        const { credentialId, clientDataJSON, authenticatorData, signature } = req.body || {};
+        if (!credentialId || !clientDataJSON || !authenticatorData || !signature) return fail('Missing data from the authenticator.');
+        const d = await loadAdminPasskeys();
+        const cred = d.credentials.find(c => c.id === credentialId);
+        if (!ADMIN_KEY || !cred) return fail('This fingerprint is not registered.');
+        const clientDataBuf = Buffer.from(clientDataJSON, 'base64url');
+        const clientData = JSON.parse(clientDataBuf.toString('utf8'));
+        if (clientData.type !== 'webauthn.get') return fail();
+        if (!takeAdminPasskeyChallenge(clientData.challenge, 'get')) return fail('The request expired. Try again.');
+        if (!adminPasskeyOriginOk(req, clientData.origin)) return fail('The site address does not match.');
+        const authData = Buffer.from(authenticatorData, 'base64url');
+        const parsed = adminWebauthn.parseAuthenticatorData(authData);
+        if (Buffer.compare(parsed.rpIdHash, adminWebauthn.sha256(Buffer.from(adminPasskeyRpId(req), 'utf8'))) !== 0) return fail();
+        if (!parsed.flags.userPresent || !parsed.flags.userVerified) return fail('Real fingerprint verification is required.');
+        const keyObject = crypto.createPublicKey({ key: cred.publicKeyJwk, format: 'jwk' });
+        const signedData = Buffer.concat([authData, adminWebauthn.sha256(clientDataBuf)]);
+        if (!adminWebauthn.verifySignature(keyObject, signedData, Buffer.from(signature, 'base64url'))) return fail();
+        if (parsed.counter > 0 && cred.counter > 0 && parsed.counter <= cred.counter) return fail('This fingerprint credential looks cloned. Re-register it.');
+        cred.counter = Math.max(cred.counter || 0, parsed.counter || 0);
+        cred.lastUsedAt = new Date().toISOString();
+        saveAdminPasskeys(d);
+        if (adminLoginFailures.has(req.ip)) adminLoginFailures.delete(req.ip);
+        const s = issueAdminSession();
+        console.log(`🔐 Admin fingerprint login OK (${cred.deviceLabel || 'device'}) from ${req.ip}`);
+        res.json({ success: true, token: s.token, expiresAt: s.expiresAt });
+    } catch (e) {
+        recordAdminLoginFailure(req.ip);
+        res.status(400).json({ success: false, message: 'Could not verify the fingerprint.' });
+    }
+});
+// Admin-only: register / list / remove. Ang pag-register at pag-alis ay kailangan ng TOTOONG admin key (hindi ng fingerprint session),
+// para ang nakaw na session ay hindi makapaglagay ng permanenteng fingerprint na backdoor. (400, hindi 403, para hindi mag-logout ang admin page.)
+function requireFullAdminKey(req, res, next) {
+    const p = String(req.headers['x-relay-admin-key'] || req.query.key || '');
+    if (p.startsWith('RS1.')) return res.status(400).json({ success: false, message: 'Sign out and sign in with the admin key (not fingerprint) to add or remove fingerprints.' });
+    next();
+}
+app.post('/relay/admin/api/passkey/register-options', requireAdminKey, requireFullAdminKey, async (req, res) => {
+    try {
+        const d = await loadAdminPasskeys();
+        res.json({
+            success: true,
+            options: {
+                challenge: newAdminPasskeyChallenge('create'),
+                rp: { name: 'OmniPOS RELAY', id: adminPasskeyRpId(req) },
+                user: { id: Buffer.from('relay-admin').toString('base64url'), name: 'relay-admin', displayName: 'RELAY Admin' },
+                pubKeyCredParams: [{ alg: -7, type: 'public-key' }, { alg: -257, type: 'public-key' }],
+                authenticatorSelection: { authenticatorAttachment: 'platform', residentKey: 'preferred', userVerification: 'required' },
+                attestation: 'none',
+                timeout: 60000,
+                excludeCredentials: d.credentials.map(c => ({ id: c.id, type: 'public-key' }))
+            }
+        });
+    } catch (e) { res.status(500).json({ success: false, message: 'Could not start registration.' }); }
+});
+app.post('/relay/admin/api/passkey/register-verify', requireAdminKey, requireFullAdminKey, async (req, res) => {
+    try {
+        const { clientDataJSON, attestationObject, deviceLabel } = req.body || {};
+        if (!clientDataJSON || !attestationObject) return res.status(400).json({ success: false, message: 'Missing data from the authenticator.' });
+        const clientData = JSON.parse(Buffer.from(clientDataJSON, 'base64url').toString('utf8'));
+        if (clientData.type !== 'webauthn.create') return res.status(400).json({ success: false, message: 'Invalid response type.' });
+        if (!takeAdminPasskeyChallenge(clientData.challenge, 'create')) return res.status(400).json({ success: false, message: 'The request expired. Try again.' });
+        if (!adminPasskeyOriginOk(req, clientData.origin)) return res.status(400).json({ success: false, message: 'The site address does not match.' });
+        const { value: attObj } = adminWebauthn.decodeCbor(Buffer.from(attestationObject, 'base64url'), 0);
+        const parsed = adminWebauthn.parseAuthenticatorData(Buffer.from(attObj.get('authData')));
+        if (Buffer.compare(parsed.rpIdHash, adminWebauthn.sha256(Buffer.from(adminPasskeyRpId(req), 'utf8'))) !== 0) return res.status(400).json({ success: false, message: 'The site (RP ID) does not match.' });
+        if (!parsed.flags.userPresent || !parsed.flags.userVerified) return res.status(400).json({ success: false, message: 'Real fingerprint verification is required, not just a tap.' });
+        if (!parsed.credentialPublicKey || !parsed.credentialId) return res.status(400).json({ success: false, message: 'No public key received.' });
+        const { keyObject } = adminWebauthn.coseKeyToPublicKeyObject(parsed.credentialPublicKey);
+        const id = Buffer.from(parsed.credentialId).toString('base64url');
+        const d = await loadAdminPasskeys();
+        if (d.credentials.some(c => c.id === id)) return res.status(409).json({ success: false, message: 'This fingerprint is already registered.' });
+        d.credentials.push({
+            id, publicKeyJwk: keyObject.export({ format: 'jwk' }), counter: parsed.counter || 0,
+            deviceLabel: String(deviceLabel || req.headers['user-agent'] || 'Device').slice(0, 80),
+            createdAt: new Date().toISOString(), lastUsedAt: null
+        });
+        saveAdminPasskeys(d);
+        console.log(`🔐 Admin fingerprint registered (${d.credentials[d.credentials.length - 1].deviceLabel})`);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(400).json({ success: false, message: 'Could not verify the fingerprint registration.' });
+    }
+});
+app.get('/relay/admin/api/passkey/list', requireAdminKey, async (req, res) => {
+    try {
+        const d = await loadAdminPasskeys();
+        res.json({ success: true, credentials: d.credentials.map(c => ({ id: c.id, deviceLabel: c.deviceLabel, createdAt: c.createdAt, lastUsedAt: c.lastUsedAt })) });
+    } catch (e) { res.status(500).json({ success: false, message: 'Could not read the list.' }); }
+});
+app.post('/relay/admin/api/passkey/delete', requireAdminKey, requireFullAdminKey, async (req, res) => {
+    try {
+        const id = String((req.body && req.body.id) || '');
+        const d = await loadAdminPasskeys();
+        const before = d.credentials.length;
+        d.credentials = d.credentials.filter(c => c.id !== id);
+        if (d.credentials.length === before) return res.status(404).json({ success: false, message: 'Not found.' });
+        saveAdminPasskeys(d);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ success: false, message: 'Could not remove it.' }); }
+});
 function requireAdminKey(req, res, next) {
     if (isAdminLoginLocked(req.ip)) {
         const retryAfterSec = adminLoginLockSecondsLeft(req.ip);
@@ -5912,7 +6091,7 @@ function requireAdminKey(req, res, next) {
         });
     }
     const provided = String(req.headers['x-relay-admin-key'] || req.query.key || '');
-    if (!ADMIN_KEY || !safeCompare(provided, ADMIN_KEY)) {
+    if (!ADMIN_KEY || !(adminSessionValid(provided) || safeCompare(provided, ADMIN_KEY))) {
         // A request with NO key at all (a logged-out or idle admin tab that is still polling) is not a password guess,
         // so it must not count toward the lock-out; otherwise one forgotten tab locks the whole admin panel.
         if (provided) recordAdminLoginFailure(req.ip);

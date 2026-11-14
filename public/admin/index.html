@@ -1454,6 +1454,7 @@ a:focus-visible,
   <div class="card">
     <input type="password" id="adminKeyInput" placeholder="Admin key" autocomplete="off">
     <button class="btn-primary" onclick="login()">Sign in</button>
+    <button class="btn-ghost" id="passkeyLoginBtn" style="display:none; width:100%; margin-top:8px;" onclick="passkeyLogin()">👆 Sign in with fingerprint</button>
     <div id="loginError" style="color:var(--red); font-size:12px; margin-top:8px;"></div>
   </div>
 </div>
@@ -1875,6 +1876,14 @@ a:focus-visible,
         <div class="sync-banner-text">
           <div id="backupSyncMain">Waiting for the first successful auto-backup check-in...</div>
           <div class="sync-banner-sub" id="backupSyncSub">Database → Download/RELAY_BACKUP</div>
+        </div>
+      </div>
+      <div class="card collapsible collapsed" id="cardFingerprintLogin" data-card-id="fingerprintLogin">
+        <h2 onclick="toggleCardCollapse('cardFingerprintLogin')">👆 Fingerprint login<span class="collapse-chevron">▾</span></h2>
+        <div class="collapse-body">
+          <div class="backup-note">Mag-sign in gamit ang fingerprint na naka-register sa phone na ito, kapalit ng pagta-type ng admin key. Ang admin key pa rin ang master: gumagana pa rin ito, at kailangan ito para mag-add o mag-alis ng fingerprint. Ang fingerprint login ay tumatagal ng 12 oras. Nakatali ang bawat registration sa address ng site (hal. relay.omniposph.com). Dapat Admin lang ang may naka-save na fingerprint sa phone na ito.</div>
+          <div id="passkeyList" class="backup-note"></div>
+          <div class="backup-row"><button class="btn-primary" onclick="passkeyRegister()">➕ Register this phone&#39;s fingerprint</button></div>
         </div>
       </div>
       <div class="card collapsible collapsed" id="cardBackupRestore" data-card-id="backupRestore">
@@ -2436,7 +2445,7 @@ const TAB_CARD_IDS = {
   revenue: ['cardSponsorDonations'],
   plans: ['cardFeatureAvailability', 'cardActivationFlags'],
   releases: ['cardPublishUpdate', 'cardDownloadPackage', 'cardBuildHistory'],
-  system: ['cardBackupRestore', 'cardDbStatus', 'cardDbHealth']
+  system: ['cardFingerprintLogin', 'cardBackupRestore', 'cardDbStatus', 'cardDbHealth']
 };
 const ALL_TAB_CARD_IDS = [].concat(...Object.values(TAB_CARD_IDS));
 function homeSetCardCollapsed(cardId, collapsed) {
@@ -2750,10 +2759,91 @@ setInterval(() => {
   }
   updateIdleCountdown();
 }, 1000);
+// ---------- Fingerprint login (WebAuthn) ----------
+function pkEnc(buf) { let s = ''; const b = new Uint8Array(buf); for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+function pkDec(str) { str = String(str).replace(/-/g, '+').replace(/_/g, '/'); while (str.length % 4) str += '='; const bin = atob(str); const b = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i); return b.buffer; }
+function passkeySupported() { return !!(window.PublicKeyCredential && navigator.credentials && window.isSecureContext); }
+async function refreshPasskeyLoginButton() {
+  const btn = document.getElementById('passkeyLoginBtn');
+  if (!btn || !passkeySupported()) return;
+  try {
+    const r = await fetch('/relay/admin/api/passkey/status');
+    const j = await r.json();
+    btn.style.display = j && j.enrolled ? 'block' : 'none';
+  } catch (e) { /* offline: leave hidden */ }
+}
+async function passkeyLogin() {
+  const err = document.getElementById('loginError');
+  err.innerText = '';
+  try {
+    const r = await fetch('/relay/admin/api/passkey/login-options', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const o = await r.json();
+    if (!r.ok || !o.success) throw new Error(o.message || 'Fingerprint login is not available.');
+    const cred = await navigator.credentials.get({ publicKey: {
+      challenge: pkDec(o.challenge), rpId: o.rpId, timeout: o.timeout, userVerification: 'required',
+      allowCredentials: (o.allowCredentials || []).map(c => ({ type: 'public-key', id: pkDec(c.id) }))
+    } });
+    const v = await fetch('/relay/admin/api/passkey/login-verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      credentialId: pkEnc(cred.rawId), clientDataJSON: pkEnc(cred.response.clientDataJSON),
+      authenticatorData: pkEnc(cred.response.authenticatorData), signature: pkEnc(cred.response.signature)
+    }) });
+    const j = await v.json();
+    if (!v.ok || !j.success || !j.token) throw new Error(j.message || 'Fingerprint was not accepted.');
+    document.getElementById('adminKeyInput').value = j.token;
+    login();
+  } catch (e) {
+    err.innerText = e && e.name === 'NotAllowedError' ? 'Fingerprint cancelled. Use the admin key or try again.' : ((e && e.message) || 'Fingerprint login failed.');
+  }
+}
+async function passkeyRegister() {
+  if (!passkeySupported()) return toast('This browser cannot use fingerprint login (needs HTTPS and a phone with a saved fingerprint).', 'error');
+  try {
+    const o = await api('/relay/admin/api/passkey/register-options', { method: 'POST', body: '{}' });
+    if (!o || !o.success) return toast((o && o.message) || 'Could not start registration.', 'error');
+    const opt = o.options;
+    const cred = await navigator.credentials.create({ publicKey: {
+      challenge: pkDec(opt.challenge), rp: opt.rp,
+      user: { id: pkDec(opt.user.id), name: opt.user.name, displayName: opt.user.displayName },
+      pubKeyCredParams: opt.pubKeyCredParams, authenticatorSelection: opt.authenticatorSelection, attestation: 'none', timeout: opt.timeout,
+      excludeCredentials: (opt.excludeCredentials || []).map(c => ({ type: 'public-key', id: pkDec(c.id) }))
+    } });
+    const label = ((navigator.userAgent.match(/\(([^)]+)\)/) || [])[1] || 'Phone').slice(0, 60);
+    const r = await api('/relay/admin/api/passkey/register-verify', { method: 'POST', body: JSON.stringify({
+      clientDataJSON: pkEnc(cred.response.clientDataJSON), attestationObject: pkEnc(cred.response.attestationObject), deviceLabel: label
+    }) });
+    if (!r || !r.success) return toast((r && r.message) || 'Could not register the fingerprint.', 'error');
+    toast('Fingerprint registered. You can now use "Sign in with fingerprint".', 'success');
+    loadPasskeyList();
+  } catch (e) {
+    if (e && e.message === 'forbidden') return;
+    toast(e && e.name === 'NotAllowedError' ? 'Fingerprint registration cancelled.' : ((e && e.message) || 'Registration failed.'), 'error');
+  }
+}
+async function loadPasskeyList() {
+  const el = document.getElementById('passkeyList');
+  if (!el || !adminKey) return;
+  try {
+    const j = await api('/relay/admin/api/passkey/list');
+    const list = (j && j.credentials) || [];
+    el.innerHTML = list.length
+      ? list.map(c => '<div style="display:flex; justify-content:space-between; gap:8px; align-items:center; padding:4px 0;"><span>👆 ' + String(c.deviceLabel || 'Device').replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch])) + '<br><small>' + (c.lastUsedAt ? 'Last used ' + new Date(c.lastUsedAt).toLocaleString() : 'Never used') + '</small></span><button class="btn-ghost" onclick="passkeyRemove(\'' + encodeURIComponent(c.id) + '\')">Remove</button></div>').join('')
+      : 'No fingerprint registered yet.';
+  } catch (e) { /* ignore */ }
+}
+async function passkeyRemove(encId) {
+  if (!confirm('Remove this fingerprint?')) return;
+  try {
+    const r = await api('/relay/admin/api/passkey/delete', { method: 'POST', body: JSON.stringify({ id: decodeURIComponent(encId) }) });
+    if (!r || !r.success) return toast((r && r.message) || 'Could not remove it.', 'error');
+    toast('Fingerprint removed.', 'success');
+    loadPasskeyList();
+  } catch (e) { /* ignore */ }
+}
 function login() {
   adminKey = document.getElementById('adminKeyInput').value.trim();
   if (!adminKey) return;
   sessionStorage.setItem('relayAdminKey', adminKey);
+  try { loadPasskeyList(); } catch (e) {}
   resetCollapsedCardsOnLogin();
   lastActivityAt = Date.now();
   renderLastExportNote();
@@ -6453,6 +6543,8 @@ function startPolling() {
   dbHealthPollTimer = setInterval(() => { if (adminKey) loadDbHealth(); }, 60000);
 }
 if (adminKey) { renderLastExportNote(); renderAutoBackupToggle(); startPolling(); applyHashTab(); }
+refreshPasskeyLoginButton();
+if (adminKey) loadPasskeyList();
 let deferredInstallPrompt = null;
 window.addEventListener('beforeinstallprompt', (e) => {
   e.preventDefault();
