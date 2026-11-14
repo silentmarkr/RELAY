@@ -38,6 +38,10 @@ if (!process.env.UV_THREADPOOL_SIZE) process.env.UV_THREADPOOL_SIZE = '8';
         if (!(key in process.env)) process.env[key] = val;
     }
 })();
+// ENV VAULT: ang mga key na inilagay sa admin page (env.html) ay pumupuno ng mga env variable na WALA sa host/.env.
+// Dapat ito ang una (sync) bago basahin ng anumang module ang process.env. Tingnan ang env-vault.js.
+const envVault = require('./env-vault');
+try { envVault.loadSync(__dirname); } catch (err) { console.error('⚠️  ENV vault failed to load (RELAY continues with host ENV only):', err && err.message); }
 const express = require('express');
 const crypto = require('crypto');
 const cloudBackupV2Store = require('./cloud-backup-v2-store');
@@ -10051,6 +10055,184 @@ app.post('/relay/client/kiosk-dev-pin/verify', rateLimit('client-kiosk-dev-pin',
         return res.json({ success: true, ok: v.ok, code: v.code || null, retryAfterSec: v.retryAfterSec || 0 });
     } catch (err) { return res.status(500).json({ success: false, message: 'Hindi ma-verify ngayon.' }); }
 });
+
+// ===== OUTPUT LOCK CONTROL (Inventory-only mode — remote unlock) =====
+// Default ng lahat ng client: LOCKED (print/preview/share/email/download ng resibo). Dito ka nagtatanggal/naglalagay ng lock,
+// anumang oras, sa admin page output-lock.html: para sa LAHAT ng client (global) o para sa ISANG client (override).
+// Ang client ay nagtatanong dito at tumatanggap ng SIGNED na sagot. Tingnan ang output-lock-control.js.
+const outputLockControl = require('./output-lock-control');
+const OUTPUT_LOCK_STATE_PATH = path.join(__dirname, 'output-lock-control.json');
+async function loadOutputLockState() {
+    const fromStore = await getPersistentJSON('output-lock-control', null, { strict: true });
+    if (fromStore !== null) return outputLockControl.normalizeState(fromStore);
+    try { return outputLockControl.normalizeState(JSON.parse(readStateFileSync(OUTPUT_LOCK_STATE_PATH))); } catch (err) { return outputLockControl.emptyState(); }
+}
+function saveOutputLockState(state) {
+    if (pgPoolDevices || pgPool || redisClient) { setPersistentJSON('output-lock-control', state); return; }
+    atomicWriteFileSync(OUTPUT_LOCK_STATE_PATH, JSON.stringify(state));
+}
+const OUTPUT_LOCK_TTL_MS = Math.max(60 * 1000, Number(process.env.OUTPUT_LOCK_TTL_HOURS || 12) * 60 * 60 * 1000);
+app.get('/relay/admin/api/output-lock/status', requireAdminKey, async (req, res) => {
+    try {
+        const st = await loadOutputLockState();
+        res.set('Cache-Control', 'no-store');
+        res.json({ success: true, state: st, ttlHours: OUTPUT_LOCK_TTL_MS / 3600000 });
+    } catch (err) { res.status(500).json({ success: false, message: 'Hindi mabasa ang lock status: ' + err.message }); }
+});
+app.post('/relay/admin/api/output-lock/set', requireAdminKey, rateLimit('output-lock-set', 120, 60 * 60 * 1000), async (req, res) => {
+    try {
+        const body = req.body || {};
+        const next = outputLockControl.applyChange(await loadOutputLockState(), {
+            scope: body.scope, unlocked: body.unlocked === true, installationId: body.installationId, mode: body.mode, note: body.note
+        });
+        saveOutputLockState(next);
+        console.log(`🔓 Output lock updated via admin: scope=${body.scope} unlocked=${body.unlocked === true} mode=${body.mode || '-'} id=${body.installationId || '-'}`);
+        res.set('Cache-Control', 'no-store');
+        res.json({ success: true, state: next });
+    } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+});
+// Client: "naka-unlock ba ako?" -> signed command (ipinapadala rin kapag LOCKED para agad bumalik sa lock).
+app.get('/relay/client/output-lock', rateLimit('client-output-lock', 240, 60 * 60 * 1000), requireApiKey, async (req, res) => {
+    let installationId = req.relayClient ? req.relayClient.installationId : null;
+    if (!installationId && req.relayMasterAuthenticated) {
+        const fromQuery = String((req.query || {}).installationId || '').trim();
+        installationId = fromQuery && fromQuery.length <= 200 ? fromQuery : null;
+    }
+    if (!installationId) return res.status(403).json({ success: false, code: 'CLIENT_CREDENTIAL_REQUIRED', message: 'A per-client credential is required.' });
+    res.set('Cache-Control', 'no-store');
+    try {
+        const st = await loadOutputLockState();
+        const verdict = outputLockControl.resolve(st, installationId);
+        const command = outputLockControl.signCommand(privateKey, installationId, verdict.unlocked, OUTPUT_LOCK_TTL_MS);
+        res.json({ success: true, unlocked: verdict.unlocked, command });
+    } catch (err) { res.status(500).json({ success: false, message: 'Hindi masagot ang lock status ngayon.' }); }
+});
+
+// ===== COMPANION APPS CONTROL (OmniKiosk / Kitchen Kiosk / Customer Display — remote allow/deny sa OmniPOS Native) =====
+// Default ng LAHAT ng client: LOCKED. Sa admin page companion-apps.html mo ina-allow ang bawat app: sa LAHAT ng client (global) o sa
+// ISANG client/store (override). Signed ang sagot sa client. Tingnan ang companion-apps-control.js.
+const companionAppsControl = require('./companion-apps-control');
+const COMPANION_APPS_STATE_PATH = path.join(__dirname, 'companion-apps-control.json');
+async function loadCompanionAppsState() {
+    const fromStore = await getPersistentJSON('companion-apps-control', null, { strict: true });
+    if (fromStore !== null) return companionAppsControl.normalizeState(fromStore);
+    try { return companionAppsControl.normalizeState(JSON.parse(readStateFileSync(COMPANION_APPS_STATE_PATH))); } catch (err) { return companionAppsControl.emptyState(); }
+}
+function saveCompanionAppsState(state) {
+    if (pgPoolDevices || pgPool || redisClient) { setPersistentJSON('companion-apps-control', state); return; }
+    atomicWriteFileSync(COMPANION_APPS_STATE_PATH, JSON.stringify(state));
+}
+const COMPANION_APPS_TTL_MS = Math.max(60 * 1000, Number(process.env.COMPANION_APPS_TTL_HOURS || 12) * 60 * 60 * 1000);
+app.get('/relay/admin/api/companion-apps/status', requireAdminKey, async (req, res) => {
+    try {
+        const st = await loadCompanionAppsState();
+        res.set('Cache-Control', 'no-store');
+        res.json({ success: true, state: st, apps: companionAppsControl.APPS.map((id) => ({ id, label: companionAppsControl.APP_LABELS[id] })), ttlHours: COMPANION_APPS_TTL_MS / 3600000 });
+    } catch (err) { res.status(500).json({ success: false, message: 'Hindi mabasa ang companion apps status: ' + err.message }); }
+});
+app.post('/relay/admin/api/companion-apps/set', requireAdminKey, rateLimit('companion-apps-set', 120, 60 * 60 * 1000), async (req, res) => {
+    try {
+        const body = req.body || {};
+        const next = companionAppsControl.applyChange(await loadCompanionAppsState(), {
+            scope: body.scope, app: body.app, allowed: body.allowed === true, installationId: body.installationId, mode: body.mode, note: body.note
+        });
+        saveCompanionAppsState(next);
+        console.log(`📲 Companion apps updated via admin: scope=${body.scope} app=${body.app || '-'} allowed=${body.allowed === true} mode=${body.mode || '-'} id=${body.installationId || '-'}`);
+        res.set('Cache-Control', 'no-store');
+        res.json({ success: true, state: next });
+    } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+});
+// Client: "anong companion apps ang pwede sa akin?" -> signed command (ipinapadala rin kapag walang allowed para agad bumalik sa lock).
+app.get('/relay/client/companion-apps', rateLimit('client-companion-apps', 240, 60 * 60 * 1000), requireApiKey, async (req, res) => {
+    let installationId = req.relayClient ? req.relayClient.installationId : null;
+    if (!installationId && req.relayMasterAuthenticated) {
+        const fromQuery = String((req.query || {}).installationId || '').trim();
+        installationId = fromQuery && fromQuery.length <= 200 ? fromQuery : null;
+    }
+    if (!installationId) return res.status(403).json({ success: false, code: 'CLIENT_CREDENTIAL_REQUIRED', message: 'A per-client credential is required.' });
+    res.set('Cache-Control', 'no-store');
+    try {
+        const st = await loadCompanionAppsState();
+        const verdict = companionAppsControl.resolve(st, installationId);
+        const command = companionAppsControl.signCommand(privateKey, installationId, verdict.allowed, COMPANION_APPS_TTL_MS);
+        res.json({ success: true, allowed: verdict.allowed, command });
+    } catch (err) { res.status(500).json({ success: false, message: 'Hindi masagot ang companion apps status ngayon.' }); }
+});
+
+// ===== ENV VAULT (admin page env.html) =====
+// Write-only: ang values ay HINDI kailanman ibinabalik sa browser. Ang host ENV (Render) ang nananaig; ang vault ay pumupuno lang
+// ng mga variable na wala. Nilo-load sa boot (tingnan ang tuktok ng file). Kailangan ng HTTPS at RELAY_ADMIN_KEY para sumulat.
+async function persistEnvVaultToDb(blob) {
+    if (!blob) return false;
+    if (!(pgPoolDevices || pgPool || redisClient)) return false;
+    setPersistentJSON(envVault.DB_KEY, blob);
+    return await flushPersistentWrites(8000);
+}
+function envVaultSecureGate(req, res) {
+    if (!birPassKey.isSecureAdminRequest(req)) {
+        res.status(400).json({ success: false, code: 'HTTPS_REQUIRED', message: 'Kailangan ng HTTPS para sa pagbabago ng ENV (localhost lang ang exempted). Kung nasa likod ng proxy, i-set ang TRUST_PROXY_HOPS.' });
+        return false;
+    }
+    return true;
+}
+app.get('/relay/admin/api/env', requireAdminKey, (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.json({ success: true, vault: envVault.status(), variables: envVault.catalog(__dirname), neverVault: [...envVault.NEVER_VAULT] });
+});
+app.post('/relay/admin/api/env/set', requireAdminKey, rateLimit('env-vault-set', 60, 60 * 60 * 1000), async (req, res) => {
+    if (!envVaultSecureGate(req, res)) return;
+    try {
+        const raw = (req.body && req.body.values) || {};
+        const values = {};
+        for (const [k, v] of Object.entries(raw)) { if (typeof v === 'string' && v.length) values[String(k).trim()] = v; }
+        if (!Object.keys(values).length) return res.status(400).json({ success: false, message: 'Walang laman na ise-save.' });
+        const r = envVault.setValues(values);
+        const mirrored = await persistEnvVaultToDb(r.blob);
+        console.log(`🔐 ENV vault updated via admin: ${r.names.join(', ')} (values hidden)`);
+        res.set('Cache-Control', 'no-store');
+        res.json({ success: true, saved: r.names, dbMirrored: mirrored, dbMirrorSkipped: !r.blob, restartNeeded: true, vault: envVault.status() });
+    } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+});
+// 👁 Reveal: ipinapakita ang kasalukuyang (effective) value ng isang variable. Kailangan ng HTTPS + admin key, naka-rate limit, may audit log
+// (pangalan lang, hindi ang value), no-store. Hindi puwedeng i-reveal ang RELAY_PRIVATE_KEY_PEM at RELAY_ENV_MASTER_KEY.
+app.post('/relay/admin/api/env/reveal', requireAdminKey, rateLimit('env-vault-reveal', 60, 10 * 60 * 1000), (req, res) => {
+    if (!envVaultSecureGate(req, res)) return;
+    const name = String((req.body && req.body.name) || '').trim();
+    if (!envVault.NAME_RE.test(name)) return res.status(400).json({ success: false, message: 'Mali ang pangalan ng variable.' });
+    if (envVault.NEVER_VAULT.has(name)) return res.status(403).json({ success: false, message: `${name} ay hindi puwedeng ipakita dito.` });
+    const value = process.env[name];
+    res.set('Cache-Control', 'no-store');
+    if (value === undefined || value === '') return res.status(404).json({ success: false, message: 'Walang laman ang variable na ito.' });
+    console.log(`👁 ENV value revealed via admin: ${name} (value hidden in log)`);
+    res.json({ success: true, name, value, source: envVault.sourceOf(name) });
+});
+app.post('/relay/admin/api/env/delete', requireAdminKey, rateLimit('env-vault-delete', 60, 60 * 60 * 1000), async (req, res) => {
+    if (!envVaultSecureGate(req, res)) return;
+    try {
+        const names = Array.isArray(req.body && req.body.names) ? req.body.names.map(String).slice(0, 200) : [];
+        const r = envVault.deleteNames(names);
+        const mirrored = await persistEnvVaultToDb(r.blob || envVault.dbBlob());
+        console.log(`🔐 ENV vault removed via admin: ${r.names.join(', ') || '(none)'}`);
+        res.set('Cache-Control', 'no-store');
+        res.json({ success: true, removed: r.names, dbMirrored: mirrored, restartNeeded: true, vault: envVault.status() });
+    } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+});
+// I-restart ang RELAY para mabasa ng lahat ng module ang bagong ENV (graceful: SIGTERM handler -> flush -> exit; auto-restart ng Render).
+app.post('/relay/admin/api/env/restart', requireAdminKey, rateLimit('env-vault-restart', 10, 60 * 60 * 1000), (req, res) => {
+    if (!envVaultSecureGate(req, res)) return;
+    if (!(req.body && req.body.confirm === true)) return res.status(400).json({ success: false, message: 'Kailangan ng confirm: true.' });
+    res.json({ success: true, message: 'Magre-restart ang RELAY sa loob ng ilang segundo. Kung hindi ito awtomatikong nag-restart (walang supervisor), simulan ulit ito.' });
+    setTimeout(() => { try { process.kill(process.pid, 'SIGTERM'); } catch (_e) { process.exit(0); } }, 600);
+});
+// Kung may local vault na walang kopya sa database (hal. kakalagay lang ng database), i-mirror ito.
+setTimeout(async () => {
+    try {
+        if (!envVault.hasVault() || !(pgPoolDevices || pgPool)) return;
+        const cur = await getPersistentJSON(envVault.DB_KEY, null);
+        if (cur) return;
+        await persistEnvVaultToDb(envVault.dbBlob());
+    } catch (_e) { /* best effort */ }
+}, 25 * 1000).unref();
 
 // ===== REMOTE BIR TEST WIPE =====
 // The developer presses "Send wipe command" for ONE installation (admin page bir-test-wipe.html). RELAY signs a short-lived,

@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#05070d"><title>Output Lock (Inventory-only) — RELAY Admin</title>
+<style>
+:root{color-scheme:dark;--bg:#05070d;--card:#101625;--line:#26334f;--text:#eafcff;--muted:#9aabc9;--accent:#22e5ff;--green:#3ddc84;--red:#ff5c72;--amber:#ffc857}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{max-width:720px;margin:0 auto;padding:18px 14px 60px}
+a{color:var(--accent)}h1{font-size:1.4rem;margin:.4rem 0}h2{font-size:1.05rem;margin:0 0 10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:14px 0}
+.field{display:flex;flex-direction:column;gap:4px;font-size:.85rem;color:var(--muted);margin:8px 0}
+input,select{background:#0a0f1c;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px;font:inherit;width:100%}
+button{background:#16213a;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px 16px;font:inherit;cursor:pointer}
+button.primary{background:var(--accent);color:#04222a;border-color:var(--accent);font-weight:700}
+button.danger{background:var(--red);color:#2a0710;border-color:var(--red);font-weight:700}
+button:disabled{opacity:.5;cursor:not-allowed}
+.small{font-size:.8rem;color:var(--muted)}
+.notice{margin:10px 0;padding:9px 12px;border-radius:8px;background:#0a1a14;border:1px solid #1f5a3d;color:var(--green);display:none}
+.notice.error{background:#2a0e14;border-color:#7a2230;color:var(--red)}.notice.show{display:block}
+.warn{background:#2a2108;border:1px solid #6b5514;color:var(--amber);padding:9px 12px;border-radius:8px;margin:10px 0}
+.badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:.8rem;border:1px solid var(--line)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:space-between;border-top:1px solid var(--line);padding:8px 0}
+.row:first-child{border-top:0}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.8rem;word-break:break-all}
+</style><link rel="stylesheet" href="admin-ui.css">
+<script src="admin-ui.js" defer></script>
+</head><body><main>
+<p><a href="index.html#system">← RELAY Admin</a></p>
+<h1>🔒 Output Lock (Inventory-only mode)</h1>
+<div class="warn">Default ng <b>lahat ng client ay LOCKED</b>: naka-lock ang print, print preview, share, email at download ng resibo/invoice/transaction data. Dito mo ito matatanggal (o maibabalik) <b>anumang oras</b>. Ang client ay nagtatanong sa RELAY kada ~60 segundo at tumatanggap ng <b>signed</b> na utos; kapag hindi na maabot ang RELAY nang lampas sa <span id="ttl">12</span> oras, kusang babalik sa LOCKED ang client.</div>
+
+<section class="card"><h2>Admin authentication</h2>
+<label class="field">RELAY admin key<input id="adminKey" type="password" autocomplete="current-password" placeholder="Enter ADMIN_KEY"></label>
+<button id="connectBtn">Connect</button></section>
+
+<div id="notice" class="notice" role="status"></div>
+
+<section class="card"><h2>LAHAT ng client <span id="gState" class="badge">—</span></h2>
+<p class="small" id="when">Mag-connect muna gamit ang admin key.</p>
+<label class="field">Tala (opsyonal, para sa sarili mo)<input id="note" maxlength="300" placeholder="hal. Na-accredit na ang BIR / testing lang"></label>
+<div style="margin-top:10px"><button id="unlockAll" class="primary" disabled>🔓 I-unlock ang LAHAT</button> <button id="lockAll" class="danger" disabled>🔒 I-lock ang LAHAT</button></div>
+</section>
+
+<section class="card"><h2>ISANG client lang (override)</h2>
+<p class="small">Nananaig ito sa global setting. Piliin ang client o i-paste ang installationId.</p>
+<label class="field">Client<select id="pick"><option value="">— piliin —</option></select></label>
+<label class="field">Installation ID<input id="iid" placeholder="installationId"></label>
+<div style="margin-top:10px"><button id="oUnlock" class="primary" disabled>🔓 I-unlock ito</button> <button id="oLock" class="danger" disabled>🔒 I-lock ito</button> <button id="oInherit" disabled>↩ Sundin ang global</button></div>
+<h2 style="margin-top:16px">Kasalukuyang overrides</h2>
+<div id="list" class="small">—</div>
+<div style="margin-top:10px"><button id="clearAll" disabled>Alisin ang lahat ng override</button></div>
+</section>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  let labels={};
+  function say(m,bad){const n=$('notice');n.textContent=m;n.className='notice show'+(bad?' error':'')}
+  async function api(p,method,body){
+    const r=await fetch(p,{method,headers:{'x-relay-admin-key':$('adminKey').value,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
+    let j={};try{j=await r.json()}catch(_){}
+    if(!r.ok||j.success===false){const e=new Error(j.message||('HTTP '+r.status));e.status=r.status;throw e}
+    return j;
+  }
+  function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+  function render(st,ttl){
+    $('ttl').textContent=ttl;
+    $('gState').textContent=st.globalUnlocked?'🔓 UNLOCKED':'🔒 LOCKED (default)';
+    $('gState').style.color=st.globalUnlocked?'var(--green)':'var(--amber)';
+    $('when').textContent=st.updatedAt?('Huling binago: '+new Date(st.updatedAt).toLocaleString()+(st.note?(' — '+st.note):'')):'Wala pang pagbabago: lahat ay LOCKED.';
+    const ids=Object.keys(st.installations);
+    $('list').innerHTML=ids.length?ids.map(id=>{const o=st.installations[id];const lab=labels[id]?esc(labels[id])+' · ':'';
+      return '<div class="row"><span><b>'+(o.mode==='unlock'?'🔓 Unlocked':'🔒 Locked')+'</b> · '+lab+'<span class="mono">'+esc(id)+'</span></span><button data-id="'+esc(id)+'">↩ Alisin</button></div>'}).join(''):'Walang override.';
+    $('list').querySelectorAll('button[data-id]').forEach(b=>b.onclick=()=>change({scope:'installation',installationId:b.dataset.id,mode:'inherit'}));
+    ['unlockAll','lockAll','oUnlock','oLock','oInherit','clearAll'].forEach(i=>$(i).disabled=false);
+  }
+  async function load(){
+    const j=await api('/relay/admin/api/output-lock/status','GET');
+    render(j.state,j.ttlHours);
+  }
+  async function loadDevices(){
+    try{
+      const j=await api('/relay/admin/api/devices','GET');
+      const list=j.seenDevices||[];
+      const sel=$('pick');sel.innerHTML='<option value="">— piliin —</option>';
+      list.forEach(d=>{labels[d.installationId]=d.label||'';const o=document.createElement('option');o.value=d.installationId;o.textContent=(d.label||'(walang label)')+' — '+d.installationId.slice(0,12)+'…';sel.appendChild(o)});
+    }catch(_){}
+  }
+  async function change(body){
+    try{const j=await api('/relay/admin/api/output-lock/set','POST',Object.assign({note:$('note').value},body));render(j.state,$('ttl').textContent);say('Na-save. Susunod ang mga client sa loob ng ~60 segundo.')}
+    catch(e){say(e.message,true)}
+  }
+  $('pick').onchange=()=>{if($('pick').value)$('iid').value=$('pick').value};
+  $('unlockAll').onclick=()=>{if(confirm('I-UNLOCK ang print/preview/share/email/download ng resibo sa LAHAT ng client?'))change({scope:'global',unlocked:true})};
+  $('lockAll').onclick=()=>{if(confirm('I-LOCK ang LAHAT ng client?'))change({scope:'global',unlocked:false})};
+  const iid=()=>$('iid').value.trim();
+  $('oUnlock').onclick=()=>iid()?change({scope:'installation',installationId:iid(),mode:'unlock'}):say('Maglagay ng installationId.',true);
+  $('oLock').onclick=()=>iid()?change({scope:'installation',installationId:iid(),mode:'lock'}):say('Maglagay ng installationId.',true);
+  $('oInherit').onclick=()=>iid()?change({scope:'installation',installationId:iid(),mode:'inherit'}):say('Maglagay ng installationId.',true);
+  $('clearAll').onclick=()=>{if(confirm('Alisin ang LAHAT ng per-client override?'))change({scope:'clear-overrides'})};
+  async function connect(){
+    try{
+      await loadDevices();await load();
+      try{sessionStorage.setItem('relayAdminKey',$('adminKey').value)}catch(_){}
+      say('Connected.');
+    }catch(e){
+      if(e.status===401||e.status===403){try{sessionStorage.removeItem('relayAdminKey')}catch(_){}}
+      say(e.message,true);
+    }
+  }
+  $('connectBtn').onclick=connect;
+  let saved='';try{saved=sessionStorage.getItem('relayAdminKey')||''}catch(_){}
+  if(saved){$('adminKey').value=saved;connect()}
+})();
+</script></main></body></html>

@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#05070d"><title>Companion Apps (APK) — RELAY Admin</title>
+<style>
+:root{color-scheme:dark;--bg:#05070d;--card:#101625;--line:#26334f;--text:#eafcff;--muted:#9aabc9;--accent:#22e5ff;--green:#3ddc84;--red:#ff5c72;--amber:#ffc857}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{max-width:720px;margin:0 auto;padding:18px 14px 60px}
+a{color:var(--accent)}h1{font-size:1.4rem;margin:.4rem 0}h2{font-size:1.05rem;margin:0 0 10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:14px 0}
+.field{display:flex;flex-direction:column;gap:4px;font-size:.85rem;color:var(--muted);margin:8px 0}
+input,select{background:#0a0f1c;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px;font:inherit;width:100%}
+button{background:#16213a;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px 16px;font:inherit;cursor:pointer}
+button.primary{background:var(--accent);color:#04222a;border-color:var(--accent);font-weight:700}
+button.danger{background:var(--red);color:#2a0710;border-color:var(--red);font-weight:700}
+button:disabled{opacity:.5;cursor:not-allowed}
+.small{font-size:.8rem;color:var(--muted)}
+.notice{margin:10px 0;padding:9px 12px;border-radius:8px;background:#0a1a14;border:1px solid #1f5a3d;color:var(--green);display:none}
+.notice.error{background:#2a0e14;border-color:#7a2230;color:var(--red)}.notice.show{display:block}
+.warn{background:#2a2108;border:1px solid #6b5514;color:var(--amber);padding:9px 12px;border-radius:8px;margin:10px 0}
+.badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:.8rem;border:1px solid var(--line)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:space-between;border-top:1px solid var(--line);padding:8px 0}
+.row:first-child{border-top:0}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.8rem;word-break:break-all}
+</style><link rel="stylesheet" href="admin-ui.css">
+<script src="admin-ui.js" defer></script>
+</head>
+<body><main>
+<p><a href="index.html#system">← RELAY Admin</a></p>
+<h1>📲 Companion Apps (APK)</h1>
+<div class="warn">Ang <b>OmniKiosk, Kitchen Kiosk at Customer Display</b> ay naka-bundle sa loob ng OmniPOS Native. Default: <b>LOCKED ang lahat</b> — walang store ang makakapag-install o makaka-save ng APK hangga't hindi mo ina-allow dito. Puwede <b>per app</b> at <b>per store</b>. Ang client ay nagtatanong sa RELAY kada ~60 segundo at tumatanggap ng <b>signed</b> na sagot; kapag hindi na maabot ang RELAY nang lampas sa <span id="ttl">12</span> oras, babalik sa LOCKED. Paalala: ito ay control sa loob ng app, hindi proteksyon laban sa taong kayang mag-extract ng APK mula sa app package.</div>
+
+<section class="card"><h2>Admin authentication</h2>
+<label class="field">RELAY admin key<input id="adminKey" type="password" autocomplete="current-password" placeholder="Enter ADMIN_KEY"></label>
+<button id="connectBtn">Connect</button></section>
+
+<div id="notice" class="notice" role="status"></div>
+
+<section class="card"><h2>LAHAT ng store (global)</h2>
+<p class="small" id="when">Mag-connect muna gamit ang admin key.</p>
+<label class="field">Tala (opsyonal, para sa sarili mo)<input id="note" maxlength="300" placeholder="hal. Para sa mga may kiosk package"></label>
+<div id="gList"></div>
+<div style="margin-top:10px"><button id="allowAll" class="primary" disabled>✅ I-allow ang LAHAT ng app</button> <button id="denyAll" class="danger" disabled>⛔ I-block ang LAHAT ng app</button></div>
+</section>
+
+<section class="card"><h2>ISANG store lang (override)</h2>
+<p class="small">Nananaig ito sa global. Piliin ang client o i-paste ang installationId.</p>
+<label class="field">Client<select id="pick"><option value="">— piliin —</option></select></label>
+<label class="field">Installation ID<input id="iid" placeholder="installationId"></label>
+<label class="field">App<select id="appSel"></select></label>
+<div style="margin-top:10px"><button id="oAllow" class="primary" disabled>✅ I-allow</button> <button id="oDeny" class="danger" disabled>⛔ I-block</button> <button id="oInherit" disabled>↩ Sundin ang global</button></div>
+<h2 style="margin-top:16px">Kasalukuyang overrides</h2>
+<div id="list" class="small">—</div>
+<div style="margin-top:10px"><button id="clearAll" disabled>Alisin ang lahat ng override</button></div>
+</section>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  let labels={},apps=[];
+  const lab=a=>{const x=apps.find(y=>y.id===a);return x?x.label:a};
+  function say(m,bad){const n=$('notice');n.textContent=m;n.className='notice show'+(bad?' error':'')}
+  async function api(p,method,body){
+    const r=await fetch(p,{method,headers:{'x-relay-admin-key':$('adminKey').value,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
+    let j={};try{j=await r.json()}catch(_){}
+    if(!r.ok||j.success===false){const e=new Error(j.message||('HTTP '+r.status));e.status=r.status;throw e}
+    return j;
+  }
+  function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+  function render(st,ttl){
+    $('ttl').textContent=ttl;
+    $('when').textContent=st.updatedAt?('Huling binago: '+new Date(st.updatedAt).toLocaleString()+(st.note?(' — '+st.note):'')):'Wala pang pagbabago: lahat ay LOCKED.';
+    $('gList').innerHTML=apps.map(a=>{const on=st.global[a.id]===true;
+      return '<div class="row"><span><b>'+esc(a.label)+'</b> · '+(on?'<span style="color:var(--green)">✅ Allowed (lahat)</span>':'<span style="color:var(--amber)">🔒 Locked</span>')+'</span>'
+        +'<button data-g="'+a.id+'" data-v="'+(on?'0':'1')+'">'+(on?'⛔ I-block':'✅ I-allow')+'</button></div>'}).join('');
+    $('gList').querySelectorAll('button[data-g]').forEach(b=>b.onclick=()=>change({scope:'global',app:b.dataset.g,allowed:b.dataset.v==='1'}));
+    const ids=Object.keys(st.installations);
+    $('list').innerHTML=ids.length?ids.map(id=>{const o=st.installations[id];const l=labels[id]?esc(labels[id])+' · ':'';
+      const parts=Object.keys(o.apps).map(a=>(o.apps[a]==='allow'?'✅ ':'⛔ ')+esc(lab(a))).join(', ');
+      return '<div class="row"><span><b>'+parts+'</b> · '+l+'<span class="mono">'+esc(id)+'</span></span><button data-id="'+esc(id)+'">↩ Alisin</button></div>'}).join(''):'Walang override.';
+    $('list').querySelectorAll('button[data-id]').forEach(b=>b.onclick=()=>change({scope:'installation',installationId:b.dataset.id,app:'all',mode:'inherit'}));
+    ['allowAll','denyAll','oAllow','oDeny','oInherit','clearAll'].forEach(i=>$(i).disabled=false);
+  }
+  async function load(){
+    const j=await api('/relay/admin/api/companion-apps/status','GET');
+    apps=j.apps;
+    const sel=$('appSel');if(!sel.options.length){sel.innerHTML='<option value="all">Lahat ng app</option>'+apps.map(a=>'<option value="'+esc(a.id)+'">'+esc(a.label)+'</option>').join('')}
+    render(j.state,j.ttlHours);
+  }
+  async function loadDevices(){
+    try{
+      const j=await api('/relay/admin/api/devices','GET');
+      const list=j.seenDevices||[];
+      const sel=$('pick');sel.innerHTML='<option value="">— piliin —</option>';
+      list.forEach(d=>{labels[d.installationId]=d.label||'';const o=document.createElement('option');o.value=d.installationId;o.textContent=(d.label||'(walang label)')+' — '+d.installationId.slice(0,12)+'…';sel.appendChild(o)});
+    }catch(_){}
+  }
+  async function change(body){
+    try{const j=await api('/relay/admin/api/companion-apps/set','POST',Object.assign({note:$('note').value},body));render(j.state,$('ttl').textContent);say('Na-save. Susunod ang mga client sa loob ng ~60 segundo.')}
+    catch(e){say(e.message,true)}
+  }
+  $('pick').onchange=()=>{if($('pick').value)$('iid').value=$('pick').value};
+  $('allowAll').onclick=()=>{if(confirm('I-ALLOW ang LAHAT ng companion app sa LAHAT ng store?'))change({scope:'global',app:'all',allowed:true})};
+  $('denyAll').onclick=()=>{if(confirm('I-BLOCK ang LAHAT ng companion app sa LAHAT ng store?'))change({scope:'global',app:'all',allowed:false})};
+  const iid=()=>$('iid').value.trim();
+  const ov=mode=>()=>iid()?change({scope:'installation',installationId:iid(),app:$('appSel').value,mode}):say('Maglagay ng installationId.',true);
+  $('oAllow').onclick=ov('allow');$('oDeny').onclick=ov('deny');$('oInherit').onclick=ov('inherit');
+  $('clearAll').onclick=()=>{if(confirm('Alisin ang LAHAT ng per-store override?'))change({scope:'clear-overrides'})};
+  async function connect(){
+    try{
+      await loadDevices();await load();
+      try{sessionStorage.setItem('relayAdminKey',$('adminKey').value)}catch(_){}
+      say('Connected.');
+    }catch(e){
+      if(e.status===401||e.status===403){try{sessionStorage.removeItem('relayAdminKey')}catch(_){}}
+      say(e.message,true);
+    }
+  }
+  $('connectBtn').onclick=connect;
+  let saved='';try{saved=sessionStorage.getItem('relayAdminKey')||''}catch(_){}
+  if(saved){$('adminKey').value=saved;connect()}
+})();
+</script></main></body></html>

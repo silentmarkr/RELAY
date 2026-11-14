@@ -42,3 +42,6 @@ data/
 
 # Where a migrated database now lives (contains connection strings — a secret). Written by Admin -> Database Migration.
 db-url-overrides.json
+relay-env-vault.json
+relay-env-vault.json.tmp
+.relay-env.key

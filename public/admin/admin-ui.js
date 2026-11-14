@@ -30,6 +30,9 @@
       { t: 'Database Migration', d: 'Move a Neon database to a new URL', ico: '🛰️', href: 'database-migration.html', k: 'neon postgres move migrate' },
       { t: 'Public URL Checker', d: 'What still points to an old RELAY URL', ico: '🔗', href: 'url-check.html', k: 'domain webhook' },
       { t: 'BIR Reset Pass Keys', d: 'Issue one-time pass keys', ico: '🧾', href: 'bir-passkeys.html', k: 'bir reset' },
+      { t: 'ENV Vault', d: 'Keys & secrets ng RELAY (hidden), kapalit ng Render ENV', ico: '🔐', href: 'env.html', k: 'env environment keys secrets render vault' },
+      { t: 'Output Lock (Inventory-only)', d: 'Unlock/lock print, preview & share ng resibo', ico: '🔒', href: 'output-lock.html', k: 'output lock unlock print receipt inventory only' },
+      { t: 'Companion Apps (APK)', d: 'I-allow ang OmniKiosk, Kitchen Kiosk at Customer Display per store', ico: '📲', href: 'companion-apps.html', k: 'companion apps apk omnikiosk kitchen kiosk display install download lock' },
       { t: 'Kiosk Developer PIN', d: "One PIN for all clients' kiosk setup", ico: '🔐', href: 'kiosk-dev-pin.html', k: 'kiosk pin' },
       { t: 'BIR Test Wipe', d: 'Remote wipe for testing only', ico: '🧪', href: 'bir-test-wipe.html', k: 'bir wipe test' }
     ] }
