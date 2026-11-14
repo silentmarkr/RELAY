@@ -10300,6 +10300,79 @@ app.get('/relay/client/output-lock', rateLimit('client-output-lock', 240, 60 * 6
     } catch (err) { res.status(500).json({ success: false, message: 'Hindi masagot ang lock status ngayon.' }); }
 });
 
+// ===== SIGNED BIR PROFILE (BIR identity provisioned by the developer, never editable by the client) =====
+// Ang business name, TIN, VAT status, MIN, serial no., PTU no./date at POS-supplier info ng bawat client ay ginagawa dito
+// (admin page bir-profile.html) at PINIPIRMAHAN ng private key ng RELAY. Ang OmniPOS ay nagba-verify gamit ang RELAY_PUBLIC_KEY
+// na naka-bind sa installationId at hindi tumatanggap ng ibang source ng BIR identity. Para magsulat/magbura: RELAY_ADMIN_KEY
+// + developer passkey (RELAY_BIR_RESET_PASSKEY, HTTPS lang, may wrong-guess lockout) — parehong gate ng BIR pass keys.
+// Tingnan ang bir-profile.js at OMNIPOS/bir-profile.js (dapat magkapareho ang canonical string at signing domain).
+const birProfile = require('./bir-profile');
+const BIR_PROFILE_STATE_PATH = path.join(__dirname, 'bir-profile-state.json');
+async function loadBirProfileState() {
+    const fromStore = await getPersistentJSON('bir-profiles', null, { strict: true });
+    if (fromStore !== null) return birProfile.normalizeState(fromStore);
+    try { return birProfile.normalizeState(JSON.parse(readStateFileSync(BIR_PROFILE_STATE_PATH))); } catch (err) { return birProfile.emptyState(); }
+}
+async function saveBirProfileState(state) {
+    if (pgPoolDevices || pgPool || redisClient) { await setPersistentJSON('bir-profiles', state); return; }
+    atomicWriteFileSync(BIR_PROFILE_STATE_PATH, JSON.stringify(state));
+}
+app.get('/relay/admin/api/bir-profiles', requireAdminKey, async (req, res) => {
+    try {
+        const st = await loadBirProfileState();
+        res.set('Cache-Control', 'no-store');
+        res.json({ success: true, state: st });
+    } catch (err) { res.status(500).json({ success: false, message: 'Could not read the BIR profiles: ' + err.message }); }
+});
+function birProfileWriteHandler(kind) {
+    return async (req, res) => {
+        try {
+            const body = req.body || {};
+            const gate = checkBirDeveloperGate(req, body);
+            if (gate) return res.status(gate.status).json(gate.json);
+            if (body.confirm !== true) {
+                return res.status(400).json({ success: false, code: 'CONFIRMATION_REQUIRED', message: 'Tick the confirmation box: you must have checked the client\'s BIR registration documents (Certificate of Registration, PTU) against these details.' });
+            }
+            const current = await loadBirProfileState();
+            let next;
+            if (kind === 'save') {
+                const id = String(body.installationId || '').trim();
+                if (id && !allowedDevices.has(id) && body.acknowledgeUnknownDevice !== true) {
+                    return res.status(409).json({ success: false, code: 'UNKNOWN_DEVICE', message: 'This installation is not in the allowed-devices list of this RELAY. Confirm it really is your client before saving its BIR profile.' });
+                }
+                next = birProfile.upsertProfile(current, { installationId: id, fields: body.fields, label: body.label, reason: body.reason });
+            } else if (kind === 'revoke') {
+                next = birProfile.revokeProfile(current, { installationId: body.installationId, reason: body.reason });
+            } else {
+                next = birProfile.removeProfile(current, { installationId: body.installationId, reason: body.reason });
+            }
+            await saveBirProfileState(next);
+            logActivity(String(body.installationId || 'unknown'), 'bir_profile_' + kind, { ip: req.ip || null, reason: String(body.reason || '').slice(0, 160) });
+            console.log(`🧾 BIR profile ${kind} via admin: id=${String(body.installationId || '-').slice(0, 12)}…`);
+            res.set('Cache-Control', 'no-store');
+            res.json({ success: true, state: next });
+        } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+    };
+}
+app.post('/relay/admin/api/bir-profiles/save', requireAdminKey, rateLimit('bir-profile-write', 30, 60 * 60 * 1000), birProfileWriteHandler('save'));
+app.post('/relay/admin/api/bir-profiles/revoke', requireAdminKey, rateLimit('bir-profile-write', 30, 60 * 60 * 1000), birProfileWriteHandler('revoke'));
+app.post('/relay/admin/api/bir-profiles/delete', requireAdminKey, rateLimit('bir-profile-write', 30, 60 * 60 * 1000), birProfileWriteHandler('delete'));
+// Client: "ano ang BIR profile ko?" -> signed profile (active o revoked). Walang record = profile:null (fail-closed sa client).
+app.get('/relay/client/bir-profile', rateLimit('client-bir-profile', 120, 60 * 60 * 1000), requireApiKey, async (req, res) => {
+    let installationId = req.relayClient ? req.relayClient.installationId : null;
+    if (!installationId && req.relayMasterAuthenticated) {
+        const fromQuery = String((req.query || {}).installationId || '').trim();
+        installationId = fromQuery && fromQuery.length <= 200 ? fromQuery : null;
+    }
+    if (!installationId) return res.status(403).json({ success: false, code: 'CLIENT_CREDENTIAL_REQUIRED', message: 'A per-client credential is required.' });
+    res.set('Cache-Control', 'no-store');
+    try {
+        const st = await loadBirProfileState();
+        const profile = birProfile.signProfileFor(privateKey, st, installationId);
+        res.json({ success: true, profile });
+    } catch (err) { res.status(500).json({ success: false, message: 'Could not answer the BIR profile request right now.' }); }
+});
+
 // ===== COMPANION APPS CONTROL (OmniKiosk / Kitchen Kiosk / Customer Display — remote allow/deny sa OmniPOS Native) =====
 // Default ng LAHAT ng client: LOCKED. Sa admin page companion-apps.html mo ina-allow ang bawat app: sa LAHAT ng client (global) o sa
 // ISANG client/store (override). Signed ang sagot sa client. Tingnan ang companion-apps-control.js.

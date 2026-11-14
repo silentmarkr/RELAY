@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#05070d"><title>BIR Profiles (signed) — RELAY Admin</title>
+<style>
+:root{color-scheme:dark;--bg:#05070d;--card:#101625;--line:#26334f;--text:#eafcff;--muted:#9aabc9;--accent:#22e5ff;--green:#3ddc84;--red:#ff5c72;--amber:#ffc857}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{max-width:760px;margin:0 auto;padding:18px 14px 60px}
+a{color:var(--accent)}h1{font-size:1.4rem;margin:.4rem 0}h2{font-size:1.05rem;margin:0 0 10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:14px 0}
+.field{display:flex;flex-direction:column;gap:4px;font-size:.85rem;color:var(--muted);margin:8px 0}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
+@media(max-width:560px){.grid{grid-template-columns:1fr}}
+input,select{background:#0a0f1c;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px;font:inherit;width:100%}
+button{background:#16213a;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px 16px;font:inherit;cursor:pointer}
+button.primary{background:var(--accent);color:#04222a;border-color:var(--accent);font-weight:700}
+button.danger{background:var(--red);color:#2a0710;border-color:var(--red);font-weight:700}
+button:disabled{opacity:.5;cursor:not-allowed}
+.small{font-size:.8rem;color:var(--muted)}
+.notice{margin:10px 0;padding:9px 12px;border-radius:8px;background:#0a1a14;border:1px solid #1f5a3d;color:var(--green);display:none}
+.notice.error{background:#2a0e14;border-color:#7a2230;color:var(--red)}.notice.show{display:block}
+.warn{background:#2a2108;border:1px solid #6b5514;color:var(--amber);padding:9px 12px;border-radius:8px;margin:10px 0}
+.badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:.78rem;border:1px solid var(--line)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:space-between;border-top:1px solid var(--line);padding:8px 0}
+.row:first-child{border-top:0}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.8rem;word-break:break-all}
+.check{display:flex;gap:8px;align-items:flex-start;font-size:.85rem;color:var(--muted);margin:8px 0}
+.check input{width:auto;margin-top:4px}
+</style><link rel="stylesheet" href="admin-ui.css">
+<script src="admin-ui.js" defer></script>
+</head><body><main>
+<p><a href="index.html#system">← RELAY Admin</a></p>
+<h1>🧾 BIR Profiles (signed)</h1>
+<div class="warn">Ito ang <b>nag-iisang source</b> ng BIR identity ng bawat client: business name, TIN, VAT status, MIN, serial no., PTU no./date at POS-supplier info. Pipirmahan ng RELAY private key at naka-bind sa <b>installationId</b>. Hindi ito maieedit ng client (UI, API, backup file o database); kapag invalid, nawala o na-revoke ang profile, <b>nagfa-fail-closed ang BIR</b> sa app (non-official slip). Kailangan ng <b>developer passkey</b> at HTTPS para sa bawat pagbabago.</div>
+
+<section class="card"><h2>Admin authentication</h2>
+<label class="field">RELAY admin key<input id="adminKey" type="password" autocomplete="current-password" placeholder="Enter ADMIN_KEY"></label>
+<button id="connectBtn">Connect</button></section>
+
+<div id="notice" class="notice" role="status"></div>
+
+<section class="card"><h2>Gumawa / palitan ang profile</h2>
+<p class="small">Ilagay ang eksaktong detalye ayon sa Certificate of Registration at PTU ng client. Bawat pag-save ay tumataas ang <b>version</b>; ang app ay hindi tatanggap ng mas mababang version.</p>
+<label class="field">Client<select id="pick"><option value="">— piliin —</option></select></label>
+<label class="field">Installation ID<input id="iid" placeholder="installationId" autocomplete="off"></label>
+<label class="field">Label (para sa sarili mo)<input id="label" maxlength="80" autocomplete="off"></label>
+<div class="grid">
+<label class="field">Business name<input id="f_businessName" maxlength="80" autocomplete="off"></label>
+<label class="field">TIN<input id="f_tin" maxlength="20" placeholder="123-456-789-00000" autocomplete="off"></label>
+<label class="field">VAT status<select id="f_vatStatus"><option value="VAT">VAT-Registered</option><option value="NON_VAT">NON-VAT</option></select></label>
+<label class="field">MIN<input id="f_min" maxlength="40" autocomplete="off"></label>
+<label class="field">Serial No. (S/N)<input id="f_serialNo" maxlength="40" autocomplete="off"></label>
+<label class="field">PTU No.<input id="f_ptuNo" maxlength="40" autocomplete="off"></label>
+<label class="field">PTU date issued<input id="f_ptuDate" type="date"></label>
+<label class="field">POS supplier name<input id="f_supplierName" maxlength="80" autocomplete="off"></label>
+<label class="field">POS supplier address<input id="f_supplierAddress" maxlength="120" autocomplete="off"></label>
+<label class="field">POS supplier TIN<input id="f_supplierTin" maxlength="20" autocomplete="off"></label>
+</div>
+<label class="field">Dahilan / reference (audit trail)<input id="reason" maxlength="160" placeholder="hal. PTU issued 2026-11-10, ticket #123" autocomplete="off"></label>
+<label class="field">Developer passkey<input id="devPass" type="password" autocomplete="off" placeholder="RELAY_BIR_RESET_PASSKEY"></label>
+<label class="check"><input id="confirm" type="checkbox"><span>Na-verify ko ang BIR registration documents ng client at tugma ang mga detalye sa itaas.</span></label>
+<label class="check"><input id="unknownOk" type="checkbox"><span>Alam kong wala ang installation na ito sa allowed-devices list pero tiyak akong client ko ito.</span></label>
+<button id="saveBtn" class="primary" disabled>💾 I-sign at i-save ang profile</button>
+</section>
+
+<section class="card"><h2>Mga profile</h2>
+<div id="list" class="small">Mag-connect muna.</div>
+</section>
+
+<section class="card"><h2>Audit trail (huling 50)</h2>
+<div id="audit" class="small">—</div>
+</section>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const FIELDS=['businessName','tin','vatStatus','ptuNo','ptuDate','min','serialNo','supplierName','supplierAddress','supplierTin'];
+  let labels={},state=null;
+  function say(m,bad){const n=$('notice');n.textContent=m;n.className='notice show'+(bad?' error':'')}
+  async function api(p,method,body){
+    const r=await fetch(p,{method,headers:{'x-relay-admin-key':$('adminKey').value,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
+    let j={};try{j=await r.json()}catch(_){}
+    if(!r.ok||j.success===false){const e=new Error(j.message||('HTTP '+r.status));e.status=r.status;throw e}
+    return j;
+  }
+  function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+  function render(){
+    const ids=Object.keys(state.profiles||{});
+    $('list').innerHTML=ids.length?ids.map(id=>{
+      const p=state.profiles[id],f=p.fields||{};
+      const lab=esc(p.label||labels[id]||'');
+      const badge=p.status==='active'?'<span class="badge" style="color:var(--green)">ACTIVE</span>':'<span class="badge" style="color:var(--red)">REVOKED</span>';
+      return '<div class="row"><div>'+badge+' v'+p.version+' · <b>'+esc(f.businessName||'(walang pangalan)')+'</b>'+(lab?' · '+lab:'')+
+        '<br><span class="mono">'+esc(id)+'</span><br>TIN '+esc(f.tin||'-')+' · PTU '+esc(f.ptuNo||'-')+' · MIN '+esc(f.min||'-')+
+        '<br>Huling binago: '+(p.updatedAt?esc(new Date(p.updatedAt).toLocaleString()):'-')+'</div>'+
+        '<div><button data-act="edit" data-id="'+esc(id)+'">✏️ I-edit</button> '+
+        (p.status==='active'?'<button data-act="revoke" data-id="'+esc(id)+'">⛔ Revoke</button> ':'')+
+        '<button class="danger" data-act="delete" data-id="'+esc(id)+'">🗑</button></div></div>';
+    }).join(''):'Wala pang BIR profile. Habang wala, fail-closed ang BIR ng lahat ng client.';
+    $('list').querySelectorAll('button[data-id]').forEach(b=>b.onclick=()=>action(b.dataset.act,b.dataset.id));
+    const au=(state.audit||[]).slice(-50).reverse();
+    $('audit').innerHTML=au.length?au.map(a=>'<div class="row"><span>'+esc(new Date(a.at).toLocaleString())+' · <b>'+esc(a.action)+'</b>'+(a.version?' v'+esc(a.version):'')+(a.reason?' — '+esc(a.reason):'')+'</span><span class="mono">'+esc(a.installationId||'')+'</span></div>').join(''):'Wala pa.';
+    $('saveBtn').disabled=false;
+  }
+  function action(act,id){
+    if(act==='edit'){
+      const p=state.profiles[id];if(!p)return;
+      $('iid').value=id;$('pick').value=labels[id]!==undefined?id:'';$('label').value=p.label||'';
+      FIELDS.forEach(k=>{$('f_'+k).value=(p.fields&&p.fields[k])||(k==='vatStatus'?'VAT':'')});
+      window.scrollTo({top:0,behavior:'smooth'});say('Na-load ang profile. Baguhin at i-save para tumaas ang version.');
+      return;
+    }
+    const msg=act==='revoke'?'I-REVOKE ang BIR profile? Magfa-fail-closed ang BIR ng client na ito.':'BURAHIN ang profile record na ito sa RELAY?';
+    if(!confirm(msg))return;
+    send('/relay/admin/api/bir-profiles/'+act,{installationId:id});
+  }
+  async function send(path,extra){
+    try{
+      const body=Object.assign({reason:$('reason').value,developerPasskey:$('devPass').value,confirm:$('confirm').checked,acknowledgeUnknownDevice:$('unknownOk').checked},extra);
+      const j=await api(path,'POST',body);
+      state=j.state;render();$('devPass').value='';say('Na-save at napirmahan. Kukunin ito ng client sa susunod na refresh (hanggang ~5 minuto kapag online).');
+    }catch(e){say(e.message,true)}
+  }
+  $('saveBtn').onclick=()=>{
+    const iid=$('iid').value.trim();
+    if(!iid)return say('Maglagay o pumili ng installationId.',true);
+    const fields={};FIELDS.forEach(k=>fields[k]=$('f_'+k).value);
+    send('/relay/admin/api/bir-profiles/save',{installationId:iid,label:$('label').value,fields});
+  };
+  $('pick').onchange=()=>{if($('pick').value){$('iid').value=$('pick').value;$('label').value=labels[$('pick').value]||''}};
+  async function loadDevices(){
+    try{
+      const j=await api('/relay/admin/api/devices','GET');
+      const sel=$('pick');sel.innerHTML='<option value="">— piliin —</option>';
+      (j.seenDevices||[]).forEach(d=>{labels[d.installationId]=d.label||'';const o=document.createElement('option');o.value=d.installationId;o.textContent=(d.label||'(walang label)')+' — '+d.installationId.slice(0,12)+'…';sel.appendChild(o)});
+    }catch(_){}
+  }
+  async function connect(){
+    try{
+      await loadDevices();
+      const j=await api('/relay/admin/api/bir-profiles','GET');
+      state=j.state;render();
+      try{sessionStorage.setItem('relayAdminKey',$('adminKey').value)}catch(_){}
+      say('Connected.');
+    }catch(e){
+      if(e.status===401||e.status===403){try{sessionStorage.removeItem('relayAdminKey')}catch(_){}}
+      say(e.message,true);
+    }
+  }
+  $('connectBtn').onclick=connect;
+  let saved='';try{saved=sessionStorage.getItem('relayAdminKey')||''}catch(_){}
+  if(saved){$('adminKey').value=saved;connect()}
+})();
+</script></main></body></html>
