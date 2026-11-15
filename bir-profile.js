@@ -25,6 +25,16 @@ const FIELD_LIMITS = Object.freeze({
     businessName: 80, businessAddress: 160, tin: 20, ptuNo: 40, min: 40, serialNo: 40, supplierName: 80, supplierAddress: 120, supplierTin: 20
 });
 
+// Default / enforced tax (VAT) rate na PINIPIRMAHAN kasama ng profile. OPTIONAL: null = walang itinakda (kapareho ng dati:
+// ang client ang may hawak ng rate nito). Kapag may numero, ito na ang rate na gagamitin ng OmniPOS at hindi na maiba ng client.
+// Nalalagay lang sa signed payload kapag may numero (tingnan ang canonicalProfileString) kaya hindi naaapektuhan ang mga lumang profile.
+function parseTaxRate(raw) {
+    if (raw === undefined || raw === null || raw === '') return { ok: true, value: null };
+    const n = typeof raw === 'number' ? raw : Number(String(raw).trim());
+    if (!Number.isFinite(n) || n < 0 || n > 100) return { ok: false, message: 'Tax rate must be a number from 0 to 100 (e.g. 12), or left blank.' };
+    return { ok: true, value: Math.round(n * 100) / 100 };
+}
+
 function emptyState() { return { profiles: {}, audit: [], updatedAt: null }; }
 
 function cleanText(val, maxLen) {
@@ -57,6 +67,10 @@ function validateFields(raw) {
         supplierAddress: cleanText(r.supplierAddress, FIELD_LIMITS.supplierAddress),
         supplierTin: cleanText(r.supplierTin, FIELD_LIMITS.supplierTin)
     };
+    const tr = parseTaxRate(r.taxRate);
+    if (!tr.ok) return { ok: false, message: tr.message };
+    // NON_VAT: walang VAT na kukuwentahin, kaya hindi nagdadala ng rate.
+    f.taxRate = f.vatStatus === 'VAT' ? tr.value : null;
     if (!f.businessName) return { ok: false, message: 'Business name is required.' };
     if (!f.vatStatus) return { ok: false, message: 'Choose a VAT status (VAT or NON_VAT).' };
     if (!f.ptuNo) return { ok: false, message: 'PTU No. is required.' };
@@ -87,6 +101,8 @@ function canonicalProfileString(p) {
     };
     // Must stay identical to OMNIPOS/bir-profile.js: businessAddress is signed only when it has a value.
     if (typeof p.businessAddress === 'string' && p.businessAddress !== '') o.businessAddress = p.businessAddress;
+    // taxRate: signed ONLY when it is a number (Must stay identical to OMNIPOS/bir-profile.js). Always appended AFTER businessAddress.
+    if (typeof p.taxRate === 'number' && Number.isFinite(p.taxRate)) o.taxRate = p.taxRate;
     return JSON.stringify(o);
 }
 function signedMessage(p) {
@@ -149,7 +165,7 @@ function upsertProfile(state, { installationId, fields, label, reason, now }) {
         previousVersion: prev ? prev.version : 0,
         version: s.profiles[id].version,
         // Pangalan lang ng binagong field ang itinatala (hindi ang laman), para ma-audit nang hindi ginagawang kopya ng TIN ang log.
-        changedFields: prev ? Object.keys(v.fields).filter((k) => String((prev.fields || {})[k] || '') !== String(v.fields[k] || '')) : Object.keys(v.fields).filter((k) => String(v.fields[k] || '') !== ''),
+        changedFields: prev ? Object.keys(v.fields).filter((k) => String((prev.fields || {})[k] ?? '') !== String(v.fields[k] ?? '')) : Object.keys(v.fields).filter((k) => String(v.fields[k] ?? '') !== ''),
         reason: cleanText(reason, 160)
     });
     return s;
@@ -205,9 +221,13 @@ function signProfileFor(privateKey, state, installationId, now) {
         supplierAddress: cleanText(f.supplierAddress, FIELD_LIMITS.supplierAddress),
         supplierTin: cleanText(f.supplierTin, FIELD_LIMITS.supplierTin)
     };
+    // Optional enforced tax rate: kasama lang sa payload kapag may numero at VAT ang status.
+    const trParsed = parseTaxRate(f.taxRate);
+    if (trParsed.ok && trParsed.value !== null && payload.vatStatus === 'VAT') payload.taxRate = trParsed.value;
     if (rec.status === 'revoked') {
         // Ang revoked na utos ay hindi na nagdadala ng identity.
         for (const k of PROFILE_FIELDS) payload[k] = k === 'vatStatus' ? 'VAT' : '';
+        delete payload.taxRate;
     }
     const signature = crypto.sign(null, signedMessage(payload), privateKey).toString('base64');
     return { payload, signature };
@@ -225,6 +245,7 @@ module.exports = {
     emptyState,
     normalizeState,
     validateFields,
+    parseTaxRate,
     canonicalProfileString,
     signedMessage,
     upsertProfile,

@@ -67,6 +67,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
 <label class="field">Registered business address<input id="f_businessAddress" maxlength="160" placeholder="Street, Barangay, City/Municipality, Province" autocomplete="off"></label>
 <label class="field">TIN<input id="f_tin" maxlength="20" placeholder="123-456-789-00000" autocomplete="off"></label>
 <label class="field">VAT status<select id="f_vatStatus"><option value="VAT">VAT-Registered</option><option value="NON_VAT">NON-VAT</option></select></label>
+<label class="field">Tax rate % (opsyonal)<input id="f_taxRate" type="number" min="0" max="100" step="0.01" placeholder="hal. 12 — iwanang blangko kung si client ang magse-set" autocomplete="off"></label>
 <label class="field">MIN<input id="f_min" maxlength="40" autocomplete="off"></label>
 <label class="field">Serial No. (S/N)<input id="f_serialNo" maxlength="40" autocomplete="off"></label>
 <label class="field">PTU No.<input id="f_ptuNo" maxlength="40" autocomplete="off"></label>
@@ -133,7 +134,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
 <script>
 (function(){
   const $=id=>document.getElementById(id);
-  const FIELDS=['businessName','businessAddress','tin','vatStatus','ptuNo','ptuDate','min','serialNo','supplierName','supplierAddress','supplierTin'];
+  const FIELDS=['businessName','businessAddress','tin','vatStatus','ptuNo','ptuDate','min','serialNo','supplierName','supplierAddress','supplierTin','taxRate'];
   let labels={},state=null;
   function say(m,bad){const n=$('notice');n.textContent=m;n.className='notice show'+(bad?' error':'')}
   async function api(p,method,body){
@@ -208,7 +209,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
     if(act==='edit'){
       const p=state.profiles[id];if(!p)return;
       $('iid').value=id;$('pick').value=labels[id]!==undefined?id:'';$('label').value=p.label||'';
-      FIELDS.forEach(k=>{$('f_'+k).value=(p.fields&&p.fields[k])||(k==='vatStatus'?'VAT':'')});
+      FIELDS.forEach(k=>{$('f_'+k).value=(p.fields&&p.fields[k]!=null&&p.fields[k]!=='')?p.fields[k]:(k==='vatStatus'?'VAT':'')});
       window.scrollTo({top:0,behavior:'smooth'});say('Na-load ang profile. Baguhin at i-save para tumaas ang version.');
       return;
     }
