@@ -16,13 +16,13 @@ const crypto = require('crypto');
 
 const SIGNING_DOMAIN = 'omnipos-bir-profile-v1\n';
 const PROFILE_FIELDS = Object.freeze([
-    'businessName', 'tin', 'vatStatus', 'ptuNo', 'ptuDate', 'min', 'serialNo', 'supplierName', 'supplierAddress', 'supplierTin'
+    'businessName', 'businessAddress', 'tin', 'vatStatus', 'ptuNo', 'ptuDate', 'min', 'serialNo', 'supplierName', 'supplierAddress', 'supplierTin'
 ]);
 const STATUSES = Object.freeze(['active', 'revoked']);
 const MAX_PROFILES = 5000;
 const MAX_AUDIT = 1000;
 const FIELD_LIMITS = Object.freeze({
-    businessName: 80, tin: 20, ptuNo: 40, min: 40, serialNo: 40, supplierName: 80, supplierAddress: 120, supplierTin: 20
+    businessName: 80, businessAddress: 160, tin: 20, ptuNo: 40, min: 40, serialNo: 40, supplierName: 80, supplierAddress: 120, supplierTin: 20
 });
 
 function emptyState() { return { profiles: {}, audit: [], updatedAt: null }; }
@@ -46,6 +46,7 @@ function validateFields(raw) {
     const r = (raw && typeof raw === 'object') ? raw : {};
     const f = {
         businessName: cleanText(r.businessName, FIELD_LIMITS.businessName),
+        businessAddress: cleanText(r.businessAddress, FIELD_LIMITS.businessAddress),
         tin: cleanText(r.tin, FIELD_LIMITS.tin),
         vatStatus: r.vatStatus === 'NON_VAT' ? 'NON_VAT' : (r.vatStatus === 'VAT' ? 'VAT' : ''),
         ptuNo: cleanText(r.ptuNo, FIELD_LIMITS.ptuNo),
@@ -67,7 +68,7 @@ function validateFields(raw) {
 
 // Fixed key order. Huwag baguhin nang hindi binabago ang OMNIPOS/bir-profile.js.
 function canonicalProfileString(p) {
-    return JSON.stringify({
+    const o = {
         installationId: p.installationId,
         deviceTag: p.deviceTag,
         status: p.status,
@@ -83,7 +84,10 @@ function canonicalProfileString(p) {
         supplierName: p.supplierName,
         supplierAddress: p.supplierAddress,
         supplierTin: p.supplierTin
-    });
+    };
+    // Must stay identical to OMNIPOS/bir-profile.js: businessAddress is signed only when it has a value.
+    if (typeof p.businessAddress === 'string' && p.businessAddress !== '') o.businessAddress = p.businessAddress;
+    return JSON.stringify(o);
 }
 function signedMessage(p) {
     return Buffer.from(SIGNING_DOMAIN + canonicalProfileString(p), 'utf8');
@@ -190,6 +194,7 @@ function signProfileFor(privateKey, state, installationId, now) {
         version: rec.version,
         issuedAt: typeof now === 'number' ? now : Date.now(),
         businessName: cleanText(f.businessName, FIELD_LIMITS.businessName),
+        businessAddress: cleanText(f.businessAddress, FIELD_LIMITS.businessAddress),
         tin: cleanText(f.tin, FIELD_LIMITS.tin),
         vatStatus: f.vatStatus === 'NON_VAT' ? 'NON_VAT' : 'VAT',
         ptuNo: cleanText(f.ptuNo, FIELD_LIMITS.ptuNo),

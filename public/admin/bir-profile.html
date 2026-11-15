@@ -64,6 +64,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
 <label class="field">Label (para sa sarili mo)<input id="label" maxlength="80" autocomplete="off"></label>
 <div class="grid">
 <label class="field">Business name<input id="f_businessName" maxlength="80" autocomplete="off"></label>
+<label class="field">Registered business address<input id="f_businessAddress" maxlength="160" placeholder="Street, Barangay, City/Municipality, Province" autocomplete="off"></label>
 <label class="field">TIN<input id="f_tin" maxlength="20" placeholder="123-456-789-00000" autocomplete="off"></label>
 <label class="field">VAT status<select id="f_vatStatus"><option value="VAT">VAT-Registered</option><option value="NON_VAT">NON-VAT</option></select></label>
 <label class="field">MIN<input id="f_min" maxlength="40" autocomplete="off"></label>
@@ -132,7 +133,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
 <script>
 (function(){
   const $=id=>document.getElementById(id);
-  const FIELDS=['businessName','tin','vatStatus','ptuNo','ptuDate','min','serialNo','supplierName','supplierAddress','supplierTin'];
+  const FIELDS=['businessName','businessAddress','tin','vatStatus','ptuNo','ptuDate','min','serialNo','supplierName','supplierAddress','supplierTin'];
   let labels={},state=null;
   function say(m,bad){const n=$('notice');n.textContent=m;n.className='notice show'+(bad?' error':'')}
   async function api(p,method,body){
