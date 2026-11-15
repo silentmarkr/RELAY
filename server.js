@@ -18500,6 +18500,77 @@ app.get('/relay/admin/api/sponsor-donations', requireAdminKey, async (req, res) 
         res.status(500).json({ success: false, message: err.message });
     }
 });
+// ===================================================================
+// SUPPORT THE DEVELOPER — EXTRA QR PAYMENT OPTIONS (static QR images)
+// The developer attaches one QR image per online-banking / e-wallet provider in admin/support-qr.html. OMNIPOS clients only
+// see a provider in their Support Developer payment dropdown when it has an enabled QR here (next to the live QR Ph option).
+// Logic lives in support-qr.js; this block only wires storage + routes.
+// ===================================================================
+const supportQr = require('./support-qr');
+const SUPPORT_QR_PATH = path.join(__dirname, 'support-qr-methods.json');
+const supportQrStore = supportQr.createStore({
+    // Must THROW when the store cannot be read (strict) so an outage is never mistaken for "no QR codes" and then overwritten.
+    load: async () => {
+        const fromStore = await getPersistentJSON(supportQr.STORE_KEY, null, { strict: true });
+        if (fromStore !== null) return fromStore;
+        try { return JSON.parse(readStateFileSync(SUPPORT_QR_PATH)); } catch (err) { return null; }
+    },
+    save: (obj) => {
+        if (pgPoolDevices || pgPool || redisClient) { setPersistentJSON(supportQr.STORE_KEY, obj); return; }
+        atomicWriteFileSync(SUPPORT_QR_PATH, JSON.stringify(obj));
+    }
+});
+function sendSupportQrError(res, err) {
+    const known = ['BAD_IMAGE', 'BAD_PROVIDER', 'LIMIT', 'NOT_FOUND'];
+    if (err && known.includes(err.code)) return res.status(err.code === 'NOT_FOUND' ? 404 : 400).json({ success: false, code: err.code, message: err.message });
+    console.error('⚠️ Support QR error:', err && err.message);
+    return res.status(503).json({ success: false, code: 'STORAGE_UNAVAILABLE', message: 'The QR code storage is not available right now. Nothing was changed. Please try again.' });
+}
+app.get('/relay/admin/api/support-qr', requireAdminKey, async (req, res) => {
+    try {
+        res.set('Cache-Control', 'no-store');
+        const items = await supportQrStore.listAdmin();
+        res.json({
+            success: true,
+            catalog: supportQr.CATALOG,
+            items,
+            limits: { maxItems: supportQr.MAX_ITEMS, maxImageBytes: supportQr.MAX_IMAGE_BYTES, maxNoteLength: supportQr.MAX_NOTE_LEN, maxCustomLabelLength: supportQr.MAX_CUSTOM_LABEL_LEN }
+        });
+    } catch (err) { sendSupportQrError(res, err); }
+});
+app.post('/relay/admin/api/support-qr/save', requireAdminKey, rateLimit('support-qr-save', 60, 60 * 60 * 1000), async (req, res) => {
+    const b = req.body || {};
+    try {
+        const saved = await supportQrStore.upsert({ bankId: b.bankId, customLabel: b.customLabel, image: b.image, note: b.note });
+        console.log(`💝 Support QR attached/updated for "${saved.label}" via admin panel.`);
+        res.json({ success: true, item: saved });
+    } catch (err) { sendSupportQrError(res, err); }
+});
+app.post('/relay/admin/api/support-qr/toggle', requireAdminKey, async (req, res) => {
+    const b = req.body || {};
+    try { res.json({ success: true, ...(await supportQrStore.setEnabled(String(b.id || ''), b.enabled === true)) }); }
+    catch (err) { sendSupportQrError(res, err); }
+});
+app.post('/relay/admin/api/support-qr/delete', requireAdminKey, async (req, res) => {
+    const b = req.body || {};
+    try { res.json({ success: true, ...(await supportQrStore.remove(String(b.id || ''))) }); }
+    catch (err) { sendSupportQrError(res, err); }
+});
+// Client (OMNIPOS) routes: list = enabled providers only (no image data); image = one QR when the client picks it.
+app.get('/relay/sponsor/static-qr', requireApiKey, requireAllowedDevice, rateLimit('sponsor-static-qr-list', 120, 60 * 60 * 1000), async (req, res) => {
+    try {
+        res.set('Cache-Control', 'no-store');
+        res.json({ success: true, methods: await supportQrStore.listPublic() });
+    } catch (err) { sendSupportQrError(res, err); }
+});
+app.get('/relay/sponsor/static-qr/image', requireApiKey, requireAllowedDevice, rateLimit('sponsor-static-qr-image', 120, 60 * 60 * 1000), async (req, res) => {
+    try {
+        res.set('Cache-Control', 'no-store');
+        const found = await supportQrStore.getPublicImage(String(req.query.id || ''));
+        if (!found) return res.status(404).json({ success: false, code: 'NOT_FOUND', message: 'This QR code is not available.' });
+        res.json({ success: true, ...found });
+    } catch (err) { sendSupportQrError(res, err); }
+});
 app.post('/relay/webhooks/paymongo', express.raw({ type: '*/*', limit: '1mb' }), async (req, res) => {
     const rawBody = req.body ? req.body.toString('utf8') : '';
     const signatureHeader = req.headers['paymongo-signature'];
