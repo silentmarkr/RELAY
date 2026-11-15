@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "generate-keys": "node generate-keys.js",
+    "generate-next-key": "node generate-next-key.js",
     "test": "node --test"
   },
   "dependencies": {

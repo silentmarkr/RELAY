@@ -10373,6 +10373,26 @@ app.get('/relay/client/bir-profile', rateLimit('client-bir-profile', 120, 60 * 6
     } catch (err) { res.status(500).json({ success: false, message: 'Could not answer the BIR profile request right now.' }); }
 });
 
+// ===== KEY ROTATION (tingnan ang key-rotation.js): pirmadong announcement ng bagong signing key =====
+const keyRotation = require('./key-rotation');
+app.get('/relay/client/key-ring', rateLimit('client-key-ring', 120, 60 * 60 * 1000), requireApiKey, (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try {
+        const announcements = keyRotation.buildAnnouncements(privateKey, {
+            nextPublicKeysText: process.env.RELAY_NEXT_PUBLIC_KEY_PEM,
+            retireKidsText: process.env.RELAY_RETIRE_KIDS
+        });
+        res.json({ success: true, announcements });
+    } catch (err) { res.status(500).json({ success: false, message: 'Could not answer the key ring request right now.' }); }
+});
+app.get('/relay/admin/api/key-rotation/status', requireAdminKey, (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.json({ success: true, ...keyRotation.describe(privateKey, {
+        nextPublicKeysText: process.env.RELAY_NEXT_PUBLIC_KEY_PEM,
+        retireKidsText: process.env.RELAY_RETIRE_KIDS
+    }) });
+});
+
 // ===== SIGNED RECEIPT BRANDING (trade name lock + branding-logo authorization) =====
 // Ang trade name sa resibo ay kontrolado LANG ng RELAY (galing sa BIR profile business name kung mayroon, kung wala ay sa
 // "Trade name & Branding Logo" card ng admin page bir-profile.html). Ang RELAY din ang nag-a-authorize kung puwedeng maglagay

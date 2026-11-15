@@ -238,6 +238,44 @@ async function runChecks(ctx) {
         if (!pem) return fail('No private key found (RELAY_PRIVATE_KEY_PEM or relay-private-key.pem). Licenses and unlock commands cannot be signed.');
         try { const k = crypto.createPrivateKey(pem); return ok(`Valid ${k.asymmetricKeyType.toUpperCase()} private key (from ${src}).`); } catch (_e) { return fail(`The private key from ${src} cannot be read. If it was pasted with line breaks lost, use \\n for new lines.`); }
     }, { local: true });
+    // KEY ROTATION: tingnan ang key-rotation.js. Ang vault key ay puwedeng galing sa private key, kaya delikado ang pagpapalit nito.
+    add('Core', 'core-vault-key', 'ENV vault encryption key', ['RELAY_ENV_MASTER_KEY'], async () => {
+        let st = null;
+        try { st = require('./env-vault').status(); } catch (_e) { st = null; }
+        if (!st || !st.count) return skip('Walang laman ang vault.');
+        if (st.keyMode === 'master-key') return ok('Naka-encrypt gamit ang RELAY_ENV_MASTER_KEY: hindi apektado ng pagpapalit ng private key.');
+        if (st.keyMode === 'private-key-env' || st.keyMode === 'private-key-file') {
+            return warn('Ang encryption key ng vault ay galing sa RELAY private key. Kapag pinalitan ang private key (key rotation), hindi na made-decrypt ang vault. I-export muna ang vault at itago ang mga value (o gumamit ng RELAY_ENV_MASTER_KEY) bago mag-rotate.');
+        }
+        return warn('Ang vault ay naka-encrypt gamit ang local key file na hindi stable (walang database copy).');
+    }, { local: true });
+    add('Core', 'core-key-rotation', 'Key rotation (announcement ng bagong key)', ['RELAY_NEXT_PUBLIC_KEY_PEM', 'RELAY_RETIRE_KIDS'], async () => {
+        if (!has(env, 'RELAY_NEXT_PUBLIC_KEY_PEM') && !has(env, 'RELAY_RETIRE_KIDS')) return skip('Walang rotation na isinasagawa (optional).');
+        const kr = require('./key-rotation');
+        const crypto = require('crypto');
+        const notes = [];
+        if (has(env, 'RELAY_NEXT_PUBLIC_KEY_PEM')) {
+            const text = String(env.RELAY_NEXT_PUBLIC_KEY_PEM);
+            const blocks = (text.replace(/\\n/g, '\n').match(/-----BEGIN PUBLIC KEY-----[\s\S]*?-----END PUBLIC KEY-----/g) || []).length;
+            const parsed = kr.parsePems(text);
+            if (!blocks) return fail('RELAY_NEXT_PUBLIC_KEY_PEM ay walang PUBLIC KEY block. Ilagay ang PUBLIC key (hindi ang private).');
+            if (parsed.length !== blocks) return fail('May PUBLIC KEY block sa RELAY_NEXT_PUBLIC_KEY_PEM na hindi valid na Ed25519 key.');
+            let currentKid = null;
+            try {
+                let pem = has(env, 'RELAY_PRIVATE_KEY_PEM') ? String(env.RELAY_PRIVATE_KEY_PEM).replace(/\\n/g, '\n') : require('fs').readFileSync(require('path').join(__dirname, 'relay-private-key.pem'), 'utf8');
+                currentKid = kr.kidOfKey(crypto.createPublicKey(crypto.createPrivateKey(pem)));
+            } catch (_e) { /* ibang check na ang private key */ }
+            if (currentKid && parsed.some((k) => k.kid === currentKid)) return warn('Ang bagong public key ay pareho na ng kasalukuyang signing key: tapos na yata ang cutover. Puwede nang alisin ang RELAY_NEXT_PUBLIC_KEY_PEM.');
+            notes.push(`${parsed.length} bagong key ang ina-announce (kid: ${parsed.map((k) => k.kid).join(', ')})`);
+        }
+        if (has(env, 'RELAY_RETIRE_KIDS')) {
+            const raw = String(env.RELAY_RETIRE_KIDS).split(/[\s,;]+/).filter(Boolean);
+            const valid = kr.parseKids(env.RELAY_RETIRE_KIDS);
+            if (valid.length !== raw.length) return fail('RELAY_RETIRE_KIDS: bawat kid ay dapat 16 hex characters, pinaghihiwalay ng kuwit.');
+            notes.push(`${valid.length} key ang ire-retire`);
+        }
+        return ok(notes.join('; ') + '. Huwag palitan ang RELAY_PRIVATE_KEY_PEM hangga\'t hindi nakukuha ng lahat ng client ang announcement.');
+    }, { local: true });
     add('Core', 'core-urls', 'Public URL', ['RELAY_PUBLIC_URL', 'RENDER_EXTERNAL_URL'], async () => {
         if (!has(env, 'RELAY_PUBLIC_URL') && !has(env, 'RENDER_EXTERNAL_URL')) return warn('Neither RELAY_PUBLIC_URL nor RENDER_EXTERNAL_URL is set: links sent to clients may be wrong.');
         for (const n of ['RELAY_PUBLIC_URL', 'RENDER_EXTERNAL_URL']) if (has(env, n) && !isHttpUrl(env[n])) return fail(`${n} is not a valid http(s) URL.`);
