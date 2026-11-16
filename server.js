@@ -18574,10 +18574,17 @@ app.get('/relay/sponsor/static-qr/image', requireApiKey, requireAllowedDevice, r
 // PUBLIC read-only routes for other apps of the developer (e.g. Verse Wallpaper) that have NO relay key / device activation.
 // Same data as the OMNIPOS routes above (enabled providers only, same store). Nothing can be changed through these routes,
 // they take no client data, and they are rate limited per IP. Never put requireApiKey / the master key in a public app instead.
+const PUBLIC_LIVE_QRPH_ID = 'live_qrph';
+const PUBLIC_DONATION_INSTALLATION_ID = 'verse-wallpaper';
 app.get('/relay/public/support-qr', rateLimit('public-support-qr-list', 60, 60 * 60 * 1000), async (req, res) => {
     try {
         res.set('Cache-Control', 'no-store');
         const methods = (await supportQrStore.listPublic()).map((m) => ({ id: m.id, label: m.label }));
+        // Live QR Ph (PayMongo, exact amount, confirmed automatically) - same option OMNIPOS shows, only when it is really available.
+        try {
+            await refreshPaymongoCapabilities(false);
+            if (pgPool && isPaymentMethodAvailable('qrph')) methods.unshift({ id: PUBLIC_LIVE_QRPH_ID, label: 'QR Ph (any bank or e-wallet)', live: true });
+        } catch (e) { /* the static QR list still works */ }
         res.json({ success: true, methods });
     } catch (err) { sendSupportQrError(res, err); }
 });
@@ -18588,6 +18595,47 @@ app.get('/relay/public/support-qr/image', rateLimit('public-support-qr-image', 6
         if (!found) return res.status(404).json({ success: false, code: 'NOT_FOUND', message: 'This QR code is not available.' });
         res.json({ success: true, id: found.id, label: found.label, note: found.note, image: found.image });
     } catch (err) { sendSupportQrError(res, err); }
+});
+// ---- Live QR Ph for public apps (Verse Wallpaper): a fresh PayMongo QR Ph with the exact amount, confirmed by the webhook. ----
+// Recorded as a normal donation (purchase id "DON-verse-...", installation id "verse-wallpaper"), so it shows in the same
+// Support Developer donations list. No tokens are ever added (DON- purchases are donation-only).
+app.post('/relay/public/support-qr/live-create', rateLimit('public-support-qr-live-create', 10, 60 * 60 * 1000), async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const amount = parseSponsorAmount(req.body && req.body.amount);
+    if (amount === null) return res.status(400).json({ success: false, message: `Please enter a whole-number amount from ${SPONSOR_MIN_PHP} to ${SPONSOR_MAX_PHP}.` });
+    if (amount < SPONSOR_ONLINE_MIN_PHP) return res.status(400).json({ success: false, message: `The minimum for QR Ph is ₱${SPONSOR_ONLINE_MIN_PHP}.` });
+    if (!pgPool) return res.status(503).json({ success: false, message: 'This payment option is not available right now.' });
+    try {
+        await refreshPaymongoCapabilities(false);
+        if (!isPaymentMethodAvailable('qrph')) return res.status(503).json({ success: false, message: 'QR Ph is not available right now.' });
+        const purchaseId = `DON-verse-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+        const checkout = await createPaymentCheckout({ method: 'qrph', amountPHP: amount, purchaseId, base: `${req.protocol}://${req.get('host')}`, description: `Verse Wallpaper Donation (PHP ${amount})` });
+        await queryWithRetry(
+            pgPool,
+            `INSERT INTO cloud_token_purchases (purchase_id, installation_id, package_id, tokens, amount_php, method, source_id, provider, status)
+             VALUES ($1, $2, 'DONATION', 0, $3, 'qrph', $4, $5, 'pending')`,
+            [purchaseId, PUBLIC_DONATION_INSTALLATION_ID, amount, checkout.providerRefId, checkout.provider]
+        );
+        logActivity(PUBLIC_DONATION_INSTALLATION_ID, 'sponsor_donation_created', { purchaseId, amountPHP: amount, method: 'qrph', provider: checkout.provider });
+        res.json({ success: true, purchaseId, qrCodeImageUrl: checkout.qrCodeImageUrl || null, expiresAt: checkout.expiresAt || null, amountPHP: amount });
+    } catch (err) {
+        console.error('⚠️ Public live QR Ph create failed:', err && err.message);
+        res.status(502).json({ success: false, message: 'Could not create the QR Ph code. You were not charged. Please try again.' });
+    }
+});
+app.get('/relay/public/support-qr/live-status', rateLimit('public-support-qr-live-status', 400, 60 * 60 * 1000), async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const purchaseId = String(req.query.purchaseId || '').trim();
+    if (!/^DON-verse-\d{10,16}-[a-f0-9]{8}$/.test(purchaseId)) return res.status(400).json({ success: false, message: 'Invalid purchaseId.' });
+    if (!pgPool) return res.status(503).json({ success: false, message: 'Not available right now.' });
+    try {
+        const r = await queryWithRetry(pgPool, `SELECT status, amount_php FROM cloud_token_purchases WHERE purchase_id = $1 AND installation_id = $2`, [purchaseId, PUBLIC_DONATION_INSTALLATION_ID]);
+        if (!r.rows[0]) return res.status(404).json({ success: false, message: 'Donation not found.' });
+        if (r.rows[0].status === 'paid') { try { await backfillPaidOnlineDonations(); } catch (bfErr) { console.error('⚠️ Sponsor donation backfill failed:', bfErr.message); } }
+        res.json({ success: true, status: r.rows[0].status, amountPHP: Number(r.rows[0].amount_php) });
+    } catch (err) {
+        res.status(500).json({ success: false, message: 'Could not check the donation right now.' });
+    }
 });
 app.post('/relay/webhooks/paymongo', express.raw({ type: '*/*', limit: '1mb' }), async (req, res) => {
     const rawBody = req.body ? req.body.toString('utf8') : '';
