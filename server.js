@@ -18571,6 +18571,24 @@ app.get('/relay/sponsor/static-qr/image', requireApiKey, requireAllowedDevice, r
         res.json({ success: true, ...found });
     } catch (err) { sendSupportQrError(res, err); }
 });
+// PUBLIC read-only routes for other apps of the developer (e.g. Verse Wallpaper) that have NO relay key / device activation.
+// Same data as the OMNIPOS routes above (enabled providers only, same store). Nothing can be changed through these routes,
+// they take no client data, and they are rate limited per IP. Never put requireApiKey / the master key in a public app instead.
+app.get('/relay/public/support-qr', rateLimit('public-support-qr-list', 60, 60 * 60 * 1000), async (req, res) => {
+    try {
+        res.set('Cache-Control', 'no-store');
+        const methods = (await supportQrStore.listPublic()).map((m) => ({ id: m.id, label: m.label }));
+        res.json({ success: true, methods });
+    } catch (err) { sendSupportQrError(res, err); }
+});
+app.get('/relay/public/support-qr/image', rateLimit('public-support-qr-image', 60, 60 * 60 * 1000), async (req, res) => {
+    try {
+        res.set('Cache-Control', 'no-store');
+        const found = await supportQrStore.getPublicImage(String(req.query.id || ''));
+        if (!found) return res.status(404).json({ success: false, code: 'NOT_FOUND', message: 'This QR code is not available.' });
+        res.json({ success: true, id: found.id, label: found.label, note: found.note, image: found.image });
+    } catch (err) { sendSupportQrError(res, err); }
+});
 app.post('/relay/webhooks/paymongo', express.raw({ type: '*/*', limit: '1mb' }), async (req, res) => {
     const rawBody = req.body ? req.body.toString('utf8') : '';
     const signatureHeader = req.headers['paymongo-signature'];
