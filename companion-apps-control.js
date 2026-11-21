@@ -1,7 +1,7 @@
 // companion-apps-control.js (RELAY)
 // -----------------------------------------------------------------------------
-// REMOTE CONTROL ng pag-install/pag-download ng COMPANION APPS (OmniKiosk, Kitchen Kiosk, Customer Display) sa OmniPOS Native.
-// Ang tatlong APK ay naka-bundle sa loob ng app, kaya DEFAULT ay LOCKED ang lahat: walang client ang makakapag-install hangga't
+// REMOTE CONTROL ng pag-install/pag-download ng COMPANION APPS (OmniKiosk, Kitchen Kiosk, Customer Display, Price Checker, Time Clock) sa OmniPOS Native.
+// Ang mga APK ay naka-bundle sa loob ng app, kaya DEFAULT ay LOCKED ang lahat: walang client ang makakapag-install hangga't
 // hindi mo ina-allow dito (admin page companion-apps.html). Dalawang antas:
 //   - global[APP] = true            -> pinapayagan ang APP sa LAHAT ng client
 //   - installations[id].apps[APP]   -> 'allow' | 'deny' (override para sa ISANG client/store; nananaig sa global)
@@ -13,8 +13,8 @@
 'use strict';
 const crypto = require('crypto');
 
-const APPS = Object.freeze(['OMNIKIOSK', 'KITCHENKIOSK', 'OMNIPOSDISPLAY']);
-const APP_LABELS = Object.freeze({ OMNIKIOSK: 'OmniKiosk', KITCHENKIOSK: 'Kitchen Kiosk', OMNIPOSDISPLAY: 'Customer Display' });
+const APPS = Object.freeze(['OMNIKIOSK', 'KITCHENKIOSK', 'OMNIPOSDISPLAY', 'PRICECHECKER', 'TIMECLOCK']);
+const APP_LABELS = Object.freeze({ OMNIKIOSK: 'OmniKiosk', KITCHENKIOSK: 'Kitchen Kiosk', OMNIPOSDISPLAY: 'Customer Display', PRICECHECKER: 'Price Checker', TIMECLOCK: 'Time Clock' });
 const DEFAULT_TTL_MS = 12 * 60 * 60 * 1000;
 const MAX_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_OVERRIDES = 5000;

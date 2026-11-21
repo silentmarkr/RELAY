@@ -23584,6 +23584,7 @@ const RELEASE_SERVER_TARGETS = new Set([
     'uom-pricing.js',
     'kiosk.js', // Self-Order Kiosk server module (license gate + Developer PIN logic)
     'daily-digest.js', // Daily Owner Summary report module
+    'companion-tools.js', // Price Checker + Time Clock server routes (require()-d by server.js)
 ]);
 const RELEASE_CLIENT_TARGETS = new Set([
     path.join('public', 'app.js'),
