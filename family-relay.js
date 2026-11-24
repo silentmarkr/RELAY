@@ -18,7 +18,7 @@
  *   GET  /devices          [admin]       lahat ng activated device ng pamilya (client + admin), may last seen
  *   POST /devices/:id/revoke [admin]
  *   POST /sign-out         [any]
- *   POST /sync/push        [client]      idempotent na batch ng ops
+ *   POST /sync/push        [client]      idempotent na batch ng ops (remittance, expense, savings, goal, category, pref)
  *   GET  /sync/pull?since= [admin|client] mga record ng sariling workspace (seq > since)
  * OWNER (x-relay-admin-key), page: /relay/admin/family.html
  *   GET  /relay/admin/api/family                       pamilya + activated devices + buod ng pera
@@ -44,13 +44,15 @@ const ENTITIES = {
     remittance: ['id', 'workspaceId', 'senderId', 'receiverId', 'currency', 'sentMinor', 'receivedMinor', 'sentAt', 'receivedAt', 'confirmedAt', 'reference', 'notes', 'status', 'createdAt', 'updatedAt', 'voided'],
     expense: ['id', 'workspaceId', 'category', 'description', 'amountMinor', 'currency', 'occurredAt', 'paymentMethod', 'receiptRef', 'notes', 'createdBy', 'createdAt', 'updatedAt', 'voided'],
     savings: ['id', 'workspaceId', 'type', 'amountMinor', 'currency', 'occurredAt', 'goalId', 'notes', 'createdBy', 'createdAt', 'updatedAt', 'voided'],
-    goal: ['id', 'workspaceId', 'name', 'targetMinor', 'currency', 'createdAt', 'updatedAt', 'voided'],
-    category: ['name', 'createdAt']
+    goal: ['id', 'workspaceId', 'name', 'targetMinor', 'currency', 'createdAt', 'updatedAt', 'voided', 'createdBy', 'targetDate'],
+    category: ['name', 'createdAt', 'createdBy'],
+    // Maliit na setting ng isang phone (pangalan ng card, edit sa kategorya): id = deviceId:key. Para bumalik pagkatapos mag-reinstall.
+    pref: ['id', 'workspaceId', 'key', 'value', 'createdBy', 'updatedAt', 'voided']
 };
 const MONEY_FIELDS = ['sentMinor', 'receivedMinor', 'amountMinor', 'targetMinor'];
 // Mahigpit na hugis ng record: ang app ay laging nagpapadala ng mga ito (tingnan ang LedgerRepository F_REM/F_EXP/F_SAV/F_GOAL/F_CAT).
-const TS_FIELDS = ['sentAt', 'receivedAt', 'confirmedAt', 'occurredAt', 'createdAt', 'updatedAt'];
-const STR_FIELDS = ['id', 'workspaceId', 'senderId', 'receiverId', 'currency', 'reference', 'notes', 'status', 'category', 'description', 'paymentMethod', 'receiptRef', 'createdBy', 'type', 'goalId', 'name'];
+const TS_FIELDS = ['sentAt', 'receivedAt', 'confirmedAt', 'occurredAt', 'createdAt', 'updatedAt', 'targetDate'];
+const STR_FIELDS = ['id', 'workspaceId', 'senderId', 'receiverId', 'currency', 'reference', 'notes', 'status', 'category', 'description', 'paymentMethod', 'receiptRef', 'createdBy', 'type', 'goalId', 'name', 'key', 'value'];
 const REQUIRED = {
     remittance: ['id', 'currency', 'sentMinor', 'status', 'createdAt', 'updatedAt'],
     expense: ['id', 'category', 'amountMinor', 'currency', 'occurredAt', 'createdAt', 'updatedAt'],
@@ -261,7 +263,14 @@ module.exports = function mountFamily(d) {
         for (const k of STR_FIELDS) if (out[k] !== undefined && out[k] !== null && typeof out[k] !== 'string') return null;
         for (const k of TS_FIELDS) if (out[k] !== undefined && out[k] !== null && (!Number.isInteger(out[k]) || out[k] < 0 || out[k] > MAX_TS)) return null;
         if (out.voided !== undefined && typeof out.voided !== 'boolean') return null;
-        if (entity === 'category') { out.name = clamp(out.name, 40); return out.name ? out : null; }
+        if (entity === 'category') { out.name = clamp(out.name, 40); if (typeof out.createdBy === 'string') out.createdBy = out.createdBy.slice(0, 120); return out.name ? out : null; }
+        if (entity === 'pref') {
+            out.key = clamp(out.key, 40);
+            out.value = String(out.value === undefined || out.value === null ? '' : out.value).slice(0, 4000); // hindi tina-trim: eksaktong teksto
+            if (!out.key || out.id !== entityId || !Number.isInteger(out.updatedAt)) return null;
+            if (typeof out.createdBy === 'string') out.createdBy = out.createdBy.slice(0, 120);
+            return out;
+        }
         for (const k of REQUIRED[entity]) if (out[k] === undefined || out[k] === null) return null;
         // Ang id sa loob ng record ay dapat kapareho ng entityId: kung hindi, maaaring mapalitan ng ibang device ang ibang record.
         if (out.id !== entityId) return null;
