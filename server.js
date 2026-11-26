@@ -10248,6 +10248,71 @@ app.post('/relay/client/kiosk-dev-pin/verify', rateLimit('client-kiosk-dev-pin',
     } catch (err) { return res.status(500).json({ success: false, message: 'Hindi ma-verify ngayon.' }); }
 });
 
+// ===== TAIWAN RULES (ShiftPay) =====
+// Ang ShiftPay app ay kumukuha ng rules JSON dito (PUBLIC, read-only, walang key, walang client data). I-edit mo ito sa
+// admin page taiwan-rules.html kapag may nagbago sa Taiwan (labor/health rate, minimum wage, tax, insured grades).
+// Hindi ito awtomatikong nag-i-scrape ng gobyerno: ikaw ang nagpapasya kung kailan at ano ang ilalathala.
+// Tingnan ang taiwan-rules.js (validation) at taiwan-rules-default.json (panimulang laman).
+const taiwanRules = require('./taiwan-rules');
+const TAIWAN_RULES_DEFAULT_PATH = path.join(__dirname, 'taiwan-rules-default.json');
+const TAIWAN_RULES_STATE_PATH = path.join(__dirname, 'taiwan-rules-state.json');
+function taiwanRulesDefault() {
+    try { return taiwanRules.parseAndValidate(fs.readFileSync(TAIWAN_RULES_DEFAULT_PATH, 'utf8')); } catch (err) { return null; }
+}
+async function loadTaiwanRules() {
+    // { rules, updatedAt, source: 'admin' | 'default' }
+    try {
+        const fromStore = await getPersistentJSON('taiwan-rules', null, { strict: true });
+        if (fromStore && fromStore.rules) return { rules: taiwanRules.validate(fromStore.rules), updatedAt: fromStore.updatedAt || null, source: 'admin' };
+    } catch (err) { /* babagsak sa file/default sa ibaba */ }
+    try {
+        const f = JSON.parse(readStateFileSync(TAIWAN_RULES_STATE_PATH));
+        if (f && f.rules) return { rules: taiwanRules.validate(f.rules), updatedAt: f.updatedAt || null, source: 'admin' };
+    } catch (err) { /* walang file */ }
+    return { rules: taiwanRulesDefault(), updatedAt: null, source: 'default' };
+}
+function saveTaiwanRules(state) {
+    if (pgPoolDevices || pgPool || redisClient) { setPersistentJSON('taiwan-rules', state); return; }
+    atomicWriteFileSync(TAIWAN_RULES_STATE_PATH, JSON.stringify(state));
+}
+// PUBLIC: eksaktong hugis ng taiwan_rules.json na binabasa ng ShiftPay (hindi naka-wrap, para direktang ma-parse ng app).
+app.get('/relay/public/taiwan-rules', rateLimit('public-taiwan-rules', 120, 60 * 60 * 1000), async (req, res) => {
+    try {
+        const cur = await loadTaiwanRules();
+        if (!cur.rules) return res.status(503).json({ success: false, message: 'Wala pang rules na nakalathala.' });
+        res.set('Cache-Control', 'no-store');
+        res.json(cur.rules);
+    } catch (err) { res.status(500).json({ success: false, message: 'Hindi mabasa ang rules ngayon.' }); }
+});
+app.get('/relay/admin/api/taiwan-rules', requireAdminKey, async (req, res) => {
+    try {
+        const cur = await loadTaiwanRules();
+        res.set('Cache-Control', 'no-store');
+        res.json({ success: true, rules: cur.rules, updatedAt: cur.updatedAt, source: cur.source, defaultRules: taiwanRulesDefault() });
+    } catch (err) { res.status(500).json({ success: false, message: 'Hindi mabasa ang rules: ' + err.message }); }
+});
+app.post('/relay/admin/api/taiwan-rules/set', requireAdminKey, rateLimit('taiwan-rules-set', 60, 60 * 60 * 1000), async (req, res) => {
+    try {
+        const body = req.body || {};
+        const clean = taiwanRules.parseAndValidate(body.rules !== undefined ? body.rules : body.json);
+        const state = { rules: clean, updatedAt: Date.now() };
+        saveTaiwanRules(state);
+        console.log(`🇹🇼 Taiwan rules updated via admin: version=${clean.version}`);
+        res.set('Cache-Control', 'no-store');
+        res.json({ success: true, rules: clean, updatedAt: state.updatedAt, source: 'admin' });
+    } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+});
+app.post('/relay/admin/api/taiwan-rules/reset', requireAdminKey, rateLimit('taiwan-rules-reset', 20, 60 * 60 * 1000), async (req, res) => {
+    try {
+        const def = taiwanRulesDefault();
+        if (!def) return res.status(500).json({ success: false, message: 'Walang default na rules file.' });
+        const state = { rules: def, updatedAt: Date.now() };
+        saveTaiwanRules(state);
+        res.set('Cache-Control', 'no-store');
+        res.json({ success: true, rules: def, updatedAt: state.updatedAt, source: 'admin' });
+    } catch (err) { res.status(400).json({ success: false, message: err.message }); }
+});
+
 // ===== OUTPUT LOCK CONTROL (Inventory-only mode — remote unlock) =====
 // Default ng lahat ng client: LOCKED (print/preview/share/email/download ng resibo). Dito ka nagtatanggal/naglalagay ng lock,
 // anumang oras, sa admin page output-lock.html: para sa LAHAT ng client (global) o para sa ISANG client (override).
@@ -18576,6 +18641,9 @@ app.get('/relay/sponsor/static-qr/image', requireApiKey, requireAllowedDevice, r
 // they take no client data, and they are rate limited per IP. Never put requireApiKey / the master key in a public app instead.
 const PUBLIC_LIVE_QRPH_ID = 'live_qrph';
 const PUBLIC_DONATION_INSTALLATION_ID = 'verse-wallpaper';
+// Mga app na pinapayagang gumamit ng public donation routes. Ang "app" ay galing sa body ng live-create; kapag wala, "verse"
+// (kaya hindi masisira ang lumang Verse Wallpaper). Ang purchase id ay "DON-<app>-..." at ang installation id ay nasa mapa.
+const PUBLIC_DONATION_APPS = { verse: { installationId: 'verse-wallpaper', label: 'Verse Wallpaper' }, shiftpay: { installationId: 'shiftpay-app', label: 'ShiftPay' } };
 app.get('/relay/public/support-qr', rateLimit('public-support-qr-list', 60, 60 * 60 * 1000), async (req, res) => {
     try {
         res.set('Cache-Control', 'no-store');
@@ -18608,15 +18676,18 @@ app.post('/relay/public/support-qr/live-create', rateLimit('public-support-qr-li
     try {
         await refreshPaymongoCapabilities(false);
         if (!isPaymentMethodAvailable('qrph')) return res.status(503).json({ success: false, message: 'QR Ph is not available right now.' });
-        const purchaseId = `DON-verse-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
-        const checkout = await createPaymentCheckout({ method: 'qrph', amountPHP: amount, purchaseId, base: `${req.protocol}://${req.get('host')}`, description: `Verse Wallpaper Donation (PHP ${amount})` });
+        const appKey = Object.prototype.hasOwnProperty.call(PUBLIC_DONATION_APPS, String((req.body && req.body.app) || 'verse')) ? String((req.body && req.body.app) || 'verse') : null;
+        if (!appKey) return res.status(400).json({ success: false, message: 'Unknown app.' });
+        const donApp = PUBLIC_DONATION_APPS[appKey];
+        const purchaseId = `DON-${appKey}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+        const checkout = await createPaymentCheckout({ method: 'qrph', amountPHP: amount, purchaseId, base: `${req.protocol}://${req.get('host')}`, description: `${donApp.label} Donation (PHP ${amount})` });
         await queryWithRetry(
             pgPool,
             `INSERT INTO cloud_token_purchases (purchase_id, installation_id, package_id, tokens, amount_php, method, source_id, provider, status)
              VALUES ($1, $2, 'DONATION', 0, $3, 'qrph', $4, $5, 'pending')`,
-            [purchaseId, PUBLIC_DONATION_INSTALLATION_ID, amount, checkout.providerRefId, checkout.provider]
+            [purchaseId, donApp.installationId, amount, checkout.providerRefId, checkout.provider]
         );
-        logActivity(PUBLIC_DONATION_INSTALLATION_ID, 'sponsor_donation_created', { purchaseId, amountPHP: amount, method: 'qrph', provider: checkout.provider });
+        logActivity(donApp.installationId, 'sponsor_donation_created', { purchaseId, amountPHP: amount, method: 'qrph', provider: checkout.provider });
         res.json({ success: true, purchaseId, qrCodeImageUrl: checkout.qrCodeImageUrl || null, expiresAt: checkout.expiresAt || null, amountPHP: amount });
     } catch (err) {
         console.error('⚠️ Public live QR Ph create failed:', err && err.message);
@@ -18626,10 +18697,12 @@ app.post('/relay/public/support-qr/live-create', rateLimit('public-support-qr-li
 app.get('/relay/public/support-qr/live-status', rateLimit('public-support-qr-live-status', 400, 60 * 60 * 1000), async (req, res) => {
     res.set('Cache-Control', 'no-store');
     const purchaseId = String(req.query.purchaseId || '').trim();
-    if (!/^DON-verse-\d{10,16}-[a-f0-9]{8}$/.test(purchaseId)) return res.status(400).json({ success: false, message: 'Invalid purchaseId.' });
+    const idMatch = /^DON-(verse|shiftpay)-\d{10,16}-[a-f0-9]{8}$/.exec(purchaseId);
+    if (!idMatch) return res.status(400).json({ success: false, message: 'Invalid purchaseId.' });
+    const statusInstallationId = PUBLIC_DONATION_APPS[idMatch[1]].installationId;
     if (!pgPool) return res.status(503).json({ success: false, message: 'Not available right now.' });
     try {
-        const r = await queryWithRetry(pgPool, `SELECT status, amount_php FROM cloud_token_purchases WHERE purchase_id = $1 AND installation_id = $2`, [purchaseId, PUBLIC_DONATION_INSTALLATION_ID]);
+        const r = await queryWithRetry(pgPool, `SELECT status, amount_php FROM cloud_token_purchases WHERE purchase_id = $1 AND installation_id = $2`, [purchaseId, statusInstallationId]);
         if (!r.rows[0]) return res.status(404).json({ success: false, message: 'Donation not found.' });
         if (r.rows[0].status === 'paid') { try { await backfillPaidOnlineDonations(); } catch (bfErr) { console.error('⚠️ Sponsor donation backfill failed:', bfErr.message); } }
         res.json({ success: true, status: r.rows[0].status, amountPHP: Number(r.rows[0].amount_php) });

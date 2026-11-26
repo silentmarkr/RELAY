@@ -1,0 +1,13 @@
+{
+  "version": "2026.1",
+  "effective": "2026-01-01",
+  "notes": "Taiwan 2026: labor 11.5% (you pay 20%), health 5.17% (you pay 30%), minimum wage 29,500.",
+  "values": {
+    "labIns": 29500, "labRate": 11.5, "labEi": 0, "labEmp": 20,
+    "helIns": 29500, "helRate": 5.17, "helEmp": 30,
+    "minWage": 29500, "nonLow": 6, "nonHigh": 18,
+    "resRate": 5, "resThresh": 40000,
+    "exOtHrs": 46, "exCatCap": 3000
+  },
+  "grades": [29500, 31800, 33300, 34800, 36300, 38200, 40100, 42000, 43900, 45800]
+}

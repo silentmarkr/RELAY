@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#05070d"><title>Taiwan Rules (ShiftPay) — RELAY Admin</title>
+<style>
+:root{color-scheme:dark;--bg:#05070d;--card:#101625;--line:#26334f;--text:#eafcff;--muted:#9aabc9;--accent:#22e5ff;--green:#3ddc84;--red:#ff5c72;--amber:#ffc857}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{max-width:760px;margin:0 auto;padding:18px 14px 60px}
+a{color:var(--accent)}h1{font-size:1.4rem;margin:.4rem 0}h2{font-size:1.05rem;margin:0 0 10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:14px 0}
+.field{display:flex;flex-direction:column;gap:4px;font-size:.85rem;color:var(--muted);margin:8px 0}
+input,textarea{background:#0a0f1c;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px;font:inherit;width:100%}
+textarea{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.82rem;min-height:340px;resize:vertical}
+button{background:#16213a;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px 16px;font:inherit;cursor:pointer}
+button.primary{background:var(--accent);color:#04222a;border-color:var(--accent);font-weight:700}
+button:disabled{opacity:.5;cursor:not-allowed}
+.small{font-size:.8rem;color:var(--muted)}
+.notice{margin:10px 0;padding:9px 12px;border-radius:8px;background:#0a1a14;border:1px solid #1f5a3d;color:var(--green);display:none}
+.notice.error{background:#2a0e14;border-color:#7a2230;color:var(--red)}.notice.show{display:block}
+.warn{background:#2a2108;border:1px solid #6b5514;color:var(--amber);padding:9px 12px;border-radius:8px;margin:10px 0}
+.badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:.8rem;border:1px solid var(--line)}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.8rem;word-break:break-all}
+</style><link rel="stylesheet" href="admin-ui.css">
+<script src="admin-ui.js" defer></script>
+</head><body><main>
+<p><a href="index.html#system">← RELAY Admin</a></p>
+<h1>🇹🇼 Taiwan Rules (ShiftPay)</h1>
+<div class="warn">Dito mo ie-edit ang labor, health, tax, tax-exempt na halaga at insured salary grades. Walang awtomatikong pag-scrape ng gobyerno: <b>ikaw</b> ang nagpapasya kung ano ang ilalathala. Dalawang paraan: <b>Auto-update</b> = kusang mag-a-apply sa mga ShiftPay user pagbukas ng app (hindi nila kailangang gumawa ng kahit ano; may Undo sila at puwede nilang i-off); <b>I-save lang</b> = makikita nila sa Check for updates ang eksaktong pagbabago at sila ang magpipindot ng Apply. Dapat tumaas ang <code>version</code> sa bawat bagong lathala.</div>
+
+<section class="card"><h2>Admin authentication</h2>
+<label class="field">RELAY admin key<input id="adminKey" type="password" autocomplete="current-password" placeholder="Enter ADMIN_KEY"></label>
+<button id="connectBtn">Connect</button></section>
+
+<div id="notice" class="notice" role="status"></div>
+
+<section class="card"><h2>Public link (ito ang gamit ng app) <span id="src" class="badge">—</span></h2>
+<p class="mono" id="pubUrl">—</p>
+<p class="small" id="when">Mag-connect muna gamit ang admin key.</p>
+<button id="copyUrl">📋 Copy link</button> <a id="openUrl" href="#" target="_blank" rel="noopener" class="small">Buksan ang live JSON</a>
+</section>
+
+<section class="card"><h2>Rules JSON</h2>
+<label class="field">version, effective, notes, values, grades (ito mismo ang makikita ng app)
+<textarea id="json" spellcheck="false" placeholder="{ ... }"></textarea></label>
+<div style="margin-top:10px"><button id="pushBtn" class="primary" disabled>📣 Auto-update ang lahat ng ShiftPay user</button> <button id="saveBtn" disabled>💾 I-save lang (user ang mag-Apply)</button> <button id="reloadBtn" disabled>↻ I-reload</button> <button id="resetBtn" disabled>↩ Ibalik sa default</button></div>
+<p class="small">Sinusuri ng RELAY ang laman bago i-save (parehong patakaran ng app: 0 hanggang 10,000,000; ang mga % ay hanggang 100; ang grades ay tumataas). Kapag may mali, hindi ito ise-save.</p>
+</section>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const PUB=location.origin+'/relay/public/taiwan-rules';
+  $('pubUrl').textContent=PUB;$('openUrl').href=PUB;
+  function say(m,bad){const n=$('notice');n.textContent=m;n.className='notice show'+(bad?' error':'')}
+  async function api(p,method,body){
+    const r=await fetch(p,{method,headers:{'x-relay-admin-key':$('adminKey').value,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
+    let j={};try{j=await r.json()}catch(_){}
+    if(!r.ok||j.success===false){const e=new Error(j.message||('HTTP '+r.status));e.status=r.status;throw e}
+    return j;
+  }
+  function render(j){
+    $('json').value=JSON.stringify(j.rules,null,2);
+    $('src').textContent=j.source==='admin'?'✅ galing sa admin':'📦 default (built-in)';
+    $('when').textContent=j.updatedAt?('Huling na-save: '+new Date(j.updatedAt).toLocaleString()+' · version '+j.rules.version):('Wala pang na-save mo: default ang ginagamit · version '+(j.rules?j.rules.version:'—'));
+    ['pushBtn','saveBtn','reloadBtn','resetBtn'].forEach(i=>$(i).disabled=false);
+  }
+  async function load(){render(await api('/relay/admin/api/taiwan-rules','GET'))}
+  async function publish(auto){
+    let obj;try{obj=JSON.parse($('json').value)}catch(e){say('Hindi valid na JSON: '+e.message,true);return}
+    obj.autoApply=auto;
+    const msg=auto?('I-AUTO-UPDATE ang version '+(obj&&obj.version)+' sa LAHAT ng ShiftPay user? Kusa itong mag-a-apply pagbukas ng app (may Undo ang user).'):('Ilathala ang version '+(obj&&obj.version)+'? Ang user ang magpipindot ng Apply.');
+    if(!confirm(msg))return;
+    try{const j=await api('/relay/admin/api/taiwan-rules/set','POST',{rules:obj});render(j);say(auto?'Nailathala. Mag-a-update nang kusa ang mga ShiftPay user sa susunod nilang pagbukas (hanggang 12 oras).':'Na-save. Makikita ng user sa "Check for updates".')}catch(e){say(e.message,true)}
+  }
+  $('pushBtn').onclick=()=>publish(true);
+  $('saveBtn').onclick=()=>publish(false);
+  $('reloadBtn').onclick=()=>load().then(()=>say('Na-reload.')).catch(e=>say(e.message,true));
+  $('resetBtn').onclick=async()=>{if(!confirm('Ibalik sa built-in na default na rules at ilathala ito?'))return;try{render(await api('/relay/admin/api/taiwan-rules/reset','POST',{}));say('Naibalik sa default.')}catch(e){say(e.message,true)}};
+  $('copyUrl').onclick=()=>{try{navigator.clipboard.writeText(PUB);say('Na-copy ang link.')}catch(_){say('I-copy mano-mano: '+PUB)}};
+  async function connect(){
+    try{await load();try{sessionStorage.setItem('relayAdminKey',$('adminKey').value)}catch(_){}say('Connected.')}
+    catch(e){if(e.status===401||e.status===403){try{sessionStorage.removeItem('relayAdminKey')}catch(_){}}say(e.message,true)}
+  }
+  $('connectBtn').onclick=connect;
+  let saved='';try{saved=sessionStorage.getItem('relayAdminKey')||''}catch(_){}
+  if(saved){$('adminKey').value=saved;connect()}
+})();
+</script></main></body></html>
