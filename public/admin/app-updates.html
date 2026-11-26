@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#05070d"><title>App Updates — RELAY Admin</title>
+<style>
+:root{color-scheme:dark;--bg:#05070d;--card:#101625;--line:#26334f;--text:#eafcff;--muted:#9aabc9;--accent:#22e5ff;--green:#3ddc84;--red:#ff5c72;--amber:#ffc857}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{max-width:760px;margin:0 auto;padding:18px 14px 60px}
+a{color:var(--accent)}h1{font-size:1.4rem;margin:.4rem 0}h2{font-size:1.05rem;margin:0 0 10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:14px 0}
+.field{display:flex;flex-direction:column;gap:4px;font-size:.85rem;color:var(--muted);margin:8px 0}
+input,textarea{background:#0a0f1c;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px;font:inherit;width:100%}
+textarea{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.82rem;min-height:340px;resize:vertical}
+button{background:#16213a;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px 16px;font:inherit;cursor:pointer}
+button.primary{background:var(--accent);color:#04222a;border-color:var(--accent);font-weight:700}
+button:disabled{opacity:.5;cursor:not-allowed}
+.small{font-size:.8rem;color:var(--muted)}
+.notice{margin:10px 0;padding:9px 12px;border-radius:8px;background:#0a1a14;border:1px solid #1f5a3d;color:var(--green);display:none}
+.notice.error{background:#2a0e14;border-color:#7a2230;color:var(--red)}.notice.show{display:block}
+.warn{background:#2a2108;border:1px solid #6b5514;color:var(--amber);padding:9px 12px;border-radius:8px;margin:10px 0}
+.badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:.8rem;border:1px solid var(--line)}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.8rem;word-break:break-all}
+</style><link rel="stylesheet" href="admin-ui.css">
+<script src="admin-ui.js" defer></script>
+</head><body><main>
+<p><a href="index.html#system">← RELAY Admin</a></p>
+<h1>📲 App Updates (APK)</h1>
+<div class="warn">I-upload lang dito ang bagong <b>.apk</b>: kusa nang binabasa ng RELAY ang package, versionCode at versionName sa loob nito, kaya wala ka nang ibang ilalagay. Sa app (Settings → Check for app update), makikita ng user kung mas mataas ang <code>versionCode</code> (nasa <code>app/build.gradle</code>; dapat mas mataas sa dati) kaysa sa naka-install, at madi-download at mai-install nila ito. Naka-save ang APK sa <b>database</b> (hindi sa disk ng Render, na nabubura kapag nag-redeploy). <b>Mahalaga:</b> tatanggapin lang ng Android ang update kung <b>pareho ang signing key</b> ng bagong APK at ng naka-install na app: laging i-build gamit ang parehong keystore/computer.</div>
+
+<section class="card"><h2>Admin authentication</h2>
+<label class="field">RELAY admin key<input id="adminKey" type="password" autocomplete="current-password" placeholder="Enter ADMIN_KEY"></label>
+<button id="connectBtn">Connect</button></section>
+
+<div id="notice" class="notice" role="status"></div>
+
+<section class="card"><h2 id="appTitle">WorkShiftData</h2>
+<p class="small" id="cur">Mag-connect muna gamit ang admin key.</p>
+<p class="small" id="store"></p>
+<label class="field">APK file<input id="file" type="file" accept=".apk,application/vnd.android.package-archive"></label>
+<div style="margin-top:10px"><button id="upBtn" class="primary" disabled>⬆️ I-upload at ilathala</button> <button id="delBtn" disabled>🗑 Alisin ang update</button></div>
+<p class="small" id="prog"></p>
+</section>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const APP='shiftpay';
+  function say(m,bad){const n=$('notice');n.textContent=m;n.className='notice show'+(bad?' error':'')}
+  async function api(p,method,body){
+    const r=await fetch(p,{method,headers:{'x-relay-admin-key':$('adminKey').value,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
+    let j={};try{j=await r.json()}catch(_){}
+    if(!r.ok||j.success===false){const e=new Error(j.message||('HTTP '+r.status));e.status=r.status;throw e}
+    return j;
+  }
+  const mb=n=>(n/1048576).toFixed(2)+' MB';
+  function render(j){
+    const a=j.apps.find(x=>x.id===APP);
+    $('appTitle').textContent=a.label;
+    $('store').textContent='Storage: '+j.storage+' · hanggang '+j.maxMb+' MB';
+    $('cur').innerHTML=a.current?('Kasalukuyang nasa RELAY: <b>'+a.current.versionName+'</b> (versionCode '+a.current.versionCode+') · '+mb(a.current.size)+' · '+new Date(a.current.uploadedAt).toLocaleString()+'<br>SHA-256: <span class="mono">'+a.current.sha256+'</span>'):'Wala pang naka-upload na APK.';
+    $('upBtn').disabled=false;$('delBtn').disabled=!a.current;
+  }
+  async function load(){render(await api('/relay/admin/api/app-updates','GET'))}
+  $('upBtn').onclick=function(){
+    const f=$('file').files[0];
+    if(!f){say('Pumili muna ng .apk file.',true);return}
+    if(!/\.apk$/i.test(f.name)){say('Dapat .apk ang file.',true);return}
+    if(!confirm('I-upload ang '+f.name+'? Babasahin ng RELAY ang version mula sa APK at makikita ito ng lahat ng user na magche-check ng update.'))return;
+    const x=new XMLHttpRequest();
+    x.open('POST','/relay/admin/api/app-updates/upload?app='+APP);
+    x.setRequestHeader('x-relay-admin-key',$('adminKey').value);
+    x.setRequestHeader('Content-Type','application/octet-stream');
+    $('upBtn').disabled=true;
+    x.upload.onprogress=e=>{if(e.lengthComputable)$('prog').textContent='Ina-upload… '+Math.round(e.loaded*100/e.total)+'%'};
+    x.onload=async()=>{
+      let j={};try{j=JSON.parse(x.responseText)}catch(_){}
+      $('prog').textContent='';
+      if(x.status>=200&&x.status<300&&j.success){say('Nailathala na. Makikita ito ng mga user sa Check for app update.');$('file').value='';await load()}
+      else{say(j.message||('HTTP '+x.status),true);$('upBtn').disabled=false}
+    };
+    x.onerror=()=>{$('prog').textContent='';say('Hindi naabot ang RELAY.',true);$('upBtn').disabled=false};
+    x.send(f);
+  };
+  $('delBtn').onclick=async()=>{if(!confirm('Alisin ang APK sa RELAY? Wala nang makikitang update ang mga user.'))return;try{await api('/relay/admin/api/app-updates/delete','POST',{app:APP});say('Naalis.');await load()}catch(e){say(e.message,true)}};
+  async function connect(){
+    try{await load();try{sessionStorage.setItem('relayAdminKey',$('adminKey').value)}catch(_){}say('Connected.')}
+    catch(e){if(e.status===401||e.status===403){try{sessionStorage.removeItem('relayAdminKey')}catch(_){}}say(e.message,true)}
+  }
+  $('connectBtn').onclick=connect;
+  let saved='';try{saved=sessionStorage.getItem('relayAdminKey')||''}catch(_){}
+  if(saved){$('adminKey').value=saved;connect()}
+})();
+</script></main></body></html>

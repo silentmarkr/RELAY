@@ -10248,6 +10248,128 @@ app.post('/relay/client/kiosk-dev-pin/verify', rateLimit('client-kiosk-dev-pin',
     } catch (err) { return res.status(500).json({ success: false, message: 'Hindi ma-verify ngayon.' }); }
 });
 
+// ===== APP UPDATES (WorkShiftData / ShiftPay APK) =====
+// I-upload mo ang bagong APK sa admin page app-updates.html; ang app (Settings > Check for app update) ay nagtatanong dito,
+// at kapag mas mataas ang versionCode, dina-download at ini-install ito ng user. Ang APK ay nakasave sa POSTGRES (tabelang
+// relay_app_files, bytea) at hindi sa disk, dahil BURA ang disk ng Render kapag nag-restart/nag-deploy. Kapag walang database,
+// file sa disk ang gamit (mawawala sa redeploy). Mga app na pinapayagan: tingnan ang APP_UPDATE_APPS.
+// PAALALA: tatanggapin lang ng Android ang update kung PAREHO ang signing key ng naka-install na app at ng bagong APK.
+const apkInfo = require('./apk-info');
+// packageName ay kinukumpara sa nababasa sa loob ng APK, kaya hindi ka makakapag-upload ng maling app.
+const APP_UPDATE_APPS = { shiftpay: { label: 'WorkShiftData (ShiftPay)', fileName: 'WorkShiftData.apk', packageName: 'com.shiftpay.tracker' } };
+const APP_UPDATE_MAX_BYTES = Math.max(1, Number(process.env.APP_UPDATE_MAX_MB || 60)) * 1024 * 1024;
+const APP_UPDATE_DIR = path.join(__dirname, 'app-updates');
+let appUpdateSchemaReady = null;
+function appUpdatePool() { return pgPoolDevices || pgPool || null; }
+async function ensureAppUpdateSchema() {
+    const pool = appUpdatePool();
+    if (!pool) return false;
+    if (!appUpdateSchemaReady) {
+        appUpdateSchemaReady = queryWithRetry(pool, `CREATE TABLE IF NOT EXISTS relay_app_files (
+            app_id TEXT PRIMARY KEY, data BYTEA NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`, []).then(() => true).catch((e) => { appUpdateSchemaReady = null; throw e; });
+    }
+    return appUpdateSchemaReady;
+}
+async function loadAppUpdateMeta() {
+    const v = await getPersistentJSON('app-updates', null, { strict: true });
+    if (v && typeof v === 'object') return v;
+    try { return JSON.parse(readStateFileSync(path.join(APP_UPDATE_DIR, 'meta.json'))); } catch (e) { return {}; }
+}
+async function saveAppUpdateMeta(meta) {
+    if (appUpdatePool() || redisClient) { setPersistentJSON('app-updates', meta); return; }
+    fs.mkdirSync(APP_UPDATE_DIR, { recursive: true });
+    atomicWriteFileSync(path.join(APP_UPDATE_DIR, 'meta.json'), JSON.stringify(meta));
+}
+function publicAppUpdateInfo(id, m) {
+    return { app: id, versionCode: m.versionCode, versionName: m.versionName, notes: m.notes || '', size: m.size, sha256: m.sha256, uploadedAt: m.uploadedAt };
+}
+app.get('/relay/admin/api/app-updates', requireAdminKey, async (req, res) => {
+    try {
+        const meta = await loadAppUpdateMeta();
+        res.set('Cache-Control', 'no-store');
+        res.json({ success: true, maxMb: APP_UPDATE_MAX_BYTES / 1048576, storage: appUpdatePool() ? 'postgres' : 'disk (mawawala sa redeploy!)',
+            apps: Object.keys(APP_UPDATE_APPS).map((id) => ({ id, label: APP_UPDATE_APPS[id].label, current: meta[id] ? publicAppUpdateInfo(id, meta[id]) : null })) });
+    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+});
+// Upload: raw na APK sa body (Content-Type: application/octet-stream). Metadata sa headers.
+app.post('/relay/admin/api/app-updates/upload', requireAdminKey, rateLimit('app-update-upload', 30, 60 * 60 * 1000),
+    express.raw({ type: '*/*', limit: APP_UPDATE_MAX_BYTES }), async (req, res) => {
+    try {
+        const id = String(req.query.app || '');
+        if (!Object.prototype.hasOwnProperty.call(APP_UPDATE_APPS, id)) return res.status(400).json({ success: false, message: 'Hindi kilalang app.' });
+        const buf = req.body;
+        if (!Buffer.isBuffer(buf) || buf.length < 2048) return res.status(400).json({ success: false, message: 'Walang laman o masyadong maliit ang file.' });
+        let info;
+        try { info = apkInfo.readApkInfo(buf); } catch (e) { return res.status(400).json({ success: false, message: 'Hindi mabasa ang APK: ' + e.message + ' (dapat mismong .apk file, hindi zip ng source).' }); }
+        if (info.packageName !== APP_UPDATE_APPS[id].packageName) return res.status(400).json({ success: false, message: `Maling app: ang APK ay "${info.packageName}" pero ang inaasahan ay "${APP_UPDATE_APPS[id].packageName}".` });
+        const versionCode = info.versionCode;
+        const versionName = info.versionName;
+        const notes = decodeURIComponent(String(req.headers['x-notes'] || '')).trim().slice(0, 500);
+        const meta = await loadAppUpdateMeta();
+        const prev = meta[id];
+        if (prev && versionCode <= prev.versionCode) {
+            return res.status(409).json({ success: false, message: `Ang APK na ito ay versionCode ${versionCode} (${versionName}) pero nasa RELAY na ang ${prev.versionCode} (${prev.versionName}). Itaas ang versionCode sa app/build.gradle at i-build ulit.` });
+        }
+        const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
+        if (appUpdatePool()) {
+            await ensureAppUpdateSchema();
+            await queryWithRetry(appUpdatePool(), `INSERT INTO relay_app_files (app_id, data, updated_at) VALUES ($1, $2, now())
+                ON CONFLICT (app_id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()`, [id, buf]);
+        } else {
+            fs.mkdirSync(APP_UPDATE_DIR, { recursive: true });
+            fs.writeFileSync(path.join(APP_UPDATE_DIR, id + '.apk'), buf);
+        }
+        meta[id] = { versionCode, versionName, notes, size: buf.length, sha256, uploadedAt: Date.now() };
+        await saveAppUpdateMeta(meta);
+        console.log(`📲 App update uploaded: ${id} v${versionName} (${versionCode}), ${buf.length} bytes`);
+        res.set('Cache-Control', 'no-store');
+        res.json({ success: true, current: publicAppUpdateInfo(id, meta[id]) });
+    } catch (err) { res.status(500).json({ success: false, message: 'Hindi na-save ang APK: ' + err.message }); }
+});
+app.post('/relay/admin/api/app-updates/delete', requireAdminKey, rateLimit('app-update-delete', 30, 60 * 60 * 1000), async (req, res) => {
+    try {
+        const id = String((req.body && req.body.app) || '');
+        if (!Object.prototype.hasOwnProperty.call(APP_UPDATE_APPS, id)) return res.status(400).json({ success: false, message: 'Hindi kilalang app.' });
+        const meta = await loadAppUpdateMeta();
+        delete meta[id];
+        if (appUpdatePool()) { await ensureAppUpdateSchema(); await queryWithRetry(appUpdatePool(), 'DELETE FROM relay_app_files WHERE app_id = $1', [id]); }
+        else { try { fs.unlinkSync(path.join(APP_UPDATE_DIR, id + '.apk')); } catch (e) { /* wala */ } }
+        await saveAppUpdateMeta(meta);
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+});
+// PUBLIC: pinakabagong bersyon (maliit na JSON) at ang mismong APK. Walang key; walang client data.
+app.get('/relay/public/app-update/latest', rateLimit('public-app-update-latest', 120, 60 * 60 * 1000), async (req, res) => {
+    try {
+        const id = String(req.query.app || '');
+        res.set('Cache-Control', 'no-store');
+        if (!Object.prototype.hasOwnProperty.call(APP_UPDATE_APPS, id)) return res.status(404).json({ success: false, message: 'Hindi kilalang app.' });
+        const meta = await loadAppUpdateMeta();
+        if (!meta[id]) return res.json({ success: true, available: false });
+        res.json({ success: true, available: true, ...publicAppUpdateInfo(id, meta[id]) });
+    } catch (err) { res.status(500).json({ success: false, message: 'Hindi mabasa ang update info ngayon.' }); }
+});
+app.get('/relay/public/app-update/download', rateLimit('public-app-update-download', 30, 60 * 60 * 1000), async (req, res) => {
+    try {
+        const id = String(req.query.app || '');
+        if (!Object.prototype.hasOwnProperty.call(APP_UPDATE_APPS, id)) return res.status(404).json({ success: false, message: 'Hindi kilalang app.' });
+        const meta = await loadAppUpdateMeta();
+        if (!meta[id]) return res.status(404).json({ success: false, message: 'Wala pang naka-upload na APK.' });
+        let buf = null;
+        if (appUpdatePool()) {
+            await ensureAppUpdateSchema();
+            const r = await queryWithRetry(appUpdatePool(), 'SELECT data FROM relay_app_files WHERE app_id = $1', [id]);
+            buf = r.rows[0] ? r.rows[0].data : null;
+        } else {
+            try { buf = fs.readFileSync(path.join(APP_UPDATE_DIR, id + '.apk')); } catch (e) { buf = null; }
+        }
+        if (!buf) return res.status(404).json({ success: false, message: 'Wala ang APK sa storage. I-upload ulit sa admin page.' });
+        res.set({ 'Content-Type': 'application/vnd.android.package-archive', 'Content-Length': String(buf.length),
+            'Content-Disposition': `attachment; filename="${APP_UPDATE_APPS[id].fileName}"`, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+        res.end(buf);
+    } catch (err) { res.status(500).json({ success: false, message: 'Hindi ma-download ngayon.' }); }
+});
+
 // ===== TAIWAN RULES (ShiftPay) =====
 // Ang ShiftPay app ay kumukuha ng rules JSON dito (PUBLIC, read-only, walang key, walang client data). I-edit mo ito sa
 // admin page taiwan-rules.html kapag may nagbago sa Taiwan (labor/health rate, minimum wage, tax, insured grades).
