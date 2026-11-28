@@ -24,7 +24,8 @@ button:disabled{opacity:.5;cursor:not-allowed}
 </head><body><main>
 <p><a href="index.html#system">← RELAY Admin</a></p>
 <h1>📲 App Updates (APK)</h1>
-<div class="warn">I-upload lang dito ang bagong <b>.apk</b>: kusa nang binabasa ng RELAY ang package, versionCode at versionName sa loob nito, kaya wala ka nang ibang ilalagay. Sa app (Settings → Check for app update), makikita ng user kung mas mataas ang <code>versionCode</code> (nasa <code>app/build.gradle</code>; dapat mas mataas sa dati) kaysa sa naka-install, at madi-download at mai-install nila ito. Naka-save ang APK sa <b>database</b> (hindi sa disk ng Render, na nabubura kapag nag-redeploy). <b>Mahalaga:</b> tatanggapin lang ng Android ang update kung <b>pareho ang signing key</b> ng bagong APK at ng naka-install na app: laging i-build gamit ang parehong keystore/computer.</div>
+<p class="small">Dito mo ina-upload ang lahat ng APK na dina-download ng mga app mula sa RELAY: ang <b>OmniPOS Native app</b> mismo, ang <b>5 companion apps</b> (Settings → Install other apps → Get latest online) at ang WorkShiftData.</p>
+<div class="warn">I-upload lang dito ang bagong <b>.apk</b>: kusa nang binabasa ng RELAY ang package, versionCode at versionName sa loob nito, kaya wala ka nang ibang ilalagay. Sa app (Settings → Check for app update, o Install other apps → Get latest online), makikita ng user kung mas mataas ang <code>versionCode</code> (nasa <code>app/build.gradle</code>; dapat mas mataas sa dati) kaysa sa naka-install, at madi-download at mai-install nila ito. Naka-save ang APK sa <b>database</b> (hindi sa disk ng Render, na nabubura kapag nag-redeploy). <b>Mahalaga:</b> tatanggapin lang ng Android ang update kung <b>pareho ang signing key</b> ng bagong APK at ng naka-install na app: laging i-build gamit ang parehong keystore/computer.</div>
 
 <section class="card"><h2>Admin authentication</h2>
 <label class="field">RELAY admin key<input id="adminKey" type="password" autocomplete="current-password" placeholder="Enter ADMIN_KEY"></label>
@@ -32,18 +33,12 @@ button:disabled{opacity:.5;cursor:not-allowed}
 
 <div id="notice" class="notice" role="status"></div>
 
-<section class="card"><h2 id="appTitle">WorkShiftData</h2>
-<p class="small" id="cur">Mag-connect muna gamit ang admin key.</p>
 <p class="small" id="store"></p>
-<label class="field">APK file<input id="file" type="file" accept=".apk,application/vnd.android.package-archive"></label>
-<div style="margin-top:10px"><button id="upBtn" class="primary" disabled>⬆️ I-upload at ilathala</button> <button id="delBtn" disabled>🗑 Alisin ang update</button></div>
-<p class="small" id="prog"></p>
-</section>
+<div id="apps"></div>
 
 <script>
 (function(){
   const $=id=>document.getElementById(id);
-  const APP='shiftpay';
   function say(m,bad){const n=$('notice');n.textContent=m;n.className='notice show'+(bad?' error':'')}
   async function api(p,method,body){
     const r=await fetch(p,{method,headers:{'x-relay-admin-key':$('adminKey').value,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
@@ -51,41 +46,64 @@ button:disabled{opacity:.5;cursor:not-allowed}
     if(!r.ok||j.success===false){const e=new Error(j.message||('HTTP '+r.status));e.status=r.status;throw e}
     return j;
   }
-  const mb=n=>(n/1048576).toFixed(2)+' MB';
+  const mb=n=>(n>=1048576?(n/1048576).toFixed(2)+' MB':Math.max(1,Math.round(n/1024))+' KB');
+  const esc=t=>String(t==null?'':t).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  let storageInfo='';
+  function cardHtml(a){
+    const cur=a.current;
+    const curTxt=cur?('Kasalukuyang nasa RELAY: <b>'+esc(cur.versionName)+'</b> (versionCode '+esc(cur.versionCode)+') · '+mb(cur.size)+' · '+esc(new Date(cur.uploadedAt).toLocaleString())+'<br>SHA-256: <span class="mono">'+esc(cur.sha256)+'</span>'):'Wala pang naka-upload na APK.';
+    return '<section class="card" data-app="'+esc(a.id)+'"><h2>'+esc(a.label)+' <span class="badge">'+(cur?'v'+esc(cur.versionName):'wala pa')+'</span></h2>'
+      +'<p class="small">Package: <span class="mono">'+esc(a.packageName)+'</span> · file name sa app: <span class="mono">'+esc(a.fileName)+'</span></p>'
+      +'<p class="small cur">'+curTxt+'</p>'
+      +'<label class="field">APK file<input class="file" type="file" accept=".apk,application/vnd.android.package-archive"></label>'
+      +'<div style="margin-top:10px"><button class="primary up">⬆️ I-upload at ilathala</button> <button class="del"'+(cur?'':' disabled')+'>🗑 Alisin ang update</button></div>'
+      +'<p class="small prog"></p></section>';
+  }
   function render(j){
-    const a=j.apps.find(x=>x.id===APP);
-    $('appTitle').textContent=a.label;
-    $('store').textContent='Storage: '+j.storage+' · hanggang '+j.maxMb+' MB';
-    $('cur').innerHTML=a.current?('Kasalukuyang nasa RELAY: <b>'+a.current.versionName+'</b> (versionCode '+a.current.versionCode+') · '+mb(a.current.size)+' · '+new Date(a.current.uploadedAt).toLocaleString()+'<br>SHA-256: <span class="mono">'+a.current.sha256+'</span>'):'Wala pang naka-upload na APK.';
-    $('upBtn').disabled=false;$('delBtn').disabled=!a.current;
+    storageInfo='Storage: '+j.storage+' · hanggang '+j.maxMb+' MB bawat APK';
+    $('store').textContent=storageInfo;
+    const nat=j.apps.filter(a=>a.group==='native'), comp=j.apps.filter(a=>a.group==='companion'), other=j.apps.filter(a=>a.group!=='companion'&&a.group!=='native');
+    $('apps').innerHTML=(nat.length?'<h2 style="margin-top:20px">OmniPOS Native app (Launcher)</h2><p class="small">Ito ang mismong OmniPOS app. Kapag may mas mataas na versionCode dito, makikita ng mga phone ang update sa Settings → Update this app (at awtomatikong na-che-check kapag binuksan ang app).</p>'+nat.map(cardHtml).join(''):'')
+      +'<h2 style="margin-top:20px">OmniPOS companion apps</h2>'+comp.map(cardHtml).join('')
+      +(other.length?'<h2 style="margin-top:20px">Iba pang app</h2>'+other.map(cardHtml).join(''):'');
+    document.querySelectorAll('#apps .card').forEach(card=>{
+      const id=card.getAttribute('data-app');
+      card.querySelector('.up').onclick=()=>upload(card,id);
+      card.querySelector('.del').onclick=()=>remove(id,card);
+    });
   }
   async function load(){render(await api('/relay/admin/api/app-updates','GET'))}
-  $('upBtn').onclick=function(){
-    const f=$('file').files[0];
+  function upload(card,id){
+    const f=card.querySelector('.file').files[0];
+    const upBtn=card.querySelector('.up'), prog=card.querySelector('.prog');
     if(!f){say('Pumili muna ng .apk file.',true);return}
     if(!/\.apk$/i.test(f.name)){say('Dapat .apk ang file.',true);return}
-    if(!confirm('I-upload ang '+f.name+'? Babasahin ng RELAY ang version mula sa APK at makikita ito ng lahat ng user na magche-check ng update.'))return;
+    if(!confirm('I-upload ang '+f.name+'? Babasahin ng RELAY ang package at version mula sa APK, at makikita ito ng lahat ng user na magche-check ng update.'))return;
     const x=new XMLHttpRequest();
-    x.open('POST','/relay/admin/api/app-updates/upload?app='+APP);
+    x.open('POST','/relay/admin/api/app-updates/upload?app='+encodeURIComponent(id));
     x.setRequestHeader('x-relay-admin-key',$('adminKey').value);
     x.setRequestHeader('Content-Type','application/octet-stream');
-    $('upBtn').disabled=true;
-    x.upload.onprogress=e=>{if(e.lengthComputable)$('prog').textContent='Ina-upload… '+Math.round(e.loaded*100/e.total)+'%'};
+    upBtn.disabled=true;
+    x.upload.onprogress=e=>{if(e.lengthComputable)prog.textContent='Ina-upload… '+Math.round(e.loaded*100/e.total)+'%'};
     x.onload=async()=>{
       let j={};try{j=JSON.parse(x.responseText)}catch(_){}
-      $('prog').textContent='';
-      if(x.status>=200&&x.status<300&&j.success){say('Nailathala na. Makikita ito ng mga user sa Check for app update.');$('file').value='';await load()}
-      else{say(j.message||('HTTP '+x.status),true);$('upBtn').disabled=false}
+      prog.textContent='';
+      if(x.status>=200&&x.status<300&&j.success){say('Nailathala na. Makikita ito ng mga user sa app (Get latest online / Check for app update).');await load()}
+      else{say(j.message||('HTTP '+x.status),true);upBtn.disabled=false}
     };
-    x.onerror=()=>{$('prog').textContent='';say('Hindi naabot ang RELAY.',true);$('upBtn').disabled=false};
+    x.onerror=()=>{prog.textContent='';say('Hindi naabot ang RELAY.',true);upBtn.disabled=false};
     x.send(f);
-  };
-  $('delBtn').onclick=async()=>{if(!confirm('Alisin ang APK sa RELAY? Wala nang makikitang update ang mga user.'))return;try{await api('/relay/admin/api/app-updates/delete','POST',{app:APP});say('Naalis.');await load()}catch(e){say(e.message,true)}};
+  }
+  async function remove(id,card){
+    if(!confirm('Alisin ang APK sa RELAY? Wala nang makikitang update ang mga user para sa app na ito.'))return;
+    try{await api('/relay/admin/api/app-updates/delete','POST',{app:id});say('Naalis.');await load()}catch(e){say(e.message,true)}
+  }
   async function connect(){
     try{await load();try{sessionStorage.setItem('relayAdminKey',$('adminKey').value)}catch(_){}say('Connected.')}
     catch(e){if(e.status===401||e.status===403){try{sessionStorage.removeItem('relayAdminKey')}catch(_){}}say(e.message,true)}
   }
   $('connectBtn').onclick=connect;
+  $('adminKey').addEventListener('keydown',e=>{if(e.key==='Enter')connect()});
   let saved='';try{saved=sessionStorage.getItem('relayAdminKey')||''}catch(_){}
   if(saved){$('adminKey').value=saved;connect()}
 })();

@@ -10256,7 +10256,18 @@ app.post('/relay/client/kiosk-dev-pin/verify', rateLimit('client-kiosk-dev-pin',
 // PAALALA: tatanggapin lang ng Android ang update kung PAREHO ang signing key ng naka-install na app at ng bagong APK.
 const apkInfo = require('./apk-info');
 // packageName ay kinukumpara sa nababasa sa loob ng APK, kaya hindi ka makakapag-upload ng maling app.
-const APP_UPDATE_APPS = { shiftpay: { label: 'WorkShiftData (ShiftPay)', fileName: 'WorkShiftData.apk', packageName: 'com.shiftpay.tracker' } };
+// group 'companion' = ang 5 companion apps ng OmniPOS Native (Settings > Install other apps > Get latest online). Ang `companionId` ay
+// ang id na ginagamit ng native app at ng Companion Apps allow/deny control (OMNIKIOSK, KITCHENKIOSK, ...).
+const APP_UPDATE_APPS = {
+    // group 'native' = ang OmniPOS Native app (Launcher) mismo. Ang app ay nagche-check dito ng bagong bersyon ng sarili (Settings > Update this app).
+    omniposnative: { label: 'OmniPOS Native (Launcher)', fileName: 'OmniPOS.apk', packageName: 'ph.omnipos.pos', group: 'native' },
+    shiftpay: { label: 'WorkShiftData (ShiftPay)', fileName: 'WorkShiftData.apk', packageName: 'com.shiftpay.tracker', group: 'other' },
+    omnikiosk: { label: 'OmniKiosk', fileName: 'OMNIKIOSK.apk', packageName: 'ph.omnipos.kiosk', group: 'companion', companionId: 'OMNIKIOSK' },
+    kitchenkiosk: { label: 'Kitchen Kiosk', fileName: 'KITCHENKIOSK.apk', packageName: 'ph.omnipos.kitchen', group: 'companion', companionId: 'KITCHENKIOSK' },
+    omniposdisplay: { label: 'Customer Display', fileName: 'OMNIPOSDISPLAY.apk', packageName: 'ph.omnipos.display', group: 'companion', companionId: 'OMNIPOSDISPLAY' },
+    pricechecker: { label: 'Price Checker', fileName: 'PRICECHECKER.apk', packageName: 'ph.omnipos.pricecheck', group: 'companion', companionId: 'PRICECHECKER' },
+    timeclock: { label: 'Time Clock', fileName: 'TIMECLOCK.apk', packageName: 'ph.omnipos.timeclock', group: 'companion', companionId: 'TIMECLOCK' }
+};
 const APP_UPDATE_MAX_BYTES = Math.max(1, Number(process.env.APP_UPDATE_MAX_MB || 60)) * 1024 * 1024;
 const APP_UPDATE_DIR = path.join(__dirname, 'app-updates');
 let appUpdateSchemaReady = null;
@@ -10288,7 +10299,8 @@ app.get('/relay/admin/api/app-updates', requireAdminKey, async (req, res) => {
         const meta = await loadAppUpdateMeta();
         res.set('Cache-Control', 'no-store');
         res.json({ success: true, maxMb: APP_UPDATE_MAX_BYTES / 1048576, storage: appUpdatePool() ? 'postgres' : 'disk (mawawala sa redeploy!)',
-            apps: Object.keys(APP_UPDATE_APPS).map((id) => ({ id, label: APP_UPDATE_APPS[id].label, current: meta[id] ? publicAppUpdateInfo(id, meta[id]) : null })) });
+            apps: Object.keys(APP_UPDATE_APPS).map((id) => ({ id, label: APP_UPDATE_APPS[id].label, group: APP_UPDATE_APPS[id].group || 'other',
+                fileName: APP_UPDATE_APPS[id].fileName, packageName: APP_UPDATE_APPS[id].packageName, current: meta[id] ? publicAppUpdateInfo(id, meta[id]) : null })) });
     } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 });
 // Upload: raw na APK sa body (Content-Type: application/octet-stream). Metadata sa headers.
@@ -10349,7 +10361,26 @@ app.get('/relay/public/app-update/latest', rateLimit('public-app-update-latest',
         res.json({ success: true, available: true, ...publicAppUpdateInfo(id, meta[id]) });
     } catch (err) { res.status(500).json({ success: false, message: 'Hindi mabasa ang update info ngayon.' }); }
 });
-app.get('/relay/public/app-update/download', rateLimit('public-app-update-download', 30, 60 * 60 * 1000), async (req, res) => {
+// PUBLIC: lahat ng companion app sa ISANG tawag (para sa OmniPOS Native > Install other apps > Get latest online). Maliit na JSON lang,
+// walang APK at walang client data. Ang APK mismo ay kinukuha sa /relay/public/app-update/download?app=<id>. Ang allow/deny (lock) ay
+// hiwalay pa ring kontrolado ng Companion Apps page at ng signed command, at tinitingnan iyon ng native app bago mag-download.
+app.get('/relay/public/companion-apps/latest', rateLimit('public-companion-apps-latest', 240, 60 * 60 * 1000), async (req, res) => {
+    try {
+        res.set('Cache-Control', 'no-store');
+        const meta = await loadAppUpdateMeta();
+        const apps = {};
+        for (const id of Object.keys(APP_UPDATE_APPS)) {
+            const def = APP_UPDATE_APPS[id];
+            if (def.group !== 'companion') continue;
+            const m = meta[id];
+            apps[def.companionId] = m
+                ? { available: true, app: id, fileName: def.fileName, packageName: def.packageName, ...publicAppUpdateInfo(id, m) }
+                : { available: false, app: id, fileName: def.fileName, packageName: def.packageName };
+        }
+        res.json({ success: true, apps });
+    } catch (err) { res.status(500).json({ success: false, message: 'Hindi mabasa ang companion apps info ngayon.' }); }
+});
+app.get('/relay/public/app-update/download', rateLimit('public-app-update-download', 60, 60 * 60 * 1000), async (req, res) => {
     try {
         const id = String(req.query.app || '');
         if (!Object.prototype.hasOwnProperty.call(APP_UPDATE_APPS, id)) return res.status(404).json({ success: false, message: 'Hindi kilalang app.' });
