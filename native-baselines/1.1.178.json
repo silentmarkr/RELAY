@@ -1,6 +1,6 @@
 {
  "version": "1.1.178",
- "builtAt": 1795254529685,
+ "builtAt": 1795887107016,
  "files": {
   ".gitignore": "67ba8d0a27eae52883411470dee4390a4e38d3e9e83e75bc3eb0d8b704b5b012",
   "bir-compliance.js": "a7a0ae997396e7925c0f226e30ec61d510887c6507dc710c29c629a0caef1875",
@@ -8,7 +8,7 @@
   "bir-retention.js": "827398c4845525c3395bedd2b72e32af1a5b1803ae73b20f5899b9b1487bbb20",
   "build-release.js": "a81d0cf5b51ad9a1e67016fcac8e566e9ddc0439efa6e6614f6b73b4f626d878",
   "cloud-snapshot.js": "b3fc78564e4c094d5eeec3cd1a260a2b7f32f17f8afb6ffbe380077cd79857b1",
-  "companion-tools.js": "601da756a710790035b902ccbe590faa93b2c351ba38d38d5604f46b4639d35d",
+  "companion-tools.js": "2a008e2dc59e5e099c73a43352d232cac152469e6ec53668d75c6206a0ccff99",
   "customer-display-hub.js": "98393d9b9277724dc2cea8b43276bf5ecfdb33898cd1c41785d78f21b2205133",
   "daily-digest.js": "76f2dde5a2c4d65b2ffc957e26ca022ef5aae54f634a614ac7e4d9e5c967b7d8",
   "db.js": "794fde0560d62fea2690f1444a2b56f32bc4d9c8e31e1f29c217b92f56e28651",
